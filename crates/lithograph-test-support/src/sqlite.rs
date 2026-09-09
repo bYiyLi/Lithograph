@@ -219,7 +219,14 @@ fn output_to_string(output: Output) -> Result<String> {
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
         });
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Ok(normalize_sqlite_stdout(&output.stdout))
+}
+
+fn normalize_sqlite_stdout(stdout: &[u8]) -> String {
+    String::from_utf8_lossy(stdout)
+        .replace("\r\n", "\n")
+        .trim()
+        .to_string()
 }
 
 fn sqlite_binary() -> std::ffi::OsString {
@@ -237,6 +244,14 @@ fn splitmix64(mut value: u64) -> u64 {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn sqlite_stdout_normalizes_windows_line_endings() {
+        assert_eq!(
+            normalize_sqlite_stdout(b"first\r\nsecond\r\n"),
+            "first\nsecond"
+        );
+    }
 
     #[test]
     fn in_memory_fixture_executes_one_session() {
