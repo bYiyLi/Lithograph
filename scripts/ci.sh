@@ -48,7 +48,7 @@ echo "Using SQLite: $LITHOGRAPH_SQLITE3 ($($LITHOGRAPH_SQLITE3 --version))"
 
 python3 scripts/check-vendor.py
 cargo fmt --check
-cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo clippy --locked --workspace --all-targets --all-features
 cargo test --locked --workspace
 cargo build --locked -p lithograph-extension
 

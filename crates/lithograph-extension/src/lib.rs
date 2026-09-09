@@ -6,6 +6,15 @@
 //! phases; this crate must not fake those semantics in order to exercise the
 //! adapter.
 
+#![allow(
+    unsafe_code,
+    reason = "the SQLite loadable-extension and Native ABI boundary necessarily uses raw FFI"
+)]
+#![cfg_attr(
+    not(test),
+    deny(clippy::expect_used, clippy::panic, clippy::unwrap_used)
+)]
+
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
@@ -18,7 +27,7 @@ use std::sync::{Mutex, OnceLock};
 
 use lithograph_core::CYPHER_PROFILE;
 use rusqlite::OptionalExtension as _;
-use rusqlite::functions::{Context as FunctionContext, FunctionFlags};
+use rusqlite::functions::{ConnectionRef, Context as FunctionContext, FunctionFlags};
 use rusqlite::vtab::{
     Context as VTabContext, Filters, IndexConstraintOp, IndexInfo, Module, VTab, VTabConfig,
     VTabConnection, VTabCursor,
@@ -194,6 +203,8 @@ pub unsafe extern "C" fn sqlite3_lithograph_init(
     pz_err_msg: *mut *mut c_char,
     p_api: *mut ffi::sqlite3_api_routines,
 ) -> c_int {
+    // SAFETY: SQLite is the only caller of this entry point and supplies all
+    // pointers according to the loadable-extension ABI documented above.
     match catch_unwind(AssertUnwindSafe(|| unsafe {
         Connection::extension_init2(db, pz_err_msg, p_api, extension_init)
     })) {
@@ -218,6 +229,8 @@ fn extension_init(db: Connection) -> SqliteResult<bool> {
     )?;
 
     const ROWS_MODULE: Module<'static, RowsTab> = Module::eponymous_only_module();
+    // SAFETY: `db` is a live rusqlite connection for the duration of module
+    // registration; the raw handle is stored only to identify this connection.
     let handle = unsafe { db.handle() };
     let registration = ConnectionRegistration::new(handle);
     db.create_module(ROWS_MODULE_NAME, &ROWS_MODULE, Some(registration))?;
@@ -226,9 +239,7 @@ fn extension_init(db: Connection) -> SqliteResult<bool> {
 }
 
 fn sql_init(ctx: &FunctionContext<'_>) -> SqliteResult<String> {
-    let connection = unsafe { ctx.get_connection() }.map_err(|error| {
-        map_sqlite_error(error, "failed to access the SQLite connection").to_sqlite_error()
-    })?;
+    let connection = sql_connection(ctx)?;
     with_savepoint(&connection, initialize)
         .map(|value| value.to_string())
         .map_err(|error| error.to_sqlite_error())
@@ -238,13 +249,7 @@ fn sql_execute(ctx: &FunctionContext<'_>) -> SqliteResult<String> {
     let (query, params, options) = scalar_execution_args(ctx).map_err(|e| e.to_sqlite_error())?;
     validate_json_object(&params, "params").map_err(|e| e.to_sqlite_error())?;
     validate_json_object(&options, "options").map_err(|e| e.to_sqlite_error())?;
-    if query.trim().is_empty() {
-        return Err(LithographError::invalid_argument("query must not be empty").to_sqlite_error());
-    }
-    let connection = unsafe { ctx.get_connection() }.map_err(|error| {
-        map_sqlite_error(error, "failed to access the SQLite connection").to_sqlite_error()
-    })?;
-    require_initialized(&connection).map_err(|e| e.to_sqlite_error())?;
+    validate_query_ready(ctx, &query)?;
 
     Err(LithographError::semantic_unavailable().to_sqlite_error())
 }
@@ -253,33 +258,40 @@ fn sql_validate(ctx: &FunctionContext<'_>) -> SqliteResult<String> {
     let query = ctx
         .get::<String>(0)
         .map_err(|_| LithographError::invalid_argument("query must be TEXT").to_sqlite_error())?;
-    if query.trim().is_empty() {
-        return Err(LithographError::invalid_argument("query must not be empty").to_sqlite_error());
-    }
-    let connection = unsafe { ctx.get_connection() }.map_err(|error| {
-        map_sqlite_error(error, "failed to access the SQLite connection").to_sqlite_error()
-    })?;
-    require_initialized(&connection).map_err(|e| e.to_sqlite_error())?;
+    validate_query_ready(ctx, &query)?;
 
     Err(LithographError::semantic_unavailable().to_sqlite_error())
 }
 
+fn validate_query_ready(ctx: &FunctionContext<'_>, query: &str) -> SqliteResult<()> {
+    if query.trim().is_empty() {
+        return Err(LithographError::invalid_argument("query must not be empty").to_sqlite_error());
+    }
+    let connection = sql_connection(ctx)?;
+    require_initialized(&connection).map_err(|e| e.to_sqlite_error())?;
+    Ok(())
+}
+
 fn sql_version(ctx: &FunctionContext<'_>) -> SqliteResult<String> {
-    let connection = unsafe { ctx.get_connection() }.map_err(|error| {
-        map_sqlite_error(error, "failed to access the SQLite connection").to_sqlite_error()
-    })?;
+    let connection = sql_connection(ctx)?;
     version_json(&connection)
         .map(|value| value.to_string())
         .map_err(|error| error.to_sqlite_error())
 }
 
 fn sql_integrity_check(ctx: &FunctionContext<'_>) -> SqliteResult<String> {
-    let connection = unsafe { ctx.get_connection() }.map_err(|error| {
-        map_sqlite_error(error, "failed to access the SQLite connection").to_sqlite_error()
-    })?;
+    let connection = sql_connection(ctx)?;
     metadata_integrity_json(&connection)
         .map(|value| value.to_string())
         .map_err(|error| error.to_sqlite_error())
+}
+
+fn sql_connection<'a>(ctx: &'a FunctionContext<'a>) -> SqliteResult<ConnectionRef<'a>> {
+    // SAFETY: rusqlite creates `FunctionContext` for the active SQLite scalar
+    // callback, so its connection handle remains valid for this invocation.
+    unsafe { ctx.get_connection() }.map_err(|error| {
+        map_sqlite_error(error, "failed to access the SQLite connection").to_sqlite_error()
+    })
 }
 
 fn scalar_execution_args(ctx: &FunctionContext<'_>) -> LithographResult<(String, String, String)> {
@@ -398,14 +410,7 @@ fn has_any_internal_object(connection: &Connection) -> LithographResult<bool> {
 }
 
 fn read_metadata(connection: &Connection) -> LithographResult<Option<Metadata>> {
-    let object_type = connection
-        .query_row(
-            "SELECT type FROM main.sqlite_schema WHERE name = ?1 LIMIT 1",
-            [META_TABLE],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|error| map_sqlite_error(error, "failed to inspect Lithograph metadata"))?;
+    let object_type = metadata_object_type(connection)?;
 
     let Some(object_type) = object_type else {
         return Ok(None);
@@ -416,19 +421,7 @@ fn read_metadata(connection: &Connection) -> LithographResult<Option<Metadata>> 
         ));
     }
 
-    let row = connection
-        .query_row(
-            "SELECT magic, database_id, storage_format FROM main._lithograph_meta WHERE id = 1",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            },
-        )
-        .optional()
+    let row = query_metadata_marker(connection)
         .map_err(|error| map_sqlite_error(error, "failed to read Lithograph metadata"))?;
 
     let Some((magic, database_id, storage_format)) = row else {
@@ -470,14 +463,7 @@ struct MetadataColumn {
 }
 
 fn metadata_integrity_json(connection: &Connection) -> LithographResult<Value> {
-    let object_type = connection
-        .query_row(
-            "SELECT type FROM main.sqlite_schema WHERE name = ?1 LIMIT 1",
-            [META_TABLE],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|error| map_sqlite_error(error, "failed to inspect Lithograph metadata"))?;
+    let object_type = metadata_object_type(connection)?;
 
     let Some(object_type) = object_type else {
         return Err(LithographError::not_initialized());
@@ -508,6 +494,33 @@ fn metadata_integrity_json(connection: &Connection) -> LithographResult<Value> {
     }))
 }
 
+fn metadata_object_type(connection: &Connection) -> LithographResult<Option<String>> {
+    connection
+        .query_row(
+            "SELECT type FROM main.sqlite_schema WHERE name = ?1 LIMIT 1",
+            [META_TABLE],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| map_sqlite_error(error, "failed to inspect Lithograph metadata"))
+}
+
+fn query_metadata_marker(connection: &Connection) -> SqliteResult<Option<(String, String, i64)>> {
+    connection
+        .query_row(
+            "SELECT magic, database_id, storage_format FROM main._lithograph_meta WHERE id = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .optional()
+}
+
 fn ensure_current_metadata_integrity(connection: &Connection) -> LithographResult<()> {
     if let Some(error) = current_metadata_integrity_errors(connection)?
         .into_iter()
@@ -523,6 +536,18 @@ fn current_metadata_integrity_errors(
 ) -> LithographResult<Vec<LithographError>> {
     let mut errors = Vec::new();
 
+    check_metadata_schema(connection, &mut errors)?;
+    check_metadata_columns(connection, &mut errors)?;
+    check_metadata_row_count(connection, &mut errors)?;
+    check_metadata_marker(connection, &mut errors)?;
+
+    Ok(errors)
+}
+
+fn check_metadata_schema(
+    connection: &Connection,
+    errors: &mut Vec<LithographError>,
+) -> LithographResult<()> {
     let schema_sql = connection
         .query_row(
             "SELECT sql FROM main.sqlite_schema WHERE type = 'table' AND name = ?1",
@@ -541,6 +566,13 @@ fn current_metadata_integrity_errors(
         ));
     }
 
+    Ok(())
+}
+
+fn check_metadata_columns(
+    connection: &Connection,
+    errors: &mut Vec<LithographError>,
+) -> LithographResult<()> {
     let columns = metadata_columns(connection)?;
     let expected = [
         ("id", "INTEGER", 0, None, 1, 0),
@@ -563,6 +595,13 @@ fn current_metadata_integrity_errors(
         ));
     }
 
+    Ok(())
+}
+
+fn check_metadata_row_count(
+    connection: &Connection,
+    errors: &mut Vec<LithographError>,
+) -> LithographResult<()> {
     let row_count = connection
         .query_row("SELECT count(*) FROM main._lithograph_meta", [], |row| {
             row.get::<_, i64>(0)
@@ -574,39 +613,18 @@ fn current_metadata_integrity_errors(
         ));
     }
 
-    let marker = connection
-        .query_row(
-            "SELECT magic, database_id, storage_format FROM main._lithograph_meta WHERE id = 1",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            },
-        )
-        .optional();
+    Ok(())
+}
+
+fn check_metadata_marker(
+    connection: &Connection,
+    errors: &mut Vec<LithographError>,
+) -> LithographResult<()> {
+    let marker = query_metadata_marker(connection);
 
     match marker {
         Ok(Some((magic, database_id, storage_format))) => {
-            if magic != MAGIC {
-                errors.push(LithographError::storage(
-                    "Lithograph metadata magic marker is invalid",
-                ));
-            }
-            if !is_canonical_uuid(&database_id) {
-                errors.push(LithographError::storage(
-                    "Lithograph databaseId is not a canonical RFC 9562 UUID v4",
-                ));
-            }
-            if storage_format > STORAGE_FORMAT_MAX {
-                errors.push(format_too_new_error(storage_format));
-            } else if storage_format < STORAGE_FORMAT_MIN {
-                errors.push(LithographError::storage(format!(
-                    "database storage format {storage_format} is below supported minimum {STORAGE_FORMAT_MIN}"
-                )));
-            }
+            validate_metadata_marker(&magic, &database_id, storage_format, errors);
         }
         Ok(None) => errors.push(LithographError::storage(
             "Lithograph metadata is missing its marker row",
@@ -625,7 +643,32 @@ fn current_metadata_integrity_errors(
         }
     }
 
-    Ok(errors)
+    Ok(())
+}
+
+fn validate_metadata_marker(
+    magic: &str,
+    database_id: &str,
+    storage_format: i64,
+    errors: &mut Vec<LithographError>,
+) {
+    if magic != MAGIC {
+        errors.push(LithographError::storage(
+            "Lithograph metadata magic marker is invalid",
+        ));
+    }
+    if !is_canonical_uuid(database_id) {
+        errors.push(LithographError::storage(
+            "Lithograph databaseId is not a canonical RFC 9562 UUID v4",
+        ));
+    }
+    if storage_format > STORAGE_FORMAT_MAX {
+        errors.push(format_too_new_error(storage_format));
+    } else if storage_format < STORAGE_FORMAT_MIN {
+        errors.push(LithographError::storage(format!(
+            "database storage format {storage_format} is below supported minimum {STORAGE_FORMAT_MIN}"
+        )));
+    }
 }
 
 fn metadata_columns(connection: &Connection) -> LithographResult<Vec<MetadataColumn>> {
@@ -705,7 +748,8 @@ fn generate_database_id(connection: &Connection) -> LithographResult<String> {
         if matches!(index, 4 | 6 | 8 | 10) {
             output.push('-');
         }
-        write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
+        write!(&mut output, "{byte:02x}")
+            .map_err(|_| LithographError::internal("failed to format generated databaseId"))?;
     }
     Ok(output)
 }
@@ -833,489 +877,16 @@ fn catch_sqlite_boundary<T>(operation: impl FnOnce() -> SqliteResult<T>) -> Sqli
     }
 }
 
-#[repr(C)]
-struct RowsTab {
-    base: ffi::sqlite3_vtab,
-    db: *mut ffi::sqlite3,
-}
-
-unsafe impl<'vtab> VTab<'vtab> for RowsTab {
-    type Aux = ConnectionRegistration;
-    type Cursor = RowsCursor<'vtab>;
-
-    fn connect(
-        db: &mut VTabConnection,
-        _aux: Option<&Self::Aux>,
-        _module_name: &[u8],
-        _database_name: &[u8],
-        _table_name: &[u8],
-        _args: &[&[u8]],
-    ) -> SqliteResult<(Cow<'static, CStr>, Self)> {
-        catch_sqlite_boundary(|| {
-            db.config(VTabConfig::DirectOnly)?;
-            let handle = unsafe { db.handle() };
-            Ok((
-                Cow::Borrowed(c"CREATE TABLE x(ordinal INTEGER, columns TEXT, row TEXT, query HIDDEN, params HIDDEN, options HIDDEN)"),
-                Self {
-                    base: ffi::sqlite3_vtab::default(),
-                    db: handle,
-                },
-            ))
-        })
-    }
-
-    fn best_index(&self, info: &mut IndexInfo) -> SqliteResult<bool> {
-        catch_sqlite_boundary(|| {
-            const QUERY_COLUMN: c_int = 3;
-            const PARAMS_COLUMN: c_int = 4;
-            const OPTIONS_COLUMN: c_int = 5;
-
-            let mut selected = [None, None, None];
-            for (index, constraint) in info.constraints().enumerate() {
-                let slot = match constraint.column() {
-                    QUERY_COLUMN => Some(0),
-                    PARAMS_COLUMN => Some(1),
-                    OPTIONS_COLUMN => Some(2),
-                    _ => None,
-                };
-                let Some(slot) = slot else {
-                    continue;
-                };
-                if constraint.is_usable()
-                    && constraint.operator() == IndexConstraintOp::SQLITE_INDEX_CONSTRAINT_EQ
-                {
-                    selected[slot] = Some(index);
-                }
-            }
-
-            let mut argv = 1;
-            let mut idx_num = 0;
-            for (slot, constraint_index) in selected.into_iter().enumerate() {
-                if let Some(constraint_index) = constraint_index {
-                    let mut usage = info.constraint_usage(constraint_index);
-                    usage.set_argv_index(argv);
-                    usage.set_omit(true);
-                    argv += 1;
-                    idx_num |= 1 << slot;
-                }
-            }
-            info.set_idx_num(idx_num);
-            if selected[0].is_some() {
-                info.set_estimated_cost(10.0);
-                info.set_estimated_rows(1000);
-            } else {
-                info.set_estimated_cost(1_000_000_000.0);
-                info.set_estimated_rows(1);
-            }
-            Ok(true)
-        })
-    }
-
-    fn open(&'vtab mut self) -> SqliteResult<Self::Cursor> {
-        catch_sqlite_boundary(|| {
-            Ok(RowsCursor {
-                base: ffi::sqlite3_vtab_cursor::default(),
-                db: self.db,
-                exhausted: true,
-                phantom: PhantomData,
-            })
-        })
-    }
-}
-
-#[repr(C)]
-struct RowsCursor<'vtab> {
-    base: ffi::sqlite3_vtab_cursor,
-    db: *mut ffi::sqlite3,
-    exhausted: bool,
-    phantom: PhantomData<&'vtab RowsTab>,
-}
-
-unsafe impl VTabCursor for RowsCursor<'_> {
-    fn filter(
-        &mut self,
-        idx_num: c_int,
-        _idx_str: Option<&str>,
-        args: &Filters<'_>,
-    ) -> SqliteResult<()> {
-        catch_sqlite_boundary(|| {
-            let mut index = 0;
-            let query = if idx_num & 1 != 0 {
-                let value = args.get::<String>(index).map_err(|_| {
-                    LithographError::invalid_argument("query must be TEXT").to_sqlite_error()
-                })?;
-                index += 1;
-                value
-            } else {
-                return Err(
-                    LithographError::invalid_argument("query is required").to_sqlite_error()
-                );
-            };
-            let params = if idx_num & 2 != 0 {
-                let value = args.get::<String>(index).map_err(|_| {
-                    LithographError::invalid_argument("params must be JSON TEXT").to_sqlite_error()
-                })?;
-                index += 1;
-                value
-            } else {
-                "{}".to_owned()
-            };
-            let options = if idx_num & 4 != 0 {
-                args.get::<String>(index).map_err(|_| {
-                    LithographError::invalid_argument("options must be JSON TEXT").to_sqlite_error()
-                })?
-            } else {
-                "{}".to_owned()
-            };
-
-            if query.trim().is_empty() {
-                return Err(
-                    LithographError::invalid_argument("query must not be empty").to_sqlite_error()
-                );
-            }
-            validate_json_object(&params, "params").map_err(|e| e.to_sqlite_error())?;
-            validate_json_object(&options, "options").map_err(|e| e.to_sqlite_error())?;
-            let connection = unsafe { Connection::from_handle(self.db) }.map_err(|error| {
-                map_sqlite_error(error, "failed to access the SQLite connection").to_sqlite_error()
-            })?;
-            require_initialized(&connection).map_err(|e| e.to_sqlite_error())?;
-
-            self.exhausted = true;
-            Err(LithographError::semantic_unavailable().to_sqlite_error())
-        })
-    }
-
-    fn next(&mut self) -> SqliteResult<()> {
-        catch_sqlite_boundary(|| {
-            self.exhausted = true;
-            Ok(())
-        })
-    }
-
-    fn eof(&self) -> bool {
-        self.exhausted
-    }
-
-    fn column(&self, _ctx: &mut VTabContext, _i: c_int) -> SqliteResult<()> {
-        catch_sqlite_boundary(|| {
-            Err(
-                LithographError::internal("lithograph_rows cursor has no current row")
-                    .to_sqlite_error(),
-            )
-        })
-    }
-
-    fn rowid(&self) -> SqliteResult<i64> {
-        catch_sqlite_boundary(|| {
-            Err(
-                LithographError::internal("lithograph_rows cursor has no current row")
-                    .to_sqlite_error(),
-            )
-        })
-    }
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LithographEventKindV1 {
-    Columns = 1,
-    Row = 2,
-    Summary = 3,
-}
-
-pub type LithographEventCallbackV1 = Option<
-    unsafe extern "C" fn(
-        user_data: *mut c_void,
-        kind: LithographEventKindV1,
-        json: *const u8,
-        json_len: usize,
-    ) -> c_int,
->;
-
-/// Executes one Cypher query through the stable native ABI v1.
-///
-/// # Safety
-///
-/// `db` must be an existing SQLite connection on which this shared library has
-/// already been loaded. Input pointer/length pairs must be readable for this
-/// call. `error_json` memory must be released with [`lithograph_v1_free`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn lithograph_v1_execute(
-    db: *mut ffi::sqlite3,
-    query: *const c_char,
-    query_len: usize,
-    params_json: *const c_char,
-    params_len: usize,
-    options_json: *const c_char,
-    options_len: usize,
-    callback: LithographEventCallbackV1,
-    _user_data: *mut c_void,
-    error_json: *mut *mut c_char,
-) -> c_int {
-    clear_error_out(error_json);
-    match catch_unwind(AssertUnwindSafe(|| unsafe {
-        native_execute_impl(
-            db,
-            query,
-            query_len,
-            params_json,
-            params_len,
-            options_json,
-            options_len,
-            callback,
-        )
-    })) {
-        Ok(Ok(())) => ffi::SQLITE_OK,
-        Ok(Err(error)) => unsafe { write_native_error(error_json, &error) },
-        Err(_) => unsafe {
-            write_native_error(
-                error_json,
-                &LithographError::internal("panic while executing native ABI call"),
-            )
-        },
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-unsafe fn native_execute_impl(
-    db: *mut ffi::sqlite3,
-    query: *const c_char,
-    query_len: usize,
-    params_json: *const c_char,
-    params_len: usize,
-    options_json: *const c_char,
-    options_len: usize,
-    callback: LithographEventCallbackV1,
-) -> LithographResult<()> {
-    if db.is_null() {
-        return Err(LithographError::new(
-            ErrorCategory::InvalidArgument,
-            "db must not be NULL",
-            ffi::SQLITE_MISUSE,
-        ));
-    }
-    if callback.is_none() {
-        return Err(LithographError::new(
-            ErrorCategory::InvalidArgument,
-            "callback must not be NULL",
-            ffi::SQLITE_MISUSE,
-        ));
-    }
-    require_native_connection_registered(db)?;
-
-    let query = unsafe { input_utf8(query, query_len, "query")? };
-    let params = unsafe { input_utf8(params_json, params_len, "params_json")? };
-    let options = unsafe { input_utf8(options_json, options_len, "options_json")? };
-    if query.trim().is_empty() {
-        return Err(LithographError::invalid_argument("query must not be empty"));
-    }
-    validate_json_object(&params, "params")?;
-    validate_json_object(&options, "options")?;
-    let connection = unsafe { Connection::from_handle(db) }
-        .map_err(|error| map_sqlite_error(error, "invalid SQLite connection"))?;
-    require_initialized(&connection)?;
-
-    Err(LithographError::semantic_unavailable())
-}
-
-/// Validates one Cypher query through the stable native ABI v1.
-///
-/// # Safety
-///
-/// The pointer and ownership rules are the same as [`lithograph_v1_execute`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn lithograph_v1_validate(
-    db: *mut ffi::sqlite3,
-    query: *const c_char,
-    query_len: usize,
-    error_json: *mut *mut c_char,
-) -> c_int {
-    clear_error_out(error_json);
-    match catch_unwind(AssertUnwindSafe(|| unsafe {
-        native_validate_impl(db, query, query_len)
-    })) {
-        Ok(Ok(())) => ffi::SQLITE_OK,
-        Ok(Err(error)) => unsafe { write_native_error(error_json, &error) },
-        Err(_) => unsafe {
-            write_native_error(
-                error_json,
-                &LithographError::internal("panic while executing native ABI call"),
-            )
-        },
-    }
-}
-
-unsafe fn native_validate_impl(
-    db: *mut ffi::sqlite3,
-    query: *const c_char,
-    query_len: usize,
-) -> LithographResult<()> {
-    if db.is_null() {
-        return Err(LithographError::new(
-            ErrorCategory::InvalidArgument,
-            "db must not be NULL",
-            ffi::SQLITE_MISUSE,
-        ));
-    }
-    require_native_connection_registered(db)?;
-    let query = unsafe { input_utf8(query, query_len, "query")? };
-    if query.trim().is_empty() {
-        return Err(LithographError::invalid_argument("query must not be empty"));
-    }
-    let connection = unsafe { Connection::from_handle(db) }
-        .map_err(|error| map_sqlite_error(error, "invalid SQLite connection"))?;
-    require_initialized(&connection)?;
-    Err(LithographError::semantic_unavailable())
-}
-
-fn require_native_connection_registered(db: *mut ffi::sqlite3) -> LithographResult<()> {
-    let registered = registered_connections()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .contains_key(&(db as usize));
-    if !registered {
-        return Err(LithographError::new(
-            ErrorCategory::InvalidArgument,
-            "target SQLite connection has not loaded the Lithograph extension",
-            ffi::SQLITE_MISUSE,
-        ));
-    }
-    Ok(())
-}
-
-unsafe fn input_utf8(
-    pointer: *const c_char,
-    length: usize,
-    name: &str,
-) -> LithographResult<String> {
-    if pointer.is_null() {
-        if length == 0 {
-            return Ok(String::new());
-        }
-        return Err(LithographError::new(
-            ErrorCategory::InvalidArgument,
-            format!("{name} pointer is NULL with a non-zero length"),
-            ffi::SQLITE_MISUSE,
-        ));
-    }
-    let bytes = unsafe { std::slice::from_raw_parts(pointer.cast::<u8>(), length) };
-    std::str::from_utf8(bytes)
-        .map(str::to_owned)
-        .map_err(|_| LithographError::invalid_argument(format!("{name} must contain valid UTF-8")))
-}
-
-fn clear_error_out(error_json: *mut *mut c_char) {
-    if !error_json.is_null() {
-        unsafe { *error_json = ptr::null_mut() };
-    }
-}
-
-unsafe fn write_native_error(error_json: *mut *mut c_char, error: &LithographError) -> c_int {
-    if !error_json.is_null()
-        && let Ok(payload) = CString::new(error.to_json())
-    {
-        unsafe { *error_json = payload.into_raw() };
-    }
-    error.sqlite_code
-}
-
-/// Releases memory returned through the native ABI v1.
-///
-/// # Safety
-///
-/// `pointer` must be NULL or a pointer returned by this Lithograph shared
-/// library through an ABI v1 allocation result such as `error_json`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn lithograph_v1_free(pointer: *mut c_void) {
-    if !pointer.is_null() {
-        unsafe {
-            drop(CString::from_raw(pointer.cast::<c_char>()));
-        }
-    }
-}
+mod native;
+mod rows;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+use native::input_utf8;
+pub use native::{
+    LithographEventCallbackV1, LithographEventKindV1, lithograph_v1_execute, lithograph_v1_free,
+    lithograph_v1_validate,
+};
+use rows::RowsTab;
 
-    #[test]
-    fn uuid_validation_accepts_rfc9562_v4_shape() {
-        assert!(is_canonical_uuid("550e8400-e29b-41d4-a716-446655440000"));
-        assert!(!is_canonical_uuid("550e8400-e29b-11d4-a716-446655440000"));
-        assert!(!is_canonical_uuid("550E8400-E29B-41D4-A716-446655440000"));
-    }
-
-    #[test]
-    fn error_json_has_stable_shape() {
-        let value: Value = serde_json::from_str(&LithographError::not_initialized().to_json())
-            .expect("error JSON must be valid");
-        assert_eq!(value["category"], "NOT_INITIALIZED");
-        assert_eq!(value["sqliteCode"], ffi::SQLITE_ERROR);
-        assert!(value["line"].is_null());
-        assert!(value["column"].is_null());
-    }
-
-    #[test]
-    fn json_adapter_requires_object_inputs() {
-        assert!(validate_json_object("{}", "params").is_ok());
-        assert_eq!(
-            validate_json_object("[]", "params")
-                .expect_err("array must be rejected")
-                .category,
-            ErrorCategory::InvalidArgument
-        );
-    }
-
-    #[test]
-    fn sqlite_error_mapping_preserves_stable_primary_categories() {
-        let cases = [
-            (ffi::SQLITE_BUSY, ErrorCategory::Busy),
-            (ffi::SQLITE_LOCKED, ErrorCategory::Busy),
-            (ffi::SQLITE_NOMEM, ErrorCategory::Resource),
-            (ffi::SQLITE_TOOBIG, ErrorCategory::Resource),
-            (ffi::SQLITE_FULL, ErrorCategory::Resource),
-            (ffi::SQLITE_IOERR, ErrorCategory::Io),
-            (ffi::SQLITE_CANTOPEN, ErrorCategory::Io),
-            (ffi::SQLITE_READONLY, ErrorCategory::Io),
-            (ffi::SQLITE_ERROR, ErrorCategory::Storage),
-        ];
-        for (code, expected) in cases {
-            let error = SqliteError::SqliteFailure(ffi::Error::new(code), None);
-            assert_eq!(map_sqlite_error(error, "probe").category, expected);
-        }
-    }
-
-    #[test]
-    fn native_input_utf8_copies_and_validates_input() {
-        let bytes = b"RETURN 1";
-        let value = unsafe {
-            input_utf8(bytes.as_ptr().cast::<c_char>(), bytes.len(), "query")
-                .expect("valid UTF-8 must be accepted")
-        };
-        assert_eq!(value, "RETURN 1");
-
-        let invalid = [0xff_u8];
-        let error = unsafe {
-            input_utf8(invalid.as_ptr().cast::<c_char>(), invalid.len(), "query")
-                .expect_err("invalid UTF-8 must be rejected")
-        };
-        assert_eq!(error.category, ErrorCategory::InvalidArgument);
-
-        let error = unsafe {
-            input_utf8(ptr::null(), 1, "query").expect_err("NULL plus length must be misuse")
-        };
-        assert_eq!(error.sqlite_code, ffi::SQLITE_MISUSE);
-    }
-
-    #[test]
-    fn virtual_table_panic_guard_converts_panics_to_internal_errors() {
-        let error = catch_sqlite_boundary::<()>(|| panic!("boundary probe"))
-            .expect_err("panic must become a SQLite error");
-        match error {
-            SqliteError::SqliteFailure(_, Some(message)) => {
-                assert!(message.contains("LITHOGRAPH_INTERNAL_ERROR"));
-            }
-            other => panic!("unexpected panic guard result: {other:?}"),
-        }
-    }
-}
+#[cfg(test)]
+mod tests;

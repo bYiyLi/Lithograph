@@ -30,11 +30,24 @@
 
 ```text
 cargo fmt --check
-cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo clippy --locked --workspace --all-targets --all-features
 cargo test --locked --workspace
+cargo make quality
 ```
 
-CI 默认执行同一 gate，避免本地/CI 两套标准；除 `cargo fmt` 外的 Cargo build/test/run gate 使用 `--locked`，保证 `Cargo.toml` 与仓库 `Cargo.lock` 不一致时直接失败而不是静默改写 lockfile。Vendor integrity gate 使用 Python 3 标准库，不引入额外 Python package dependency。
+CI 默认执行同一 gate，避免本地/CI 两套标准；除 `cargo fmt` 外的 Cargo build/test/run gate 使用 `--locked`，保证 `Cargo.toml` 与仓库 `Cargo.lock` 不一致时直接失败而不是静默改写 lockfile。通用质量分析优先使用标准工具，不在仓库内重复实现第二套静态分析器；仅 Rust source physical-line budget 属于 Lithograph 项目级 policy，由统一任务编排层直接执行轻量阈值检查。
+
+`Makefile.toml` 使用 `cargo-make 0.37.24` 作为统一质量任务入口，并固定执行：
+
+- `cargo-llvm-cov 0.8.7`：排除仅做命令编排的 `lithograph-test-support/src/bin/` 和 extension 单元测试源文件后，workspace line coverage 不低于 50%、function coverage 不低于 45%、region coverage 不低于 50%；Phase 01 的 SQLite/Native ABI 外部进程验收仍由现有 integration smoke 单独证明，不用 unit coverage 数字替代；
+- `cargo-deny 0.20.2`：对当前支持的 macOS arm64/x86_64、Linux arm64/x86_64、Windows x86_64 target graph 执行 RustSec advisory、license allowlist、wildcard dependency、registry/git source policy；重复 dependency version 当前作为 warning 暴露，不因无法由 Lithograph 直接控制的 transitive split 阻塞开发；
+- `cargo-machete 0.9.2`：拒绝 unused Cargo dependency；
+- `Lizard 1.24.0`：production Rust cyclomatic complexity `CCN <= 15`、函数 physical length `<= 100`、参数 `<= 10`（允许冻结的 C ABI surface）；test-support 与 Native ABI C smoke 使用 `CCN <= 20`、函数 physical length `<= 150`、参数 `<= 10`；普通 Rust 函数的 7 参数上限继续由 Clippy hard gate 负责；
+- `jscpd-rs 0.1.12`：production Rust 以至少 5 行 / 50 token 的 clone 为检测单元，duplicate line ratio 达到 1% 即失败；
+- Clippy：函数最多 100 行、参数最多 7 个、cognitive complexity threshold 25、type complexity threshold 250，并拒绝 `dbg!`、`todo!`、`unimplemented!`、无理由 lint suppression 和没有 safety rationale 的 unsafe block；
+- Rust lint：workspace 默认拒绝 unsafe code，只有 SQLite/Native ABI owner `lithograph-extension` 在 crate boundary 明确说明理由后允许；该 crate 内 `unsafe_op_in_unsafe_fn` 仍为 hard error；production `lithograph-core` / `lithograph-extension` 额外拒绝 `unwrap`、`expect` 和 `panic!`；
+- Rust source file physical-line budget：1000 行开始 warning，1400 行 hard failure；
+- `RUSTDOCFLAGS=-D warnings cargo doc --workspace --all-features --no-deps`：public Rust documentation 必须无 warning。
 
 ### Feature 00.3 SQLite fixture harness
 
@@ -77,6 +90,7 @@ CI 默认执行同一 gate，避免本地/CI 两套标准；除 `cargo fmt` 外�
 - [x] pinned TCK revision、LICENSE 与 NOTICE 可从仓库复现；
 - [x] `CY25-2026.08` fixture metadata 可以记录 source/version/family；
 - [x] CI 与本地 gate 使用同一 canonical scripts/commands；
+- [x] complexity、file/function size、coverage、dependency advisory/license/source、unsafe 与 lint-bypass policy 均有自动化 hard gate；
 - [x] 没有 product behavior 被 mock 后声称实现。
 
 ## 5. Review
@@ -98,6 +112,7 @@ CI 默认执行同一 gate，避免本地/CI 两套标准；除 `cargo fmt` 外�
 - workspace 仅包含 `lithograph-core`、`lithograph-extension`、`lithograph-test-support` 三个当前有明确职责的 crate；
 - Extension 使用 `rusqlite 0.40.1` 的 `loadable_extension`、`functions` 与 `vtab` feature，feature tree 已验证不存在 bundled SQLite，artifact dependency inspection 也未发现 private SQLite runtime linkage；
 - `scripts/ci.sh` 是本地与 CI 共享 gate，并验证 SQLite `3.45.0+`、FTS5、thread-safe 与 loadable-extension runtime requirement；所有会解析 dependency graph 的 Cargo build/test/run gate 使用 `--locked`，已用 stale `Cargo.lock` 负向探针确认会直接失败而不会静默改写 lockfile；
+- `cargo make quality` 是维护性与 supply-chain quality 的统一入口：Clippy + Lizard 负责 lint、cognitive/cyclomatic complexity、函数体量与 unsafe discipline，`jscpd-rs` 负责 production clone/duplicate gate，`cargo-llvm-cov` 负责 coverage baseline，`cargo-deny` 负责 advisory/license/source policy，`cargo-machete` 负责 unused dependency，Rustdoc warnings 与 Rust file budget 进入同一 gate；仓库不维护第二套通用静态分析实现；
 - 当前开发机使用支持 `.load` 的 SQLite 3.51.0 对真实 `lithograph` shared library 完成 load smoke；系统自带 `OMIT_LOAD_EXTENSION` 的 SQLite 不作为合格 runtime；
 - file / memory / corruption / crash fixture、runtime inspection、compatibility result comparator 与 machine-readable report 均有自动化测试；fixture/report boundary 会拒绝空 inventory、duplicate ID、mixed profile、row width mismatch、矛盾 parse expectation 与非法 error location，而当前 `CY25-2026.08` 11 个 fixture 已通过同一 validation；
 - openCypher TCK 固定为 upstream `2024.3` / `677cbafabb8c3c5eed458fd3b1ec0daec8d67d23`，vendored `LICENSE`、`NOTICE`、feature 与 graph data 已与 upstream 逐字节核对；`.gitattributes` 禁止该目录的 Git text normalization，`MANIFEST.sha256` + `scripts/check-vendor.py` 在默认 gate 中同时验证固定 source/tag/commit/content/license revision metadata 和 227 个 upstream 文件；错误 commit metadata 的负向探针会被明确拒绝；

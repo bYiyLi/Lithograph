@@ -38,7 +38,7 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 
 ## 3. 当前基线
 
-当前仓库已经完成 Phase 00 Engineering Foundation 与 Phase 01 SQLite Extension Boundary。Rust workspace、CI/test/compatibility harness、stock SQLite loadable-extension ABI、main-scoped format metadata/init/migration boundary、metadata integrity detection、stable SQL error boundary、Native C ABI v1、安全 flags、最低 SQLite 3.45.0 fixture 与 macOS/Linux/Windows build gates 均已建立并通过 Phase review。Cypher parser/executor 与 version-aware graph storage 仍按后续 Phase 实现，不以 Phase 01 临时语义提前占位。
+当前仓库已经完成 Phase 00 Engineering Foundation 与 Phase 01 SQLite Extension Boundary。Rust workspace、CI/test/compatibility harness、`cargo make quality` 统一质量门禁、stock SQLite loadable-extension ABI、main-scoped format metadata/init/migration boundary、metadata integrity detection、stable SQL error boundary、Native C ABI v1、安全 flags、最低 SQLite 3.45.0 fixture 与 macOS/Linux/Windows build gates 均已建立并通过 Phase review。质量门禁当前覆盖 Rust lint/unsafe discipline、cognitive/cyclomatic complexity、函数与文件体量、production duplicate、Rustdoc、coverage、unused dependency，以及 dependency advisory/license/source policy。Cypher parser/executor 与 version-aware graph storage 仍按后续 Phase 实现，不以 Phase 01 临时语义提前占位。
 
 - Phase 00：`done`；
 - Phase 01：`done`；
@@ -77,6 +77,7 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 7. Phase status 与仓库事实同步；
 8. final diff 无临时文件、无 unrelated refactor、无 secret、无 generated junk；
 9. 文档链接、Markdown、`git diff --check` 与新文件 trailing-whitespace 检查通过。
+10. repository-wide `cargo make quality` 通过；如果 Phase 修改了 SQLite Extension 行为，再同时通过 `scripts/ci.sh` 对应的真实 SQLite/ABI/compatibility gate。
 
 Commit / push 是独立 repository action。只有真实执行后才记录对应状态。
 

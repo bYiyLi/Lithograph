@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use lithograph_test_support::sqlite::{inspect_runtime, load_extension};
 use serde::Serialize;
 use std::env;

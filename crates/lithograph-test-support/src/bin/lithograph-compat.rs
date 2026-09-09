@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use lithograph_test_support::compatibility::{
     inventory_report, load_fixture_directory, self_check_report,
 };

@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use lithograph_test_support::sqlite::{
     FileDatabaseFixture, FixtureError, InMemoryDatabaseFixture, extension_load_command,
 };

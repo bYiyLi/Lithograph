@@ -139,25 +139,14 @@ pub fn read_feature(path: &Path) -> io::Result<TckFeature> {
         }
 
         if let Some(name) = line.strip_prefix("Examples:") {
-            let scenario = current_scenario.as_mut().ok_or_else(|| {
-                invalid_data(path, index + 1, "Examples block is outside a scenario")
-            })?;
-            if !scenario.outline {
-                return Err(invalid_data(
-                    path,
-                    index + 1,
-                    "Examples block belongs to a non-outline scenario",
-                ));
-            }
-
-            let (rows, next_index) = read_following_table(path, &lines, index + 1)?;
-            scenario.examples.push(TckExamples {
-                name: name.trim().to_string(),
-                line: index + 1,
-                tags: std::mem::take(&mut pending_tags),
-                rows,
-            });
-            index = next_index;
+            index = push_examples(
+                path,
+                &lines,
+                index,
+                name,
+                &mut pending_tags,
+                &mut current_scenario,
+            )?;
             continue;
         }
 
@@ -192,7 +181,16 @@ pub fn read_feature(path: &Path) -> io::Result<TckFeature> {
     }
 
     flush_scenario(&mut current_scenario, &mut scenarios);
+    finish_feature(path, feature_name, feature_tags, background, scenarios)
+}
 
+fn finish_feature(
+    path: &Path,
+    feature_name: Option<String>,
+    feature_tags: Vec<String>,
+    background: Vec<TckStep>,
+    scenarios: Vec<TckScenario>,
+) -> io::Result<TckFeature> {
     let name =
         feature_name.ok_or_else(|| invalid_data(path, 1, "TCK file has no Feature heading"))?;
     Ok(TckFeature {
@@ -201,6 +199,35 @@ pub fn read_feature(path: &Path) -> io::Result<TckFeature> {
         background,
         scenarios,
     })
+}
+
+fn push_examples(
+    path: &Path,
+    lines: &[&str],
+    index: usize,
+    name: &str,
+    pending_tags: &mut Vec<String>,
+    current_scenario: &mut Option<TckScenario>,
+) -> io::Result<usize> {
+    let scenario = current_scenario
+        .as_mut()
+        .ok_or_else(|| invalid_data(path, index + 1, "Examples block is outside a scenario"))?;
+    if !scenario.outline {
+        return Err(invalid_data(
+            path,
+            index + 1,
+            "Examples block belongs to a non-outline scenario",
+        ));
+    }
+
+    let (rows, next_index) = read_following_table(path, lines, index + 1)?;
+    scenario.examples.push(TckExamples {
+        name: name.trim().to_string(),
+        line: index + 1,
+        tags: std::mem::take(pending_tags),
+        rows,
+    });
+    Ok(next_index)
 }
 
 pub fn read_suite_inventory(root: &Path) -> io::Result<TckSuiteInventory> {

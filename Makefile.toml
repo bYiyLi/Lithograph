@@ -1,0 +1,118 @@
+[config]
+default_to_workspace = false
+
+[tasks.quality]
+description = "Run the complete Lithograph maintainability and supply-chain quality gate."
+dependencies = [
+    "quality-vendor",
+    "quality-file-budget",
+    "quality-format",
+    "quality-clippy",
+    "quality-rustdoc",
+    "quality-complexity-production",
+    "quality-complexity-support",
+    "quality-complexity-c-smoke",
+    "quality-duplicates",
+    "quality-unused-deps",
+    "quality-supply-chain",
+    "quality-coverage",
+]
+
+[tasks.quality-vendor]
+command = "python3"
+args = ["scripts/check-vendor.py"]
+
+[tasks.quality-file-budget]
+script = '''
+set -eu
+warning_limit=1000
+hard_limit=1400
+failed=0
+for file in $(find crates -type f -name '*.rs' -print | sort); do
+  lines=$(wc -l < "$file" | tr -d ' ')
+  if [ "$lines" -gt "$hard_limit" ]; then
+    echo "$file: $lines lines exceeds hard Rust file budget $hard_limit" >&2
+    failed=1
+  elif [ "$lines" -gt "$warning_limit" ]; then
+    echo "$file: $lines lines exceeds soft Rust file budget $warning_limit" >&2
+  fi
+done
+exit "$failed"
+'''
+
+[tasks.quality-format]
+command = "cargo"
+args = ["fmt", "--check"]
+
+[tasks.quality-clippy]
+command = "cargo"
+args = ["clippy", "--locked", "--workspace", "--all-targets", "--all-features"]
+
+[tasks.quality-rustdoc]
+env = { RUSTDOCFLAGS = "-D warnings" }
+command = "cargo"
+args = ["doc", "--locked", "--workspace", "--all-features", "--no-deps"]
+
+[tasks.quality-complexity-production]
+command = "lizard"
+args = [
+    "-l", "rust",
+    "-C", "15",
+    "-L", "100",
+    "-a", "10",
+    "crates/lithograph-core/src",
+    "crates/lithograph-extension/src",
+    "-x", "crates/lithograph-extension/src/tests.rs",
+    "-w",
+]
+
+[tasks.quality-complexity-support]
+command = "lizard"
+args = [
+    "-l", "rust",
+    "-C", "20",
+    "-L", "150",
+    "-a", "10",
+    "crates/lithograph-test-support/src",
+    "-w",
+]
+
+[tasks.quality-complexity-c-smoke]
+command = "lizard"
+args = ["-C", "20", "-L", "150", "-a", "10", "tests/native_abi_smoke.c", "-w"]
+
+[tasks.quality-duplicates]
+command = "jscpd"
+args = [
+    "crates/lithograph-core/src",
+    "crates/lithograph-extension/src",
+    "--format", "rust",
+    "--min-lines", "5",
+    "--min-tokens", "50",
+    "--threshold", "1",
+    "--max-lines", "5000",
+    "--ignore", "**/tests.rs",
+    "--reporters", "console",
+    "--noTips",
+]
+
+[tasks.quality-unused-deps]
+command = "cargo"
+args = ["machete", "--with-metadata", "--skip-target-dir"]
+
+[tasks.quality-supply-chain]
+command = "cargo"
+args = ["deny", "check"]
+
+[tasks.quality-coverage]
+command = "cargo"
+args = [
+    "llvm-cov",
+    "--locked",
+    "--workspace",
+    "--all-features",
+    "--ignore-filename-regex", "crates/lithograph-test-support/src/bin/|crates/lithograph-extension/src/tests.rs",
+    "--fail-under-regions", "50",
+    "--fail-under-functions", "45",
+    "--fail-under-lines", "50",
+]

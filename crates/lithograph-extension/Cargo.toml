@@ -12,6 +12,9 @@ path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-lithograph-core = { path = "../lithograph-core" }
+lithograph-core = { path = "../lithograph-core", version = "=0.0.0" }
 rusqlite = { workspace = true, features = ["functions", "loadable_extension", "vtab"] }
 serde_json.workspace = true
+
+[lints]
+workspace = true
