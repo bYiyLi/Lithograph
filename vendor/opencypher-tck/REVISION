@@ -1,0 +1,5 @@
+source=https://github.com/opencypher/openCypher.git
+tag=2024.3
+commit=677cbafabb8c3c5eed458fd3b1ec0daec8d67d23
+content=tck/features,tck/graphs
+license=Apache-2.0

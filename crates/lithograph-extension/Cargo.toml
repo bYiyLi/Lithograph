@@ -1,0 +1,15 @@
+[package]
+name = "lithograph-extension"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "lithograph"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rusqlite = { workspace = true, features = ["functions", "loadable_extension", "vtab"] }

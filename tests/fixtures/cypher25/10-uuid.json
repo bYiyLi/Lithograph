@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "cy25-uuid-parser",
+  "profile": {
+    "id": "CY25-2026.08",
+    "source": "https://feedback.neo4j.com/changelog/neo4j-aura-august-2026-release",
+    "version": "2026.08",
+    "family": "UUID"
+  },
+  "execution": "planned",
+  "query": "RETURN uuid('6ba7b810-9dad-11d1-80b4-00c04fd430c8') AS id",
+  "params": {},
+  "initial_graph": [],
+  "expected": {"kind": "parse", "valid": true}
+}

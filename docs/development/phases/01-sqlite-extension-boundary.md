@@ -1,6 +1,6 @@
 # Phase 01：SQLite Extension Boundary
 
-**状态：`planned`**
+**状态：`ready`**
 
 ## 1. 目标
 

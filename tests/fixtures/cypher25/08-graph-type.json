@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "cy25-graph-type-parser",
+  "profile": {
+    "id": "CY25-2026.08",
+    "source": "https://neo4j.com/docs/cypher-manual/current/schema/graph-types/set-graph-types/",
+    "version": "2026.06",
+    "family": "Graph Type"
+  },
+  "execution": "planned",
+  "query": "ALTER CURRENT GRAPH TYPE SET { (:Person => {name :: STRING}) }",
+  "params": {},
+  "initial_graph": [],
+  "expected": {"kind": "parse", "valid": true}
+}

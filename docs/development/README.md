@@ -38,19 +38,19 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 
 ## 3. 当前基线
 
-当前仓库只有产品设计、开发规范与开发计划，没有 Engine 实现。因此：
+当前仓库已经完成 Phase 00 Engineering Foundation：Rust workspace、SQLite extension load boundary、SQLite/test fixture、Cypher compatibility harness、locked Cargo gate、vendored openCypher TCK byte/revision integrity 与 CI 基线均已建立并通过最终 review。Phase 00 不包含 graph product behavior，Engine 产品功能从 Phase 01 开始实现。
 
-- Phase 00：`ready`；
-- Phase 01–10：`planned`；
-- 没有 Phase 可以标记 `done`；
-- `docs/development/cypher25-compatibility.md` 的实现状态初始均为 `planned`。
+- Phase 00：`done`；
+- Phase 01：`ready`；
+- Phase 02–10：`planned`；
+- `docs/development/cypher25-compatibility.md` 的 capability family 仍全部为 `planned`，Phase 00 只建立 inventory 与验收基础，不把未实现 Cypher 能力标记为完成。
 
 ## 4. 路线总览
 
 | Phase | 状态 | 交付结果 | 主要依赖 |
 | --- | --- | --- | --- |
-| [00 Engineering Foundation](phases/00-engineering-foundation.md) | `ready` | Rust/CI/test/compatibility harness 与可重复工程基线 | Design |
-| [01 SQLite Extension Boundary](phases/01-sqlite-extension-boundary.md) | `planned` | 可跨平台 `.load`、初始化、SQL Bridge、Native ABI | 00 |
+| [00 Engineering Foundation](phases/00-engineering-foundation.md) | `done` | Rust/CI/test/compatibility harness 与可重复工程基线 | Design |
+| [01 SQLite Extension Boundary](phases/01-sqlite-extension-boundary.md) | `ready` | 可跨平台 `.load`、初始化、SQL Bridge、Native ABI | 00 |
 | [02 Version-aware Storage Core](phases/02-versioned-storage-core.md) | `planned` | Root Commit、immutable layers、snapshot resolver、branch main、checkpoint | 01 |
 | [03 Cypher Frontend and Value Semantics](phases/03-cypher-frontend-values.md) | `planned` | `CY25-2026.08` parser/AST/scope/type/value foundation | 00–02 |
 | [04 Read Query Engine](phases/04-read-query-engine.md) | `planned` | MATCH/RETURN vertical slice、planner/executor、indexed traversal、streaming | 02–03 |

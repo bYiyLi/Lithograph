@@ -17,7 +17,7 @@ Profile 由 Neo4j Cypher 25 current-graph Manual + 2026.08 已公开 Cypher addi
 | `partial` | 部分 fixtures 通过，但该 capability family 未闭合 |
 | `done` | inventory 全部存在，positive/negative/composition fixtures 全部通过 |
 
-当前全部 capability family 为 `planned`。
+当前全部 capability family 为 `planned`。Phase 00 已建立 fixture schema、machine-readable report、openCypher TCK adapter 与首批 `CY25-2026.08` inventory；这些基础设施本身不构成任何 Cypher capability 的实现证据，因此不会改变本表状态。
 
 ## 3. Profile Boundary
 

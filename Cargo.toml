@@ -1,0 +1,20 @@
+[workspace]
+members = [
+    "crates/lithograph-core",
+    "crates/lithograph-extension",
+    "crates/lithograph-test-support",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.98.1"
+license = "AGPL-3.0-only"
+repository = "https://github.com/bYiyLi/Lithograph"
+
+[workspace.dependencies]
+rusqlite = { version = "=0.40.1", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3.21"

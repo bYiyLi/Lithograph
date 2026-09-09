@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "id": "cy25-runtime-values-basic",
+  "profile": {
+    "id": "CY25-2026.08",
+    "source": "https://neo4j.com/docs/cypher-manual/current/values-and-types/",
+    "version": "2026.08",
+    "family": "Runtime values"
+  },
+  "execution": "planned",
+  "query": "RETURN $i AS i, $n AS n, $s AS s, $xs AS xs, $m AS m",
+  "params": {
+    "i": {"type": "integer", "value": 1},
+    "n": {"type": "null"},
+    "s": {"type": "string", "value": "hello"},
+    "xs": {"type": "list", "value": [
+      {"type": "integer", "value": 1},
+      {"type": "integer", "value": 2}
+    ]},
+    "m": {"type": "map", "value": {
+      "name": {"type": "string", "value": "Alice"}
+    }}
+  },
+  "initial_graph": [],
+  "expected": {
+    "kind": "rows",
+    "columns": ["i", "n", "s", "xs", "m"],
+    "ordered": true,
+    "rows": [[
+      {"type": "integer", "value": 1},
+      {"type": "null"},
+      {"type": "string", "value": "hello"},
+      {"type": "list", "value": [
+        {"type": "integer", "value": 1},
+        {"type": "integer", "value": 2}
+      ]},
+      {"type": "map", "value": {
+        "name": {"type": "string", "value": "Alice"}
+      }}
+    ]]
+  }
+}

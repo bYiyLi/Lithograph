@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "id": "cy25-parse-error-location",
+  "profile": {
+    "id": "CY25-2026.08",
+    "source": "https://neo4j.com/docs/python-manual/current/query-simple/",
+    "version": "2026.08",
+    "family": "Error compatibility"
+  },
+  "execution": "planned",
+  "query": "MATCH (p:Person) RETURN",
+  "params": {},
+  "initial_graph": [],
+  "expected": {
+    "kind": "error",
+    "error": {
+      "category": "SyntaxError",
+      "line": 1,
+      "column": 24,
+      "message_contains": "expected"
+    }
+  }
+}

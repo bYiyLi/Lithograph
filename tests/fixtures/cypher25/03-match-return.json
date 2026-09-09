@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "id": "cy25-match-return-basic",
+  "profile": {
+    "id": "CY25-2026.08",
+    "source": "https://neo4j.com/docs/cypher-manual/current/clauses/match/",
+    "version": "2026.08",
+    "family": "MATCH"
+  },
+  "execution": "planned",
+  "query": "MATCH (p:Person) RETURN p.name AS name",
+  "params": {},
+  "initial_graph": ["CREATE (:Person {name: 'Alice'})"],
+  "expected": {
+    "kind": "rows",
+    "columns": ["name"],
+    "ordered": false,
+    "rows": [[{"type": "string", "value": "Alice"}]]
+  }
+}

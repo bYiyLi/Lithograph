@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "cy25-search-parser",
+  "profile": {
+    "id": "CY25-2026.08",
+    "source": "https://neo4j.com/docs/cypher-manual/current/clauses/search/",
+    "version": "2026.06",
+    "family": "SEARCH"
+  },
+  "execution": "planned",
+  "query": "MATCH (d:Document) SEARCH d IN (VECTOR INDEX documentEmbedding FOR [1.0, 2.0] LIMIT 5) RETURN d",
+  "params": {},
+  "initial_graph": [],
+  "expected": {"kind": "parse", "valid": true}
+}

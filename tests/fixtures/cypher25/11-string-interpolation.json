@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "cy25-string-interpolation-parser",
+  "profile": {
+    "id": "CY25-2026.08",
+    "source": "https://feedback.neo4j.com/changelog/neo4j-aura-august-2026-release",
+    "version": "2026.08",
+    "family": "String interpolation"
+  },
+  "execution": "planned",
+  "query": "WITH 'Alice' AS name RETURN s\"Hello {name}\" AS greeting",
+  "params": {},
+  "initial_graph": [],
+  "expected": {"kind": "parse", "valid": true}
+}

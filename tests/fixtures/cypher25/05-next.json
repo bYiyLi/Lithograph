@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "cy25-next-parser",
+  "profile": {
+    "id": "CY25-2026.08",
+    "source": "https://neo4j.com/docs/cypher-manual/current/queries/composed-queries/sequential-queries/",
+    "version": "2025.06",
+    "family": "NEXT"
+  },
+  "execution": "planned",
+  "query": "RETURN 1 AS x NEXT RETURN x AS x",
+  "params": {},
+  "initial_graph": [],
+  "expected": {"kind": "parse", "valid": true}
+}

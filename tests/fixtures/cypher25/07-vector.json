@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "cy25-vector-parser",
+  "profile": {
+    "id": "CY25-2026.08",
+    "source": "https://neo4j.com/docs/cypher-manual/current/values-and-types/vector/",
+    "version": "2025.10",
+    "family": "VECTOR"
+  },
+  "execution": "planned",
+  "query": "RETURN vector([1, 2, 3], 3, INTEGER) AS embedding",
+  "params": {},
+  "initial_graph": [],
+  "expected": {"kind": "parse", "valid": true}
+}

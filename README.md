@@ -30,10 +30,11 @@ RETURN person.name, company.name
 
 ## 项目状态
 
-Lithograph 当前已经完成产品与技术设计、开发规范和可执行开发计划，尚未开始 Engine 实现，也没有可用于生产的 Release。
+Lithograph 当前已经完成产品与技术设计、开发规范、可执行开发计划和 Phase 00 Engineering Foundation。Rust workspace、CI、SQLite/test fixture、Cypher compatibility harness 与可重复 dependency/vendor integrity gate 已建立并通过最终验收；graph product behavior 从 Phase 01 开始实现，目前没有可用于生产的 Release。
 
 - [技术设计](docs/design.md)
 - [开发计划](docs/development/README.md)
+- 当前开发阶段：Phase 00 `done`，Phase 01 `ready`
 
 ## 许可
 
