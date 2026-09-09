@@ -72,6 +72,9 @@ No-op mutating query 仍创建 Commit。
 - [ ] multi-row write 只产生一个 top-level Commit；
 - [ ] query 中途失败 Branch head / Commit / Layer 全部 rollback；
 - [ ] SQL Bridge mutating invocation 发生 parser-after-write/fault-injection/error 时回滚到 invocation savepoint；
+- [ ] autocommit 下两个 scalar write invocation 前一成功、后一失败时保持两个独立 invocation；caller-owned outer rollback 能撤销其中全部 graph invocation；
+- [ ] `lithograph_rows` 对 mutating query 返回 `READ_ONLY_ADAPTER`，virtual-table rescan 不执行任何 write；
+- [ ] Native callback cancel 发生在尚未 durable 的 write 时返回 `SQLITE_INTERRUPT` 并回滚整个 write；
 - [ ] outer SQLite rollback 移除其中全部 graph Commits；
 - [ ] outer SQLite commit 后其它 connection 一次看到完整 commit chain；
 - [ ] two writers 基于同一 branch base 时一个成功、另一个准确 `BRANCH_HEAD_MOVED`；

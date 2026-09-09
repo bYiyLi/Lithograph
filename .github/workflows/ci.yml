@@ -5,7 +5,7 @@ on:
   pull_request:
 
 jobs:
-  phase-00-gates:
+  phase-01-gates:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,3 +20,28 @@ jobs:
           cargo --version
       - name: Run canonical gates
         run: ./scripts/ci.sh
+
+  macos-phase-01-gates:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install SQLite
+        run: brew install sqlite
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal --component clippy --component rustfmt
+      - name: Select Homebrew SQLite
+        run: echo "LITHOGRAPH_SQLITE3=$(brew --prefix sqlite)/bin/sqlite3" >> "$GITHUB_ENV"
+      - name: Run canonical gates
+        run: ./scripts/ci.sh
+
+  windows-phase-01-gates:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal
+      - name: Build SQLite extension
+        run: cargo build --locked -p lithograph-extension
+      - name: Run Windows load, ABI, and artifact gates
+        shell: pwsh
+        run: ./scripts/windows-phase01-smoke.ps1 -ExtensionPath target/debug/lithograph.dll

@@ -95,6 +95,8 @@ LIMIT ...
 - [ ] OPTIONAL null preservation fixtures 通过；
 - [ ] duplicate rows / aggregation / ordering 基础语义通过；
 - [ ] 1M-row synthetic streaming fixture 在 rows API 下不按总结果线性增长内存；
+- [ ] `lithograph()` read query 返回第 13.1 节完整 JSON envelope；`lithograph_rows` columns/row encoding 与同一 query 一致；
+- [ ] Native read event 顺序固定为 `COLUMNS -> ROW* -> SUMMARY`；callback cancel 返回 `SQLITE_INTERRUPT` 且停止继续发 event；
 - [ ] sort spill fixture 与 in-memory result 相同；
 - [ ] historical commit read 与同一 commit 创建时 read 一致；
 - [ ] EXPLAIN 不触发 graph read/write side effect；

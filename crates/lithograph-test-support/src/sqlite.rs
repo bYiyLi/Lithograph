@@ -169,6 +169,12 @@ pub fn inspect_runtime() -> Result<SqliteRuntimeInfo> {
 }
 
 pub fn load_extension(path: &Path) -> Result<()> {
+    let load = extension_load_command(path)?;
+    run_sqlite(":memory:", &format!("{load}\nSELECT 1;\n"))?;
+    Ok(())
+}
+
+pub fn extension_load_command(path: &Path) -> Result<String> {
     let path = path
         .to_str()
         .ok_or_else(|| FixtureError::InvalidOutput("extension path is not UTF-8".into()))?;
@@ -177,9 +183,13 @@ pub fn load_extension(path: &Path) -> Result<()> {
             "extension path contains a newline".into(),
         ));
     }
+    let path = if cfg!(windows) {
+        path.replace('\\', "/")
+    } else {
+        path.to_owned()
+    };
     let quoted = path.replace('"', "\"\"");
-    run_sqlite(":memory:", &format!(".load \"{quoted}\"\nSELECT 1;\n"))?;
-    Ok(())
+    Ok(format!(".load \"{quoted}\""))
 }
 
 fn run_sqlite(database: impl AsRef<std::ffi::OsStr>, script: &str) -> Result<String> {

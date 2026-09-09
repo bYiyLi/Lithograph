@@ -52,14 +52,34 @@ cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace
 cargo build --locked -p lithograph-extension
 
+target_dir=${CARGO_TARGET_DIR:-target}
 case "$(uname -s)" in
-  Darwin) extension="target/debug/liblithograph.dylib" ;;
-  Linux) extension="target/debug/liblithograph.so" ;;
-  *) extension="" ;;
+  Darwin)
+    built_extension="$target_dir/debug/liblithograph.dylib"
+    extension="$target_dir/debug/lithograph.dylib"
+    ;;
+  Linux)
+    built_extension="$target_dir/debug/liblithograph.so"
+    extension="$target_dir/debug/lithograph.so"
+    ;;
+  *)
+    built_extension=""
+    extension=""
+    ;;
 esac
 
 if [ -n "$extension" ]; then
+  cp "$built_extension" "$extension"
+  extension_without_suffix=${extension%.*}
+  "$LITHOGRAPH_SQLITE3" -batch -noheader \
+    -cmd ".load $extension_without_suffix" \
+    :memory: \
+    'SELECT json_valid(lithograph_version());' | grep -qx '1'
   cargo run --locked --quiet -p lithograph-test-support --bin lithograph-sqlite-probe -- "$extension"
+  cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase01 -- "$extension"
+  scripts/sqlite-345-smoke.sh "$extension"
+  python3 scripts/check-extension-artifact.py "$extension"
+  scripts/native-abi-smoke.sh "$extension"
 fi
 
 cargo run --locked --quiet -p lithograph-test-support --bin lithograph-compat -- self-check

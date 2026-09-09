@@ -1,6 +1,6 @@
 # Phase 02：Version-aware Storage Core
 
-**状态：`planned`**
+**状态：`ready`**
 
 ## 1. 目标
 
@@ -39,6 +39,8 @@
 - 创建 Root Commit；
 - `main` -> Root；
 - 重复 init 不创建第二 Root。
+
+Phase 02 接管 Phase 01 仅建立 format metadata 时暂为 `null` 的 init `root` / `branch` 字段；完成本 Feature 后，`lithograph_init()` 必须满足 Design 的最终 Root Commit / `main` Branch contract。
 
 ### Feature 02.3 Global identity
 

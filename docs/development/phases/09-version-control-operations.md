@@ -144,6 +144,7 @@ theirs
 - [ ] squash(since) 后 Snapshot 与原 HEAD 完全一致，只由一个新 Commit 连接 since；
 - [ ] squash/rebase 产生的旧 unreachable history 在 explicit GC 前仍可按 Commit ID 查询；
 - [ ] reset/revert/history/time-travel 通过；
+- [ ] `lithograph_rows` 对 checkout、GC 及其它 version/connection-state mutation 返回 `READ_ONLY_ADAPTER`，不产生任何 ref/cache/history side effect；
 - [ ] Merge Commit 未指定 mainline 时 revert 返回 `INVALID_ARGUMENT`，指定 1/2 时 inverse patch 正确；
 - [ ] explicit GC 不删除 reachable history；
 - [ ] reset 后 unreachable history 默认保留直到 explicit GC；

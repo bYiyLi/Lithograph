@@ -78,6 +78,7 @@ Parser implementation 可以依法参考 GraphQLite/openCypher grammar，但输�
 - [ ] int64/vector/temporal/UUID params/result round-trip；
 - [ ] parser/semantic layer 不访问 SQLite graph rows；
 - [ ] AST 不携带 GraphQLite/Cypher-to-SQL implementation-specific node。
+- [ ] `lithograph_validate()` 接入真实 parser + semantic/type/schema validation，success JSON 为 `{valid: true, cypherProfile}`，不执行 query。
 
 ## 6. Review
 

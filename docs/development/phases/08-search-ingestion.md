@@ -90,6 +90,7 @@ Native API 实现：
 - [ ] historical commit 的 full-text/vector query 不读取 current-head derived index；
 - [ ] LOAD CSV large streaming fixture 无全文件 materialization；
 - [ ] malformed CSV/network/file failure rollback 正确；
+- [ ] `lithograph_rows` 对 `LOAD CSV` 与 transaction-owning query 返回 `READ_ONLY_ADAPTER`，不触发 filesystem/network/transaction side effect；
 - [ ] Native API transaction batching 产生独立 durable Commits；
 - [ ] successful mutating batch 数与新增 Commit 数一致；read-only batch 不新增 Commit；
 - [ ] internal concurrent batches 不因彼此 branch advance 产生伪 `BRANCH_HEAD_MOVED`，外部并发 writer 仍能触发真实 stale-head error；
