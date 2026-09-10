@@ -549,8 +549,16 @@ int main(int argc, char **argv) {
 
     error_json = NULL;
     rc = validate(db, query, strlen(query), &error_json);
-    require(rc == SQLITE_ERROR, "Phase 01 validate must return SQLITE_ERROR until frontend exists");
-    require_error(error_json, "SEMANTIC_ERROR");
+    require(rc == SQLITE_OK, "frontend validate must succeed after init");
+    require(error_json == NULL, "successful native validation must not allocate error_json");
+
+    const char *invalid_query = "MATCH (n) RETURN n,";
+    error_json = NULL;
+    rc = validate(db, invalid_query, strlen(invalid_query), &error_json);
+    require(rc == SQLITE_ERROR, "invalid syntax must return SQLITE_ERROR");
+    require_error(error_json, "PARSE_ERROR");
+    require(strstr(error_json, "\"line\":1") != NULL, "parse error must expose line 1");
+    require(strstr(error_json, "\"column\":20") != NULL, "parse error must expose stable column");
     lithograph_free(error_json);
 
     error_json = NULL;
@@ -567,7 +575,7 @@ int main(int argc, char **argv) {
         NULL,
         &error_json
     );
-    require(rc == SQLITE_ERROR, "Phase 01 execute must return SQLITE_ERROR until engine exists");
+    require(rc == SQLITE_ERROR, "execute must return SQLITE_ERROR until query engine exists");
     require_error(error_json, "SEMANTIC_ERROR");
     require(callback_count == 0, "unavailable execution must not emit partial events");
     lithograph_free(error_json);

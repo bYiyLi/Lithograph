@@ -125,15 +125,17 @@ unsafe fn native_execute_impl(
     if query.trim().is_empty() {
         return Err(LithographError::invalid_argument("query must not be empty"));
     }
-    validate_json_object(&params, "params")?;
+    cypher::decode_parameters_text(&params)
+        .map_err(|error| LithographError::invalid_argument(error.message))?;
     validate_json_object(&options, "options")?;
     // SAFETY: registration proves `db` is a live SQLite connection containing
     // this extension; rusqlite borrows the handle without taking ownership.
     let connection = unsafe { Connection::from_handle(db) }
         .map_err(|error| map_sqlite_error(error, "invalid SQLite connection"))?;
     require_initialized(&connection)?;
+    validate_cypher(&query)?;
 
-    Err(LithographError::semantic_unavailable())
+    Err(LithographError::execution_unavailable())
 }
 
 /// Validates one Cypher query through the stable native ABI v1.
@@ -182,7 +184,8 @@ unsafe fn native_validate_impl(
     let connection = unsafe { Connection::from_handle(db) }
         .map_err(|error| map_sqlite_error(error, "invalid SQLite connection"))?;
     require_initialized(&connection)?;
-    Err(LithographError::semantic_unavailable())
+    validate_cypher(&query)?;
+    Ok(())
 }
 
 fn require_native_connection_registered(db: *mut ffi::sqlite3) -> LithographResult<()> {

@@ -150,7 +150,25 @@ fn check_init_and_metadata(load: &str) -> Result<(), Box<dyn Error>> {
     let second = parse_json(lines[1], "second init")?;
     let version = parse_json(lines[2], "version after init")?;
     let integrity = parse_json(lines[3], "integrity after init")?;
+    check_initialized_json(&first, &second, &version, &integrity, lines[4])?;
+    let required_storage = fixture.execute_script(
+        "SELECT count(*) FROM sqlite_schema WHERE name IN ('_lithograph_meta', '_lithograph_commits', '_lithograph_branches', '_lithograph_layers');",
+    )?;
+    require_equal(
+        &required_storage,
+        &"4".to_string(),
+        "Phase 02 init must expose the required canonical storage tables",
+    )?;
+    Ok(())
+}
 
+fn check_initialized_json(
+    first: &Value,
+    second: &Value,
+    version: &Value,
+    integrity: &Value,
+    user_version: &str,
+) -> Result<(), Box<dyn Error>> {
     let database_id = first["databaseId"]
         .as_str()
         .ok_or("first init must return databaseId")?;
@@ -169,13 +187,22 @@ fn check_init_and_metadata(load: &str) -> Result<(), Box<dyn Error>> {
         &Some(1),
         "version must report storage format 1",
     )?;
+    let root = first["root"]
+        .as_str()
+        .ok_or("init must return the Root Commit after Phase 02")?;
     require(
-        first["root"].is_null(),
-        "Phase 01 must not invent a Root Commit",
+        is_lower_hex_commit(root),
+        "Root Commit must be 64 lowercase hex characters",
     )?;
-    require(
-        first["branch"].is_null(),
-        "Phase 01 must not invent a main Branch",
+    require_equal(
+        &second["root"].as_str(),
+        &Some(root),
+        "idempotent init must preserve the Root Commit",
+    )?;
+    require_equal(
+        &first["branch"].as_str(),
+        &Some("main"),
+        "init must return the main Branch after Phase 02",
     )?;
     require_equal(
         &integrity["ok"].as_bool(),
@@ -183,20 +210,19 @@ fn check_init_and_metadata(load: &str) -> Result<(), Box<dyn Error>> {
         "metadata integrity must pass",
     )?;
     require_equal(
-        &lines[4],
+        &user_version,
         &"77",
         "init must not consume PRAGMA user_version",
     )?;
-
-    let schema = fixture.execute_script(
-        "SELECT type || ':' || name FROM sqlite_schema WHERE name LIKE '_lithograph_%' ORDER BY name;",
-    )?;
-    require_equal(
-        &schema,
-        &"table:_lithograph_meta".to_string(),
-        "Phase 01 init may create only metadata storage",
-    )?;
     Ok(())
+}
+
+fn is_lower_hex_commit(value: &str) -> bool {
+    if value.len() != 64 || !value.is_ascii() || value != value.to_ascii_lowercase() {
+        return false;
+    }
+    let (high, low) = value.split_at(32);
+    u128::from_str_radix(high, 16).is_ok() && u128::from_str_radix(low, 16).is_ok()
 }
 
 fn check_outer_transaction_rollback(load: &str) -> Result<(), Box<dyn Error>> {
@@ -583,9 +609,18 @@ fn check_execution_boundary(load: &str) -> Result<(), Box<dyn Error>> {
         fixture.execute_script(&format!("{load}\nSELECT lithograph('RETURN 1');")),
         "LITHOGRAPH_SEMANTIC_ERROR",
     )?;
-    assert_sqlite_error(
-        fixture.execute_script(&format!("{load}\nSELECT lithograph_validate('RETURN 1');")),
-        "LITHOGRAPH_SEMANTIC_ERROR",
+    let validation =
+        fixture.execute_script(&format!("{load}\nSELECT lithograph_validate('RETURN 1');"))?;
+    let validation = parse_json(&validation, "frontend validation")?;
+    require_equal(
+        &validation["valid"].as_bool(),
+        &Some(true),
+        "frontend validation must succeed without executing the query",
+    )?;
+    require_equal(
+        &validation["cypherProfile"].as_str(),
+        &Some("CY25-2026.08"),
+        "frontend validation must expose the frozen Cypher profile",
     )?;
     assert_sqlite_error(
         fixture.execute_script(&format!(

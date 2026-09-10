@@ -5,6 +5,7 @@ default_to_workspace = false
 description = "Run the complete Lithograph maintainability and supply-chain quality gate."
 dependencies = [
     "quality-vendor",
+    "quality-lce1-golden",
     "quality-file-budget",
     "quality-format",
     "quality-clippy",
@@ -21,6 +22,9 @@ dependencies = [
 [tasks.quality-vendor]
 command = "python3"
 args = ["scripts/check-vendor.py"]
+
+[tasks.quality-lce1-golden]
+command = "scripts/lce1-golden.sh"
 
 [tasks.quality-file-budget]
 script = '''
@@ -152,6 +156,8 @@ esac
 
 cp "$built_extension" "$extension"
 cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase01 -- "$extension"
+cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase02 -- "$extension"
+cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase03 -- "$extension"
 scripts/native-abi-smoke.sh "$extension"
 
 cargo llvm-cov report \

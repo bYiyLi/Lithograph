@@ -8,7 +8,7 @@ Lithograph 是一个运行在标准 SQLite 上的、可加载的 Property Graph 
 
 1. 完整的 Cypher 25 当前图查询与数据库语义；
 2. 面向大规模单机图的 Property Graph 存储、执行、Schema、Index、Full-text 与 Vector Search；
-3. Git / TerminusDB 风格的版本化图：每次写入形成不可变 Commit，支持 Branch、History、Time-travel、Diff、Patch、Merge、Rebase、Squash、Reset 与 Revert。
+3. 基于 immutable Commit DAG 的版本化状态图：每次 graph / Schema / Index write 形成 Commit，并提供 Branch、Tag、可修改的 Commit Data、显式 empty-delta Commit、可分页 History、Time-travel、Diff、Patch、Merge、Rebase、Squash、Reset 与 Revert。Git / TerminusDB 是机制参考，不限定调用方如何解释这些状态。
 
 ```text
 Application / SQLite client
@@ -53,6 +53,8 @@ Lithograph 不创建“类似 Cypher”的查询语言。公开图查询语言�
 
 版本历史从第一条图数据开始存在。图数据、Schema 与 Index 定义共同进入 Commit 历史。Branch 只移动引用，不复制完整数据库。历史 Commit 不被后续写入修改。
 
+Commit 的 graph / Schema / Index Snapshot 与 DAG lineage 是 immutable canonical history。调用方可以另外给已有 Commit 保存可修改的 **Commit Data**，也可以用 **Tag** 给 Commit 建立显式命名引用；Commit Data 与 Tag 都是 version-control sidecar state，不进入 Snapshot、Commit hash、Diff / Patch 或 Merge correctness。若某项业务数据本身必须随 Snapshot versioning、Cypher query、Constraint、Diff 或 Merge 一起演进，它必须保存为正常 graph / Schema 数据，而不是 Commit Data。
+
 ### 2.4 大规模单机图
 
 遍历、索引、历史查询和结果返回不能依赖把完整图或完整结果集加载到内存。邻接访问的成本必须与命中的邻接数据相关，而不是与全部 Relationship 数量相关。
@@ -91,7 +93,9 @@ Cypher 25 会继续演进。Lithograph 的“完整兼容”始终针对一个�
 - `EXPLAIN` 与 `PROFILE`；
 - `CALL { ... } IN TRANSACTIONS` 与 `IN CONCURRENT TRANSACTIONS` 的 query-engine semantics。
 
-Neo4j DBMS 自身的多数据库管理、数据库 alias、用户/角色/权限、cluster/server、OIDC/ABAC、Java UDF 部署和系统数据库管理命令属于 Neo4j 产品管理面，不属于 Lithograph 的 current-graph Cypher compatibility Profile。`USE`、`graph.byName()`、`graph.names()` 等依赖 DBMS/composite-database graph selection 的 surface 同样不进入该 Profile；Lithograph 的 version selection 使用第 4/10 节的 Branch/Commit context，而不是伪装成 Neo4j composite database。
+Neo4j DBMS 自身的多数据库管理、数据库 alias、用户/角色/权限、cluster/server、OIDC/ABAC、Java UDF 部署和系统数据库管理命令属于 Neo4j 产品管理面，不属于 Lithograph 的 current-graph Cypher compatibility Profile。`USE`、`graph.byName()`、`graph.names()` 等依赖 DBMS/composite-database graph selection 的 surface 同样不进入该 Profile；Lithograph 的 version selection 使用第 4/10 节的 Branch/Commit/Tag context，而不是伪装成 Neo4j composite database。
+
+Lithograph 的 `graphView` execution context（第 4.4、7.6 节）是 Adapter / Engine 层对**同一个 Versioned Property Graph 的 query-local 可见子图**进行约束的通用能力，不属于 Cypher 25 grammar 或 compatibility Profile。它不得把 Cypher 25 `USE` 重新解释成子图过滤，也不得引入 Lithograph-specific Cypher clause。
 
 ### 3.3 Compatibility Oracle
 
@@ -130,7 +134,7 @@ Lithograph v1 的 canonical graph storage 固定属于目标 connection 的 SQLi
 
 `.load` 只注册 Extension API，不修改数据库内容。`lithograph_init()` 在当前 database 内原子创建或迁移 `_lithograph_*` 内部结构，并创建表示空图的 Root Commit 与默认 `main` Branch。
 
-首次初始化生成一个 RFC 9562 UUID 作为 `databaseId`，保存在 `_lithograph_meta`，在该 database 的整个生命周期和 storage migration 中保持不变。`storageFormat` 首版固定为 `1`。
+首次初始化生成一个 RFC 9562 UUID 作为 `databaseId`，保存在 `_lithograph_meta`，在该 database 的整个生命周期和 storage migration 中保持不变。Storage format `1` 是首个 canonical graph-storage baseline；加入 Commit Data / Tag sidecar 后，首个公开 release 的 current storage format 固定为 `2`。最终 Extension 对 fresh database 直接创建 format `2`；已存在 format `1` database 只能通过第 14.3 节定义的显式 `1 -> 2` migration 升级，既有 Commit ID 不重算。
 
 重复执行 `lithograph_init()` 是幂等的。数据库格式高于当前 Extension 可理解版本时直接返回 `FORMAT_TOO_NEW`，不得自动降级或重写历史。
 
@@ -267,20 +271,32 @@ Native API 接收现有 `sqlite3*`、Cypher text、parameter JSON、option JSON 
 ```json
 {
   "branch": "main",
-  "at": "commit/<64-hex-id>",
   "author": "alice@example.com",
-  "message": "update graph"
+  "message": "update graph",
+  "graphView": {
+    "requireAllLabels": ["tenant_acme"],
+    "excludeAnyLabels": ["internal"]
+  }
 }
 ```
 
 规则：
 
 - `branch` 临时选择本 query 的 Branch；省略时使用当前 connection checkout 的 Branch；
-- `at` 选择只读历史 Snapshot，接受 `commit/<id>` 或 `branch/<name>`；使用 `at` 的 query 不允许修改；
+- `at` 选择只读 Snapshot，接受 `commit/<id>`、`branch/<name>` 或 `tag/<name>`；Branch / Tag 在 execution 开始时先解析并 pin 到一个 immutable Commit，使用 `at` 的 query 不允许修改；
 - `author` 和 `message` 是该 execution 内所有新 Commit 的 metadata 来源；省略时存 `null`。Version procedure 不定义第二套 author/message 来源；
-- `branch` 与 `at` 互斥。
+- `branch` 与 `at` 互斥；
+- `graphView` 是 query-local Graph View specification；省略或 `{}` 表示完整 Snapshot graph。它不持久化、不命名、不进入 Commit/Layer/Schema hash，也不改变 connection checkout；
+- `graphView.requireAllLabels` 是 Node 必须同时拥有的 Label 集合；省略或空数组表示没有正向 Label 限制；
+- `graphView.excludeAnyLabels` 是 Node 不能拥有的 Label 集合；命中任意一个即不可见；省略或空数组表示没有排除 Label；
+- `graphView` 必须是 object，当前只允许 `requireAllLabels` / `excludeAnyLabels` 两个成员；成员值必须是 string array。其它成员、错误 JSON type 或非 string item 返回 `INVALID_ARGUMENT`；显式 `null` 不等价于省略；
+- 两个 Label array 按精确 Label name 的 set 语义规范化，同一数组中的重复项去重；同一 Label 在规范化后同时出现在 `requireAllLabels` 与 `excludeAnyLabels` 时返回 `INVALID_ARGUMENT`；
+- Label 按 Lithograph Label dictionary 的精确名称语义比较，不做 case folding 或 Unicode normalization。解析 Graph View 本身不得创建 Label dictionary entry：当前 graph state 中尚不存在的 required Label 使既有 Node 均不可见，尚不存在的 excluded Label 当前没有过滤效果；如果后续合法 Cypher write 通过正常 Label mutation 创建该名称，后续 clause 按更新后的 graph state 重新计算 visibility；
+- Graph View v1 不定义独立 Relationship selector：Relationship 只有在其 source 和 target Node 都可见时才可见，因此 view 是由 Node visibility 诱导出的 Property Subgraph；
+- `graphView` 可以与 `branch` 或只读 `at` 组合；它们决定 base Snapshot，初始 visibility 按该 Snapshot 计算，read-write query 的后续 clause 再按第 7.6 节基于前序 staged writes 后的 graph state 重新计算；
+- `graphView` 只约束 graph-data query / mutation / Search 的可见数据。Schema、Constraint、Index definition 和 Version Procedure 不属于 Graph View；这些 command/procedure 与 `graphView` 同时出现时返回 `INVALID_ARGUMENT`，避免把子图错误解释成独立 Schema 或 Version repository。
 
-对 Version Procedure：`branch` query option 只为“对当前 Branch 操作”的 procedure 临时选择 target（`patch.apply`、`merge`、`rebase`、`squash`、`reset`、`revert`）；它不永久改变 connection checkout。`branch.create/delete/checkout/list` 自己显式指定或管理 Branch，和 query-level `branch` option 同时出现时返回 `INVALID_ARGUMENT`。任何 version mutation 与 `at` 同时出现都返回 `READ_ONLY_SNAPSHOT`。
+对 Version Procedure：`branch` query option 只为“对当前 Branch 操作”的 procedure 临时选择 target（`commit.create`、`patch.apply`、`merge`、`rebase`、`squash`、`reset`、`revert`）；它不永久改变 connection checkout。`branch.create/delete/checkout/list`、`tag.*` 与 `commit.data.*` 自己显式指定或管理 target，和 query-level `branch` option 同时出现时返回 `INVALID_ARGUMENT`。任何 version mutation 与 `at` 同时出现都返回 `READ_ONLY_SNAPSHOT`。
 
 Parameters JSON 与 result JSON 共用第 13.1 节 tagged-value encoding。普通 JSON primitive/list/map 直接映射到对应 Cypher value；需要保留 INTEGER64 边界、Temporal、Point、Vector 或 UUID 类型时必须使用 `$type` tagged form。
 
@@ -325,7 +341,7 @@ Label、Relationship Type 与 Property Key 使用 append-only integer dictionary
 
 Query runtime 使用完整 Cypher 25 value model，包括 `NULL`、Boolean、Integer、Float、String、List、Map、Node、Relationship、Path、Temporal、Duration、Point、Vector 与 UUID。
 
-持久化 Property 只接受 Cypher 25 允许的 property value types。Map、Node、Relationship、Path 等 constructed/structural runtime value 不作为 Property value 持久化。
+持久化 Property 只接受 Cypher 25 允许的 property value types。Map、Node、Relationship、Path 等 constructed/structural runtime value 不作为 Property value 持久化。Property legality 在 Cypher type/mutation boundary 验证；LCE1 codec 负责 storage-format bytes 的 canonical encode/decode，不作为 Cypher Property 语义验证器，因此 format 1 已冻结的 tagged List bytes 不能因上层 property-type 规则而改变。
 
 `SET n.key = null` 与对应 Relationship 操作表示删除该 Property，而不是持久化一个 `NULL` property slot。
 
@@ -334,20 +350,27 @@ Vector 按原始 coordinate type 与 dimension 保存，不用 JSON list 替代�
 ## 6. Engine Structure
 
 ```text
-Cypher text + parameters + version context
-                  |
-                  v
+Cypher text + parameters              execution options
+          |                                  |
+          v                                  v
 +---------------- Frontend ----------------+
 | Lexer / Parser -> AST -> Semantic Analyze |
 | Scope -> Type -> Schema validation        |
 +--------------------|----------------------+
-                     v
+                     |             +-------------------------+
+                     |             | Execution Context       |
+                     |             | - version context       |
+                     |             | - graphView             |
+                     |             +------------|------------+
+                     |                          |
+                     +-------------+------------+
+                                   v
               Logical Planner
-                     |
-                     v
+                                   |
+                                   v
               Physical Planner
-                     |
-                     v
+                                   |
+                                   v
 +---------------- Executor -----------------+
 | row pipeline / path operators / writes    |
 | subqueries / aggregation / eager barriers |
@@ -400,13 +423,67 @@ Executor 使用 row pipeline。没有 `ORDER BY`、global aggregation、`DISTINC
 
 ### 7.4 Snapshot Pinning
 
-每个 query 在执行开始时解析 Branch / Commit 并 pin 到一个 immutable Commit。Branch head 在 query 执行期间发生变化不会改变该 query 已看到的 Snapshot。
+普通 query 在执行开始时解析 Branch / Commit 并 pin 到一个 immutable Commit。Branch head 在 query 执行期间发生变化不会改变该 query 的 base Snapshot；同一 query 内前序 write clause 产生的 staged changes 仍按 Cypher clause-composition semantics 对后序 clause 可见。
+
+`CALL { ... } IN TRANSACTIONS` / `IN CONCURRENT TRANSACTIONS` 是例外：它们按第 9.5 节让每个 inner batch transaction 各自 pin 对应的 Branch head，而不是让整个 outer query 共用一个 immutable Commit。query-level `graphView` selector 在这些 batch 间保持不变，但 visibility 必须基于各 batch 自己的 pinned Snapshot 与该 batch 内已经完成的 staged clause writes 计算。
 
 ### 7.5 Cancellation 与 Connection State
 
 Executor 在 batch/operator boundary 与长路径/搜索循环中检查 SQLite interrupt state；host 调用 `sqlite3_interrupt()` 后 query 尽快停止并返回 `SQLITE_INTERRUPT`。Native event callback 返回非零是同一 cancellation 语义的另一入口。
 
 Active Branch、temporary query options、prepared-plan/cache handle、current error/cancellation state 全部属于单个 `sqlite3*` connection 或单个 query。禁止使用 process-global mutable query/branch/parser state。跨线程使用同一 `sqlite3*` 是否允许完全遵循 host SQLite threading mode；Lithograph 不为一个不允许并发使用的 connection 增加第二套线程安全保证。
+
+### 7.6 Graph View Execution Boundary
+
+Graph View 是 Lithograph Execution API 的 query-local visibility / mutation boundary。它解决调用方需要在同一个 versioned Property Graph 内把不同逻辑数据空间交给完整 Cypher 执行、又不能依赖 query rewrite 或 result post-filter 的问题。
+
+Graph View 的 **selector specification 在一次 execution 内固定，element membership 不固定为 query-start 的 ID 集合**。Visibility 是一个作用于当前 Cypher graph state 的规则：read-only query 的 graph state 就是 pinned Snapshot；read-write query 中，每个 clause 读取前一 clause 输出的 graph state，因此必须观察全部前序 clause 已完成的 writes，同时不能观察后序 clause 的 writes。
+
+普通 query 的执行关系是：
+
+```text
+normalize graphView selector
+          ↓
+Branch / Commit resolution
+          ↓
+pin immutable Snapshot
+          ↓
+current clause graph state
+  = base Snapshot
+    + completed prior-clause staged writes
+          ↓
+evaluate Graph View visibility
+          ↓
+visible Property Subgraph for this clause
+          ↓
+Executor / Search
+```
+
+Planner 持有规范化的 selector / execution context，不把 Graph View 预展开成固定 element-ID allowlist；Physical operator 在对应 clause 的实际 graph state 上执行 visibility check。Graph View v1 使用第 4.4 节的 Label selector：Node 在当前 clause graph state 中满足全部 `requireAllLabels` 且不命中任何 `excludeAnyLabels` 时可见；Relationship 当且仅当两个端点都可见时可见。Graph View v1 是 element-level visibility，不提供 Property masking：一个 element 可见时，它在当前 graph state 中可见的 Label / Relationship Type / Property 仍按正常 Cypher 语义可见。NodeId / RelationshipId、Label、Type、Property 与 Schema 本身不因 view 改写或复制。
+
+所有会观察 graph data 的 execution path 必须把该可见子图当作本次 Cypher 的输入图，而不是执行完成后再过滤结果。至少包括：
+
+- Node/Label/Relationship scan 与 index seek；
+- `ExpandAll` / `ExpandInto`、variable/quantified path、shortest/path selector；
+- `MATCH` / `OPTIONAL MATCH`、subquery、aggregation、`count()`、`DISTINCT` 与 cardinality；
+- element reference dereference 与基于 graph element 的 function/procedure；
+- full-text、vector、`SEARCH` 及其它返回 graph element 的 Search path。
+
+因此隐藏 Node 不参与 aggregation/cardinality，隐藏 Relationship 不能作为 path 的中间边，Search 的 `skip` / `limit` / top-k 不能先让隐藏结果占用名额后再做 post-filter。Index/Search 可以在物理层产生更宽的 candidate set，但在任何 Cypher-visible semantic step 前必须执行 Graph View visibility check。
+
+Graph View 不要求把整个子图预先 materialize。Planner / Storage 应利用现有 Label membership 与 seek/adjacency 结构按需检查 visibility；view 本身不建立第二套 canonical storage 或 per-view derived history。
+
+Graph-data mutation 在同一个 boundary 内执行：
+
+- 一个 mutating clause 开始时，既有 Node / Relationship 必须在该 clause 的 input graph state 中可见才能作为 mutation target；不可见既有 element 等价于本 clause 不存在，不能通过 element reference、`MERGE` 或其它 operator 绕过；
+- 一个 mutating clause 的全部 Cypher-defined effects 完成后（包括 `MERGE` 的 `ON CREATE` / `ON MATCH` effects），该 clause 新建且仍存在的 Node 必须满足当前 Graph View；新建 Relationship 的两个端点必须可见。Clause 内部尚未对后续 clause 暴露的临时执行步骤不单独形成 visibility boundary；
+- `SET` / `REMOVE` Label 不允许一个 clause 在完成后把其修改且仍存在的 Node 留在当前 Graph View 外；这种 write 返回 `GRAPH_VIEW_VIOLATION`，整个 top-level mutating query 按第 9 节回滚；因此在要求 Label `A` 的 view 中，`CREATE (n) SET n:A` 会在 `CREATE` clause 完成时失败，而 `CREATE (n:A)` 可以成功并被后续 clause 观察；
+- 删除可见 Node 时，如果保持 referential integrity 必须同时修改一个不可见 Relationship，则该 delete / detach delete 返回 `GRAPH_VIEW_VIOLATION`，不得跨 view 隐式删除；
+- graph-data mutation 不因 Graph View 改变 Commit 粒度、Branch compare-and-move 或 caller-owned transaction 语义。
+
+Graph View **不投影 Schema / Constraint / Index definition**。当前 Commit 的完整 versioned Schema 仍是该 execution 的唯一 Schema；Graph Type、property type、KEY / UNIQUE / existence 等 validation 按原 Cypher/Lithograph contract 对 mutation 的完整 candidate canonical graph state 执行，包括 Graph View 外的 element。`MERGE` 的 match 部分只看到 view 内 element；如果它因此尝试创建一个与 view 外 element 冲突的 UNIQUE / KEY value，最终返回正常的 `CONSTRAINT_ERROR` 并回滚，而不是把 constraint 解释成 view-local constraint。由这种 validation 产生的间接存在性信号不违反 Graph View contract，因为 Graph View 明确不是 authorization boundary。
+
+Graph View 是执行语义，不是认证或权限系统。持有原始 Lithograph execution surface 的调用方可以省略 `graphView` 访问完整 graph；上层产品若把它用于租户或内部数据隔离，必须控制调用方能提交的 options。Lithograph 只保证在**已经选择的** Graph View 内没有 query/operator/Search/write bypass。
 
 ## 8. Version-aware Storage Model
 
@@ -425,6 +502,8 @@ Mutable Branch refs
 ```
 
 每个 Commit 的 graph layer 表示相对 **first parent** 的标准化变化。Merge Commit 的 second parent 只记录第二条历史边；合并后的完整 delta 仍相对 first parent 保存，因此 Snapshot 重建只需沿 first-parent chain 应用 layer。
+
+Commit Data 与 Tag 不加入上述 canonical graph Snapshot source of truth。它们是独立的 mutable sidecar：Commit Data 只解释某个 Commit，Tag 只命名某个 Commit；修改它们不能改变既有 Commit、Layer、Schema hash 或 Snapshot resolution。
 
 ### 8.2 Internal Tables
 
@@ -455,6 +534,15 @@ _lithograph_commits
   committed_at INTEGER NOT NULL
 
 _lithograph_branches
+  name TEXT PRIMARY KEY
+  commit_id BLOB NOT NULL
+
+-- storage format 2 adds:
+_lithograph_commit_data
+  commit_id BLOB PRIMARY KEY
+  data_json TEXT NOT NULL
+
+_lithograph_tags
   name TEXT PRIMARY KEY
   commit_id BLOB NOT NULL
 
@@ -492,6 +580,23 @@ _lithograph_cp_properties
 
 `op` 是封闭枚举：add/remove 或 set/remove，取决于 delta table。一个 Layer 内同一 logical slot 在 canonicalization 后只保留一个最终 operation。
 
+Storage format 1 冻结以下 physical key 与 payload contract；后续若改变列语义、主键或 canonical access path，必须提升 storage format：
+
+- `_lithograph_sequences.kind`：`1 = NodeId`、`2 = RelationshipId`、`3 = LabelId`、`4 = RelationshipTypeId`、`5 = PropertyKeyId`、`6 = LayerId`；`next_id` 始终是下一个可分配的正 `INTEGER64`。
+- dictionary table 以 `id` 为主键并对 `name` 建唯一索引；名称按 SQLite `BINARY` bytes 比较，不做 case folding。
+- `_lithograph_commits.id`、`parent1`、`parent2`、`schema_hash` 与 `_lithograph_layers.hash` 都保存原始 32-byte BLAKE3 digest；公开 Commit ID 才转成 64 位 lowercase hex。
+- delta `op`：`1 = add/set`，`2 = remove`；`owner_kind`：`1 = Node`，`2 = Relationship`。
+- `_lithograph_node_delta` 主键 `(layer_id, node_id)`；`_lithograph_label_delta` 主键 `(layer_id, node_id, label_id)`；`_lithograph_rel_delta` 主键 `(layer_id, relationship_id)`；`_lithograph_property_delta` 主键 `(layer_id, owner_kind, owner_id, key_id)`。
+- `_lithograph_cp_nodes` 主键 `(commit_id, node_id)`；`_lithograph_cp_labels` 主键 `(commit_id, node_id, label_id)`；`_lithograph_cp_relationships` 主键 `(commit_id, relationship_id)`；`_lithograph_cp_properties` 主键 `(commit_id, owner_kind, owner_id, key_id)`。
+- `Relationship` delta 的 remove row 仍保存创建时的 `source_id / type_id / target_id`，使 overlay 可以建立 forward/backward tombstone 而不扫描全部 Relationship。
+- Property `type_tag`：`1 Boolean`、`2 Integer`、`3 Float`、`4 String`、`5 List`、`6 Date`、`7 LocalTime`、`8 Time`、`9 LocalDateTime`、`10 ZonedDateTime`、`11 Duration`、`12 Point`、`13 Vector`、`14 UUID`。remove row 的 `type_tag` 与所有 payload column 均为 `NULL`。
+- Boolean / Integer / Date / LocalTime 使用 `int_value`；String 使用 `text_value`；Float 的 numeric value 使用 `real_value`，同时在 `aux_value` 保存 canonical binary64 bits，以保证 signed zero 与 canonical NaN 可重算；Time、LocalDateTime、ZonedDateTime 使用 `int_value` 保存主时间量并用 `aux_value` 保存其余 fixed-width/zone payload；List、Duration、Point、Vector、UUID 使用 `blob_value` 保存 LCE1 typed value bytes。
+- checkpoint property row 使用与 set property delta 完全相同的 tagged payload contract，不保存 remove row。
+
+Storage format `2` 保留 format `1` 的全部 canonical graph table / key / LCE1 contract，并只增加 `_lithograph_commit_data` 与 `_lithograph_tags` 两个 mutable sidecar table。`data_json` 必须是合法 JSON value 的 UTF-8 JSON 表达；普通说明文本使用 JSON string。Commit Data 不作为 Cypher Property，因此不受 PropertyValue 持久化类型限制，Engine 只验证 JSON 合法性而不解释 key 或业务 schema。没有 `_lithograph_commit_data` row 表示该 Commit 没有 Data；显式 JSON `null` 是一个已存在的 Data value，与无 row 不同。
+
+Storage format 1 的 canonical explicit index inventory 除 table primary key 外固定包含：dictionary name unique indexes、Layer hash unique index，以及第 8.3 节列出的 relationship outgoing/incoming/global-identity、label reverse lookup。不得依赖 SQLite 自动生成且名称/布局不受 Lithograph 控制的 secondary index 作为 canonical access path。
+
 `Property` 使用 tagged union storage：`type_tag` 决定 payload column 与 `aux_value` 的解释。复杂 property type 使用 canonical binary representation，不能因 JSON serialization 损失类型。
 
 Lithograph Canonical Encoding v1（`LCE1`）固定所有进入 Layer/Schema/Commit hash 的字节表示：
@@ -512,6 +617,12 @@ Lithograph Canonical Encoding v1（`LCE1`）固定所有进入 Layer/Schema/Comm
 - Schema canonical blob 按 object canonical identifier 排序；object 内 field/property/index/constraint 按 canonical name 排序；
 - 所有 hash record 使用 domain tag + length-delimited fields，禁止依赖字符串拼接边界。
 
+`LCE1` record framing 进一步冻结为：`"LCE1" + uleb128(domain_len) + domain_bytes + uleb128(field_count) + repeated(uleb128(field_len) + field_bytes)`。Domain 固定使用 ASCII bytes。format 1 使用 `VALUE`、`NODE`、`LABEL`、`REL`、`PROPERTY`、`LAYER`、`SCHEMA`、`COMMIT` domain；Layer logical slot 排序固定为 Node、Label、Relationship、Property 四个 family，再按各 family 主键中的 signed integer 数值升序。operation 的 numeric tag 使用上文 `op` 值。
+
+`VALUE` 的第一个 field 是单字节 `type_tag`，后续 field 按对应 value contract 编码。List 使用 `uleb128(element_count) + repeated(uleb128(value_record_len) + VALUE_record)`；Point 保存 signed 64-bit CRS identifier、ULEB128 coordinate count 与 canonical binary64 coordinates；Vector 保存单字节 coordinate type（`1 i8`、`2 i16`、`3 i32`、`4 i64`、`5 f32`、`6 f64`）、ULEB128 dimension 与 packed little-endian coordinates，floating vector NaN 同样 canonicalize 为 quiet NaN；UUID field 固定为 RFC 9562 16-byte network-order value。
+
+`COMMIT` fields 固定顺序为 `format_version, parent1, parent2, layer_hash, schema_hash, author, message, committed_at`。optional field 使用首字节 `0` 表示 absent、`1 + payload` 表示 present。Root Commit 使用 `parent1 = null`、`parent2 = null`、`author = null`、`message = null`、`committed_at = 0`；因此 empty Layer、empty Schema 与 Root Commit 都是 deterministic content-addressed object。普通 Commit 的 `committed_at` 仍遵循第 8.4 节 connection clock contract。
+
 `LCE1` 属于 storage-format contract。修改上述编码必须提升 storage format，并通过 migration 保持旧 Commit ID 可验证。
 
 ### 8.3 Physical Access Indexes
@@ -523,6 +634,7 @@ relationship delta:
   (layer_id, source_id, type_id, target_id, relationship_id)
   (layer_id, target_id, type_id, source_id, relationship_id)
   (layer_id, relationship_id)
+  (relationship_id, layer_id)
 
 checkpoint relationships:
   (commit_id, source_id, type_id, target_id, relationship_id)
@@ -547,6 +659,8 @@ Layer、Schema object 与 Commit 使用 256-bit BLAKE3 content hash。
 - Schema hash 基于 canonical schema representation；
 - Commit hash 基于 `format_version + parent IDs + layer hash + schema hash + metadata`；
 - Commit ID 对外为 64 个 lowercase hex characters。
+
+Commit Data 与 Tag name/ref 不进入 Layer / Schema / Commit hash。更新或删除 Commit Data、创建/移动/删除 Tag 都不能改变既有 Commit ID；这些 sidecar mutation 由 SQLite transaction 提供原子 durability。
 
 `format_version` 是 hash input 的一部分。后续 storage migration 不允许静默重算既有 Commit ID。
 
@@ -582,7 +696,8 @@ Statistics、range/text index materialization、FTS index、vector HNSW graph �
 
 ```text
 pin active branch head
-    -> execute against pinned snapshot
+    -> execute clauses against pinned snapshot + staged writes
+       under the fixed graphView selector
     -> validate constraints
     -> canonicalize delta
     -> write immutable layer/commit
@@ -616,24 +731,33 @@ Native API 在 caller 没有 active transaction 时实现 `CALL { ... } IN TRANS
 
 `IN CONCURRENT TRANSACTIONS` 可以并行执行不需要 SQLite write lock 的 parse/parameter/materialization preparation，但同一 active Branch 的真正 batch transaction 从“pin latest Branch head”开始进入 Lithograph branch commit coordinator，按获得 coordinator 的顺序执行并最终由 SQLite 串行 durable commit。内部 concurrent batches 因此不会互相触发 `BRANCH_HEAD_MOVED`；每个 batch 都从进入自身 transaction 时的最新 Branch head 开始。外部 writer 在某 batch pin head 后移动同一 Branch 时，该 batch 仍按 9.3 返回 `BRANCH_HEAD_MOVED`。`DISJOINT BY` 等 Cypher 25 semantics 由 executor 保证。
 
+存在 `options.graphView` 时，outer execution 只解析/规范化一次 selector；每个 inner batch transaction 在 pin 自己的 base Commit 后，用同一个 selector 对该 batch 的 graph state 重新计算 visibility。顺序 batch 因而可以按 Cypher 语义观察前一成功 batch 已 durable 的 graph changes；concurrent batch 的 visibility 以其实际 pinned base 与 branch-commit coordinator 顺序为准，不允许复用 outer query 开始时预计算的 element membership。
+
 ## 10. Versioned Graph Model
 
-### 10.1 Root、Commit 与 Branch
+### 10.1 Root、Commit、Branch、Tag 与 Commit Data
 
 `lithograph_init()` 创建 Root Commit，`main` 指向 Root。
 
-Branch 是唯一可变的版本引用：
+Commit 是 immutable database state：其 parents、graph Layer、Schema reference、author/message/committedAt 与 Commit ID 创建后不允许原地修改。普通 graph / Schema / Index mutating query 按第 9 节自动创建 Commit；此外 Version Procedure 可以显式创建一个 single-parent empty-delta Commit，用于调用方主动建立新的状态节点，而不引入 Git working tree 或 staging model。
+
+Branch 与 Tag 都是可变的命名引用，但语义不同：
 
 ```text
 main -> C3
 feature -> F2
+tag/release-baseline -> C2
 ```
 
-创建 Branch 只新增一个 ref，初始指向指定 Branch/Commit Snapshot，不复制图数据。
+创建 Branch 只新增一个 ref，初始指向指定 version descriptor 解析出的 Commit Snapshot，不复制图数据。
 
 每个 connection 有一个 active Branch，默认 `main`。`checkout` 只改变 connection-local execution context，不改 graph data。
 
 Branch name 使用 case-sensitive UTF-8 bytes，长度为 1..255 bytes；禁止 NUL、ASCII control characters、开头或结尾 `/`、空 path segment，以及 segment `.` / `..`。`/` 可以用于层级命名。`main` 是 init 创建的保留 Branch，不能删除或重命名。删除其它 Branch 不删除 Commit；如果另一 connection 仍 checkout 已删除 Branch，它的下一次依赖 active Branch 的 query 返回 `BRANCH_NOT_FOUND`，直到 checkout 一个存在的 Branch。
+
+Tag 使用与 Branch name 相同的字节与 path validation，但位于独立 namespace，因此 `branch/foo` 与 `tag/foo` 可以同时存在。Tag 不参与 connection checkout，也不会因 graph write 自动移动；只有显式 `tag.move` 才能改变其 target。Tag create / move / delete 都不创建 Commit。Tag 是 GC reachability root：只要任意 Tag 仍指向某 Commit，该 Commit 及其 canonical ancestors 不能因 Branch 不可达而被 GC。
+
+每个 Commit 最多有一份可选 **Commit Data**。它是调用方提供的 mutable JSON annotation，可以是 object、array、string、number、boolean 或 `null`；Lithograph 不预定义 `title`、`time`、`stage` 等业务字段。Commit Data 可以随时通过显式 sidecar mutation set / replace / clear，且这些操作不创建 Commit、不移动 Branch/Tag，也不改变目标 Snapshot。需要 immutable/versioned 的业务事实必须放入正常 graph / Schema state。
 
 ### 10.2 Version Descriptor
 
@@ -642,9 +766,10 @@ Branch name 使用 case-sensitive UTF-8 bytes，长度为 1..255 bytes；禁止 
 ```text
 branch/<name>
 commit/<64-hex-id>
+tag/<name>
 ```
 
-历史 `commit/<id>` Snapshot 永远只读。要从历史状态继续写入，先从该 Commit 创建 Branch。
+`branch/<name>` 与 `tag/<name>` 在每次 operation 开始时解析为当时指向的 Commit；operation 后续使用 pinned Commit，不受并发 ref move 影响。历史 `commit/<id>` Snapshot 永远只读。要从任意历史 Commit / Tag 状态继续写入，先从解析出的 Commit 创建 Branch。
 
 ### 10.3 Version Procedures
 
@@ -655,7 +780,15 @@ CALL lithograph.branch.create(name [, from])
 CALL lithograph.branch.checkout(name)
 CALL lithograph.branch.list()
 CALL lithograph.branch.delete(name)
-CALL lithograph.log([version [, limit]])
+CALL lithograph.commit.get(version)
+CALL lithograph.commit.create([data])
+CALL lithograph.commit.data.set(version, data)
+CALL lithograph.commit.data.clear(version)
+CALL lithograph.tag.create(name, target)
+CALL lithograph.tag.list()
+CALL lithograph.tag.move(name, target)
+CALL lithograph.tag.delete(name)
+CALL lithograph.log([version [, limit [, cursor]]])
 CALL lithograph.diff(before, after)
 CALL lithograph.patch.apply(patch)
 CALL lithograph.merge(source [, options])
@@ -673,10 +806,18 @@ Procedure result 是普通 Cypher rows，因此可以与 `YIELD` / `RETURN` 组�
 - `branch.create(name, from)`：`from` 省略时使用 active Branch head；否则接受 version descriptor；
 - `branch.checkout(name)`：只接受 Branch name；调用时 SQLite connection 必须处于 autocommit mode，否则返回 `TRANSACTION_BOUNDARY_REQUIRED`，避免 connection-local checkout 与 caller rollback 脱节；
 - `branch.delete(name)`：不能删除 `main`，也不能删除当前 connection 的 active Branch；
-- `log(version, limit)`：`version` 省略时使用 active Branch；
+- `commit.get(version)`：接受任意 version descriptor，返回解析后的 immutable Commit metadata 与当前 Commit Data；读取本身不修改任何 ref/data；
+- `commit.create(data)`：在 query-level `branch` 或 active Branch 上创建一个 parent=当前 head、empty Layer、相同 Schema 的新 Commit；`author/message` 使用 execution-level query options。可选 `data` 与新 Commit Data 在同一 SQLite transaction 内原子写入；不使用 working tree / staging；
+- `commit.data.set(version, data)`：解析 target Commit 后 set / replace 其 Commit Data；显式 JSON `null` 是合法 value；不创建 Commit；
+- `commit.data.clear(version)`：删除目标 Commit 的 Data sidecar；目标 Commit 本身保持不变；
+- `tag.create(name, target)`：创建新 Tag 并指向 target version descriptor 当前解析出的 Commit；同名 Tag 已存在时返回 `INVALID_ARGUMENT`；
+- `tag.move(name, target)`：显式移动已存在 Tag；不存在时返回 `TAG_NOT_FOUND`；
+- `tag.delete(name)`：删除 Tag ref，不删除其目标 Commit；
+- `tag.list()`：枚举全部 Tag，按 name binary ascending 返回；
+- `log(version, limit, cursor)`：`version` 省略时使用 active Branch；第一次调用把 version 解析并 pin 成 immutable start Commit。`limit` 省略时默认 `100`，必须为正整数；`cursor` 是 opaque continuation，包含 start Commit 与 DAG traversal frontier，只能用于同一 pinned traversal，Branch / Tag 后续移动不改变已开始的分页；
 - `diff(before, after)`：两个参数都必须是 version descriptor；
 - `patch.apply(patch)`：Commit author/message 使用 execution-level query options；
-- `merge(source, options)`：`source` 接受 Branch/Commit descriptor；procedure options 只支持 `resolutions`；Commit author/message 使用 execution-level query options；
+- `merge(source, options)`：`source` 接受任意 version descriptor；procedure options 只支持 `resolutions`；Commit author/message 使用 execution-level query options；
 - `rebase(onto, options)`：把 active Branch 在 merge-base 之后的 first-parent commit sequence 逐个 replay 到 `onto`；procedure options 只支持 `resolutions`；replayed Commit 默认保留各自旧 author/message，不使用 execution-level author/message 覆盖历史 intent；
 - `squash(since)`：`since` 必须是 active Branch head 的 ancestor descriptor，把 `since..HEAD` 的最终结构化变化压成一个新 Commit；新 Commit author/message 使用 execution-level query options；
 - `reset(target)`：把 active Branch ref 移到 target descriptor 当前解析出的 Commit；
@@ -703,7 +844,15 @@ Procedure result 是普通 Cypher rows，因此可以与 `YIELD` / `RETURN` 组�
 | `branch.checkout` | `name, commit` 一行 |
 | `branch.list` | 每个 Branch 一行 `name, commit, active`，按 name binary ascending |
 | `branch.delete` | `name, previousCommit` 一行 |
-| `log` | 每个 Commit 一行 `commit, parents, author, message, committedAt` |
+| `commit.get` | `commit, parents, author, message, committedAt, hasData, data` 一行 |
+| `commit.create` | `commit` 一行 |
+| `commit.data.set` | `commit, data` 一行 |
+| `commit.data.clear` | `commit` 一行 |
+| `tag.create` | `name, commit` 一行 |
+| `tag.list` | 每个 Tag 一行 `name, commit` |
+| `tag.move` | `name, previousCommit, commit` 一行 |
+| `tag.delete` | `name, previousCommit` 一行 |
+| `log` | 每个 Commit 一行 `commit, parents, author, message, committedAt, cursor`；`cursor` 可从该 row 之后继续，遍历结束时为 `null` |
 | `diff` | 一行 `patch` map |
 | `patch.apply` | 一行 `commit` |
 | `merge` | 一行 `status, commit, conflicts`；冲突时 `commit = null` |
@@ -713,7 +862,7 @@ Procedure result 是普通 Cypher rows，因此可以与 `YIELD` / `RETURN` 组�
 | `revert` | 一行 `commit` |
 | `gc` | 一行 deleted Commit/Layer/cache counters |
 
-`log(version, limit)` 默认遍历该 version 可达的 DAG，按 reverse-topological order 返回；同一 topology level 先按 `committed_at` descending，再按 Commit ID ascending，保证结果确定。`limit` 必须为正整数；省略表示全部可达 Commit。
+`log` 遍历 pinned start Commit 可达的 DAG，按 reverse-topological order 返回；同一 topology level 先按 `committed_at` descending，再按 Commit ID ascending，保证结果确定。Continuation cursor 只编码 traversal state，不是新的 version identity，也不能被调用方解析或修改。`log` 默认不展开 Commit Data；需要某个状态的业务 annotation 时使用 `commit.get`，避免大型 history 把任意 JSON 一次性塞入结果。
 
 ### 10.4 Diff 与 Patch
 
@@ -749,9 +898,11 @@ Patch 是一个 map：
 
 每个 operation 使用稳定 `elementId`、label/type/property name 和 before/after value 表示。`DETACH DELETE` 产生显式 Relationship deletions 与 Node deletion，因此 patch 可独立验证和重放。
 
-`lithograph.diff(A, B)` 对任意 Branch / Commit 产生从 A 变为 B 的 canonical ordered patch。若 A 是 B 的 ancestor，可以直接 compose Layers；否则使用 Snapshot / merge-base 优化，但输出语义相同。
+`lithograph.diff(A, B)` 对任意 version descriptor 产生从 A 变为 B 的 canonical ordered patch。若 A 是 B 的 ancestor，可以直接 compose Layers；否则使用 Snapshot / merge-base 优化，但输出语义相同。
 
 `lithograph.patch.apply` 在 active Branch 上验证 patch 的 `before` condition，全部成立后以一个新 Commit 原子应用；任一 condition 不成立则整体失败。
+
+Diff / Patch 只描述 canonical graph / Schema / Index Snapshot change。Commit Data、Tag、Branch ref 不进入 patch。显式 empty-delta Commit 与其 parent 的 `diff` 可以合法返回空 `operations`；这不表示两个 Commit identity 相同。
 
 ### 10.5 Three-way Merge
 
@@ -798,6 +949,8 @@ Conflict 的最小 logical slot：
 
 再次调用 `lithograph.merge` 时可提供 per-conflict resolution：`ours`、`theirs` 或显式 replacement value。全部 conflict 解决且 constraints 通过后才创建 two-parent Merge Commit。
 
+Merge 不解释或合并 Commit Data，也不移动 Tag。Diverged merge 新建的 Merge Commit 默认没有 Commit Data；调用方需要时在 merge 成功后显式 set。Fast-forward 只移动目标 Branch 到已有 source Commit，因此该 Commit 原有 Data 保持可见。
+
 Conflict ID 是对 `merge-base identity + ours commit + theirs commit + slot + base/ours/theirs canonical values` 的 BLAKE3 hash；同一 merge 输入重复执行得到相同 conflict ID。Branch head 在首次 conflict 计算后发生变化时，旧 resolution 不允许套用，返回 `BRANCH_HEAD_MOVED`。
 
 ### 10.6 Rebase
@@ -815,6 +968,8 @@ Conflict ID 是对 `merge-base identity + ours commit + theirs commit + slot + b
 
 Rebase conflict 使用与 merge 相同的 logical slot 和 `base/ours/theirs` shape，并额外包含 `sourceCommit`。`options.resolutions` 使用相同 conflictId resolution format。没有需要 replay 的 Commit 时返回 `status = up_to_date`；成功重写时 `status = rebased`，`rewritten` 按旧到新顺序返回 `{from,to}` pairs。
 
+Rebase 不自动把旧 Commit Data 复制到 rewritten Commit，也不移动任何 Tag。旧 Commit Data 继续绑定旧 Commit；调用方可以根据 `rewritten` mapping 自行决定是否复制/重建 annotation。Lithograph 不猜测任意业务 JSON 在新 base 上是否仍然成立。
+
 ### 10.7 Squash
 
 `squash(since)` 要求 `since` 是 active Branch head 的 ancestor。若 `since == HEAD`，返回 `INVALID_ARGUMENT`，因为没有 Commit 可 squash。
@@ -823,18 +978,22 @@ Squash 计算 `diff(since, HEAD)`，创建一个 parent=`since` 的新 single-pa
 
 Squash 不把原 Commit author/message 列表嵌入新 Commit。新 Commit metadata 使用 execution-level query options 的 `author/message`；省略时为 `null`。Squash 后 graph/schema/index Snapshot 必须与原 HEAD 完全相同。
 
+Squash 不聚合被压缩 Commit 的 Commit Data，也不移动 Tag。新 Commit 默认没有 Data；旧 annotation 仍绑定旧 Commit，直到这些 Commit 后续真正被 GC。
+
 ### 10.8 Reset、Revert 与 History
 
 - `reset(target)` 原子移动 active Branch ref 到已有 Commit，不删除 Commit；
 - `revert(commit)` 计算该 Commit 相对 parent 的 inverse patch，并在 active Branch 创建一个新 Commit；普通 Commit 固定使用 parent1；Merge Commit 必须通过 options 指定 `mainline: 1|2`，否则返回 `INVALID_ARGUMENT`；Root Commit 不能 revert；
-- `log` 沿 Commit DAG 返回 id、parents、author、message、timestamp；
-- 使用 `options.at = commit/<id>` 可 time-travel 查询任意历史 Snapshot。
+- `log` 沿 pinned Commit DAG 分页返回 id、parents、author、message、timestamp 与 opaque continuation；
+- 使用 `options.at = commit/<id>|branch/<name>|tag/<name>` 可 time-travel / named-snapshot 查询，Branch / Tag 都在 query 开始时解析到 immutable Commit。
 
-Canonical history 不自动 GC。`lithograph.gc()` 只删除从任何 Branch 都不可达的 Commit / Layer；derived checkpoint/index/cache 可以自动回收，因为可重建。
+Reset / Revert 不修改既有 Commit Data 或 Tag；Revert 创建的新 Commit 默认没有 Data。
 
-GC 对 canonical objects 按 reachability 删除：Commit 不可达后，其 Layer 只有在没有其它 reachable Commit 引用时才删除；Schema object 同理。Dictionary identity/name 是 database-global append-only metadata，即使当前没有 reachable Snapshot 使用也不回收，避免 ID 重用和历史/patch 解释变化。
+Canonical history 不自动 GC。`lithograph.gc()` 只删除从任何 Branch **或 Tag** 都不可达的 Commit / Layer；derived checkpoint/index/cache 可以自动回收，因为可重建。
 
-Lithograph 的 Git-like contract 是**单个 SQLite database 内的本地版本控制**。Commit/Branch/Diff/Merge/Rebase/Squash 等全部在同一个 `databaseId` 内工作。跨 SQLite database 或跨网络的 clone/fetch/push/pull 属于复制/传输层，不是 Lithograph Extension v1 的 Version Procedure contract；SQLite backup/file replication 可以复制整个 repository，但两个独立 `databaseId` 不通过 Version API 隐式合并 identity space。
+GC 对 canonical objects 按 reachability 删除：Commit 不可达后，其 Commit Data sidecar 一起删除；其 Layer 只有在没有其它 reachable Commit 引用时才删除；Schema object 同理。Tag 本身是 root，不由 GC 自动删除。Dictionary identity/name 是 database-global append-only metadata，即使当前没有 reachable Snapshot 使用也不回收，避免 ID 重用和历史/patch 解释变化。
+
+Lithograph 的 versioned-state contract 是**单个 SQLite database 内的本地状态演进机制**；Git / TerminusDB 只提供 Commit DAG、Branch、Diff/Merge 等机制参考，不规定调用方把 Commit 解释成软件版本、时间点、场景还是其它业务状态。Commit/Branch/Tag/Diff/Merge/Rebase/Squash 等全部在同一个 `databaseId` 内工作。跨 SQLite database 或跨网络的 clone/fetch/push/pull 属于复制/传输层，不是 Lithograph Extension v1 的 Version Procedure contract；SQLite backup/file replication 可以复制整个 repository，但两个独立 `databaseId` 不通过 Version API 隐式合并 identity space。
 
 ## 11. Schema、Constraint 与 Index Model
 
@@ -968,8 +1127,10 @@ SCHEMA_ERROR
 CONSTRAINT_ERROR
 NOT_INITIALIZED
 INVALID_ARGUMENT
+GRAPH_VIEW_VIOLATION
 VERSION_NOT_FOUND
 BRANCH_NOT_FOUND
+TAG_NOT_FOUND
 BRANCH_HEAD_MOVED
 MERGE_CONFLICT
 TRANSACTION_BOUNDARY_REQUIRED
@@ -1007,6 +1168,8 @@ Native API 返回 SQLite primary result code + 结构化 `error_json`；SQL Brid
 
 - 当前 storage format 的 canonical internal-schema inventory 完整且无额外 reserved object、大小写变体 collision 或未声明的 internal-table child trigger/index；
 - Branch ref 指向存在 Commit；
+- Tag ref 指向存在 Commit；
+- Commit Data row 指向存在 Commit 且 `data_json` 是合法 JSON；
 - Commit parents、Layer、Schema object 均存在；
 - Commit / Layer / Schema hash 可重算且匹配；
 - Relationship endpoint 在对应 Snapshot 存在；
@@ -1018,6 +1181,8 @@ Native API 返回 SQLite primary result code + 结构化 `error_json`；SQL Brid
 
 Canonical write 与 Branch move 共用 SQLite transaction，因此 crash 后只允许出现 commit 前状态或 commit 后状态，不存在 Branch 指向半写 Layer 的合法状态。SQLite recovery 完成后 Lithograph 再执行自身 metadata/integrity checks。
 
+Commit Data set/clear 与 Tag create/move/delete 同样必须是单 SQLite transaction 的原子 sidecar/ref mutation；crash/reopen 后只允许看到操作前或操作后状态，不允许出现半写 JSON、Tag 指向不存在 Commit 或 ref/data 与返回成功状态不一致。
+
 ### 14.3 Storage Migration
 
 Storage format version 记录在 `_lithograph_meta`。升级迁移必须：
@@ -1027,6 +1192,8 @@ Storage format version 记录在 `_lithograph_meta`。升级迁移必须：
 - 迁移失败整体 rollback；
 - 新 Engine 继续读取历史 `format_version`；
 - 旧 Engine 遇到更高 format version 直接拒绝写入和读取需要新格式语义的 graph。
+
+首个正式 migration path 是 `1 -> 2`：只增加 Commit Data / Tag sidecar storage 与对应 integrity / GC semantics，不改写任何既有 Commit、Layer、Schema object 或 hash input。Migration 在一个 SQLite transaction 内创建新 canonical internal objects、把 `storageFormat` 提升到 `2`，失败时整体 rollback。Format `1` database 不存在 Commit Data / Tag，因此迁移不需要为历史 Commit 合成 annotation 或 ref；升级后它们从空集合开始。
 
 ## 15. Deployment 与 Runtime Boundary
 
@@ -1064,6 +1231,8 @@ Windows x86_64, arm64
 
 Lithograph 是 embedded extension，没有独立 account / role / authentication layer。读取和写入数据库文件、`LOAD CSV` 文件、HTTP(S) 与加载 Extension 的权限都继承宿主进程和 SQLite connection。
 
+`graphView` 不是 authorization boundary：它只约束一次 execution 的可见 Property Subgraph。能够直接调用 Lithograph 且自行选择 options 的主体可以省略该 option 访问完整 graph；需要强制隔离的上层必须控制 execution surface 与 option construction。
+
 执行 Cypher、初始化、migration、version mutation 和 integrity-maintenance 的 SQL entrypoints 注册为 direct-only surface，不能从持久化 trigger/view/schema expression 隐式触发。纯信息函数只有在确认无副作用后才可注册为 innocuous。
 
 `_lithograph_*` 是内部表。直接 SQL 修改这些表不属于公开 API；由于数据库文件所有者最终拥有 SQLite 全权限，Lithograph 不伪装成能阻止文件所有者篡改，而通过 hash、referential integrity 和 `lithograph_integrity_check()` 检测损坏。
@@ -1080,6 +1249,7 @@ Lithograph 是 embedded extension，没有独立 account / role / authentication
 - historical query 从 checkpoint + bounded overlay 解析，不要求从 Root 重放全部 history；
 - derived index / checkpoint 可 rebuild，不阻塞 canonical history correctness；
 - planner statistics 可以增量刷新，不能要求每个 query 扫描全图计算 cardinality；
+- Graph View 不能通过预先 materialize 整个子图实现；scan/seek/expand/search 必须在现有 Snapshot access path 上按需执行 visibility check，且不得因 view 导致本可 seek 的查询退化为无条件全图扫描；
 - 10M Node / 100M Relationship benchmark tier 必须作为 release hardening 的真实规模验证，覆盖 traversal、indexed lookup、write、history、diff 与 search；通过条件是正确完成、无 OOM、无意外全图扫描，并建立可持续 regression baseline。
 
 ## 18. 关键架构决定与取舍
@@ -1139,6 +1309,13 @@ Lithograph 是 embedded extension，没有独立 account / role / authentication
 - 依据：SQLite SQL statement 内无法可靠取得 Cypher transaction-owning clause 所需的独立 commit boundary。
 - 备选：fork SQLite 或通过隐式辅助连接绕过 host transaction。
 - 取舍：极少数 transaction-boundary query 必须从 Native API 调用，但 Cypher Engine 本身仍按 Profile 完整实现。
+
+### D9 Graph View 是 Execution Context，不扩展 Cypher
+
+- 决定：通过现有 SQL Bridge / Native ABI 的 `options.graphView` 选择 query-local Property Subgraph；selector 在一次 execution 内固定，visibility 随 Cypher 当前 clause graph state 计算；完整 versioned Schema / Constraint 不被 view 投影。Cypher text、AST 与 `CY25-2026.08` grammar 不增加 Lithograph-specific syntax。
+- 依据：调用方需要让完整 MATCH/path/aggregation/Search/write 在同一个逻辑子图内执行；query rewrite 或结果后过滤无法保证 `count()`、path、top-k 和 mutation correctness。Cypher 25 的 `USE` 面向 graph reference / composite-database selection，不等价于同一 Property Graph 内的子图过滤。
+- 备选：重新解释 `USE`、给 Cypher 增加自定义 clause、由调用方给每条 query 注入 `WHERE`、或为每个逻辑范围复制独立 database。
+- 取舍：Planner/Executor/Storage/Search 都必须继承同一个 visibility contract，并在 read-write clause 与 transaction batch 边界重新依据实际 graph state 判断 membership；但不改变 storage format、Phase 03 frontend、Cypher compatibility Profile，也不建立持久化 named-view registry 或 per-view Schema。
 
 ## 19. 参考基线
 

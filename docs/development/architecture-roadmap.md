@@ -36,7 +36,7 @@ Phase 07 Schema / Constraint / Index
 Phase 08 Search / LOAD CSV
         |
         v
-Phase 09 Version Control Operations
+Phase 09 Versioned State Operations
         |
         v
 Phase 10 Compatibility / Scale / Release Closure
@@ -69,6 +69,7 @@ Phase 10 Compatibility / Scale / Release Closure
 | Snapshot Resolver / checkpoint | 02 | 10 |
 | Cypher lexer/parser/AST | 03 | 06 |
 | Scope/type/value semantics | 03 | 06 |
+| Graph View execution boundary | 04 | 10 |
 | Logical / physical planner | 04 | 10 |
 | Row/path executor | 04 | 06 |
 | Mutating operators | 05 | 06 |
@@ -83,6 +84,8 @@ Phase 10 Compatibility / Scale / Release Closure
 | Three-way Merge / conflict | 09 | 09 |
 | Rebase / Squash | 09 | 09 |
 | Reset / Revert / History / GC | 09 | 09 |
+| Commit Data / Tag sidecar + storage format 1→2 migration | 09 | 09 |
+| Explicit empty-delta Commit / cursor-based DAG history | 09 | 09 |
 | Compatibility closure | 10 | 10 |
 | Scale / crash / migration / cross-platform release | 10 | 10 |
 
@@ -151,9 +154,10 @@ branch A/B
 - `CY25-2026.08` matrix：Phase 03 开始持续更新；
 - parser error location / stable error category：Phase 03 开始；
 - no full-result materialization：Phase 04 开始；
+- Graph View visibility：Phase 04 建立 read boundary，Phase 05 建立 write boundary，Phase 06–08 覆盖新增 operator/index/search path，Phase 10 做跨 surface closure；
 - transaction rollback：Phase 05 开始；
 - historical correctness：Phase 02 后所有 storage/index Feature 都验证；
-- storage migration：Phase 01 建立 versioning，Phase 10 完成 release-grade fixtures；
+- storage migration：Phase 01 建立 versioning；Phase 09 实现 Commit Data / Tag 所需的 format `1 -> 2` 显式迁移且保持既有 Commit ID；Phase 10 完成 release-grade fixtures；
 - fuzz / crash / scale：对应模块成熟后逐步加入，Phase 10 做 closure。
 
 ## 6. 禁止的返工路径

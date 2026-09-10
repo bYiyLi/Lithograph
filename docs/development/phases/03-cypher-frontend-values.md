@@ -1,6 +1,6 @@
 # Phase 03：Cypher Frontend and Value Semantics
 
-**状态：`planned`**
+**状态：`done`**
 
 ## 1. 目标
 
@@ -70,20 +70,42 @@ Parser implementation 可以依法参考 GraphQLite/openCypher grammar，但输�
 
 ## 5. Acceptance
 
-- [ ] compatibility matrix lexical/parser families 有完整 inventory；
-- [ ] openCypher parser fixtures 与 Cypher 25 grammar fixtures 运行；
-- [ ] invalid syntax 返回 stable line/column；
-- [ ] scope isolation/correlation negative fixtures 通过；
-- [ ] value/type/null comparison fixture 通过；
-- [ ] int64/vector/temporal/UUID params/result round-trip；
-- [ ] parser/semantic layer 不访问 SQLite graph rows；
-- [ ] AST 不携带 GraphQLite/Cypher-to-SQL implementation-specific node。
-- [ ] `lithograph_validate()` 接入真实 parser + semantic/type/schema validation，success JSON 为 `{valid: true, cypherProfile}`，不执行 query。
+- [x] compatibility matrix lexical/parser families 有完整 inventory；
+- [x] openCypher parser fixtures 与 Cypher 25 grammar fixtures 运行；
+- [x] invalid syntax 返回 stable line/column；
+- [x] scope isolation/correlation negative fixtures 通过；
+- [x] value/type/null comparison fixture 通过；
+- [x] int64/vector/temporal/UUID params/result round-trip；
+- [x] parser/semantic layer 不访问 SQLite graph rows；
+- [x] AST 不携带 GraphQLite/Cypher-to-SQL implementation-specific node。
+- [x] `lithograph_validate()` 接入真实 parser + semantic/type/schema validation，success JSON 为 `{valid: true, cypherProfile}`，不执行 query。
 
 ## 6. Review
 
 重点检查 grammar coverage 是否通过 special-case 拼接、scope/type 是否推迟给 executor 猜测、JSON adapter 是否改变 Cypher type。
 
-## 7. 完成条件
+Phase-level review 已闭环：
 
-Frontend/value foundation 可支撑 read planner；Phase 04 转 `ready`，compatibility matrix 对已完成 family 更新真实状态。
+- parser 输出 Lithograph-owned AST；semantic/type 层只依赖 AST/query text，不访问 SQLite graph rows，也没有把 GraphQLite/Cypher-to-SQL implementation node 暴露给后续 planner；
+- openCypher inherited parser corpus 固定覆盖 4,224 个合法 query/query-precondition；3,312 个非 compile-error `executing query` 全部通过 frontend validation；585 个 compile-time error 中 Phase 03 可静态判定的场景全部拒绝；
+- 当前 16 个仍由 frontend 接受的 openCypher compile-time-error query 均属于后续明确 owner：7 个依赖 procedure catalog/signature（Phase 06–09）、1 个依赖完整 built-in function inventory（Phase 06）、8 个依赖完整 aggregation/DISTINCT `ORDER BY` visibility/grouping semantics（Phase 06）。`phase03_parser_tck` 锁定的是这 16 个 scenario 的精确集合，而不是数量上限；后续只能显式收缩，不能用等量替换掩盖 regression；
+- CALL import、LOAD CSV binding、relationship direction、YIELD alias、escaped identifier、grouping reference、unary integer boundary 与 expression-subquery kind 均由 AST 结构驱动；raw query text 不再承担 scope/type/legality 判断，interpolation fragment error span 会映射回原始 query 的全局 line/column；
+- scope/correlation、graph-element category、pattern predicate、write/read clause legality、property type、literal range、numeric/null/type comparison、parameter legality均已有 negative fixtures；
+- 40 层 nested List TCK query 曾触发小栈 stack overflow；AST traversal 改为 iterative DFS，type inference 增加 transparent-expression peeling 后，在 2 MiB thread stack 与正式 TCK suite 中均通过；
+- runtime `Value` 与 persistent `PropertyValue` 分层；Property legality 不反向改变 format 1 LCE1 physical encoding，Phase 02 frozen golden hash 保持 `cea822c1c96dd7c456beae36aa4e9e89d8d3cad8658aa450b3ede2887ade4440`；
+- direct comparison 与 `ORDER BY` total ordering 使用独立 value contract；同-family Map/Node/Relationship/List/Path/Vector/Point/Temporal/numeric/NaN/null ordering 均有行为测试，UUID ordering 在 frozen public evidence 未定义前不臆造；
+- Lithograph JSON 对 INTEGER64、非有限 Float、reserved `$type` Map、Node/Relationship/Path、Temporal、Point、全部 Vector coordinate types 与 UUID 做 exact round-trip/error validation；Duration 输出由 component value 重新生成 canonical text，而不是保留任意输入 spelling；
+- semantic/type/value 实现按职责拆分，production Rust 文件均满足 650 行 budget；新增重复职责已合并，repository jscpd duplicated lines 为 0.88%。
+
+## 7. 验证证据
+
+- `cargo test -p lithograph-core --test phase03_frontend --test phase03_value_order`：21/21 + 4/4，共 25 个 Phase 03 core integration tests 通过；
+- `cargo test -p lithograph-test-support --test phase03_parser_tck`：3/3 通过，锁定 4,224 parser corpus、3,312 frontend-success corpus、585 compile-error corpus 与精确 16 个后续 Phase ownership scenario；
+- Phase 02 regression：`phase02_storage` 13/13、`phase02_checkpoint_integrity` 8/8 通过；
+- `cargo test -p lithograph-extension --all-features`：7/7 通过；真实 SQLite `lithograph_validate()` 与 Native ABI validation/error-category surface 通过；
+- `cargo make quality`：vendor/LCE1 golden、file budget、format、workspace Clippy、Rustdoc、complexity、duplicate、unused dependency、supply-chain、coverage 全部通过；coverage 为 regions 82.21%、functions 83.95%、lines 83.84%，`value_order.rs` line coverage 为 88.37%；
+- `scripts/ci.sh`：SQLite 3.51.0 与最低 SQLite 3.45.0 的真实 `.load`、Phase 01/02/03 probes、artifact inspection、Native ABI、compatibility harness/inventory 全部通过。Harness self-check 中 1 个 intentional failure 是 harness 自检预期，不是产品失败。
+
+## 8. 完成条件
+
+Frontend/value foundation 已满足 read planner 前置合同；Phase 03 `done`，Phase 04 转 `ready`。完整 aggregation/order/function/procedure semantics 仍由 compatibility matrix 指定的后续 Phase 负责，不把 frontend foundation 误标为完整 Cypher execution。

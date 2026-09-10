@@ -25,7 +25,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use lithograph_core::CYPHER_PROFILE;
+use lithograph_core::{CYPHER_PROFILE, cypher, storage};
 use rusqlite::OptionalExtension as _;
 use rusqlite::vtab::{
     Context as VTabContext, Filters, IndexConstraintOp, IndexInfo, Module, VTab, VTabConfig,
@@ -82,7 +82,10 @@ fn registered_connections() -> &'static Mutex<HashMap<usize, usize>> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ErrorCategory {
+    Parse,
     Semantic,
+    Type,
+    Schema,
     NotInitialized,
     InvalidArgument,
     FormatTooNew,
@@ -96,7 +99,10 @@ enum ErrorCategory {
 impl ErrorCategory {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Parse => "PARSE_ERROR",
             Self::Semantic => "SEMANTIC_ERROR",
+            Self::Type => "TYPE_ERROR",
+            Self::Schema => "SCHEMA_ERROR",
             Self::NotInitialized => "NOT_INITIALIZED",
             Self::InvalidArgument => "INVALID_ARGUMENT",
             Self::FormatTooNew => "FORMAT_TOO_NEW",
@@ -143,10 +149,10 @@ impl LithographError {
         )
     }
 
-    fn semantic_unavailable() -> Self {
+    fn execution_unavailable() -> Self {
         Self::new(
             ErrorCategory::Semantic,
-            "Cypher frontend and execution are not available in this development phase",
+            "Cypher execution is not available before the read query engine phase",
             ffi::SQLITE_ERROR,
         )
     }
@@ -228,42 +234,68 @@ fn extension_init(db: Connection) -> SqliteResult<bool> {
 
 fn initialize(connection: &Connection) -> LithographResult<Value> {
     match read_metadata(connection) {
-        Ok(Some(metadata)) => {
-            ensure_supported_format(&metadata)?;
-            ensure_current_metadata_integrity(connection)?;
-            Ok(init_json(&metadata))
-        }
-        Ok(None) => {
-            if has_any_internal_object(connection)? {
-                return Err(LithographError::storage(
-                    "reserved _lithograph_* object exists without a valid Lithograph marker",
-                ));
-            }
-
-            create_metadata_table(connection)?;
-            let metadata = Metadata {
-                database_id: generate_database_id(connection)?,
-                storage_format: STORAGE_FORMAT_CURRENT,
-            };
-            connection
-                .execute(
-                    "INSERT INTO main._lithograph_meta(id, magic, database_id, storage_format) VALUES(1, ?1, ?2, ?3)",
-                    rusqlite::params![MAGIC, metadata.database_id, metadata.storage_format],
-                )
-                .map_err(|error| map_sqlite_error(error, "failed to persist Lithograph metadata"))?;
-            ensure_current_metadata_integrity(connection)?;
-            Ok(init_json(&metadata))
-        }
+        Ok(Some(metadata)) => initialize_existing(connection, metadata),
+        Ok(None) => initialize_fresh(connection),
         Err(error) => Err(error),
     }
 }
 
-fn init_json(metadata: &Metadata) -> Value {
+fn initialize_existing(connection: &Connection, metadata: Metadata) -> LithographResult<Value> {
+    ensure_supported_format(&metadata)?;
+    migrate_phase01_bootstrap(connection)?;
+    ensure_current_metadata_integrity(connection)?;
+    let root = storage::root_commit(connection)
+        .map_err(|error| map_storage_error(error, "failed to resolve Root Commit"))?;
+    storage::branch_head(connection, "main")
+        .map_err(|error| map_storage_error(error, "failed to resolve main branch"))?;
+    Ok(init_json(&metadata, root))
+}
+
+fn migrate_phase01_bootstrap(connection: &Connection) -> LithographResult<()> {
+    if !is_phase01_metadata_bootstrap(connection)? {
+        return Ok(());
+    }
+    storage::create_storage_schema(connection).map_err(|error| {
+        map_storage_error(error, "failed to migrate Phase 01 storage bootstrap")
+    })?;
+    storage::initialize_root(connection).map_err(|error| {
+        map_storage_error(error, "failed to initialize Root Commit during migration")
+    })?;
+    Ok(())
+}
+
+fn initialize_fresh(connection: &Connection) -> LithographResult<Value> {
+    if has_any_internal_object(connection)? {
+        return Err(LithographError::storage(
+            "reserved _lithograph_* object exists without a valid Lithograph marker",
+        ));
+    }
+    create_metadata_table(connection)?;
+    let metadata = Metadata {
+        database_id: generate_database_id(connection)?,
+        storage_format: STORAGE_FORMAT_CURRENT,
+    };
+    connection
+        .execute(
+            "INSERT INTO main._lithograph_meta(id, magic, database_id, storage_format) VALUES(1, ?1, ?2, ?3)",
+            rusqlite::params![MAGIC, metadata.database_id, metadata.storage_format],
+        )
+        .map_err(|error| map_sqlite_error(error, "failed to persist Lithograph metadata"))?;
+    storage::create_storage_schema(connection)
+        .map_err(|error| map_storage_error(error, "failed to create Lithograph storage schema"))?;
+    let root = storage::initialize_root(connection).map_err(|error| {
+        map_storage_error(error, "failed to initialize Root Commit and main branch")
+    })?;
+    ensure_current_metadata_integrity(connection)?;
+    Ok(init_json(&metadata, root.root))
+}
+
+fn init_json(metadata: &Metadata, root: storage::HashId) -> Value {
     json!({
         "databaseId": metadata.database_id,
         "storageFormat": metadata.storage_format,
-        "root": Value::Null,
-        "branch": Value::Null,
+        "root": root.to_hex(),
+        "branch": "main",
     })
 }
 
@@ -511,6 +543,35 @@ fn rollback_savepoint(connection: &Connection, savepoint: &str) -> LithographRes
     )))
 }
 
+fn map_frontend_error(error: cypher::FrontendError) -> LithographError {
+    let category = match error.kind {
+        cypher::FrontendErrorKind::Parse => ErrorCategory::Parse,
+        cypher::FrontendErrorKind::Semantic => ErrorCategory::Semantic,
+        cypher::FrontendErrorKind::Type => ErrorCategory::Type,
+        cypher::FrontendErrorKind::Schema => ErrorCategory::Schema,
+        cypher::FrontendErrorKind::InvalidArgument => ErrorCategory::InvalidArgument,
+    };
+    let mut mapped = LithographError::new(category, error.message, ffi::SQLITE_ERROR);
+    mapped.line = Some(u64::from(error.line));
+    mapped.column = Some(u64::from(error.column));
+    mapped
+}
+
+fn validate_cypher(query: &str) -> LithographResult<Value> {
+    cypher::validate(query).map_err(map_frontend_error)?;
+    Ok(json!({
+        "valid": true,
+        "cypherProfile": CYPHER_PROFILE,
+    }))
+}
+
+fn map_storage_error(error: storage::StorageError, message: &str) -> LithographError {
+    match error {
+        storage::StorageError::Sqlite(error) => map_sqlite_error(error, message),
+        other => LithographError::storage(format!("{message}: {other}")),
+    }
+}
+
 fn map_sqlite_error(error: SqliteError, message: &str) -> LithographError {
     let primary = match &error {
         SqliteError::SqliteFailure(error, _) => error.extended_code & 0xff,
@@ -541,8 +602,8 @@ mod rows;
 mod scalar;
 
 use metadata_integrity::{
-    ensure_current_metadata_integrity, has_any_internal_object, metadata_integrity_json,
-    metadata_object_type, query_metadata_marker,
+    ensure_current_metadata_integrity, has_any_internal_object, is_phase01_metadata_bootstrap,
+    metadata_integrity_json, metadata_object_type, query_metadata_marker,
 };
 
 #[cfg(test)]

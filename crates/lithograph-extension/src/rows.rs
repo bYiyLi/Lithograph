@@ -146,7 +146,9 @@ unsafe impl VTabCursor for RowsCursor<'_> {
                     LithographError::invalid_argument("query must not be empty").to_sqlite_error()
                 );
             }
-            validate_json_object(&params, "params").map_err(|e| e.to_sqlite_error())?;
+            cypher::decode_parameters_text(&params).map_err(|error| {
+                LithographError::invalid_argument(error.message).to_sqlite_error()
+            })?;
             validate_json_object(&options, "options").map_err(|e| e.to_sqlite_error())?;
             // SAFETY: `self.db` was captured from the live VTab connection and
             // SQLite invokes this cursor only while that connection is valid.
@@ -154,9 +156,10 @@ unsafe impl VTabCursor for RowsCursor<'_> {
                 map_sqlite_error(error, "failed to access the SQLite connection").to_sqlite_error()
             })?;
             require_initialized(&connection).map_err(|e| e.to_sqlite_error())?;
+            validate_cypher(&query).map_err(|e| e.to_sqlite_error())?;
 
             self.exhausted = true;
-            Err(LithographError::semantic_unavailable().to_sqlite_error())
+            Err(LithographError::execution_unavailable().to_sqlite_error())
         })
     }
 

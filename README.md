@@ -2,13 +2,13 @@
 
 Lithograph 为 SQLite 提供版本化 Property Graph 数据库能力。
 
-它以标准 SQLite loadable extension 的形式运行：保留 SQLite 的嵌入式、单文件部署体验，同时使用 Cypher 25 查询图数据，并使用类似 Git 的 Commit 与 Branch 管理图的完整历史。
+它以标准 SQLite loadable extension 的形式运行：保留 SQLite 的嵌入式、单文件部署体验，同时使用 Cypher 25 查询图数据，并使用 immutable Commit DAG、Branch 与 Tag 管理同一张图的状态演进。Git / TerminusDB 是版本机制参考，不限定上层如何解释这些状态。
 
 ## 核心能力
 
 - **Property Graph**：Node、Relationship、Label、Relationship Type 与 Property。
 - **Cypher 25**：图查询、数据修改、路径、Schema、Constraint、Index 与现代 Cypher 类型系统。
-- **Git-like 版本管理**：immutable Commit、Branch、历史查询、Time-travel、结构化 Diff/Patch、Merge、Rebase、Squash、Reset 与 Revert。
+- **版本化状态管理**：immutable Commit、Branch、Tag、可修改 Commit Data、显式 empty-delta Commit、可分页历史查询、Time-travel、结构化 Diff/Patch、Merge、Rebase、Squash、Reset 与 Revert。
 - **全文与向量搜索**：Full-text Index、Vector Index 与 Cypher 25 `SEARCH`。
 - **SQLite 原生部署**：作为 loadable extension 使用同一个 SQLite database file，不需要独立数据库 Server。
 - **大规模单机图**：版本感知存储、索引化邻接访问、流式查询执行与 checkpointed history 面向大规模本地图数据设计。
@@ -30,11 +30,11 @@ RETURN person.name, company.name
 
 ## 项目状态
 
-Lithograph 当前已经完成产品与技术设计、开发规范、可执行开发计划和 Phase 00 Engineering Foundation。Rust workspace、CI、SQLite/test fixture、Cypher compatibility harness 与可重复 dependency/vendor integrity gate 已建立并通过最终验收；graph product behavior 从 Phase 01 开始实现，目前没有可用于生产的 Release。
+Lithograph 当前已经完成产品与技术设计、开发规范、可执行开发计划，以及 Phase 00–03。Rust workspace、CI、SQLite/test fixture、Cypher compatibility harness、标准 SQLite loadable-extension / Native ABI boundary、version-aware storage，以及 `CY25-2026.08` parser、Lithograph-owned AST、scope/type/value foundation 与真实 `lithograph_validate()` frontend validation surface 已建立并通过对应 Phase 验收。Read planner/executor 尚未实现，目前没有可用于生产的 Release。
 
 - [技术设计](docs/design.md)
 - [开发计划](docs/development/README.md)
-- 当前开发阶段：Phase 00 `done`，Phase 01 `ready`
+- 当前开发阶段：Phase 00–03 `done`，Phase 04 `ready`
 
 ## 许可
 

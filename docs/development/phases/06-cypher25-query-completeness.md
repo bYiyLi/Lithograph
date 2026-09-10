@@ -6,13 +6,15 @@
 
 在已有 frontend/planner/executor/write foundation 上闭合 `CY25-2026.08` 的 query、path、expression、function 和 mutation semantics，Search/Schema 专项能力由后续 Phase 接管。
 
+Phase 04/05 已建立的 Graph View 是 execution context，不是新 Cypher 语法；本 Phase 新增的 query/path/subquery/function/mutation surface 必须自动继承同一 visibility/write boundary。
+
 ## 2. 依赖
 
 - Phase 03–05 `done`。
 
 ## 3. Design Inputs
 
-- `docs/design.md` 第 3、5–7 节；
+- `docs/design.md` 第 3、4.4、5–7 节；
 - `docs/development/cypher25-compatibility.md`。
 
 ## 4. Features
@@ -87,6 +89,9 @@
 - [ ] compatibility matrix 中 query/path/value/function/mutation families 全部达到 `done`，除明确归 Phase 07/08/09 的 family；
 - [ ] applicable openCypher TCK 相关 scenario 无 regression；
 - [ ] cross-clause composition suite 覆盖至少 MATCH/WITH/subquery/aggregate/write 的组合边；
+- [ ] Graph View 下 write→read clause、`UNION` 与多次 `CALL {}` invocation 的 visibility 仍遵守 Cypher clause composition：后序 clause/invocation 能看到允许范围内的前序 writes，前序 clause 不能看到后序 writes；
+- [ ] WITH/UNION/WHEN/NEXT/subquery/quantified path/shortest path/function dereference 不存在 Graph View visibility bypass；
+- [ ] mutation completeness 中新增的 MERGE/SET/FOREACH/DELETE 变体继续满足 `GRAPH_VIEW_VIOLATION` 原子边界；
 - [ ] timezone/DST、numeric overflow、NaN、Unicode fixtures 通过；
 - [ ] quantified path / shortest / match/path mode cardinality oracle 对齐；
 - [ ] MERGE multi-row 与 concurrent foundation tests 通过；
@@ -94,7 +99,7 @@
 
 ## 6. Review
 
-重点检查为单个 TCK case 添加的无语义模型 special-case、operator 顺序依赖、变量 scope 泄漏、path duplicate/cardinality、temporal precision 和 mutation finalize order。
+重点检查为单个 TCK case 添加的无语义模型 special-case、operator 顺序依赖、变量 scope 泄漏、Graph View 在 nested/subquery/path/function 中丢失、path duplicate/cardinality、temporal precision 和 mutation finalize order。
 
 ## 7. 完成条件
 

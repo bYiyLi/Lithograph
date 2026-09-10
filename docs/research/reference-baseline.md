@@ -1,6 +1,6 @@
 # Lithograph 外部参考基线
 
-**研究快照日期：2026-09-09**
+**研究快照日期：2026-09-10**
 
 本文保存 Lithograph 设计使用的外部证据。它不是产品设计真源；最终设计以 `docs/design.md` 为准。
 
@@ -104,6 +104,11 @@ Lithograph 把 three-way merge 从“文本行”改成 Property Graph logical s
 
 - <https://neo4j.com/docs/cypher-manual/current/>
 - <https://neo4j.com/docs/cypher-manual/current/deprecations-additions-removals-compatibility/>
+- <https://neo4j.com/docs/cypher-manual/current/functions/graph/>
+- <https://neo4j.com/docs/cypher-manual/current/appendix/gql-conformance/supported-optional/>
+- <https://neo4j.com/docs/cypher-manual/25/clauses/clause-composition/>
+- <https://neo4j.com/docs/cypher-manual/current/subqueries/subqueries-in-transactions/>
+- <https://neo4j.com/docs/operations-manual/current/scalability/composite-databases/querying-composite-databases/>
 - <https://neo4j.com/docs/cypher-manual/current/clauses/search/>
 - <https://neo4j.com/docs/cypher-manual/current/schema/graph-types/>
 - <https://feedback.neo4j.com/changelog/neo4j-aura-august-2026-release>
@@ -116,6 +121,10 @@ Lithograph 把 three-way merge 从“文本行”改成 Property Graph logical s
 - `VECTOR` 在 2025.10 引入；
 - `SEARCH` 在 2026.01 引入并用于 ANN vector search；
 - 2026.08 Aura release 增加 native UUID 与 string interpolation。
+- Cypher 25 支持 GQL optional feature GQ01 `USE` graph clause，但 Neo4j 当前 graph references 面向 database / composite-database constituent graph；`graph.byName()` 也明确用于 Composite Database 的 constituent graph selection。
+- 因此 `USE` 提供“选择一个 graph 后执行 query”的标准语义证据，但不能直接表达 Lithograph 当前“同一个 SQLite database / Versioned Property Graph 内按 Label visibility 选择 query-local induced subgraph”的需求。Lithograph 不重定义 `USE`，而把 Graph View 放在 execution options / Engine boundary。
+- Cypher clause composition 把 graph state 作为 clause 之间的输入/输出：一个 clause 观察全部前序 clause writes，不能观察后序 clause writes。Graph View 因此固定 selector 而不能固定 query-start element membership；visibility 必须作用于每个 clause 实际接收的 graph state。
+- `CALL { ... } IN TRANSACTIONS` 把 subquery batch 放进独立 inner transactions 并产生中间 commits；ordered semantics 下后续执行可观察前序 writes。Lithograph 因此让同一个 Graph View selector 传播到 batch，但每个 batch 基于自身 pinned Commit 重新计算 visibility。
 
 因此 Lithograph 使用冻结 Profile `CY25-2026.08` 判断首个完整兼容版本，后续 Cypher 25 additions 通过新的 Profile 升级。
 

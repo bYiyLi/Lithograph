@@ -59,7 +59,7 @@ pub(super) fn metadata_integrity_json(connection: &Connection) -> LithographResu
     Ok(json!({
         "ok": error_values.is_empty(),
         "errors": error_values,
-        "checked": ["metadata"],
+        "checked": ["metadata", "storage", "history", "checkpoints"],
     }))
 }
 
@@ -104,6 +104,27 @@ pub(super) fn query_metadata_marker(
         .optional()
 }
 
+pub(super) fn is_phase01_metadata_bootstrap(connection: &Connection) -> LithographResult<bool> {
+    let objects = internal_schema_objects(connection)?;
+    let metadata_only = objects.as_slice()
+        == [InternalSchemaObject {
+            object_type: "table".to_owned(),
+            name: META_TABLE.to_owned(),
+            table_name: META_TABLE.to_owned(),
+        }];
+    if !metadata_only {
+        return Ok(false);
+    }
+
+    let mut errors = Vec::new();
+    check_temp_internal_triggers(connection, &mut errors)?;
+    check_metadata_schema(connection, &mut errors)?;
+    check_metadata_columns(connection, &mut errors)?;
+    check_metadata_row_count(connection, &mut errors)?;
+    check_metadata_marker(connection, &mut errors)?;
+    Ok(errors.is_empty())
+}
+
 pub(super) fn ensure_current_metadata_integrity(connection: &Connection) -> LithographResult<()> {
     if let Some(error) = current_metadata_integrity_errors(connection)?
         .into_iter()
@@ -119,12 +140,12 @@ fn current_metadata_integrity_errors(
 ) -> LithographResult<Vec<LithographError>> {
     let mut errors = Vec::new();
 
-    check_metadata_schema_inventory(connection, &mut errors)?;
     check_temp_internal_triggers(connection, &mut errors)?;
     check_metadata_schema(connection, &mut errors)?;
     check_metadata_columns(connection, &mut errors)?;
     check_metadata_row_count(connection, &mut errors)?;
     check_metadata_marker(connection, &mut errors)?;
+    check_storage_integrity(connection, &mut errors)?;
 
     Ok(errors)
 }
@@ -186,21 +207,17 @@ fn has_internal_prefix(value: &str) -> bool {
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case(INTERNAL_PREFIX.as_bytes()))
 }
 
-fn check_metadata_schema_inventory(
+fn check_storage_integrity(
     connection: &Connection,
     errors: &mut Vec<LithographError>,
 ) -> LithographResult<()> {
-    let objects = internal_schema_objects(connection)?;
-    let is_canonical = objects.as_slice()
-        == [InternalSchemaObject {
-            object_type: "table".to_owned(),
-            name: META_TABLE.to_owned(),
-            table_name: META_TABLE.to_owned(),
-        }];
-    if !is_canonical {
-        errors.push(LithographError::storage(
-            "Lithograph internal schema inventory does not match storage format 1",
-        ));
+    let findings = storage::integrity_check(connection)
+        .map_err(|error| map_storage_error(error, "failed to verify Lithograph storage"))?;
+    for finding in findings {
+        errors.push(LithographError::storage(format!(
+            "{}: {}",
+            finding.code, finding.message
+        )));
     }
     Ok(())
 }

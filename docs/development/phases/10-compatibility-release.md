@@ -45,6 +45,8 @@ before layer write
 after layer / before commit
 after commit / before branch move
 after branch move / before SQLite commit
+before/after Commit Data sidecar write
+before/after Tag ref create/move/delete
 checkpoint/index rebuild
 migration steps
 ```
@@ -54,7 +56,7 @@ migration steps
 ### Feature 10.4 Storage migration
 
 - previous-format fixture；
-- forward migration；
+- format `1 -> 2` forward migration，验证 Commit Data / Tag sidecar 建立且既有 Commit ID/history 不变；
 - migration rollback；
 - too-new format rejection；
 - Commit ID/history preservation；
@@ -77,6 +79,9 @@ Release tier：
 - variable path；
 - write batch + commit；
 - historical query；
+- cursor-based large Commit-DAG traversal；
+- Tag lookup / GC-root reachability；
+- Commit Data get/set/clear；
 - branch diff；
 - full-text；
 - vector SEARCH；
@@ -100,7 +105,7 @@ Windows x86_64/arm64
 - symbol/ABI check；
 - real SQLite `.load`；
 - `lithograph_init`；
-- read/write/history smoke；
+- read/write/history/Tag/Commit-Data/explicit-Commit smoke；
 - storage-format interoperability fixture。
 
 同一平台 artifact 额外在支持矩阵中的 SQLite **3.45.0 minimum** 与当前稳定 SQLite runtime 各执行一次 load/init/read/write smoke，证明 loadable-extension ABI 不依赖构建机私有 SQLite。
@@ -116,7 +121,10 @@ Review：
 - LOAD CSV authority boundary；
 - no secrets/local fixtures in package；
 - dependency license/security audit；
-- public error/result/ABI stable。
+- public error/result/ABI stable；
+- Graph View 没有被实现成自定义 Cypher dialect、result post-filter 或可绕过的 adapter-only filter；
+- Commit Data / Tag 保持 sidecar 边界：不改变 immutable Commit hash/Snapshot，Tag 不自动移动且参与 GC root；
+- paginated history cursor pin immutable start Commit，不因 Branch/Tag 后续移动漂移；
 
 ### Feature 10.8 Documentation closure
 
@@ -133,8 +141,11 @@ Review：
 - [ ] Phase 00–09 全部 `done`；
 - [ ] `CY25-2026.08` unresolved/partial/skipped = 0；
 - [ ] openCypher applicable TCK failure = 0；
+- [ ] Graph View cross-surface fixture 覆盖 scan/seek/path/subquery/aggregation/write/full-text/vector/historical read：read/search/historical result 与对应 Snapshot 的物理诱导子图 oracle 一致，read-write query 与逐 clause graph-state oracle 一致，Schema/Constraint 仍按完整 canonical graph 验证，且不存在 visibility/write bypass；
 - [ ] fuzz/property suite 无未解决 correctness finding；
 - [ ] crash/recovery/migration suite 全通过；
+- [ ] format `1 -> 2` migration 保持全部既有 Commit ID、Snapshot 与 history semantics，Commit Data/Tag sidecar crash/reopen 与 rollback 行为正确；
+- [ ] Tag、Commit Data、explicit empty-delta Commit 与 cursor-based DAG History 的 Phase 09 acceptance 在 release matrix 中回归通过；
 - [ ] 10M/100M benchmark gate 通过；
 - [ ] 所有 release artifacts real-load acceptance 通过；
 - [ ] cross-platform storage fixture interoperable；
@@ -146,4 +157,4 @@ Review：
 
 只有 Release Acceptance 全部满足，才允许把 Lithograph 首个完整版本描述为：
 
-> stock SQLite loadable extension，完整实现 `CY25-2026.08` current-graph Profile，并提供 Git/TerminusDB-style Versioned Property Graph。
+> stock SQLite loadable extension，完整实现 `CY25-2026.08` current-graph Profile，并提供基于 immutable Commit DAG、Branch/Tag 与结构化版本操作的 Versioned Property Graph。

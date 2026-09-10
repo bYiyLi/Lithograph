@@ -47,9 +47,14 @@ select_sqlite
 echo "Using SQLite: $LITHOGRAPH_SQLITE3 ($($LITHOGRAPH_SQLITE3 --version))"
 
 python3 scripts/check-vendor.py
+scripts/lce1-golden.sh
 cargo fmt --check
 cargo clippy --locked --workspace --all-targets --all-features
-cargo test --locked --workspace
+# `rusqlite/loadable_extension` switches SQLite calls to the host API table.
+# Cargo feature unification would force that ABI mode into standalone Core
+# integration tests if all packages were tested in one workspace invocation.
+cargo test --locked -p lithograph-core -p lithograph-test-support
+cargo test --locked -p lithograph-extension
 cargo build --locked -p lithograph-extension
 
 target_dir=${CARGO_TARGET_DIR:-target}
@@ -77,6 +82,8 @@ if [ -n "$extension" ]; then
     'SELECT json_valid(lithograph_version());' | grep -qx '1'
   cargo run --locked --quiet -p lithograph-test-support --bin lithograph-sqlite-probe -- "$extension"
   cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase01 -- "$extension"
+  cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase02 -- "$extension"
+cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase03 -- "$extension"
   scripts/sqlite-345-smoke.sh "$extension"
   python3 scripts/check-extension-artifact.py "$extension"
   scripts/native-abi-smoke.sh "$extension"

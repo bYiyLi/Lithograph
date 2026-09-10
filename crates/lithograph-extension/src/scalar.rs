@@ -78,10 +78,12 @@ unsafe extern "C" fn scalar_execute(
     unsafe {
         run_scalar(context, argc, argv, |args, connection| {
             let (query, params, options) = execution_args(args)?;
-            validate_json_object(&params, "params")?;
-            validate_json_object(&options, "options")?;
             validate_query_ready(connection, &query)?;
-            Err(LithographError::semantic_unavailable())
+            cypher::decode_parameters_text(&params)
+                .map_err(|error| LithographError::invalid_argument(error.message))?;
+            validate_json_object(&options, "options")?;
+            validate_cypher(&query)?;
+            Err(LithographError::execution_unavailable())
         });
     }
 }
@@ -97,7 +99,7 @@ unsafe extern "C" fn scalar_validate(
         run_scalar(context, argc, argv, |args, connection| {
             let query = args.text(0, "query must be TEXT")?;
             validate_query_ready(connection, &query)?;
-            Err(LithographError::semantic_unavailable())
+            validate_cypher(&query).map(|value| value.to_string())
         });
     }
 }

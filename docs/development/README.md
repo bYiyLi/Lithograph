@@ -38,13 +38,17 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 
 ## 3. 当前基线
 
-当前仓库已经完成 Phase 00 Engineering Foundation 与 Phase 01 SQLite Extension Boundary。Rust workspace、CI/test/compatibility harness、`cargo make quality` 统一质量门禁、stock SQLite loadable-extension ABI、main-scoped format metadata/init/migration boundary、metadata integrity detection、stable SQL error boundary、Native C ABI v1、安全 flags、最低 SQLite 3.45.0 fixture 与 macOS/Linux/Windows build gates 均已建立并通过 Phase review。质量门禁当前覆盖 Rust lint/unsafe discipline、cognitive/cyclomatic complexity、函数与文件体量、production duplicate、Rustdoc、unit + 真实 SQLite `.load` / Native ABI integration coverage、unused dependency，以及 dependency advisory/license/source policy。Cypher parser/executor 与 version-aware graph storage 仍按后续 Phase 实现，不以 Phase 01 临时语义提前占位。
+当前仓库已经完成 Phase 00 Engineering Foundation、Phase 01 SQLite Extension Boundary、Phase 02 Version-aware Storage Core 与 Phase 03 Cypher Frontend and Value Semantics。除既有 version-aware storage 外，现已具备 `CY25-2026.08` parser、Lithograph-owned AST、scope/semantic/type foundation、runtime Value/PropertyValue 边界、exact Lithograph JSON，以及真实 `lithograph_validate()` SQL/Native validation surface；planner/executor 尚未实现。Graph View 已作为 query-local Execution Context 写入 Design，首次实现归 Phase 04，不回改 Phase 03 grammar/AST。最低 SQLite 3.45.0 与当前 SQLite 的真实 `.load`、Phase 01–03 probe、Native ABI、质量与 compatibility regression 均通过。
+
+当前 Design 进一步确认了通用版本化状态能力：Commit 保持 immutable；Commit Data 是可修改 JSON sidecar；Tag 是显式可移动但不会随写入自动前进的 named ref；允许显式创建 empty-delta Commit；History 需要 opaque cursor 做 bounded DAG traversal。它们不回开 Phase 02/03：实现 owner 是 Phase 09，其中 storage format 从 development baseline `1` 显式迁移到首个公开 release 的 format `2`；Phase 10 负责 migration/scale/recovery closure。
 
 - Phase 00：`done`；
 - Phase 01：`done`；
-- Phase 02：`ready`；
-- Phase 03–10：`planned`；
-- `docs/development/cypher25-compatibility.md` 的 capability family 仍全部为 `planned`；Phase 00–01 只建立 compatibility/SQLite execution boundary，不把尚未存在的 Cypher semantics 标记为完成。
+- Phase 02：`done`；
+- Phase 03：`done`；
+- Phase 04：`ready`；
+- Phase 05–10：`planned`；
+- `docs/development/cypher25-compatibility.md` 仅把 Phase 03 已有 frontend/value 实现证据对应的 family 标为 `partial`；需要 planner/executor、完整函数/聚合/procedure 或 schema/search semantics 的 family 继续保持 `planned`。
 
 ## 4. 路线总览
 
@@ -52,17 +56,17 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 | --- | --- | --- | --- |
 | [00 Engineering Foundation](phases/00-engineering-foundation.md) | `done` | Rust/CI/test/compatibility harness 与可重复工程基线 | Design |
 | [01 SQLite Extension Boundary](phases/01-sqlite-extension-boundary.md) | `done` | 可跨平台 `.load`、初始化、SQL Bridge、Native ABI | 00 |
-| [02 Version-aware Storage Core](phases/02-versioned-storage-core.md) | `ready` | Root Commit、immutable layers、snapshot resolver、branch main、checkpoint | 01 |
-| [03 Cypher Frontend and Value Semantics](phases/03-cypher-frontend-values.md) | `planned` | `CY25-2026.08` parser/AST/scope/type/value foundation | 00–02 |
-| [04 Read Query Engine](phases/04-read-query-engine.md) | `planned` | MATCH/RETURN vertical slice、planner/executor、indexed traversal、streaming | 02–03 |
-| [05 Mutation, Transaction and Commit](phases/05-mutation-transaction-commit.md) | `planned` | Cypher writes、constraint hook、每次写入 Commit、rollback/concurrency | 02–04 |
-| [06 Cypher 25 Query Completeness](phases/06-cypher25-query-completeness.md) | `planned` | current-graph query/path/expression/function/subquery semantics 完整 | 03–05 |
-| [07 Schema, Constraint and Standard Indexes](phases/07-schema-constraint-index.md) | `planned` | Graph Type、Constraint、lookup/range/text/point index | 05–06 |
-| [08 Search and Data Ingestion](phases/08-search-ingestion.md) | `planned` | Full-text、Vector/HNSW、SEARCH、LOAD CSV | 06–07 |
-| [09 Version Control Operations](phases/09-version-control-operations.md) | `planned` | branch/history/time-travel/diff/patch/merge/rebase/squash/reset/revert/gc | 05、07–08 |
+| [02 Version-aware Storage Core](phases/02-versioned-storage-core.md) | `done` | Root Commit、immutable layers、snapshot resolver、branch main、checkpoint | 01 |
+| [03 Cypher Frontend and Value Semantics](phases/03-cypher-frontend-values.md) | `done` | `CY25-2026.08` parser/AST/scope/type/value foundation | 00–02 |
+| [04 Read Query Engine](phases/04-read-query-engine.md) | `ready` | Graph View read boundary、MATCH/RETURN vertical slice、planner/executor、indexed traversal、streaming | 02–03 |
+| [05 Mutation, Transaction and Commit](phases/05-mutation-transaction-commit.md) | `planned` | Graph View write boundary、Cypher writes、每次写入 Commit、rollback/concurrency | 02–04 |
+| [06 Cypher 25 Query Completeness](phases/06-cypher25-query-completeness.md) | `planned` | current-graph query/path/expression/function/subquery semantics 完整并继承 Graph View | 03–05 |
+| [07 Schema, Constraint and Standard Indexes](phases/07-schema-constraint-index.md) | `planned` | Graph Type、Constraint、lookup/range/text/point index；indexed read 遵守 Graph View | 05–06 |
+| [08 Search and Data Ingestion](phases/08-search-ingestion.md) | `planned` | Full-text、Vector/HNSW、SEARCH、LOAD CSV 并遵守 Graph View | 06–07 |
+| [09 Versioned State Operations](phases/09-version-control-operations.md) | `planned` | format 1→2、Commit Data、Tag、explicit Commit、cursor History、branch/time-travel/diff/patch/merge/rebase/squash/reset/revert/gc | 05、07–08 |
 | [10 Compatibility Closure and Release Hardening](phases/10-compatibility-release.md) | `planned` | 100% applicable Profile、10M/100M scale、recovery/migration、跨平台 release | 00–09 |
 
-关键依赖原则：**Version-aware storage 在 Phase 02 建立，不能拖到后期再 retrofit。** Phase 09 只是交付完整用户级 Git-like operations。
+关键依赖原则：**Version-aware graph storage 在 Phase 02 建立，不能拖到后期再 retrofit。** Phase 09 在该 immutable history foundation 上增加用户级状态 sidecar/ref 与版本操作，并通过显式 `1 -> 2` migration 增加 Commit Data / Tag storage；这不改变 Phase 02 的 Layer / Commit / Snapshot 核心合同，也不要求重开 Phase 02/03。
 
 ## 5. Phase 完成标准
 
@@ -84,6 +88,8 @@ Commit / push 是独立 repository action。只有真实执行后才记录对应
 ## 6. Compatibility 完成规则
 
 “完整 Cypher 25”不按总代码量或 clause 名单主观判断，而按 `docs/development/cypher25-compatibility.md` 的冻结 Profile 判断。
+
+`graphView` 是 Lithograph-specific execution option，不属于 Cypher grammar/compatibility inventory；它的 correctness 由 Phase 04–10 acceptance 单独验证，不能为了实现它修改 Cypher 25 语法或把 `USE` 纳入不同语义。
 
 最终 Phase 10 必须同时满足：
 
@@ -109,8 +115,12 @@ Commit / push 是独立 repository action。只有真实执行后才记录对应
 - branch divergence、three-way merge、delete-vs-modify、property conflict、constraint conflict；
 - rebase 全量 rollback、squash snapshot-equivalence 与旧 history 保留；
 - reset/revert 后旧 history 仍可查询；
-- explicit GC 只清理 unreachable canonical history；
-- crash/reopen 后 commit DAG 与 branch refs 完整。
+- Commit Data 可 set/replace/clear 而不改变 Commit ID/Snapshot，也不进入 Diff/Patch/Merge；
+- Tag 只通过显式操作移动，作为 GC reachability root，Branch write 不自动移动 Tag；
+- explicit empty-delta Commit 可以建立新的 immutable state node，不引入 working tree/staging；
+- History/DAG traversal 使用 immutable start Commit + opaque cursor 分页，Branch/Tag 后续移动不改变已开始的 traversal；
+- explicit GC 只清理 Branch/Tag 都不可达的 canonical history，并随被删除 Commit 清理其 Commit Data；
+- crash/reopen 后 Commit DAG、Branch/Tag refs 与 Commit Data 完整。
 
 ## 8. Verification Layers
 
@@ -134,6 +144,8 @@ full repository gates
 
 没有新失败或跨模块影响时，不因为“更彻底”在每个小 Feature 后重复完整 release gate。
 
+`rusqlite/loadable_extension` 会把 SQLite 调用切换到 host `sqlite3_api_routines`。因此 standalone Core storage tests 与 Extension ABI tests 必须使用独立 Cargo invocation，避免 workspace feature unification 把 loadable-extension ABI mode 强加给 standalone SQLite connection；workspace `clippy --all-features` 仍用于验证联合编译。
+
 ## 9. Development Artifacts
 
 - [架构实现依赖图](architecture-roadmap.md)
@@ -156,8 +168,8 @@ Lithograph 可以宣告首个完整版本完成，只有以下事实同时成立
 
 - 可在支持平台的 stock SQLite 上加载，不需要 SQLite fork 或 server；
 - `CY25-2026.08` current-graph compatibility acceptance 全部通过；
-- graph/schema/index write 全部具有 Git-like immutable history；
-- Branch、Time-travel、Diff、Patch、Merge、Rebase、Squash、Reset、Revert 和 History 可用；
+- graph/schema/index write 全部具有 immutable Commit-DAG history；
+- Branch、Tag、Commit Data、explicit Commit、可分页 History、Time-travel、Diff、Patch、Merge、Rebase、Squash、Reset 与 Revert 可用；
 - Full-text 与 Vector `SEARCH` 可用且历史 Snapshot correctness 保持；
 - transaction、crash recovery、format migration、integrity check 通过；
 - 10M Node / 100M Relationship release benchmark tier 正确完成且没有 OOM / unintended full scan；

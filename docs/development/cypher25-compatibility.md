@@ -17,7 +17,7 @@ Profile 由 Neo4j Cypher 25 current-graph Manual + 2026.08 已公开 Cypher addi
 | `partial` | 部分 fixtures 通过，但该 capability family 未闭合 |
 | `done` | inventory 全部存在，positive/negative/composition fixtures 全部通过 |
 
-当前全部 capability family 为 `planned`。Phase 00 已建立 fixture schema、machine-readable report、openCypher TCK adapter 与首批 `CY25-2026.08` inventory；这些基础设施本身不构成任何 Cypher capability 的实现证据，因此不会改变本表状态。
+Phase 03 已交付 parser/AST/scope/type/value frontend foundation，因此与该 Phase 直接拥有的 capability family 已具有自动化实现证据并标为 `partial`；`partial` 不代表 query execution 或完整 family semantics 已完成。Phase 04+ 才拥有的 MATCH/result、完整 aggregation/ordering、built-in function/procedure、schema/index/search 等 family 在其 acceptance 未完成前仍保持 `planned`。
 
 ## 3. Profile Boundary
 
@@ -40,9 +40,9 @@ Profile 由 Neo4j Cypher 25 current-graph Manual + 2026.08 已公开 Cypher addi
 
 | Family | Required coverage | 状态 | Owning Phase |
 | --- | --- | --- | --- |
-| Lexical / identifiers / parameters | keywords、escaped/unescaped identifiers、Unicode、parameter naming、comments、query options | `planned` | 03, 06 |
-| Literals / operators | boolean、numeric、string、list、map、temporal/spatial/vector/UUID literals/constructors、operator precedence | `planned` | 03, 06 |
-| Null / equality / ordering | three-valued logic、comparison、ordering、NaN、type ordering where specified | `planned` | 03, 06 |
+| Lexical / identifiers / parameters | keywords、escaped/unescaped identifiers、Unicode、parameter naming、comments、query options | `partial` | 03, 06 |
+| Literals / operators | boolean、numeric、string、list、map、temporal/spatial/vector/UUID literals/constructors、operator precedence | `partial` | 03, 06 |
+| Null / equality / ordering | three-valued logic、comparison、ordering、NaN、type ordering where specified | `partial` | 03, 06 |
 | MATCH | node/relationship pattern、labels/types/property predicates、multiple patterns | `planned` | 04, 06 |
 | OPTIONAL MATCH | outer/null preservation、predicate placement/composition | `planned` | 04, 06 |
 | FILTER / WHERE | predicate expressions、pattern predicates、scope | `planned` | 04, 06 |
@@ -65,12 +65,12 @@ Profile 由 Neo4j Cypher 25 current-graph Manual + 2026.08 已公开 Cypher addi
 | Match modes | repeatable/different relationship semantics | `planned` | 06 |
 | Path modes | walk/trail/acyclic/simple constraints as Profile specifies | `planned` | 06 |
 | Path selectors / shortest | ANY/ALL shortest、k/group selectors、mix with path modes | `planned` | 06 |
-| Runtime values | Boolean/Integer/Float/String/List/Map/Node/Relationship/Path | `planned` | 03, 06 |
-| Temporal / Duration | constructors、arithmetic、formatting、timezone/DST semantics | `planned` | 03, 06 |
-| Spatial Point | CRS、constructors、comparison/functions、point index integration | `planned` | 03, 06, 07 |
-| VECTOR | coordinate types、dimension、storage、conversion、similarity/distance | `planned` | 03, 06, 08 |
-| UUID | native type、constructors、bit helpers、storage/equality | `planned` | 03, 06 |
-| String interpolation | `s"...{expr}..."` / `S"..."` semantics | `planned` | 03, 06 |
+| Runtime values | Boolean/Integer/Float/String/List/Map/Node/Relationship/Path | `partial` | 03, 06 |
+| Temporal / Duration | constructors、arithmetic、formatting、timezone/DST semantics | `partial` | 03, 06 |
+| Spatial Point | CRS、constructors、comparison/functions、point index integration | `partial` | 03, 06, 07 |
+| VECTOR | coordinate types、dimension、storage、conversion、similarity/distance | `partial` | 03, 06, 08 |
+| UUID | native type、constructors、bit helpers、storage/equality | `partial` | 03, 06 |
+| String interpolation | `s"...{expr}..."` / `S"..."` semantics | `partial` | 03, 06 |
 | Built-in functions | complete current-graph function inventory from frozen Manual | `planned` | 06 |
 | Aggregating functions | complete frozen Manual inventory and null/group semantics | `planned` | 06 |
 | Procedure CALL | built-in current-graph procedures、YIELD、scope/result contract | `planned` | 06–09 |
@@ -89,7 +89,13 @@ Profile 由 Neo4j Cypher 25 current-graph Manual + 2026.08 已公开 Cypher addi
 | EXPLAIN | semantic validation + plan without execution | `planned` | 04, 10 |
 | PROFILE | execution + operator runtime counters | `planned` | 04, 10 |
 | SHOW current graph surfaces | functions/procedures/indexes/constraints/current graph type | `planned` | 06–08 |
-| Error compatibility | syntax position、semantic/type/constraint failures、transaction errors | `planned` | 03–10 |
+| Error compatibility | syntax position、semantic/type/constraint failures、transaction errors | `partial` | 03–10 |
+
+### Phase 03 frontend evidence
+
+Phase 03 的 inherited openCypher frontend regression 固定为：4,224 个合法 query/query-precondition parser inputs 全部 parse；3,312 个非 compile-error `executing query` 全部通过 frontend validation；585 个 compile-time-error `executing query` 中，当前仍有 16 个由后续 owner 明确接管（7 个 procedure signature、1 个完整 built-in function inventory、8 个 aggregation/DISTINCT `ORDER BY` visibility/grouping）。`phase03_parser_tck` 锁定这 16 个 scenario 的精确集合，而不是“最多 16 个”的数量门槛；后续只能显式收缩，不能通过等量替换掩盖 regression。
+
+这些证据只证明 parser/semantic/type foundation，不把尚未执行的 result semantics 标为 `done`。
 
 ## 5. 2025.06+ Cypher 25 Delta Inventory
 
