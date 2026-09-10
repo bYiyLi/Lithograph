@@ -38,7 +38,7 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 
 ## 3. 当前基线
 
-当前仓库已经完成 Phase 00 Engineering Foundation 与 Phase 01 SQLite Extension Boundary。Rust workspace、CI/test/compatibility harness、`cargo make quality` 统一质量门禁、stock SQLite loadable-extension ABI、main-scoped format metadata/init/migration boundary、metadata integrity detection、stable SQL error boundary、Native C ABI v1、安全 flags、最低 SQLite 3.45.0 fixture 与 macOS/Linux/Windows build gates 均已建立并通过 Phase review。质量门禁当前覆盖 Rust lint/unsafe discipline、cognitive/cyclomatic complexity、函数与文件体量、production duplicate、Rustdoc、coverage、unused dependency，以及 dependency advisory/license/source policy。Cypher parser/executor 与 version-aware graph storage 仍按后续 Phase 实现，不以 Phase 01 临时语义提前占位。
+当前仓库已经完成 Phase 00 Engineering Foundation 与 Phase 01 SQLite Extension Boundary。Rust workspace、CI/test/compatibility harness、`cargo make quality` 统一质量门禁、stock SQLite loadable-extension ABI、main-scoped format metadata/init/migration boundary、metadata integrity detection、stable SQL error boundary、Native C ABI v1、安全 flags、最低 SQLite 3.45.0 fixture 与 macOS/Linux/Windows build gates 均已建立并通过 Phase review。质量门禁当前覆盖 Rust lint/unsafe discipline、cognitive/cyclomatic complexity、函数与文件体量、production duplicate、Rustdoc、unit + 真实 SQLite `.load` / Native ABI integration coverage、unused dependency，以及 dependency advisory/license/source policy。Cypher parser/executor 与 version-aware graph storage 仍按后续 Phase 实现，不以 Phase 01 临时语义提前占位。
 
 - Phase 00：`done`；
 - Phase 01：`done`；

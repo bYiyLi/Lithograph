@@ -58,11 +58,14 @@ fn run() -> Result<ProbeResult, Box<dyn Error>> {
     check_reserved_object_collision(&load)?;
     checks.push("reserved-object-collision");
 
+    check_reserved_namespace_integrity(&load)?;
+    checks.push("reserved-namespace-integrity");
+
     check_temp_schema_shadowing(&load)?;
     checks.push("main-schema-isolation");
 
-    check_higher_format(&load)?;
-    checks.push("format-too-new");
+    check_format_boundaries(&load)?;
+    checks.push("format-boundaries");
 
     check_metadata_integrity_contract(&load)?;
     checks.push("metadata-integrity-detection");
@@ -237,6 +240,142 @@ fn check_reserved_object_collision(load: &str) -> Result<(), Box<dyn Error>> {
         &"_lithograph_meta\nxlithograph_user_object".to_string(),
         "only the exact _lithograph_ prefix must be reserved",
     )?;
+
+    let case_variant = FileDatabaseFixture::new(0x0110)?;
+    case_variant.execute_script("CREATE TABLE _LITHOGRAPH_future(v INTEGER);")?;
+    assert_sqlite_error(
+        case_variant.execute_script(&format!("{load}\nSELECT lithograph_init();")),
+        "LITHOGRAPH_STORAGE_ERROR",
+    )?;
+    assert_sqlite_error(
+        case_variant.execute_script(&format!("{load}\nSELECT lithograph_version();")),
+        "LITHOGRAPH_STORAGE_ERROR",
+    )?;
+    let integrity =
+        case_variant.execute_script(&format!("{load}\nSELECT lithograph_integrity_check();"))?;
+    assert_integrity_failure(&integrity, "case-variant reserved collision")?;
+    Ok(())
+}
+
+fn check_reserved_namespace_integrity(load: &str) -> Result<(), Box<dyn Error>> {
+    check_renamed_metadata_is_corrupt(load)?;
+    check_unexpected_reserved_object_is_corrupt(load)?;
+    check_unexpected_internal_child_objects_are_corrupt(load)?;
+    check_temp_internal_triggers_are_rejected(load)?;
+    Ok(())
+}
+
+fn check_renamed_metadata_is_corrupt(load: &str) -> Result<(), Box<dyn Error>> {
+    let renamed = FileDatabaseFixture::new(0x0111)?;
+    renamed.execute_script(&format!("{load}\nSELECT lithograph_init();"))?;
+    renamed
+        .execute_script("ALTER TABLE main._lithograph_meta RENAME TO _lithograph_meta_broken;")?;
+    assert_sqlite_error(
+        renamed.execute_script(&format!("{load}\nSELECT lithograph_version();")),
+        "LITHOGRAPH_STORAGE_ERROR",
+    )?;
+    let integrity =
+        renamed.execute_script(&format!("{load}\nSELECT lithograph_integrity_check();"))?;
+    assert_integrity_failure(&integrity, "renamed metadata table")?;
+    assert_sqlite_error(
+        renamed.execute_script(&format!("{load}\nSELECT lithograph_init();")),
+        "LITHOGRAPH_STORAGE_ERROR",
+    )?;
+    Ok(())
+}
+
+fn check_unexpected_reserved_object_is_corrupt(load: &str) -> Result<(), Box<dyn Error>> {
+    let extra_object = FileDatabaseFixture::new(0x0112)?;
+    extra_object.execute_script(&format!("{load}\nSELECT lithograph_init();"))?;
+    extra_object.execute_script("CREATE TABLE main._lithograph_unexpected(v INTEGER);")?;
+    let integrity =
+        extra_object.execute_script(&format!("{load}\nSELECT lithograph_integrity_check();"))?;
+    assert_integrity_failure(&integrity, "unexpected reserved object")?;
+    assert_sqlite_error(
+        extra_object.execute_script(&format!("{load}\nSELECT lithograph_version();")),
+        "LITHOGRAPH_STORAGE_ERROR",
+    )?;
+    assert_sqlite_error(
+        extra_object.execute_script(&format!("{load}\nSELECT lithograph_init();")),
+        "LITHOGRAPH_STORAGE_ERROR",
+    )?;
+    Ok(())
+}
+
+fn check_unexpected_internal_child_objects_are_corrupt(load: &str) -> Result<(), Box<dyn Error>> {
+    let extra_trigger = FileDatabaseFixture::new(0x0113)?;
+    extra_trigger.execute_script(&format!("{load}\nSELECT lithograph_init();"))?;
+    extra_trigger.execute_script(
+        "CREATE TRIGGER main.user_probe AFTER UPDATE ON _lithograph_meta BEGIN SELECT 1; END;",
+    )?;
+    let integrity =
+        extra_trigger.execute_script(&format!("{load}\nSELECT lithograph_integrity_check();"))?;
+    assert_integrity_failure(&integrity, "unexpected internal-table trigger")?;
+    assert_sqlite_error(
+        extra_trigger.execute_script(&format!("{load}\nSELECT lithograph_version();")),
+        "LITHOGRAPH_STORAGE_ERROR",
+    )?;
+
+    let extra_index = FileDatabaseFixture::new(0x0116)?;
+    extra_index.execute_script(&format!("{load}\nSELECT lithograph_init();"))?;
+    extra_index
+        .execute_script("CREATE INDEX main.user_meta_index ON _lithograph_meta(database_id);")?;
+    let integrity =
+        extra_index.execute_script(&format!("{load}\nSELECT lithograph_integrity_check();"))?;
+    assert_integrity_failure(&integrity, "unexpected internal-table index")?;
+    assert_sqlite_error(
+        extra_index.execute_script(&format!("{load}\nSELECT lithograph_version();")),
+        "LITHOGRAPH_STORAGE_ERROR",
+    )?;
+    Ok(())
+}
+
+fn check_temp_internal_triggers_are_rejected(load: &str) -> Result<(), Box<dyn Error>> {
+    let temp_trigger = InMemoryDatabaseFixture::new(0x0117);
+    let integrity = temp_trigger.execute_script(&format!(
+        "{load}\n\
+         SELECT lithograph_init();\n\
+         CREATE TEMP TRIGGER temp_meta_probe AFTER UPDATE ON main._lithograph_meta BEGIN SELECT 1; END;\n\
+         SELECT lithograph_integrity_check();"
+    ))?;
+    let integrity = integrity
+        .lines()
+        .last()
+        .ok_or("TEMP trigger integrity probe returned no rows")?;
+    assert_integrity_failure(integrity, "TEMP trigger on internal table")?;
+
+    let temp_trigger_version = InMemoryDatabaseFixture::new(0x0118);
+    assert_sqlite_error(
+        temp_trigger_version.execute_script(&format!(
+            "{load}\n\
+             SELECT lithograph_init();\n\
+             CREATE TEMP TRIGGER temp_meta_probe AFTER UPDATE ON main._lithograph_meta BEGIN SELECT 1; END;\n\
+             SELECT lithograph_version();"
+        )),
+        "LITHOGRAPH_STORAGE_ERROR",
+    )?;
+
+    let temp_trigger_init = InMemoryDatabaseFixture::new(0x0119);
+    assert_sqlite_error(
+        temp_trigger_init.execute_script(&format!(
+            "{load}\n\
+             SELECT lithograph_init();\n\
+             CREATE TEMP TRIGGER temp_meta_probe AFTER UPDATE ON main._lithograph_meta BEGIN SELECT 1; END;\n\
+             SELECT lithograph_init();"
+        )),
+        "LITHOGRAPH_STORAGE_ERROR",
+    )?;
+
+    let preinit_temp_trigger = InMemoryDatabaseFixture::new(0x011a);
+    assert_sqlite_error(
+        preinit_temp_trigger.execute_script(&format!(
+            "{load}\n\
+             CREATE TEMP TABLE _lithograph_meta(v INTEGER);\n\
+             CREATE TEMP TRIGGER temp_meta_probe AFTER UPDATE ON temp._lithograph_meta BEGIN SELECT 1; END;\n\
+             SELECT lithograph_init();"
+        )),
+        "LITHOGRAPH_STORAGE_ERROR",
+    )?;
     Ok(())
 }
 
@@ -283,20 +422,46 @@ fn check_temp_schema_shadowing(load: &str) -> Result<(), Box<dyn Error>> {
         &Some(true),
         "TEMP shadow must not leave a half-initialized main database",
     )?;
+
+    let attached = InMemoryDatabaseFixture::new(0x0115);
+    let output = attached.execute_script(&format!(
+        "{load}\n\
+         ATTACH ':memory:' AS aux;\n\
+         CREATE TABLE aux._lithograph_meta(id INTEGER, magic TEXT, database_id TEXT, storage_format INTEGER);\n\
+         SELECT lithograph_init();\n\
+         SELECT count(*) FROM main._lithograph_meta;\n\
+         SELECT count(*) FROM aux._lithograph_meta;"
+    ))?;
+    let lines: Vec<_> = output.lines().collect();
+    require_equal(
+        &lines.len(),
+        &3,
+        "attached-schema shadow probe must return three lines",
+    )?;
+    parse_json(lines[0], "init with attached-schema shadow")?;
+    require_equal(&lines[1], &"1", "init must persist metadata only in main")?;
+    require_equal(
+        &lines[2],
+        &"0",
+        "init must not write attached-schema metadata",
+    )?;
     Ok(())
 }
 
-fn check_higher_format(load: &str) -> Result<(), Box<dyn Error>> {
+fn check_format_boundaries(load: &str) -> Result<(), Box<dyn Error>> {
     let fixture = FileDatabaseFixture::new(0x0106)?;
     fixture.execute_script(&format!("{load}\nSELECT lithograph_init();"))?;
-    fixture.execute_script("UPDATE _lithograph_meta SET storage_format = 2 WHERE id = 1;")?;
+    fixture.execute_script(
+        "UPDATE _lithograph_meta SET storage_format = 2 WHERE id = 1;\
+         CREATE TABLE main._lithograph_future(v INTEGER);",
+    )?;
 
     let version = fixture.execute_script(&format!("{load}\nSELECT lithograph_version();"))?;
     let version = parse_json(&version, "version on newer format")?;
     require_equal(
         &version["storageFormat"]["current"].as_i64(),
         &Some(2),
-        "version must remain readable on a newer format",
+        "version must remain readable on a newer format with unknown future schema objects",
     )?;
     assert_sqlite_error(
         fixture.execute_script(&format!("{load}\nSELECT lithograph_init();")),
@@ -305,6 +470,21 @@ fn check_higher_format(load: &str) -> Result<(), Box<dyn Error>> {
     assert_sqlite_error(
         fixture.execute_script(&format!("{load}\nSELECT lithograph_integrity_check();")),
         "LITHOGRAPH_FORMAT_TOO_NEW",
+    )?;
+
+    let lower = FileDatabaseFixture::new(0x0114)?;
+    lower.execute_script(&format!("{load}\nSELECT lithograph_init();"))?;
+    lower.execute_script("UPDATE _lithograph_meta SET storage_format = 0 WHERE id = 1;")?;
+    assert_sqlite_error(
+        lower.execute_script(&format!("{load}\nSELECT lithograph_version();")),
+        "LITHOGRAPH_STORAGE_ERROR",
+    )?;
+    let integrity =
+        lower.execute_script(&format!("{load}\nSELECT lithograph_integrity_check();"))?;
+    assert_integrity_failure(&integrity, "below-minimum storage format")?;
+    assert_sqlite_error(
+        lower.execute_script(&format!("{load}\nSELECT lithograph_init();")),
+        "LITHOGRAPH_STORAGE_ERROR",
     )?;
     Ok(())
 }

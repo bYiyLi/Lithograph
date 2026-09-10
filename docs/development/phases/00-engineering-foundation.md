@@ -39,7 +39,7 @@ CI 默认执行同一 gate，避免本地/CI 两套标准；除 `cargo fmt` 外�
 
 `Makefile.toml` 使用 `cargo-make 0.37.24` 作为统一质量任务入口，并固定执行：
 
-- `cargo-llvm-cov 0.8.7`：排除仅做命令编排的 `lithograph-test-support/src/bin/` 和 extension 单元测试源文件后，workspace line coverage 不低于 50%、function coverage 不低于 45%、region coverage 不低于 50%；Phase 01 的 SQLite/Native ABI 外部进程验收仍由现有 integration smoke 单独证明，不用 unit coverage 数字替代；
+- `cargo-llvm-cov 0.8.7`：coverage profile 由 Rust unit tests 与真实 instrumented SQLite `.load` / Phase 01 / Native ABI smoke 共同产生；排除仅做命令编排的 `lithograph-test-support/src/bin/` 和 extension 单元测试源文件后，workspace line coverage 不低于 80%、function coverage 不低于 75%、region coverage 不低于 80%，且每个进入报告的 source file line coverage 不低于 50%。Extension 单元测试仍独立执行，但生产 extension coverage 以真实 host SQLite execution path 为主要证据；
 - `cargo-deny 0.20.2`：对当前支持的 macOS arm64/x86_64、Linux arm64/x86_64、Windows x86_64 target graph 执行 RustSec advisory、license allowlist、wildcard dependency、registry/git source policy；重复 dependency version 当前作为 warning 暴露，不因无法由 Lithograph 直接控制的 transitive split 阻塞开发；
 - `cargo-machete 0.9.2`：拒绝 unused Cargo dependency；
 - `Lizard 1.24.0`：production Rust cyclomatic complexity `CCN <= 15`、函数 physical length `<= 100`、参数 `<= 10`（允许冻结的 C ABI surface）；test-support 与 Native ABI C smoke 使用 `CCN <= 20`、函数 physical length `<= 150`、参数 `<= 10`；普通 Rust 函数的 7 参数上限继续由 Clippy hard gate 负责；
@@ -112,7 +112,7 @@ CI 默认执行同一 gate，避免本地/CI 两套标准；除 `cargo fmt` 外�
 - workspace 仅包含 `lithograph-core`、`lithograph-extension`、`lithograph-test-support` 三个当前有明确职责的 crate；
 - Extension 使用 `rusqlite 0.40.1` 的 `loadable_extension`、`functions` 与 `vtab` feature，feature tree 已验证不存在 bundled SQLite，artifact dependency inspection 也未发现 private SQLite runtime linkage；
 - `scripts/ci.sh` 是本地与 CI 共享 gate，并验证 SQLite `3.45.0+`、FTS5、thread-safe 与 loadable-extension runtime requirement；所有会解析 dependency graph 的 Cargo build/test/run gate 使用 `--locked`，已用 stale `Cargo.lock` 负向探针确认会直接失败而不会静默改写 lockfile；
-- `cargo make quality` 是维护性与 supply-chain quality 的统一入口：Clippy + Lizard 负责 lint、cognitive/cyclomatic complexity、函数体量与 unsafe discipline，`jscpd-rs` 负责 production clone/duplicate gate，`cargo-llvm-cov` 负责 coverage baseline，`cargo-deny` 负责 advisory/license/source policy，`cargo-machete` 负责 unused dependency，Rustdoc warnings 与 Rust file budget 进入同一 gate；仓库不维护第二套通用静态分析实现；
+- `cargo make quality` 是维护性与 supply-chain quality 的统一入口：Clippy + Lizard 负责 lint、cognitive/cyclomatic complexity、函数体量与 unsafe discipline，`jscpd-rs` 负责 production clone/duplicate gate，`cargo-llvm-cov` 把 unit test 与真实 SQLite `.load` / Phase 01 / Native ABI path 合并为 production coverage baseline，`cargo-deny` 负责 advisory/license/source policy，`cargo-machete` 负责 unused dependency，Rustdoc warnings 与 Rust file budget 进入同一 gate；仓库不维护第二套通用静态分析实现；
 - 当前开发机使用支持 `.load` 的 SQLite 3.51.0 对真实 `lithograph` shared library 完成 load smoke；系统自带 `OMIT_LOAD_EXTENSION` 的 SQLite 不作为合格 runtime；
 - file / memory / corruption / crash fixture、runtime inspection、compatibility result comparator 与 machine-readable report 均有自动化测试；fixture/report boundary 会拒绝空 inventory、duplicate ID、mixed profile、row width mismatch、矛盾 parse expectation 与非法 error location，而当前 `CY25-2026.08` 11 个 fixture 已通过同一 validation；
 - openCypher TCK 固定为 upstream `2024.3` / `677cbafabb8c3c5eed458fd3b1ec0daec8d67d23`，vendored `LICENSE`、`NOTICE`、feature 与 graph data 已与 upstream 逐字节核对；`.gitattributes` 禁止该目录的 Git text normalization，`MANIFEST.sha256` + `scripts/check-vendor.py` 在默认 gate 中同时验证固定 source/tag/commit/content/license revision metadata 和 227 个 upstream 文件；错误 commit metadata 的负向探针会被明确拒绝；

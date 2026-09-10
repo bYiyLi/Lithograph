@@ -105,14 +105,59 @@ command = "cargo"
 args = ["deny", "check"]
 
 [tasks.quality-coverage]
-command = "cargo"
-args = [
-    "llvm-cov",
-    "--locked",
-    "--workspace",
-    "--all-features",
-    "--ignore-filename-regex", "crates/lithograph-test-support/src/bin/|crates/lithograph-extension/src/tests.rs",
-    "--fail-under-regions", "50",
-    "--fail-under-functions", "45",
-    "--fail-under-lines", "50",
-]
+script = '''
+set -eu
+
+# Keep extension unit tests in the quality gate, but measure production
+# coverage from the same real SQLite load/ABI paths used by Phase 01.
+cargo test --locked -p lithograph-extension --all-features
+
+base_target=${CARGO_TARGET_DIR:-target}
+coverage_target="$base_target/llvm-cov-integration"
+rm -rf "$coverage_target"
+export CARGO_TARGET_DIR="$coverage_target"
+
+if [ -z "${LITHOGRAPH_SQLITE3:-}" ]; then
+  for candidate in /opt/homebrew/opt/sqlite/bin/sqlite3 /usr/local/opt/sqlite/bin/sqlite3 "$(command -v sqlite3 2>/dev/null || true)"; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+      LITHOGRAPH_SQLITE3="$candidate"
+      break
+    fi
+  done
+fi
+if [ -z "${LITHOGRAPH_SQLITE3:-}" ]; then
+  echo "quality coverage requires a sqlite3 runtime" >&2
+  exit 1
+fi
+export LITHOGRAPH_SQLITE3
+
+eval "$(cargo llvm-cov show-env --sh)"
+cargo test --locked -p lithograph-core -p lithograph-test-support --all-features
+cargo build --locked -p lithograph-extension
+
+case "$(uname -s)" in
+  Darwin)
+    built_extension="$CARGO_TARGET_DIR/debug/liblithograph.dylib"
+    extension="$CARGO_TARGET_DIR/debug/lithograph.dylib"
+    ;;
+  Linux)
+    built_extension="$CARGO_TARGET_DIR/debug/liblithograph.so"
+    extension="$CARGO_TARGET_DIR/debug/lithograph.so"
+    ;;
+  *)
+    echo "quality coverage integration is supported on macOS and Linux" >&2
+    exit 2
+    ;;
+esac
+
+cp "$built_extension" "$extension"
+cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase01 -- "$extension"
+scripts/native-abi-smoke.sh "$extension"
+
+cargo llvm-cov report \
+  --ignore-filename-regex 'crates/lithograph-test-support/src/bin/|crates/lithograph-extension/src/tests.rs' \
+  --fail-under-regions 80 \
+  --fail-under-functions 75 \
+  --fail-under-lines 80 \
+  --fail-under-file-lines 50
+'''

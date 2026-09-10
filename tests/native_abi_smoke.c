@@ -7,6 +7,7 @@
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#include <unistd.h>
 #endif
 
 #include "lithograph.h"
@@ -138,6 +139,35 @@ static int deny_meta_insert_and_rollback_to(
         && strcmp(arg1, "ROLLBACK") == 0
         && strncmp(arg2, "lithograph_invocation_", 22) == 0
     ) {
+        return SQLITE_DENY;
+    }
+    return SQLITE_OK;
+}
+
+static int deny_meta_insert_rollback_to_and_full_rollback(
+    void *data,
+    int action,
+    const char *arg1,
+    const char *arg2,
+    const char *database,
+    const char *trigger
+) {
+    (void)data;
+    (void)database;
+    (void)trigger;
+    if (action == SQLITE_INSERT && arg1 != NULL && strcmp(arg1, "_lithograph_meta") == 0) {
+        return SQLITE_DENY;
+    }
+    if (
+        action == SQLITE_SAVEPOINT
+        && arg1 != NULL
+        && arg2 != NULL
+        && strcmp(arg1, "ROLLBACK") == 0
+        && strncmp(arg2, "lithograph_invocation_", 22) == 0
+    ) {
+        return SQLITE_DENY;
+    }
+    if (action == SQLITE_TRANSACTION && arg1 != NULL && strcmp(arg1, "ROLLBACK") == 0) {
         return SQLITE_DENY;
     }
     return SQLITE_OK;
@@ -278,6 +308,32 @@ static void check_rollback_to_fault_cleanup(const char *path) {
     sqlite3_close(db);
 }
 
+static void check_full_rollback_fault_discards_connection(const char *path) {
+    sqlite3 *db = NULL;
+    require(sqlite3_open(":memory:", &db) == SQLITE_OK, "failed to open full-rollback-fault database");
+    load_extension(db, path);
+    require(
+        sqlite3_set_authorizer(db, deny_meta_insert_rollback_to_and_full_rollback, NULL) == SQLITE_OK,
+        "failed to set full-rollback-fault authorizer"
+    );
+
+    char *error = NULL;
+    int rc = sqlite3_exec(db, "SELECT lithograph_init();", NULL, NULL, &error);
+    require(rc != SQLITE_OK, "full-rollback-fault init must fail");
+    require(
+        error != NULL && strstr(error, "LITHOGRAPH_INTERNAL_ERROR") != NULL,
+        "full-rollback failure must surface INTERNAL_ERROR"
+    );
+    require(
+        strstr(error, "full SQLite rollback also failed") != NULL,
+        "full-rollback failure must report that cleanup could not be completed"
+    );
+    sqlite3_free(error);
+
+    /* The contract requires callers to discard the connection after this path. */
+    sqlite3_close(db);
+}
+
 static void check_release_fault_aborts_outer_transaction(const char *path) {
     sqlite3 *db = NULL;
     require(sqlite3_open(":memory:", &db) == SQLITE_OK, "failed to open outer-release-fault database");
@@ -332,6 +388,80 @@ static void check_release_fault_aborts_outer_transaction(const char *path) {
     sqlite3_close(db);
 }
 
+static void check_busy_error_contract(const char *path) {
+    char database_path[1024];
+#ifdef _WIN32
+    char temp_directory[MAX_PATH];
+    DWORD temp_length = GetTempPathA(MAX_PATH, temp_directory);
+    require(temp_length > 0 && temp_length < MAX_PATH, "failed to resolve Windows temporary directory");
+    int written = snprintf(
+        database_path,
+        sizeof(database_path),
+        "%slithograph-native-busy-%lu.db",
+        temp_directory,
+        (unsigned long)GetCurrentProcessId()
+    );
+#else
+    const char *temp_directory = getenv("TMPDIR");
+    if (temp_directory == NULL || temp_directory[0] == '\0') {
+        temp_directory = "/tmp";
+    }
+    int written = snprintf(
+        database_path,
+        sizeof(database_path),
+        "%s/lithograph-native-busy-%lu.db",
+        temp_directory,
+        (unsigned long)getpid()
+    );
+#endif
+    require(written > 0 && (size_t)written < sizeof(database_path), "temporary database path is too long");
+    (void)remove(database_path);
+
+    sqlite3 *writer = NULL;
+    sqlite3 *reader = NULL;
+    require(sqlite3_open(database_path, &writer) == SQLITE_OK, "failed to open BUSY writer database");
+    require(sqlite3_open(database_path, &reader) == SQLITE_OK, "failed to open BUSY reader database");
+    load_extension(writer, path);
+    load_extension(reader, path);
+    require(sqlite3_busy_timeout(reader, 0) == SQLITE_OK, "failed to disable BUSY timeout");
+
+    char *error = NULL;
+    require(
+        sqlite3_exec(writer, "SELECT lithograph_init();", NULL, NULL, &error) == SQLITE_OK,
+        error == NULL ? "BUSY fixture init failed" : error
+    );
+    sqlite3_free(error);
+
+    sqlite3_stmt *statement = NULL;
+    require(
+        sqlite3_prepare_v2(reader, "SELECT lithograph_version();", -1, &statement, NULL) == SQLITE_OK,
+        "failed to prepare BUSY version probe"
+    );
+    require(
+        sqlite3_exec(writer, "BEGIN EXCLUSIVE;", NULL, NULL, &error) == SQLITE_OK,
+        error == NULL ? "failed to acquire BUSY fixture lock" : error
+    );
+    sqlite3_free(error);
+
+    int rc = sqlite3_step(statement);
+    require(rc == SQLITE_BUSY || rc == SQLITE_LOCKED, "locked metadata read must preserve SQLite BUSY/LOCKED code");
+    require(
+        strstr(sqlite3_errmsg(reader), "LITHOGRAPH_BUSY") != NULL,
+        "locked metadata read must surface stable LITHOGRAPH_BUSY error text"
+    );
+    sqlite3_finalize(statement);
+
+    error = NULL;
+    require(
+        sqlite3_exec(writer, "ROLLBACK;", NULL, NULL, &error) == SQLITE_OK,
+        error == NULL ? "failed to release BUSY fixture lock" : error
+    );
+    sqlite3_free(error);
+    sqlite3_close(reader);
+    sqlite3_close(writer);
+    (void)remove(database_path);
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) {
         fprintf(stderr, "usage: native-abi-smoke <extension-path>\n");
@@ -349,9 +479,27 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+#ifdef _WIN32
+    FARPROC execute_symbol = load_symbol(library, "lithograph_v1_execute");
+    FARPROC validate_symbol = load_symbol(library, "lithograph_v1_validate");
+    FARPROC free_symbol = load_symbol(library, "lithograph_v1_free");
+    require(execute_symbol != NULL, "missing lithograph_v1_execute export");
+    require(validate_symbol != NULL, "missing lithograph_v1_validate export");
+    require(free_symbol != NULL, "missing lithograph_v1_free export");
+    require(sizeof(execute_fn) == sizeof(execute_symbol), "unexpected Windows function-pointer size");
+    require(sizeof(validate_fn) == sizeof(validate_symbol), "unexpected Windows function-pointer size");
+    require(sizeof(free_fn) == sizeof(free_symbol), "unexpected Windows function-pointer size");
+    execute_fn execute = NULL;
+    validate_fn validate = NULL;
+    free_fn lithograph_free = NULL;
+    memcpy(&execute, &execute_symbol, sizeof(execute));
+    memcpy(&validate, &validate_symbol, sizeof(validate));
+    memcpy(&lithograph_free, &free_symbol, sizeof(lithograph_free));
+#else
     execute_fn execute = (execute_fn)load_symbol(library, "lithograph_v1_execute");
     validate_fn validate = (validate_fn)load_symbol(library, "lithograph_v1_validate");
     free_fn lithograph_free = (free_fn)load_symbol(library, "lithograph_v1_free");
+#endif
     require(execute != NULL, "missing lithograph_v1_execute export");
     require(validate != NULL, "missing lithograph_v1_validate export");
     require(lithograph_free != NULL, "missing lithograph_v1_free export");
@@ -439,7 +587,9 @@ int main(int argc, char **argv) {
     check_init_fault_rollback(path);
     check_release_fault_cleanup(path);
     check_rollback_to_fault_cleanup(path);
+    check_full_rollback_fault_discards_connection(path);
     check_release_fault_aborts_outer_transaction(path);
+    check_busy_error_contract(path);
     close_library(library);
     return 0;
 }

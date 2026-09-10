@@ -126,6 +126,8 @@ SQLite CLI 的 `.load` 已处理 extension loading。其它 host application 必
 
 Lithograph v1 的 canonical graph storage 固定属于目标 connection 的 SQLite `main` database。即使该 connection 存在 TEMP object 或 `ATTACH` 的其它 database，所有 `_lithograph_*` canonical object 的检查、创建和读写都显式限定 `main`，TEMP / attached 同名 object 不得 shadow Lithograph storage。若要把另一个 SQLite 文件作为独立 Lithograph database 使用，应让该文件作为另一个 connection 的 `main` 打开；v1 不通过同一 connection 的 attached schema 承载第二个 graph repository。
 
+`_lithograph_` internal namespace 的保留遵循 SQLite identifier 的大小写不敏感语义：`_lithograph_*`、`_LITHOGRAPH_*` 等大小写变体属于同一 reserved namespace，不能借大小写绕过 collision/integrity 检查。每个 storage format 都定义 exact canonical internal-schema inventory；除该 format 明确定义的 table/index/trigger 等 schema object 外，`main` reserved namespace 中的额外 object，以及挂接在 canonical internal table 上但不属于该 format 的 trigger/index，均视为内部结构损坏。普通 TEMP 同名 table/view 仍不得 shadow `main` canonical storage；但 SQLite 允许 connection-local TEMP trigger 挂接到非 TEMP table，因此在当前 Extension 可理解的 initialized format 上，任何 target table 名落入 reserved namespace 的 TEMP trigger 都视为 unsafe connection state 并由 integrity/version/init 拒绝，避免 TEMP trigger 截获 canonical internal write。更高且当前无法理解的 storage format 仍优先保持前述 version-discovery / `FORMAT_TOO_NEW` contract。
+
 `.load` 只注册 Extension API，不修改数据库内容。`lithograph_init()` 在当前 database 内原子创建或迁移 `_lithograph_*` 内部结构，并创建表示空图的 Root Commit 与默认 `main` Branch。
 
 首次初始化生成一个 RFC 9562 UUID 作为 `databaseId`，保存在 `_lithograph_meta`，在该 database 的整个生命周期和 storage migration 中保持不变。`storageFormat` 首版固定为 `1`。
@@ -134,9 +136,13 @@ Lithograph v1 的 canonical graph storage 固定属于目标 connection 的 SQLi
 
 `_lithograph_meta` 中必须存在 Lithograph magic marker、`databaseId` 与 `storageFormat` 才视为已初始化。如果数据库里已经存在任意 `_lithograph_*` user object，但缺少有效 marker，`lithograph_init()` 返回 `STORAGE_ERROR`，不覆盖、不删除、不迁移这些对象。Lithograph 不依赖宿主 `PRAGMA foreign_keys` 是否开启来维持内部正确性；所有 canonical referential invariants 由 Engine 明确验证，SQLite physical constraints 只作为附加防线。
 
+“未初始化”只表示 `main` 中既不存在有效 `_lithograph_meta`，也不存在任何 reserved internal-schema evidence。若 metadata 缺失、被重命名或损坏，但 `main` 中仍存在 reserved object / canonical-internal child object，则该 database 属于可检测的损坏/冲突状态而不是 pristine uninitialized：`lithograph_init()` 与 `lithograph_version()` 返回 `STORAGE_ERROR`；`lithograph_integrity_check()` 在仍可完成检查时返回 `ok: false` 与结构化 `STORAGE_ERROR`。
+
 Lithograph 不使用 `PRAGMA user_version`，避免占用宿主应用的数据库版本字段；内部格式版本保存在 `_lithograph_meta`。
 
 除 `lithograph_version()` 外，所有要求 graph state 的 API 在尚未执行 `lithograph_init()` 时返回 `NOT_INITIALIZED`。`lithograph_version()` 不要求先初始化，并分别返回 Extension version、ABI version、支持的 storage-format range 与当前 database 的 storage-format version；`main` 中不存在 Lithograph metadata 时当前 format 与 `databaseId` 为 `null`，更高但 marker 可读的 format 仍报告其实际版本。若 metadata 已存在但损坏，或 metadata 读取本身发生 `BUSY` / resource / I/O 等错误，则返回对应稳定 error，不把失败静默伪装成未初始化。
+
+若 marker 可读但 `storageFormat` 低于当前 Extension 的 minimum supported format，只有存在该旧 format 到当前 format 的显式 migration path 时，`lithograph_init()` 才可以在第 14.3 节 transaction contract 下迁移；没有已实现 migration path 时按内部格式不兼容/损坏返回 `STORAGE_ERROR`。`lithograph_version()` 不把这种低于 minimum 的状态当作正常可用 database 返回成功 JSON。高于 maximum 的可读 format 仍按前述规则报告实际版本，由需要理解内部语义的 API 返回 `FORMAT_TOO_NEW`。
 
 SQL information/init API 返回 JSON object：
 
@@ -999,6 +1005,7 @@ Native API 返回 SQLite primary result code + 结构化 `error_json`；SQL Brid
 
 `lithograph_integrity_check()` 至少验证：
 
+- 当前 storage format 的 canonical internal-schema inventory 完整且无额外 reserved object、大小写变体 collision 或未声明的 internal-table child trigger/index；
 - Branch ref 指向存在 Commit；
 - Commit parents、Layer、Schema object 均存在；
 - Commit / Layer / Schema hash 可重算且匹配；
@@ -1060,6 +1067,8 @@ Lithograph 是 embedded extension，没有独立 account / role / authentication
 执行 Cypher、初始化、migration、version mutation 和 integrity-maintenance 的 SQL entrypoints 注册为 direct-only surface，不能从持久化 trigger/view/schema expression 隐式触发。纯信息函数只有在确认无副作用后才可注册为 innocuous。
 
 `_lithograph_*` 是内部表。直接 SQL 修改这些表不属于公开 API；由于数据库文件所有者最终拥有 SQLite 全权限，Lithograph 不伪装成能阻止文件所有者篡改，而通过 hash、referential integrity 和 `lithograph_integrity_check()` 检测损坏。
+
+该 integrity contract 证明 database 内仍存在的 canonical evidence 是否自洽，不提供独立于数据库文件的 authenticity / anti-tamper trust anchor。拥有文件全权限的主体若删除全部 Lithograph internal evidence，结果在单文件内部与从未初始化的 pristine database 不可区分；若同时自洽重写全部 canonical data/hash，也不能仅靠同一文件证明其历史真实性。需要这种外部真实性保证的部署必须由宿主另行提供 trusted backup、signature/attestation 或其它外部锚点，Lithograph 不在 embedded database 内伪造该能力。
 
 ## 17. Large-scale Invariants
 

@@ -9,6 +9,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install SQLite coverage runtime
+        run: sudo apt-get update && sudo apt-get install -y sqlite3 libsqlite3-dev
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.98.1 --profile minimal --component clippy --component rustfmt --component llvm-tools-preview
       - name: Install pinned quality tools

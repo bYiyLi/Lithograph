@@ -98,7 +98,7 @@ if ($LASTEXITCODE -ne 0) {
 $sqliteObj = Join-Path $root "sqlite3-native.obj"
 $nativeObj = Join-Path $root "native-abi-smoke.obj"
 Invoke-VcCommand "cd /d `"$root`" && cl /nologo /c /O2 /w /DSQLITE_THREADSAFE=1 /DSQLITE_ENABLE_FTS5 `"$sqliteC`" /Fo`"$sqliteObj`""
-Invoke-VcCommand "cd /d `"$root`" && cl /nologo /c /std:c11 /W4 /WX /wd4191 /I`"$lithographInclude`" /I`"$sqliteHeaderDir`" `"$nativeSource`" /Fo`"$nativeObj`""
+Invoke-VcCommand "cd /d `"$root`" && cl /nologo /c /std:c11 /W4 /WX /I`"$lithographInclude`" /I`"$sqliteHeaderDir`" `"$nativeSource`" /Fo`"$nativeObj`""
 Invoke-VcCommand "cd /d `"$root`" && link /nologo `"$nativeObj`" `"$sqliteObj`" /OUT:`"$nativeExe`""
 & $nativeExe $extension
 if ($LASTEXITCODE -ne 0) {

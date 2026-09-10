@@ -94,19 +94,24 @@ Phase 01 固定 symbol、参数、ownership、panic boundary、structured error 
 - [x] `lithograph_init()` 创建 internal metadata 并幂等；
 - [x] init 中途故障 fixture rollback，无 half-schema；
 - [x] 所有 canonical metadata SQL 显式限定 `main` schema；TEMP 同名 `_lithograph_meta` 不能截获 init/read，关闭该 connection 后持久 database 仍保持已初始化；
-- [x] higher format fixture 返回 `FORMAT_TOO_NEW`；
+- [x] reserved `_lithograph_` namespace 按 SQLite identifier 大小写不敏感语义检查；pre-init 大小写变体 collision 不会被覆盖，initialized format 1 的 internal-schema inventory 拒绝额外 reserved object 与未声明的 internal-table trigger/index；普通 TEMP shadow object 不影响 `main`，但 target table 名落入 reserved namespace 的 TEMP trigger 被视为 unsafe connection state 并拒绝；
+- [x] metadata 缺失/重命名但仍存在 reserved evidence 时不得 false-positive 为 pristine `NOT_INITIALIZED`：version/init 返回 `STORAGE_ERROR`，integrity 在可检查时返回 `ok:false`；
+- [x] higher format fixture 保留实际 `lithograph_version().storageFormat.current` 并由需要理解内部语义的 API 返回 `FORMAT_TOO_NEW`；低于 minimum 且无 migration path 的 format 返回/报告 `STORAGE_ERROR`；
 - [x] SQL scalar/rows/validate/version/integrity symbols 可调用；
 - [x] Phase 01 可产生的 init/version/integrity/error JSON shape 与 Design 固定 contract 一致；Phase 03 接入 validate success shape；
 - [x] 可读 metadata 损坏返回 `lithograph_integrity_check() -> {ok:false,...}` 与结构化 errors；schema/marker/row-count corruption 不得 false-positive 为 `ok:true`，`lithograph_version()` 不把损坏静默伪装成未初始化；
 - [x] SQL Bridge 的 query/params/options 类型与 JSON argument failure 统一进入 `LITHOGRAPH_INVALID_ARGUMENT`，不泄漏 rusqlite filter/function parameter error；
+- [x] SQL scalar error boundary 通过 SQLite host API 先设置稳定 `LITHOGRAPH_<CATEGORY>` error text、再设置 primary result code；真实双 connection lock fixture 证明 metadata read 的 `BUSY/LOCKED` 不会被折叠成 `SQLITE_ERROR`；
 - [x] `lithograph_rows` 是 eponymous-only virtual table，query/params/options 使用 hidden columns，cursor 不建立 full-result materialization contract；真实 row streaming acceptance 由 Phase 04 完成；
 - [x] 在 Phase 03–04 real frontend/executor 接入前，已初始化 database 的 Cypher execution/validation surface 统一返回稳定 `SEMANTIC_ERROR`，不存在 query-text special case 或 fake result；
 - [x] 预先存在 `_lithograph_*` object 但无有效 magic marker 的 fixture 返回 `STORAGE_ERROR` 且不覆盖 user object；
 - [x] `lithograph_init()` 在 metadata DDL 后、marker write 前故障时，内部 SAVEPOINT 清除该 invocation 的全部变化；caller-owned outer transaction rollback 同样能撤销成功 init；
 - [x] internal SAVEPOINT `ROLLBACK TO` / `RELEASE` 故障不会静默丢弃 cleanup failure，也不会在 `ROLLBACK TO` 失败后继续 `RELEASE`；无法完成 invocation-local cleanup 时按 Design fail closed 执行 full `ROLLBACK` 并返回 `INTERNAL_ERROR`，autocommit 恢复且 caller-owned outer transaction fallback 行为通过 fault fixture；
+- [x] full-rollback fallback 本身被 SQLite 拒绝时仍返回稳定 `INTERNAL_ERROR`，测试立即丢弃该 connection，不继续依赖其 transaction state；
 - [x] C ABI smoke 通过；
 - [x] Native ABI 的 versioned symbols、misuse handling、structured error allocation/free lifecycle 通过 C caller test；
 - [x] `lithograph_rows` virtual-table callback 在 Lithograph boundary 内捕获 Rust panic 并转换为 `INTERNAL_ERROR`，不依赖 rusqlite vtab wrapper 提供 unwind boundary；Native pointer/length UTF-8 输入在 ABI call 内复制为 owned value，不产生跨调用借用；
+- [x] SQL scalar callback 在 Lithograph boundary 内捕获 panic 并转换为稳定 `LITHOGRAPH_INTERNAL_ERROR`，不把 rusqlite generic unwind error 暴露为公开合同；
 - [x] trigger/view direct-only negative test 通过；
 - [x] Linux/Windows cross-build 通过。
 

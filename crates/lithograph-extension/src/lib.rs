@@ -27,7 +27,6 @@ use std::sync::{Mutex, OnceLock};
 
 use lithograph_core::CYPHER_PROFILE;
 use rusqlite::OptionalExtension as _;
-use rusqlite::functions::{ConnectionRef, Context as FunctionContext, FunctionFlags};
 use rusqlite::vtab::{
     Context as VTabContext, Filters, IndexConstraintOp, IndexInfo, Module, VTab, VTabConfig,
     VTabConnection, VTabCursor,
@@ -40,6 +39,7 @@ const STORAGE_FORMAT_MIN: i64 = 1;
 const STORAGE_FORMAT_MAX: i64 = 1;
 const STORAGE_FORMAT_CURRENT: i64 = 1;
 const META_TABLE: &str = "_lithograph_meta";
+const INTERNAL_PREFIX: &str = "_lithograph_";
 const MAGIC: &str = "lithograph-format-v1";
 const ROWS_MODULE_NAME: &CStr = c"lithograph_rows";
 
@@ -214,19 +214,7 @@ pub unsafe extern "C" fn sqlite3_lithograph_init(
 }
 
 fn extension_init(db: Connection) -> SqliteResult<bool> {
-    let direct = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DIRECTONLY;
-    let innocuous = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS;
-
-    db.create_scalar_function("lithograph_init", 0, direct, sql_init)?;
-    db.create_scalar_function("lithograph", -1, direct, sql_execute)?;
-    db.create_scalar_function("lithograph_validate", 1, innocuous, sql_validate)?;
-    db.create_scalar_function("lithograph_version", 0, innocuous, sql_version)?;
-    db.create_scalar_function(
-        "lithograph_integrity_check",
-        0,
-        innocuous,
-        sql_integrity_check,
-    )?;
+    register_scalar_functions(&db)?;
 
     const ROWS_MODULE: Module<'static, RowsTab> = Module::eponymous_only_module();
     // SAFETY: `db` is a live rusqlite connection for the duration of module
@@ -236,91 +224,6 @@ fn extension_init(db: Connection) -> SqliteResult<bool> {
     db.create_module(ROWS_MODULE_NAME, &ROWS_MODULE, Some(registration))?;
 
     Ok(false)
-}
-
-fn sql_init(ctx: &FunctionContext<'_>) -> SqliteResult<String> {
-    let connection = sql_connection(ctx)?;
-    with_savepoint(&connection, initialize)
-        .map(|value| value.to_string())
-        .map_err(|error| error.to_sqlite_error())
-}
-
-fn sql_execute(ctx: &FunctionContext<'_>) -> SqliteResult<String> {
-    let (query, params, options) = scalar_execution_args(ctx).map_err(|e| e.to_sqlite_error())?;
-    validate_json_object(&params, "params").map_err(|e| e.to_sqlite_error())?;
-    validate_json_object(&options, "options").map_err(|e| e.to_sqlite_error())?;
-    validate_query_ready(ctx, &query)?;
-
-    Err(LithographError::semantic_unavailable().to_sqlite_error())
-}
-
-fn sql_validate(ctx: &FunctionContext<'_>) -> SqliteResult<String> {
-    let query = ctx
-        .get::<String>(0)
-        .map_err(|_| LithographError::invalid_argument("query must be TEXT").to_sqlite_error())?;
-    validate_query_ready(ctx, &query)?;
-
-    Err(LithographError::semantic_unavailable().to_sqlite_error())
-}
-
-fn validate_query_ready(ctx: &FunctionContext<'_>, query: &str) -> SqliteResult<()> {
-    if query.trim().is_empty() {
-        return Err(LithographError::invalid_argument("query must not be empty").to_sqlite_error());
-    }
-    let connection = sql_connection(ctx)?;
-    require_initialized(&connection).map_err(|e| e.to_sqlite_error())?;
-    Ok(())
-}
-
-fn sql_version(ctx: &FunctionContext<'_>) -> SqliteResult<String> {
-    let connection = sql_connection(ctx)?;
-    version_json(&connection)
-        .map(|value| value.to_string())
-        .map_err(|error| error.to_sqlite_error())
-}
-
-fn sql_integrity_check(ctx: &FunctionContext<'_>) -> SqliteResult<String> {
-    let connection = sql_connection(ctx)?;
-    metadata_integrity_json(&connection)
-        .map(|value| value.to_string())
-        .map_err(|error| error.to_sqlite_error())
-}
-
-fn sql_connection<'a>(ctx: &'a FunctionContext<'a>) -> SqliteResult<ConnectionRef<'a>> {
-    // SAFETY: rusqlite creates `FunctionContext` for the active SQLite scalar
-    // callback, so its connection handle remains valid for this invocation.
-    unsafe { ctx.get_connection() }.map_err(|error| {
-        map_sqlite_error(error, "failed to access the SQLite connection").to_sqlite_error()
-    })
-}
-
-fn scalar_execution_args(ctx: &FunctionContext<'_>) -> LithographResult<(String, String, String)> {
-    match ctx.len() {
-        1..=3 => {}
-        _ => {
-            return Err(LithographError::invalid_argument(
-                "lithograph() expects query [, params [, options]]",
-            ));
-        }
-    }
-
-    let query = ctx
-        .get::<String>(0)
-        .map_err(|_| LithographError::invalid_argument("query must be TEXT"))?;
-    let params = if ctx.len() >= 2 {
-        ctx.get::<String>(1)
-            .map_err(|_| LithographError::invalid_argument("params must be JSON TEXT"))?
-    } else {
-        "{}".to_owned()
-    };
-    let options = if ctx.len() >= 3 {
-        ctx.get::<String>(2)
-            .map_err(|_| LithographError::invalid_argument("options must be JSON TEXT"))?
-    } else {
-        "{}".to_owned()
-    };
-
-    Ok((query, params, options))
 }
 
 fn initialize(connection: &Connection) -> LithographResult<Value> {
@@ -348,6 +251,7 @@ fn initialize(connection: &Connection) -> LithographResult<Value> {
                     rusqlite::params![MAGIC, metadata.database_id, metadata.storage_format],
                 )
                 .map_err(|error| map_sqlite_error(error, "failed to persist Lithograph metadata"))?;
+            ensure_current_metadata_integrity(connection)?;
             Ok(init_json(&metadata))
         }
         Err(error) => Err(error),
@@ -365,13 +269,33 @@ fn init_json(metadata: &Metadata) -> Value {
 
 fn version_json(connection: &Connection) -> LithographResult<Value> {
     let metadata = read_metadata(connection)?;
-    if let Some(metadata) = metadata.as_ref()
-        && (STORAGE_FORMAT_MIN..=STORAGE_FORMAT_MAX).contains(&metadata.storage_format)
-    {
+    let Some(metadata) = metadata else {
+        if has_any_internal_object(connection)? {
+            return Err(LithographError::storage(
+                "reserved _lithograph_ schema evidence exists without valid metadata",
+            ));
+        }
+        return Ok(json!({
+            "extension": env!("CARGO_PKG_VERSION"),
+            "abi": ABI_VERSION,
+            "cypherProfile": CYPHER_PROFILE,
+            "storageFormat": {
+                "min": STORAGE_FORMAT_MIN,
+                "max": STORAGE_FORMAT_MAX,
+                "current": Value::Null,
+            },
+            "databaseId": Value::Null,
+        }));
+    };
+    if metadata.storage_format < STORAGE_FORMAT_MIN {
+        return Err(LithographError::storage(format!(
+            "database storage format {} is below supported minimum {} and has no migration path",
+            metadata.storage_format, STORAGE_FORMAT_MIN
+        )));
+    }
+    if metadata.storage_format <= STORAGE_FORMAT_MAX {
         ensure_current_metadata_integrity(connection)?;
     }
-    let current = metadata.as_ref().map(|metadata| metadata.storage_format);
-    let database_id = metadata.map(|metadata| metadata.database_id);
 
     Ok(json!({
         "extension": env!("CARGO_PKG_VERSION"),
@@ -380,9 +304,9 @@ fn version_json(connection: &Connection) -> LithographResult<Value> {
         "storageFormat": {
             "min": STORAGE_FORMAT_MIN,
             "max": STORAGE_FORMAT_MAX,
-            "current": current,
+            "current": metadata.storage_format,
         },
-        "databaseId": database_id,
+        "databaseId": metadata.database_id,
     }))
 }
 
@@ -397,16 +321,6 @@ fn create_metadata_table(connection: &Connection) -> LithographResult<()> {
             );",
         )
         .map_err(|error| map_sqlite_error(error, "failed to create Lithograph metadata"))
-}
-
-fn has_any_internal_object(connection: &Connection) -> LithographResult<bool> {
-    connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE name GLOB '_lithograph_*')",
-            [],
-            |row| row.get::<_, bool>(0),
-        )
-        .map_err(|error| map_sqlite_error(error, "failed to inspect database schema"))
 }
 
 fn read_metadata(connection: &Connection) -> LithographResult<Option<Metadata>> {
@@ -450,262 +364,6 @@ fn require_initialized(connection: &Connection) -> LithographResult<Metadata> {
     ensure_supported_format(&metadata)?;
     ensure_current_metadata_integrity(connection)?;
     Ok(metadata)
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct MetadataColumn {
-    name: String,
-    declared_type: String,
-    not_null: i64,
-    default_value: Option<String>,
-    primary_key: i64,
-    hidden: i64,
-}
-
-fn metadata_integrity_json(connection: &Connection) -> LithographResult<Value> {
-    let object_type = metadata_object_type(connection)?;
-
-    let Some(object_type) = object_type else {
-        return Err(LithographError::not_initialized());
-    };
-
-    let errors = if object_type == "table" {
-        current_metadata_integrity_errors(connection)?
-    } else {
-        vec![LithographError::storage(
-            "Lithograph metadata has an invalid storage object type",
-        )]
-    };
-    if let Some(error) = errors
-        .iter()
-        .find(|error| error.category == ErrorCategory::FormatTooNew)
-    {
-        return Err(error.clone());
-    }
-    let error_values: Vec<_> = errors
-        .into_iter()
-        .map(|error| error.to_json_value())
-        .collect();
-
-    Ok(json!({
-        "ok": error_values.is_empty(),
-        "errors": error_values,
-        "checked": ["metadata"],
-    }))
-}
-
-fn metadata_object_type(connection: &Connection) -> LithographResult<Option<String>> {
-    connection
-        .query_row(
-            "SELECT type FROM main.sqlite_schema WHERE name = ?1 LIMIT 1",
-            [META_TABLE],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|error| map_sqlite_error(error, "failed to inspect Lithograph metadata"))
-}
-
-fn query_metadata_marker(connection: &Connection) -> SqliteResult<Option<(String, String, i64)>> {
-    connection
-        .query_row(
-            "SELECT magic, database_id, storage_format FROM main._lithograph_meta WHERE id = 1",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            },
-        )
-        .optional()
-}
-
-fn ensure_current_metadata_integrity(connection: &Connection) -> LithographResult<()> {
-    if let Some(error) = current_metadata_integrity_errors(connection)?
-        .into_iter()
-        .next()
-    {
-        return Err(error);
-    }
-    Ok(())
-}
-
-fn current_metadata_integrity_errors(
-    connection: &Connection,
-) -> LithographResult<Vec<LithographError>> {
-    let mut errors = Vec::new();
-
-    check_metadata_schema(connection, &mut errors)?;
-    check_metadata_columns(connection, &mut errors)?;
-    check_metadata_row_count(connection, &mut errors)?;
-    check_metadata_marker(connection, &mut errors)?;
-
-    Ok(errors)
-}
-
-fn check_metadata_schema(
-    connection: &Connection,
-    errors: &mut Vec<LithographError>,
-) -> LithographResult<()> {
-    let schema_sql = connection
-        .query_row(
-            "SELECT sql FROM main.sqlite_schema WHERE type = 'table' AND name = ?1",
-            [META_TABLE],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .optional()
-        .map_err(|error| map_sqlite_error(error, "failed to inspect Lithograph metadata schema"))?
-        .flatten();
-    if !schema_sql
-        .as_deref()
-        .is_some_and(metadata_schema_sql_matches)
-    {
-        errors.push(LithographError::storage(
-            "Lithograph metadata table schema does not match storage format 1",
-        ));
-    }
-
-    Ok(())
-}
-
-fn check_metadata_columns(
-    connection: &Connection,
-    errors: &mut Vec<LithographError>,
-) -> LithographResult<()> {
-    let columns = metadata_columns(connection)?;
-    let expected = [
-        ("id", "INTEGER", 0, None, 1, 0),
-        ("magic", "TEXT", 1, None, 0, 0),
-        ("database_id", "TEXT", 1, None, 0, 0),
-        ("storage_format", "INTEGER", 1, None, 0, 0),
-    ];
-    if columns.len() != expected.len()
-        || columns.iter().zip(expected).any(|(actual, expected)| {
-            actual.name != expected.0
-                || actual.declared_type != expected.1
-                || actual.not_null != expected.2
-                || actual.default_value.as_deref() != expected.3
-                || actual.primary_key != expected.4
-                || actual.hidden != expected.5
-        })
-    {
-        errors.push(LithographError::storage(
-            "Lithograph metadata columns do not match storage format 1",
-        ));
-    }
-
-    Ok(())
-}
-
-fn check_metadata_row_count(
-    connection: &Connection,
-    errors: &mut Vec<LithographError>,
-) -> LithographResult<()> {
-    let row_count = connection
-        .query_row("SELECT count(*) FROM main._lithograph_meta", [], |row| {
-            row.get::<_, i64>(0)
-        })
-        .map_err(|error| map_sqlite_error(error, "failed to inspect Lithograph metadata rows"))?;
-    if row_count != 1 {
-        errors.push(LithographError::storage(
-            "Lithograph metadata must contain exactly one marker row",
-        ));
-    }
-
-    Ok(())
-}
-
-fn check_metadata_marker(
-    connection: &Connection,
-    errors: &mut Vec<LithographError>,
-) -> LithographResult<()> {
-    let marker = query_metadata_marker(connection);
-
-    match marker {
-        Ok(Some((magic, database_id, storage_format))) => {
-            validate_metadata_marker(&magic, &database_id, storage_format, errors);
-        }
-        Ok(None) => errors.push(LithographError::storage(
-            "Lithograph metadata is missing its marker row",
-        )),
-        Err(error) => {
-            let mapped = map_sqlite_error(error, "failed to inspect Lithograph metadata marker");
-            if matches!(
-                mapped.category,
-                ErrorCategory::Busy | ErrorCategory::Resource | ErrorCategory::Io
-            ) {
-                return Err(mapped);
-            }
-            errors.push(LithographError::storage(
-                "Lithograph metadata marker does not match storage format 1",
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_metadata_marker(
-    magic: &str,
-    database_id: &str,
-    storage_format: i64,
-    errors: &mut Vec<LithographError>,
-) {
-    if magic != MAGIC {
-        errors.push(LithographError::storage(
-            "Lithograph metadata magic marker is invalid",
-        ));
-    }
-    if !is_canonical_uuid(database_id) {
-        errors.push(LithographError::storage(
-            "Lithograph databaseId is not a canonical RFC 9562 UUID v4",
-        ));
-    }
-    if storage_format > STORAGE_FORMAT_MAX {
-        errors.push(format_too_new_error(storage_format));
-    } else if storage_format < STORAGE_FORMAT_MIN {
-        errors.push(LithographError::storage(format!(
-            "database storage format {storage_format} is below supported minimum {STORAGE_FORMAT_MIN}"
-        )));
-    }
-}
-
-fn metadata_columns(connection: &Connection) -> LithographResult<Vec<MetadataColumn>> {
-    let mut statement = connection
-        .prepare("PRAGMA main.table_xinfo('_lithograph_meta')")
-        .map_err(|error| {
-            map_sqlite_error(error, "failed to inspect Lithograph metadata columns")
-        })?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok(MetadataColumn {
-                name: row.get(1)?,
-                declared_type: row.get(2)?,
-                not_null: row.get(3)?,
-                default_value: row.get(4)?,
-                primary_key: row.get(5)?,
-                hidden: row.get(6)?,
-            })
-        })
-        .map_err(|error| {
-            map_sqlite_error(error, "failed to inspect Lithograph metadata columns")
-        })?;
-
-    rows.collect::<SqliteResult<Vec<_>>>()
-        .map_err(|error| map_sqlite_error(error, "failed to inspect Lithograph metadata columns"))
-}
-
-fn metadata_schema_sql_matches(sql: &str) -> bool {
-    let normalized: String = sql
-        .chars()
-        .filter(|character| !character.is_ascii_whitespace())
-        .flat_map(char::to_lowercase)
-        .collect();
-    normalized
-        == "createtable_lithograph_meta(idintegerprimarykeycheck(id=1),magictextnotnull,database_idtextnotnull,storage_formatintegernotnull)"
-        || normalized
-            == "createtablemain._lithograph_meta(idintegerprimarykeycheck(id=1),magictextnotnull,database_idtextnotnull,storage_formatintegernotnull)"
 }
 
 fn ensure_supported_format(metadata: &Metadata) -> LithographResult<()> {
@@ -877,8 +535,15 @@ fn catch_sqlite_boundary<T>(operation: impl FnOnce() -> SqliteResult<T>) -> Sqli
     }
 }
 
+mod metadata_integrity;
 mod native;
 mod rows;
+mod scalar;
+
+use metadata_integrity::{
+    ensure_current_metadata_integrity, has_any_internal_object, metadata_integrity_json,
+    metadata_object_type, query_metadata_marker,
+};
 
 #[cfg(test)]
 use native::input_utf8;
@@ -887,6 +552,7 @@ pub use native::{
     lithograph_v1_validate,
 };
 use rows::RowsTab;
+use scalar::register_scalar_functions;
 
 #[cfg(test)]
 mod tests;

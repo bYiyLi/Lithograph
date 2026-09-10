@@ -84,3 +84,11 @@ fn virtual_table_panic_guard_converts_panics_to_internal_errors() {
         other => panic!("unexpected panic guard result: {other:?}"),
     }
 }
+
+#[test]
+fn scalar_panic_guard_converts_panics_to_internal_errors() {
+    let error = scalar::catch_scalar_operation::<()>(|| panic!("scalar boundary probe"))
+        .expect_err("panic must become a Lithograph error");
+    assert_eq!(error.category, ErrorCategory::Internal);
+    assert!(error.message.contains("SQLite scalar callback"));
+}
