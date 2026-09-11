@@ -159,6 +159,7 @@ name = "lithograph-test-support"
 version = "0.0.0"
 dependencies = [
  "lithograph-core",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

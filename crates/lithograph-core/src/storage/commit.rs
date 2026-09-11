@@ -20,6 +20,17 @@ pub fn branch_head(connection: &Connection, branch: &str) -> StorageResult<HashI
     HashId::from_slice(&bytes)
 }
 
+/// Returns whether an immutable Commit identity exists without resolving its graph state.
+pub fn commit_exists(connection: &Connection, commit: HashId) -> StorageResult<bool> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM main._lithograph_commits WHERE id = ?1)",
+            [commit.as_bytes().as_slice()],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(StorageError::from)
+}
+
 /// Creates a mutable branch reference at an existing immutable Commit.
 pub fn create_branch(connection: &Connection, name: &str, from: HashId) -> StorageResult<()> {
     if name.is_empty() {

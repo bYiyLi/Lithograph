@@ -14,4 +14,5 @@
 pub const CYPHER_PROFILE: &str = "CY25-2026.08";
 
 pub mod cypher;
+pub mod query;
 pub mod storage;

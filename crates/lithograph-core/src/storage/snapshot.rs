@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use rusqlite::{Connection, OptionalExtension, params};
 
+use super::checkpoint::{SnapshotStatistics, load_checkpoint_statistics};
 use super::layer::{DeltaOp, PropertyDelta, RelationshipDelta, RelationshipRecord, load_layer};
 use super::property::PropertyColumns;
 use super::{
@@ -15,11 +16,15 @@ use super::{
 pub(super) struct Overlay {
     pub(super) nodes: BTreeMap<NodeId, DeltaOp>,
     pub(super) labels: BTreeMap<(NodeId, LabelId), DeltaOp>,
+    pub(super) labels_by_label: BTreeMap<(LabelId, NodeId), DeltaOp>,
     pub(super) relationships: BTreeMap<RelationshipId, RelationshipDelta>,
     pub(super) outgoing:
         BTreeMap<(NodeId, RelationshipTypeId, NodeId, RelationshipId), RelationshipDelta>,
     pub(super) incoming:
         BTreeMap<(NodeId, RelationshipTypeId, NodeId, RelationshipId), RelationshipDelta>,
+    pub(super) outgoing_by_id: BTreeMap<(NodeId, RelationshipId), RelationshipDelta>,
+    pub(super) incoming_by_id: BTreeMap<(NodeId, RelationshipId), RelationshipDelta>,
+    pub(super) incident_by_id: BTreeMap<(NodeId, RelationshipId), RelationshipDelta>,
     pub(super) properties: BTreeMap<(OwnerKind, i64, PropertyKeyId), PropertyDelta>,
 }
 
@@ -65,6 +70,93 @@ impl<'connection> Snapshot<'connection> {
     /// Commit pinned by this snapshot.
     pub fn commit(&self) -> HashId {
         self.commit
+    }
+
+    pub(crate) fn connection_for_query(&self) -> &'connection Connection {
+        self.connection
+    }
+
+    pub(crate) fn statistics(&self) -> StorageResult<Option<SnapshotStatistics>> {
+        let mut statistics = match self.checkpoint {
+            Some(checkpoint) => {
+                let Some(statistics) = load_checkpoint_statistics(self.connection, checkpoint)?
+                else {
+                    return Ok(None);
+                };
+                statistics
+            }
+            None => SnapshotStatistics::default(),
+        };
+        for (&node_id, &op) in &self.overlay.nodes {
+            let before = self.checkpoint_node_exists(node_id)?;
+            adjust_count(&mut statistics.node_count, before, op == DeltaOp::Add);
+        }
+        for (&(node_id, label_id), &op) in &self.overlay.labels {
+            let before = self.checkpoint_label_exists(node_id, label_id)?;
+            let count = statistics.label_counts.entry(label_id).or_default();
+            adjust_count(count, before, op == DeltaOp::Add);
+        }
+        for (&relationship_id, delta) in &self.overlay.relationships {
+            let before_type = self.checkpoint_relationship_type(relationship_id)?;
+            let after_type = (delta.op == DeltaOp::Add).then_some(delta.record.type_id);
+            adjust_count(
+                &mut statistics.relationship_count,
+                before_type.is_some(),
+                after_type.is_some(),
+            );
+            if before_type != after_type {
+                if let Some(type_id) = before_type {
+                    let count = statistics.type_counts.entry(type_id).or_default();
+                    *count = count.saturating_sub(1);
+                }
+                if let Some(type_id) = after_type {
+                    let count = statistics.type_counts.entry(type_id).or_default();
+                    *count = count.saturating_add(1);
+                }
+            }
+        }
+        Ok(Some(statistics))
+    }
+
+    fn checkpoint_node_exists(&self, node_id: NodeId) -> StorageResult<bool> {
+        let Some(checkpoint) = self.checkpoint else {
+            return Ok(false);
+        };
+        let exists: i64 = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM main._lithograph_cp_nodes WHERE commit_id = ?1 AND node_id = ?2)",
+            params![checkpoint.as_bytes().as_slice(), node_id],
+            |row| row.get(0),
+        )?;
+        Ok(exists == 1)
+    }
+
+    fn checkpoint_label_exists(&self, node_id: NodeId, label_id: LabelId) -> StorageResult<bool> {
+        let Some(checkpoint) = self.checkpoint else {
+            return Ok(false);
+        };
+        let exists: i64 = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM main._lithograph_cp_labels WHERE commit_id = ?1 AND node_id = ?2 AND label_id = ?3)",
+            params![checkpoint.as_bytes().as_slice(), node_id, label_id],
+            |row| row.get(0),
+        )?;
+        Ok(exists == 1)
+    }
+
+    fn checkpoint_relationship_type(
+        &self,
+        relationship_id: RelationshipId,
+    ) -> StorageResult<Option<RelationshipTypeId>> {
+        let Some(checkpoint) = self.checkpoint else {
+            return Ok(None);
+        };
+        self.connection
+            .query_row(
+                "SELECT type_id FROM main._lithograph_cp_relationships WHERE commit_id = ?1 AND relationship_id = ?2",
+                params![checkpoint.as_bytes().as_slice(), relationship_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StorageError::from)
     }
 
     /// Returns whether a Node is visible in this snapshot.
@@ -565,17 +657,44 @@ fn checkpoint_property(
 impl Overlay {
     fn apply(&mut self, layer: super::layer::LayerBuilder) {
         self.nodes.extend(layer.nodes);
-        self.labels.extend(layer.labels);
+        for ((node_id, label_id), op) in layer.labels {
+            self.labels.insert((node_id, label_id), op);
+            self.labels_by_label.insert((label_id, node_id), op);
+        }
         for (relationship_id, delta) in layer.relationships {
             if let Some(previous) = self.relationships.get(&relationship_id) {
                 self.outgoing.remove(&outgoing_key(previous.record));
                 self.incoming.remove(&incoming_key(previous.record));
+                self.outgoing_by_id
+                    .remove(&(previous.record.source, relationship_id));
+                self.incoming_by_id
+                    .remove(&(previous.record.target, relationship_id));
+                self.incident_by_id
+                    .remove(&(previous.record.source, relationship_id));
+                self.incident_by_id
+                    .remove(&(previous.record.target, relationship_id));
             }
             self.outgoing.insert(outgoing_key(delta.record), delta);
             self.incoming.insert(incoming_key(delta.record), delta);
+            self.outgoing_by_id
+                .insert((delta.record.source, relationship_id), delta);
+            self.incoming_by_id
+                .insert((delta.record.target, relationship_id), delta);
+            self.incident_by_id
+                .insert((delta.record.source, relationship_id), delta);
+            self.incident_by_id
+                .insert((delta.record.target, relationship_id), delta);
             self.relationships.insert(relationship_id, delta);
         }
         self.properties.extend(layer.properties);
+    }
+}
+
+fn adjust_count(count: &mut u64, before: bool, after: bool) {
+    match (before, after) {
+        (false, true) => *count = count.saturating_add(1),
+        (true, false) => *count = count.saturating_sub(1),
+        _ => {}
     }
 }
 

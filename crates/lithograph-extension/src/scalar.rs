@@ -79,11 +79,7 @@ unsafe extern "C" fn scalar_execute(
         run_scalar(context, argc, argv, |args, connection| {
             let (query, params, options) = execution_args(args)?;
             validate_query_ready(connection, &query)?;
-            cypher::decode_parameters_text(&params)
-                .map_err(|error| LithographError::invalid_argument(error.message))?;
-            validate_json_object(&options, "options")?;
-            validate_cypher(&query)?;
-            Err(LithographError::execution_unavailable())
+            execution::scalar_result(connection, &query, &params, &options)
         });
     }
 }

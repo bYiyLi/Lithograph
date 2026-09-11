@@ -174,6 +174,8 @@ static int deny_meta_insert_rollback_to_and_full_rollback(
 }
 
 static int callback_count = 0;
+static lithograph_event_kind_v1 callback_kinds[8];
+static void *callback_user_data = NULL;
 
 static int event_callback(
     void *user_data,
@@ -181,12 +183,30 @@ static int event_callback(
     const unsigned char *json,
     size_t json_len
 ) {
-    (void)user_data;
-    (void)kind;
     (void)json;
     (void)json_len;
+    callback_user_data = user_data;
+    if (callback_count < (int)(sizeof(callback_kinds) / sizeof(callback_kinds[0]))) {
+        callback_kinds[callback_count] = kind;
+    }
     callback_count += 1;
     return 0;
+}
+
+static int cancel_on_row_callback(
+    void *user_data,
+    lithograph_event_kind_v1 kind,
+    const unsigned char *json,
+    size_t json_len
+) {
+    (void)user_data;
+    (void)json;
+    (void)json_len;
+    if (callback_count < (int)(sizeof(callback_kinds) / sizeof(callback_kinds[0]))) {
+        callback_kinds[callback_count] = kind;
+    }
+    callback_count += 1;
+    return kind == LITHOGRAPH_EVENT_ROW_V1 ? 1 : 0;
 }
 
 static void check_init_fault_rollback(const char *path) {
@@ -462,6 +482,59 @@ static void check_busy_error_contract(const char *path) {
     (void)remove(database_path);
 }
 
+static void check_native_read_events(
+    execute_fn execute,
+    free_fn lithograph_free,
+    sqlite3 *db,
+    const char *query
+) {
+    char *error_json = NULL;
+    callback_count = 0;
+    callback_user_data = NULL;
+    int user_data_marker = 42;
+    int rc = execute(
+        db,
+        query,
+        strlen(query),
+        "{}",
+        2,
+        "{}",
+        2,
+        event_callback,
+        &user_data_marker,
+        &error_json
+    );
+    require(rc == SQLITE_OK, "read execution must succeed after init");
+    require(error_json == NULL, "successful native execution must not allocate error_json");
+    require(callback_count == 3, "RETURN 1 must emit COLUMNS, ROW, SUMMARY");
+    require(callback_kinds[0] == LITHOGRAPH_EVENT_COLUMNS_V1, "first event must be COLUMNS");
+    require(callback_kinds[1] == LITHOGRAPH_EVENT_ROW_V1, "second event must be ROW");
+    require(callback_kinds[2] == LITHOGRAPH_EVENT_SUMMARY_V1, "third event must be SUMMARY");
+    require(callback_user_data == &user_data_marker, "native execute must forward user_data");
+
+    error_json = NULL;
+    callback_count = 0;
+    rc = execute(
+        db,
+        query,
+        strlen(query),
+        "{}",
+        2,
+        "{}",
+        2,
+        cancel_on_row_callback,
+        NULL,
+        &error_json
+    );
+    require(rc == SQLITE_INTERRUPT, "callback cancellation must return SQLITE_INTERRUPT");
+    require_error(error_json, "RESOURCE_ERROR");
+    require(callback_count == 2, "callback cancellation must stop before SUMMARY");
+    require(callback_kinds[0] == LITHOGRAPH_EVENT_COLUMNS_V1, "cancel flow must begin with COLUMNS");
+    require(callback_kinds[1] == LITHOGRAPH_EVENT_ROW_V1, "cancel flow must stop on ROW");
+    lithograph_free(error_json);
+    lithograph_free(NULL);
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) {
         fprintf(stderr, "usage: native-abi-smoke <extension-path>\n");
@@ -561,25 +634,7 @@ int main(int argc, char **argv) {
     require(strstr(error_json, "\"column\":20") != NULL, "parse error must expose stable column");
     lithograph_free(error_json);
 
-    error_json = NULL;
-    callback_count = 0;
-    rc = execute(
-        db,
-        query,
-        strlen(query),
-        "{}",
-        2,
-        "{}",
-        2,
-        event_callback,
-        NULL,
-        &error_json
-    );
-    require(rc == SQLITE_ERROR, "execute must return SQLITE_ERROR until query engine exists");
-    require_error(error_json, "SEMANTIC_ERROR");
-    require(callback_count == 0, "unavailable execution must not emit partial events");
-    lithograph_free(error_json);
-    lithograph_free(NULL);
+    check_native_read_events(execute, lithograph_free, db, query);
 
     sqlite3_close(db);
 

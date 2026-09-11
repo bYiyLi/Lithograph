@@ -115,6 +115,16 @@ impl DurationValue {
         &self.text
     }
 
+    pub(crate) fn from_components(months: i64, days: i64, seconds: i64, nanoseconds: i64) -> Self {
+        Self {
+            text: super::temporal_format::format_duration(months, days, seconds, nanoseconds),
+            months,
+            days,
+            seconds,
+            nanoseconds,
+        }
+    }
+
     pub(crate) fn components(&self) -> (i64, i64, i64, i64) {
         (self.months, self.days, self.seconds, self.nanoseconds)
     }

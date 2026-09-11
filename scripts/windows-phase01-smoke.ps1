@@ -102,6 +102,10 @@ if ($LASTEXITCODE -ne 0) {
 if ($LASTEXITCODE -ne 0) {
     throw "Windows Phase 03 frontend probe failed"
 }
+& cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase04 -- $extension
+if ($LASTEXITCODE -ne 0) {
+    throw "Windows Phase 04 read query probe failed"
+}
 
 $sqliteObj = Join-Path $root "sqlite3-native.obj"
 $nativeObj = Join-Path $root "native-abi-smoke.obj"

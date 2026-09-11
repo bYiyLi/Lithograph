@@ -34,7 +34,7 @@ pub unsafe extern "C" fn lithograph_v1_execute(
     options_json: *const c_char,
     options_len: usize,
     callback: LithographEventCallbackV1,
-    _user_data: *mut c_void,
+    user_data: *mut c_void,
     error_json: *mut *mut c_char,
 ) -> c_int {
     let operation = || {
@@ -47,6 +47,7 @@ pub unsafe extern "C" fn lithograph_v1_execute(
                 NativeTextInput::new(params_json, params_len),
                 NativeTextInput::new(options_json, options_len),
                 callback,
+                user_data,
             )
         }
     };
@@ -98,6 +99,32 @@ unsafe fn native_execute_impl(
     params_json: NativeTextInput,
     options_json: NativeTextInput,
     callback: LithographEventCallbackV1,
+    user_data: *mut c_void,
+) -> LithographResult<()> {
+    validate_native_execute_args(db, callback)?;
+    require_native_connection_registered(db)?;
+    // SAFETY: all three input buffers remain readable for this ABI invocation.
+    let inputs = unsafe { decode_native_execute_inputs(query, params_json, options_json)? };
+    if inputs.query.trim().is_empty() {
+        return Err(LithographError::invalid_argument("query must not be empty"));
+    }
+    // SAFETY: registration proves `db` is a live SQLite connection containing
+    // this extension; rusqlite borrows the handle without taking ownership.
+    let connection = unsafe { Connection::from_handle(db) }
+        .map_err(|error| map_sqlite_error(error, "invalid SQLite connection"))?;
+    let mut execution = execution::AdapterExecution::prepare(
+        &connection,
+        &inputs.query,
+        &inputs.params_json,
+        &inputs.options_json,
+    )?;
+    // SAFETY: callback and user_data originate from the active ABI invocation.
+    unsafe { emit_execution_events(&connection, &mut execution, callback, user_data) }
+}
+
+fn validate_native_execute_args(
+    db: *mut ffi::sqlite3,
+    callback: LithographEventCallbackV1,
 ) -> LithographResult<()> {
     if db.is_null() {
         return Err(LithographError::new(
@@ -113,8 +140,20 @@ unsafe fn native_execute_impl(
             ffi::SQLITE_MISUSE,
         ));
     }
-    require_native_connection_registered(db)?;
+    Ok(())
+}
 
+struct NativeExecuteInputs {
+    query: String,
+    params_json: String,
+    options_json: String,
+}
+
+unsafe fn decode_native_execute_inputs(
+    query: NativeTextInput,
+    params_json: NativeTextInput,
+    options_json: NativeTextInput,
+) -> LithographResult<NativeExecuteInputs> {
     // SAFETY: each pointer/length pair comes directly from the public ABI call
     // and remains readable for this invocation.
     let query = unsafe { input_utf8(query.pointer, query.length, "query")? };
@@ -122,20 +161,89 @@ unsafe fn native_execute_impl(
     let params = unsafe { input_utf8(params_json.pointer, params_json.length, "params_json")? };
     // SAFETY: same ABI lifetime contract as `query` above.
     let options = unsafe { input_utf8(options_json.pointer, options_json.length, "options_json")? };
-    if query.trim().is_empty() {
-        return Err(LithographError::invalid_argument("query must not be empty"));
-    }
-    cypher::decode_parameters_text(&params)
-        .map_err(|error| LithographError::invalid_argument(error.message))?;
-    validate_json_object(&options, "options")?;
-    // SAFETY: registration proves `db` is a live SQLite connection containing
-    // this extension; rusqlite borrows the handle without taking ownership.
-    let connection = unsafe { Connection::from_handle(db) }
-        .map_err(|error| map_sqlite_error(error, "invalid SQLite connection"))?;
-    require_initialized(&connection)?;
-    validate_cypher(&query)?;
+    Ok(NativeExecuteInputs {
+        query,
+        params_json: params,
+        options_json: options,
+    })
+}
 
-    Err(LithographError::execution_unavailable())
+unsafe fn emit_execution_events(
+    connection: &Connection,
+    execution: &mut execution::AdapterExecution,
+    callback: LithographEventCallbackV1,
+    user_data: *mut c_void,
+) -> LithographResult<()> {
+    let columns = serde_json::to_string(execution.columns()).map_err(|error| {
+        LithographError::internal(format!("failed to encode result columns: {error}"))
+    })?;
+    // SAFETY: the callback and user-data pointer come from this ABI invocation.
+    if let Err(error) = unsafe {
+        emit_event(
+            callback,
+            user_data,
+            LithographEventKindV1::Columns,
+            &columns,
+        )
+    } {
+        let _ = execution.cancel(connection);
+        return Err(error);
+    }
+
+    loop {
+        let batch = execution.next_batch(connection, 256)?;
+        for row in &batch.rows {
+            let payload = execution::row_json(row).to_string();
+            // SAFETY: the callback and user-data pointer come from this ABI invocation.
+            let event =
+                unsafe { emit_event(callback, user_data, LithographEventKindV1::Row, &payload) };
+            if let Err(error) = event {
+                let _ = execution.cancel(connection);
+                return Err(error);
+            }
+        }
+        if batch.done {
+            let summary = batch
+                .summary
+                .ok_or_else(|| LithographError::internal("completed query is missing summary"))?;
+            let payload = execution::summary_json(&summary).to_string();
+            // SAFETY: the callback and user-data pointer come from this ABI invocation.
+            return unsafe {
+                emit_event(
+                    callback,
+                    user_data,
+                    LithographEventKindV1::Summary,
+                    &payload,
+                )
+            };
+        }
+    }
+}
+
+unsafe fn emit_event(
+    callback: LithographEventCallbackV1,
+    user_data: *mut c_void,
+    kind: LithographEventKindV1,
+    payload: &str,
+) -> LithographResult<()> {
+    let callback = callback.ok_or_else(|| {
+        LithographError::new(
+            ErrorCategory::InvalidArgument,
+            "callback must not be NULL",
+            ffi::SQLITE_MISUSE,
+        )
+    })?;
+    // SAFETY: caller guarantees callback/user_data originate from the active ABI call;
+    // payload bytes remain live for the duration of this callback invocation.
+    let cancelled = unsafe { callback(user_data, kind, payload.as_ptr(), payload.len()) };
+    if cancelled != 0 {
+        return Err(LithographError::new(
+            ErrorCategory::Resource,
+            "query interrupted by event callback",
+            ffi::SQLITE_INTERRUPT,
+        ));
+    }
+    Ok(())
 }
 
 /// Validates one Cypher query through the stable native ABI v1.

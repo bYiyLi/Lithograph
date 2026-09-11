@@ -1,4 +1,7 @@
 use super::*;
+use std::collections::VecDeque;
+
+const ROWS_PREFETCH: usize = 256;
 
 #[repr(C)]
 pub(super) struct RowsTab {
@@ -87,7 +90,15 @@ unsafe impl<'vtab> VTab<'vtab> for RowsTab {
             Ok(RowsCursor {
                 base: ffi::sqlite3_vtab_cursor::default(),
                 db: self.db,
-                exhausted: true,
+                execution: None,
+                columns_json: "[]".to_owned(),
+                query: String::new(),
+                params: String::new(),
+                options: String::new(),
+                current_row: None,
+                pending_rows: VecDeque::new(),
+                ordinal: 0,
+                execution_done: false,
                 phantom: PhantomData,
             })
         })
@@ -98,8 +109,59 @@ unsafe impl<'vtab> VTab<'vtab> for RowsTab {
 pub(super) struct RowsCursor<'vtab> {
     base: ffi::sqlite3_vtab_cursor,
     db: *mut ffi::sqlite3,
-    exhausted: bool,
+    execution: Option<execution::AdapterExecution>,
+    columns_json: String,
+    query: String,
+    params: String,
+    options: String,
+    current_row: Option<String>,
+    pending_rows: VecDeque<String>,
+    ordinal: i64,
+    execution_done: bool,
     phantom: PhantomData<&'vtab RowsTab>,
+}
+
+impl RowsCursor<'_> {
+    fn advance(&mut self, connection: &Connection) -> LithographResult<()> {
+        self.current_row = None;
+        if let Some(row) = self.pending_rows.pop_front() {
+            self.current_row = Some(row);
+            return Ok(());
+        }
+        if self.execution_done {
+            self.execution = None;
+            return Ok(());
+        }
+        let Some(execution) = self.execution.as_mut() else {
+            return Ok(());
+        };
+        let batch = execution.next_batch(connection, ROWS_PREFETCH)?;
+        self.pending_rows.extend(
+            batch
+                .rows
+                .iter()
+                .map(|row| execution::row_json(row).to_string()),
+        );
+        self.execution_done = batch.done;
+        self.current_row = self.pending_rows.pop_front();
+        if self.current_row.is_none() && self.execution_done {
+            self.execution = None;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for RowsCursor<'_> {
+    fn drop(&mut self) {
+        let Some(mut execution) = self.execution.take() else {
+            return;
+        };
+        // SAFETY: SQLite invokes xClose while the owning VTab connection is live;
+        // `from_handle` borrows the raw handle and never closes it on drop.
+        if let Ok(connection) = unsafe { Connection::from_handle(self.db) } {
+            let _ = execution.cancel(&connection);
+        }
+    }
 }
 
 // SAFETY: `RowsCursor` is `repr(C)` and stores `sqlite3_vtab_cursor` first, as
@@ -146,49 +208,81 @@ unsafe impl VTabCursor for RowsCursor<'_> {
                     LithographError::invalid_argument("query must not be empty").to_sqlite_error()
                 );
             }
-            cypher::decode_parameters_text(&params).map_err(|error| {
-                LithographError::invalid_argument(error.message).to_sqlite_error()
-            })?;
-            validate_json_object(&options, "options").map_err(|e| e.to_sqlite_error())?;
             // SAFETY: `self.db` was captured from the live VTab connection and
             // SQLite invokes this cursor only while that connection is valid.
             let connection = unsafe { Connection::from_handle(self.db) }.map_err(|error| {
                 map_sqlite_error(error, "failed to access the SQLite connection").to_sqlite_error()
             })?;
-            require_initialized(&connection).map_err(|e| e.to_sqlite_error())?;
-            validate_cypher(&query).map_err(|e| e.to_sqlite_error())?;
-
-            self.exhausted = true;
-            Err(LithographError::execution_unavailable().to_sqlite_error())
+            if let Some(mut previous) = self.execution.take() {
+                previous
+                    .cancel(&connection)
+                    .map_err(|e| e.to_sqlite_error())?;
+            }
+            let execution =
+                execution::AdapterExecution::prepare(&connection, &query, &params, &options)
+                    .map_err(|e| e.to_sqlite_error())?;
+            self.columns_json = serde_json::to_string(execution.columns()).map_err(|error| {
+                LithographError::internal(format!("failed to encode result columns: {error}"))
+                    .to_sqlite_error()
+            })?;
+            self.query = query;
+            self.params = params;
+            self.options = options;
+            self.execution = Some(execution);
+            self.current_row = None;
+            self.pending_rows.clear();
+            self.ordinal = 0;
+            self.execution_done = false;
+            self.advance(&connection).map_err(|e| e.to_sqlite_error())
         })
     }
 
     fn next(&mut self) -> SqliteResult<()> {
         catch_sqlite_boundary(|| {
-            self.exhausted = true;
-            Ok(())
+            if self.current_row.is_some() {
+                self.ordinal = self.ordinal.saturating_add(1);
+            }
+            // SAFETY: the cursor retains the live VTab database handle.
+            let connection = unsafe { Connection::from_handle(self.db) }.map_err(|error| {
+                map_sqlite_error(error, "failed to access the SQLite connection").to_sqlite_error()
+            })?;
+            self.advance(&connection).map_err(|e| e.to_sqlite_error())
         })
     }
 
     fn eof(&self) -> bool {
-        self.exhausted
+        self.current_row.is_none()
     }
 
-    fn column(&self, _ctx: &mut VTabContext, _i: c_int) -> SqliteResult<()> {
+    fn column(&self, ctx: &mut VTabContext, i: c_int) -> SqliteResult<()> {
         catch_sqlite_boundary(|| {
-            Err(
+            let current = self.current_row.as_ref().ok_or_else(|| {
                 LithographError::internal("lithograph_rows cursor has no current row")
-                    .to_sqlite_error(),
-            )
+                    .to_sqlite_error()
+            })?;
+            match i {
+                0 => ctx.set_result(&self.ordinal),
+                1 => ctx.set_result(&self.columns_json),
+                2 => ctx.set_result(current),
+                3 => ctx.set_result(&self.query),
+                4 => ctx.set_result(&self.params),
+                5 => ctx.set_result(&self.options),
+                _ => Err(SqliteError::InvalidColumnIndex(
+                    usize::try_from(i).unwrap_or(usize::MAX),
+                )),
+            }
         })
     }
 
     fn rowid(&self) -> SqliteResult<i64> {
         catch_sqlite_boundary(|| {
-            Err(
-                LithographError::internal("lithograph_rows cursor has no current row")
-                    .to_sqlite_error(),
-            )
+            if self.current_row.is_none() {
+                return Err(
+                    LithographError::internal("lithograph_rows cursor has no current row")
+                        .to_sqlite_error(),
+                );
+            }
+            Ok(self.ordinal)
         })
     }
 }

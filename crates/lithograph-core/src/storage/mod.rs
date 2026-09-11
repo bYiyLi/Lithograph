@@ -14,6 +14,7 @@ mod schema;
 mod snapshot;
 mod snapshot_labels;
 mod snapshot_properties;
+mod snapshot_scan;
 mod snapshot_stream;
 mod value;
 
@@ -22,10 +23,11 @@ use std::fmt;
 use rusqlite::Error as SqliteError;
 
 pub use checkpoint::{create_checkpoint, delete_checkpoint};
-pub use commit::{branch_head, commit_layer, create_branch};
+pub use commit::{branch_head, commit_exists, commit_layer, create_branch};
 pub use identity::{
-    allocate_node_id, allocate_relationship_id, intern_label, intern_property_key,
-    intern_relationship_type,
+    allocate_node_id, allocate_relationship_id, find_label, find_property_key,
+    find_relationship_type, intern_label, intern_property_key, intern_relationship_type,
+    label_name, property_key_name, relationship_type_name,
 };
 pub use integrity::{IntegrityIssue, integrity_check, structural_integrity_issues};
 pub use layer::{LayerBuilder, RelationshipRecord};
@@ -47,6 +49,15 @@ pub type RelationshipTypeId = i64;
 /// Positive append-only property-key dictionary identifier.
 pub type PropertyKeyId = i64;
 
+/// Bounded snapshot scan page. `next_after` is the last fully-consumed
+/// database identity and is safe to use as the exclusive cursor for the next
+/// page. `None` means the scan is exhausted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanPage<T> {
+    pub items: Vec<T>,
+    pub next_after: Option<i64>,
+}
+
 /// Stable 256-bit content identifier used by Layer, Schema, and Commit objects.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct HashId([u8; 32]);
@@ -63,6 +74,21 @@ impl HashId {
             .try_into()
             .map_err(|_| StorageError::corrupt("content hash must contain exactly 32 bytes"))?;
         Ok(Self(array))
+    }
+
+    /// Parses a public 64-character hexadecimal Commit identifier.
+    pub fn from_hex(text: &str) -> StorageResult<Self> {
+        if text.len() != 64 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(StorageError::not_found(format!("Commit {text}")));
+        }
+        let mut bytes = [0_u8; 32];
+        for (index, chunk) in text.as_bytes().as_chunks::<2>().0.iter().enumerate() {
+            let pair = std::str::from_utf8(chunk)
+                .map_err(|_| StorageError::not_found(format!("Commit {text}")))?;
+            bytes[index] = u8::from_str_radix(pair, 16)
+                .map_err(|_| StorageError::not_found(format!("Commit {text}")))?;
+        }
+        Ok(Self(bytes))
     }
 
     /// Returns the raw digest bytes.

@@ -25,7 +25,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use lithograph_core::{CYPHER_PROFILE, cypher, storage};
+use lithograph_core::{CYPHER_PROFILE, cypher, query, storage};
 use rusqlite::OptionalExtension as _;
 use rusqlite::vtab::{
     Context as VTabContext, Filters, IndexConstraintOp, IndexInfo, Module, VTab, VTabConfig,
@@ -45,6 +45,15 @@ const ROWS_MODULE_NAME: &CStr = c"lithograph_rows";
 
 static NEXT_SAVEPOINT: AtomicU64 = AtomicU64::new(1);
 static REGISTERED_CONNECTIONS: OnceLock<Mutex<HashMap<usize, usize>>> = OnceLock::new();
+
+type SqliteIsInterrupted = unsafe extern "C" fn(*mut ffi::sqlite3) -> c_int;
+
+// sqlite3_api_routines is append-only. sqlite3_is_interrupted was appended in
+// SQLite 3.41.0 at zero-based table slot 266. Lithograph requires
+// SQLite >= 3.45, so every supported loadable-extension host provides it even
+// though libsqlite3-sys's conservative default bindings stop at an older slot.
+const SQLITE_API_IS_INTERRUPTED_SLOT: usize = 266;
+static SQLITE_IS_INTERRUPTED: OnceLock<SqliteIsInterrupted> = OnceLock::new();
 
 struct ConnectionRegistration {
     handle: usize,
@@ -88,6 +97,9 @@ enum ErrorCategory {
     Schema,
     NotInitialized,
     InvalidArgument,
+    VersionNotFound,
+    BranchNotFound,
+    TagNotFound,
     FormatTooNew,
     Busy,
     Resource,
@@ -105,6 +117,9 @@ impl ErrorCategory {
             Self::Schema => "SCHEMA_ERROR",
             Self::NotInitialized => "NOT_INITIALIZED",
             Self::InvalidArgument => "INVALID_ARGUMENT",
+            Self::VersionNotFound => "VERSION_NOT_FOUND",
+            Self::BranchNotFound => "BRANCH_NOT_FOUND",
+            Self::TagNotFound => "TAG_NOT_FOUND",
             Self::FormatTooNew => "FORMAT_TOO_NEW",
             Self::Busy => "BUSY",
             Self::Resource => "RESOURCE_ERROR",
@@ -145,14 +160,6 @@ impl LithographError {
         Self::new(
             ErrorCategory::NotInitialized,
             "database has not been initialized with lithograph_init()",
-            ffi::SQLITE_ERROR,
-        )
-    }
-
-    fn execution_unavailable() -> Self {
-        Self::new(
-            ErrorCategory::Semantic,
-            "Cypher execution is not available before the read query engine phase",
             ffi::SQLITE_ERROR,
         )
     }
@@ -211,12 +218,56 @@ pub unsafe extern "C" fn sqlite3_lithograph_init(
 ) -> c_int {
     // SAFETY: SQLite is the only caller of this entry point and supplies all
     // pointers according to the loadable-extension ABI documented above.
-    match catch_unwind(AssertUnwindSafe(|| unsafe {
-        Connection::extension_init2(db, pz_err_msg, p_api, extension_init)
+    match catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: SQLite owns `db`, `pz_err_msg`, and `p_api` for this init
+        // call and requires extensions to initialize their API thunk table
+        // before invoking SQLite services.
+        let code = unsafe { Connection::extension_init2(db, pz_err_msg, p_api, extension_init) };
+        if code == ffi::SQLITE_OK && !capture_is_interrupted_api(p_api) {
+            return ffi::SQLITE_ERROR;
+        }
+        code
     })) {
         Ok(code) => code,
         Err(_) => ffi::SQLITE_ERROR,
     }
+}
+
+fn capture_is_interrupted_api(p_api: *mut ffi::sqlite3_api_routines) -> bool {
+    if SQLITE_IS_INTERRUPTED.get().is_some() {
+        return true;
+    }
+    if p_api.is_null() {
+        return false;
+    }
+
+    // SQLite's loadable-extension ABI represents sqlite3_api_routines as an
+    // append-only array of function pointers. The host allocation is larger
+    // than the conservative Rust binding type when loading on SQLite >= 3.41.
+    let slots = p_api.cast::<*const c_void>();
+    // SAFETY: supported hosts are SQLite >= 3.45, whose API table contains
+    // zero-based slot 266 (`sqlite3_is_interrupted`).
+    let slot = unsafe { slots.add(SQLITE_API_IS_INTERRUPTED_SLOT) };
+    // SAFETY: `slot` points inside the live host-owned sqlite3_api_routines
+    // table passed to this extension initialization call.
+    let raw = unsafe { slot.read() };
+    if raw.is_null() {
+        return false;
+    }
+    // SAFETY: SQLite documents slot 266 as
+    // `int (*is_interrupted)(sqlite3*)` from 3.41 onward.
+    let function = unsafe { std::mem::transmute::<*const c_void, SqliteIsInterrupted>(raw) };
+    let _ = SQLITE_IS_INTERRUPTED.set(function);
+    true
+}
+
+fn host_is_interrupted(db: *mut ffi::sqlite3) -> bool {
+    let Some(function) = SQLITE_IS_INTERRUPTED.get() else {
+        return false;
+    };
+    // SAFETY: the function pointer was captured from SQLite's process-lifetime
+    // extension API table, and callers supply a live SQLite connection handle.
+    unsafe { function(db) != 0 }
 }
 
 fn extension_init(db: Connection) -> SqliteResult<bool> {
@@ -461,6 +512,7 @@ fn is_canonical_uuid(value: &str) -> bool {
     bytes[14] == b'4' && matches!(bytes[19], b'8' | b'9' | b'a' | b'b')
 }
 
+#[cfg(test)]
 fn validate_json_object(input: &str, name: &str) -> LithographResult<Value> {
     let value: Value = serde_json::from_str(input).map_err(|_| {
         LithographError::invalid_argument(format!("{name} must contain valid JSON"))
@@ -596,6 +648,7 @@ fn catch_sqlite_boundary<T>(operation: impl FnOnce() -> SqliteResult<T>) -> Sqli
     }
 }
 
+mod execution;
 mod metadata_integrity;
 mod native;
 mod rows;

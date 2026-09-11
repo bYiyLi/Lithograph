@@ -74,7 +74,7 @@ fn run() -> Result<ProbeResult, Box<dyn Error>> {
     checks.push("direct-only-and-innocuous");
 
     check_execution_boundary(&load)?;
-    checks.push("execution-boundary-without-fake-cypher");
+    checks.push("execution-adapters-share-current-engine");
 
     check_stable_sql_errors(&load)?;
     checks.push("stable-sql-error-contract");
@@ -605,9 +605,17 @@ fn check_execution_boundary(load: &str) -> Result<(), Box<dyn Error>> {
     let fixture = FileDatabaseFixture::new(0x0108)?;
     fixture.execute_script(&format!("{load}\nSELECT lithograph_init();"))?;
 
-    assert_sqlite_error(
-        fixture.execute_script(&format!("{load}\nSELECT lithograph('RETURN 1');")),
-        "LITHOGRAPH_SEMANTIC_ERROR",
+    let scalar = fixture.execute_script(&format!("{load}\nSELECT lithograph('RETURN 1');"))?;
+    let scalar = parse_json(&scalar, "scalar read execution")?;
+    require_equal(
+        &scalar["columns"][0].as_str(),
+        &Some("1"),
+        "scalar execution must expose the RETURN column",
+    )?;
+    require_equal(
+        &scalar["rows"][0][0].as_i64(),
+        &Some(1),
+        "scalar execution must return the projected value",
     )?;
     let validation =
         fixture.execute_script(&format!("{load}\nSELECT lithograph_validate('RETURN 1');"))?;
@@ -622,11 +630,12 @@ fn check_execution_boundary(load: &str) -> Result<(), Box<dyn Error>> {
         &Some("CY25-2026.08"),
         "frontend validation must expose the frozen Cypher profile",
     )?;
-    assert_sqlite_error(
-        fixture.execute_script(&format!(
-            "{load}\nSELECT * FROM lithograph_rows('RETURN 1');"
-        )),
-        "LITHOGRAPH_SEMANTIC_ERROR",
+    let rows = fixture.execute_script(&format!(
+        "{load}\nSELECT ordinal, columns, row FROM lithograph_rows('RETURN 1');"
+    ))?;
+    require(
+        rows.contains("0|[\"1\"]|[1]"),
+        "rows execution must stream the same column and value contract",
     )?;
     assert_sqlite_error(
         fixture.execute_script(&format!(

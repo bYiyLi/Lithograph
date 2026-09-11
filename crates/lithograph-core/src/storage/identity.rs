@@ -49,6 +49,48 @@ pub fn intern_property_key(connection: &Connection, name: &str) -> StorageResult
     )
 }
 
+/// Looks up an existing Label dictionary id without allocating one.
+pub fn find_label(connection: &Connection, name: &str) -> StorageResult<Option<LabelId>> {
+    find_name(connection, "_lithograph_labels", name)
+}
+
+/// Looks up an existing Relationship Type dictionary id without allocating one.
+pub fn find_relationship_type(
+    connection: &Connection,
+    name: &str,
+) -> StorageResult<Option<RelationshipTypeId>> {
+    find_name(connection, "_lithograph_rel_types", name)
+}
+
+/// Looks up an existing Property Key dictionary id without allocating one.
+pub fn find_property_key(
+    connection: &Connection,
+    name: &str,
+) -> StorageResult<Option<PropertyKeyId>> {
+    find_name(connection, "_lithograph_prop_keys", name)
+}
+
+/// Resolves a Label dictionary id to its exact stored name.
+pub fn label_name(connection: &Connection, id: LabelId) -> StorageResult<Option<String>> {
+    name_for_id(connection, "_lithograph_labels", id)
+}
+
+/// Resolves a Relationship Type dictionary id to its exact stored name.
+pub fn relationship_type_name(
+    connection: &Connection,
+    id: RelationshipTypeId,
+) -> StorageResult<Option<String>> {
+    name_for_id(connection, "_lithograph_rel_types", id)
+}
+
+/// Resolves a Property Key dictionary id to its exact stored name.
+pub fn property_key_name(
+    connection: &Connection,
+    id: PropertyKeyId,
+) -> StorageResult<Option<String>> {
+    name_for_id(connection, "_lithograph_prop_keys", id)
+}
+
 pub(crate) fn allocate_layer_id(connection: &Connection) -> StorageResult<i64> {
     allocate_id(connection, 6)
 }
@@ -96,4 +138,20 @@ fn intern_name(
     let insert = format!("INSERT INTO main.{table}(id, name) VALUES(?1, ?2)");
     connection.execute(&insert, params![id, name])?;
     Ok(id)
+}
+
+fn find_name(connection: &Connection, table: &str, name: &str) -> StorageResult<Option<i64>> {
+    let select = format!("SELECT id FROM main.{table} WHERE name = ?1");
+    connection
+        .query_row(&select, [name], |row| row.get::<_, i64>(0))
+        .optional()
+        .map_err(StorageError::from)
+}
+
+fn name_for_id(connection: &Connection, table: &str, id: i64) -> StorageResult<Option<String>> {
+    let select = format!("SELECT name FROM main.{table} WHERE id = ?1");
+    connection
+        .query_row(&select, [id], |row| row.get::<_, String>(0))
+        .optional()
+        .map_err(StorageError::from)
 }

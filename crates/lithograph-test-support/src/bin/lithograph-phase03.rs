@@ -46,7 +46,7 @@ fn run() -> Result<ProbeResult, Box<dyn Error>> {
     check_parse_error(&fixture, &load)?;
     check_semantic_error(&fixture, &load)?;
     check_type_error(&fixture, &load)?;
-    check_execution_stays_unavailable(&fixture, &load)?;
+    check_execution_uses_frontend(&fixture, &load)?;
 
     Ok(ProbeResult {
         phase: "03-cypher-frontend-values",
@@ -56,7 +56,7 @@ fn run() -> Result<ProbeResult, Box<dyn Error>> {
             "parse-error-category",
             "semantic-scope-error",
             "type-error-category",
-            "execution-boundary-preserved",
+            "execution-uses-validated-frontend",
         ],
     })
 }
@@ -103,13 +103,15 @@ fn check_type_error(fixture: &FileDatabaseFixture, load: &str) -> Result<(), Box
     )
 }
 
-fn check_execution_stays_unavailable(
+fn check_execution_uses_frontend(
     fixture: &FileDatabaseFixture,
     load: &str,
 ) -> Result<(), Box<dyn Error>> {
-    assert_error(
-        fixture.execute_script(&format!("{load}\nSELECT lithograph('RETURN 1');")),
-        "LITHOGRAPH_SEMANTIC_ERROR",
+    let output = fixture.execute_script(&format!("{load}\nSELECT lithograph('RETURN 1');"))?;
+    let value: Value = serde_json::from_str(&output)?;
+    require(
+        value["columns"][0].as_str() == Some("1") && value["rows"][0][0].as_i64() == Some(1),
+        "read execution must consume the Phase 03 frontend output",
     )
 }
 

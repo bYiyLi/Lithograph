@@ -48,6 +48,26 @@ fn sqlite_error_mapping_preserves_stable_primary_categories() {
 }
 
 #[test]
+fn query_error_mapping_preserves_busy_and_io_categories() {
+    for (code, expected) in [
+        (ffi::SQLITE_BUSY, ErrorCategory::Busy),
+        (ffi::SQLITE_LOCKED, ErrorCategory::Busy),
+        (ffi::SQLITE_IOERR, ErrorCategory::Io),
+        (ffi::SQLITE_CANTOPEN, ErrorCategory::Io),
+        (ffi::SQLITE_READONLY, ErrorCategory::Io),
+    ] {
+        let query_error = query::QueryError {
+            kind: query::QueryErrorKind::Storage,
+            message: "probe".to_owned(),
+            line: None,
+            column: None,
+            sqlite_code: Some(code),
+        };
+        assert_eq!(execution::map_query_error(query_error).category, expected);
+    }
+}
+
+#[test]
 fn native_input_utf8_copies_and_validates_input() {
     let bytes = b"RETURN 1";
     // SAFETY: `bytes` is a live local buffer for the full call.
