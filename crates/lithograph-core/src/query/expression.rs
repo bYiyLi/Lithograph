@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::cypher::{
     self, AstKind, AstNode, CypherComparison, ExpressionKind, LiteralKind, PathValue, Value,
+    unescape_identifier,
 };
 use crate::storage::{RelationshipRecord, Snapshot};
 
@@ -30,6 +31,8 @@ pub(crate) struct BindingRow {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Expr {
     Literal(Value),
+    List(Vec<Expr>),
+    Map(BTreeMap<String, Expr>),
     Variable(String),
     Parameter(String),
     Property(Box<Expr>, String),
@@ -98,10 +101,93 @@ fn compile_expression_kind(node: &AstNode, kind: ExpressionKind) -> QueryResult<
         ExpressionKind::Not => compile_not(node),
         ExpressionKind::Postfix => compile_postfix(node),
         ExpressionKind::FunctionCall => compile_function(node),
+        ExpressionKind::List => compile_list(node),
+        ExpressionKind::Map => compile_map(node),
         _ => Err(QueryError::semantic(format!(
-            "Phase 04 does not execute {kind:?} expressions yet"
+            "Lithograph does not execute {kind:?} expressions yet"
         ))),
     }
+}
+
+fn compile_list(node: &AstNode) -> QueryResult<Expr> {
+    if node
+        .descendants()
+        .any(|child| matches!(child.kind, AstKind::Pattern | AstKind::BindingVariable))
+    {
+        return Err(QueryError::semantic(
+            "list and pattern comprehensions are owned by Phase 06",
+        ));
+    }
+    let Some(arguments) = node
+        .children
+        .iter()
+        .find(|child| matches!(child.kind, AstKind::ArgumentList))
+    else {
+        return Ok(Expr::List(Vec::new()));
+    };
+    arguments
+        .children
+        .iter()
+        .filter(|child| is_expression_value(child))
+        .map(compile_expression)
+        .collect::<QueryResult<Vec<_>>>()
+        .map(Expr::List)
+}
+
+fn compile_map(node: &AstNode) -> QueryResult<Expr> {
+    if node
+        .children
+        .iter()
+        .any(|child| child.kind == AstKind::Variable)
+    {
+        return Err(QueryError::semantic(
+            "map projections are owned by Phase 06",
+        ));
+    }
+    let mut entries = BTreeMap::new();
+    let mut map_entries = Vec::new();
+    collect_map_entries(node, &mut map_entries);
+    for entry in map_entries {
+        let key = entry
+            .children
+            .iter()
+            .find(|child| child.kind == AstKind::MapKey)
+            .and_then(|child| child.text.as_deref())
+            .ok_or_else(|| QueryError::semantic("map entry is missing its key"))?;
+        let key = parse_map_key(key)?;
+        let value = entry
+            .children
+            .iter()
+            .find(|child| is_expression_value(child))
+            .ok_or_else(|| QueryError::semantic("map entry is missing its value"))?;
+        if entries
+            .insert(key.clone(), compile_expression(value)?)
+            .is_some()
+        {
+            return Err(QueryError::semantic(format!(
+                "map literal contains duplicate key {key:?}"
+            )));
+        }
+    }
+    Ok(Expr::Map(entries))
+}
+
+fn collect_map_entries<'a>(node: &'a AstNode, entries: &mut Vec<&'a AstNode>) {
+    for child in &node.children {
+        if child.kind == AstKind::MapEntry {
+            entries.push(child);
+        } else if !matches!(child.kind, AstKind::Expression(ExpressionKind::Map)) {
+            collect_map_entries(child, entries);
+        }
+    }
+}
+
+fn parse_map_key(text: &str) -> QueryResult<String> {
+    let trimmed = text.trim();
+    if trimmed.starts_with('\'') || trimmed.starts_with('"') {
+        return parse_string(trimmed);
+    }
+    Ok(unescape_identifier(trimmed))
 }
 
 fn compile_only_child(node: &AstNode) -> QueryResult<Expr> {
@@ -186,40 +272,53 @@ fn compile_comparison(node: &AstNode) -> QueryResult<Expr> {
         .find(|child| is_expression_value(child))
         .ok_or_else(|| QueryError::semantic("comparison is missing its left operand"))?;
     let left = compile_expression(left_node)?;
-    let suffix = node
+    let suffixes = node
         .children
         .iter()
-        .find(|child| matches!(child.kind, AstKind::ComparisonSuffix));
-    let Some(suffix) = suffix else {
+        .filter(|child| matches!(child.kind, AstKind::ComparisonSuffix))
+        .collect::<Vec<_>>();
+    if suffixes.is_empty() {
         return Ok(left);
-    };
-    let operator = suffix
-        .descendants()
-        .find(|child| matches!(child.kind, AstKind::Operator))
-        .and_then(|node| node.text.as_deref())
-        .ok_or_else(|| QueryError::semantic("comparison is missing its operator"))?;
-    let right_node = suffix
-        .children
-        .iter()
-        .find(|child| is_expression_value(child))
-        .or_else(|| {
-            suffix
-                .descendants()
-                .skip(1)
-                .find(|child| is_expression_value(child))
-        })
-        .ok_or_else(|| QueryError::semantic("comparison is missing its right operand"))?;
-    Ok(Expr::Binary(
-        binary_operator(operator)?,
-        Box::new(left),
-        Box::new(compile_expression(right_node)?),
-    ))
+    }
+    let mut previous = left;
+    let mut result = None;
+    for suffix in suffixes {
+        let operator = suffix
+            .descendants()
+            .find(|child| matches!(child.kind, AstKind::Operator))
+            .and_then(|node| node.text.as_deref())
+            .ok_or_else(|| QueryError::semantic("comparison is missing its operator"))?;
+        let right_node = suffix
+            .children
+            .iter()
+            .find(|child| is_expression_value(child))
+            .or_else(|| {
+                suffix
+                    .descendants()
+                    .skip(1)
+                    .find(|child| is_expression_value(child))
+            })
+            .ok_or_else(|| QueryError::semantic("comparison is missing its right operand"))?;
+        let right = compile_expression(right_node)?;
+        let comparison = Expr::Binary(
+            binary_operator(operator)?,
+            Box::new(previous),
+            Box::new(right.clone()),
+        );
+        result = Some(match result {
+            Some(existing) => Expr::Binary(BinaryOp::And, Box::new(existing), Box::new(comparison)),
+            None => comparison,
+        });
+        previous = right;
+    }
+    result.ok_or_else(|| QueryError::internal("comparison suffix lowering produced no expression"))
 }
 
 fn compile_not(node: &AstNode) -> QueryResult<Expr> {
     let mut expression = compile_only_child(node)?;
     let count = node
-        .descendants()
+        .children
+        .iter()
         .filter(|child| {
             matches!(child.kind, AstKind::Operator)
                 && child
@@ -258,6 +357,21 @@ fn compile_unary(node: &AstNode) -> QueryResult<Expr> {
 }
 
 fn compile_postfix(node: &AstNode) -> QueryResult<Expr> {
+    let postfix_nodes = || node.children.iter().skip(1).flat_map(AstNode::descendants);
+    if postfix_nodes().any(|child| {
+        matches!(
+            child.kind,
+            AstKind::Subscript
+                | AstKind::LabelExpression
+                | AstKind::NameExpression(_)
+                | AstKind::LabelName
+                | AstKind::TypePredicate
+        )
+    }) {
+        return Err(QueryError::semantic(
+            "Phase 04 does not execute subscript, slice, label-predicate, or type-predicate postfix expressions",
+        ));
+    }
     let base = node
         .children
         .iter()
@@ -272,11 +386,7 @@ fn compile_postfix(node: &AstNode) -> QueryResult<Expr> {
         })
         .ok_or_else(|| QueryError::semantic("postfix expression is missing its base"))?;
     let mut expression = compile_expression(base)?;
-    for property in node
-        .descendants()
-        .skip(1)
-        .filter(|child| matches!(child.kind, AstKind::PropertyKey))
-    {
+    for property in postfix_nodes().filter(|child| matches!(child.kind, AstKind::PropertyKey)) {
         expression = Expr::Property(
             Box::new(expression),
             property.text.clone().unwrap_or_default(),
@@ -291,6 +401,15 @@ fn compile_function(node: &AstNode) -> QueryResult<Expr> {
         .find(|child| matches!(child.kind, AstKind::FunctionName))
         .and_then(|child| child.text.clone())
         .ok_or_else(|| QueryError::semantic("function call is missing its name"))?;
+    let supported = matches!(
+        name.to_ascii_lowercase().as_str(),
+        "count" | "elementid" | "labels" | "size" | "type"
+    );
+    if !supported {
+        return Err(QueryError::semantic(format!(
+            "Phase 04 does not execute function {name}"
+        )));
+    }
     if node
         .descendants()
         .any(|child| matches!(child.kind, AstKind::SetQuantifier(_)))
@@ -300,18 +419,29 @@ fn compile_function(node: &AstNode) -> QueryResult<Expr> {
         ));
     }
     let Some(arguments) = node
-        .descendants()
+        .children
+        .iter()
         .find(|child| matches!(child.kind, AstKind::ArgumentList))
     else {
         return Ok(Expr::Function(name, Vec::new()));
     };
-    let args = arguments
-        .children
-        .iter()
-        .filter(|child| is_expression_value(child))
+    let mut argument_nodes = Vec::new();
+    collect_immediate_expression_values(arguments, &mut argument_nodes);
+    let args = argument_nodes
+        .into_iter()
         .map(compile_expression)
         .collect::<QueryResult<Vec<_>>>()?;
     Ok(Expr::Function(name, args))
+}
+
+fn collect_immediate_expression_values<'a>(node: &'a AstNode, output: &mut Vec<&'a AstNode>) {
+    for child in &node.children {
+        if is_expression_value(child) {
+            output.push(child);
+        } else if !matches!(child.kind, AstKind::Subquery(_)) {
+            collect_immediate_expression_values(child, output);
+        }
+    }
 }
 
 fn compile_literal(kind: LiteralKind, text: &str) -> QueryResult<Expr> {
@@ -421,6 +551,21 @@ pub(crate) fn evaluate_with_aliases(
 ) -> QueryResult<Value> {
     match expression {
         Expr::Literal(value) => Ok(value.clone()),
+        Expr::List(items) => items
+            .iter()
+            .map(|item| evaluate_with_aliases(item, snapshot, row, params, aliases))
+            .collect::<QueryResult<Vec<_>>>()
+            .map(Value::List),
+        Expr::Map(entries) => entries
+            .iter()
+            .map(|(key, value)| {
+                Ok((
+                    key.clone(),
+                    evaluate_with_aliases(value, snapshot, row, params, aliases)?,
+                ))
+            })
+            .collect::<QueryResult<BTreeMap<_, _>>>()
+            .map(Value::Map),
         Expr::Variable(name) => match aliases.get(name) {
             Some(value) => Ok(value.clone()),
             None => binding_value(
@@ -565,12 +710,17 @@ fn evaluate_function(
         .map(|arg| evaluate_with_aliases(arg, snapshot, row, params, aliases))
         .collect::<QueryResult<Vec<_>>>()?;
     match (lower.as_str(), values.as_slice()) {
+        ("elementid", [Value::Node(node)]) => Ok(Value::String(node.element_id.clone())),
+        ("elementid", [Value::Relationship(relationship)]) => {
+            Ok(Value::String(relationship.element_id.clone()))
+        }
         ("labels", [Value::Node(node)]) => Ok(Value::List(
             node.labels.iter().cloned().map(Value::String).collect(),
         )),
         ("type", [Value::Relationship(rel)]) => Ok(Value::String(rel.relationship_type.clone())),
         ("size", [Value::List(values)]) => Ok(Value::Integer(values.len() as i64)),
         ("size", [Value::String(value)]) => Ok(Value::Integer(value.chars().count() as i64)),
+        ("elementid" | "labels" | "type" | "size", [Value::Null]) => Ok(Value::Null),
         ("count", _) => Err(QueryError::internal(
             "count() reached scalar expression evaluation",
         )),

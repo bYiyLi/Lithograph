@@ -3,6 +3,7 @@
 mod error;
 mod expression;
 mod graph;
+mod mutation;
 mod options;
 mod plan;
 mod spill;
@@ -15,4 +16,4 @@ pub use plan::{
     LogicalOperator, LogicalPlan, PhysicalOperator, PhysicalPlan, PreparedQuery, prepare,
 };
 pub use stats::PlannerStatistics;
-pub use stream::{QueryBatch, QueryCursor, QueryMetrics, QuerySummary};
+pub use stream::{QueryBatch, QueryCounters, QueryCursor, QueryMetrics, QuerySummary, QueryType};

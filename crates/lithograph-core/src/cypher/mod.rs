@@ -32,6 +32,7 @@ pub use ast::{
 };
 pub use error::{FrontendError, FrontendErrorKind, Span};
 pub use parser::parse;
+pub(crate) use semantic::unescape_identifier;
 pub use semantic::{BindingKind, analyze, validate};
 
 pub use json::{

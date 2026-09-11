@@ -85,6 +85,7 @@ if [ -n "$extension" ]; then
   cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase02 -- "$extension"
   cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase03 -- "$extension"
   cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase04 -- "$extension"
+  cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase05 -- "$extension"
   scripts/sqlite-345-smoke.sh "$extension"
   python3 scripts/check-extension-artifact.py "$extension"
   scripts/native-abi-smoke.sh "$extension"

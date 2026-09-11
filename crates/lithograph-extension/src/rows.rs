@@ -221,6 +221,12 @@ unsafe impl VTabCursor for RowsCursor<'_> {
             let execution =
                 execution::AdapterExecution::prepare(&connection, &query, &params, &options)
                     .map_err(|e| e.to_sqlite_error())?;
+            if execution.is_write() {
+                return Err(execution::map_query_error(query::QueryError::read_only_adapter(
+                    "lithograph_rows is a read-only adapter and does not execute mutating Cypher",
+                ))
+                .to_sqlite_error());
+            }
             self.columns_json = serde_json::to_string(execution.columns()).map_err(|error| {
                 LithographError::internal(format!("failed to encode result columns: {error}"))
                     .to_sqlite_error()

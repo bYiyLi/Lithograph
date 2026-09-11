@@ -13,6 +13,10 @@ use super::graph::{ResolvedGraphView, resolve_commit};
 use super::stats::PlannerStatistics;
 use super::{ExecutionOptions, QueryError, QueryResult};
 
+mod build;
+pub(crate) use build::append_pattern_operators;
+use build::{build_logical, build_physical};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LogicalOperator {
     NodeScan {
@@ -47,6 +51,11 @@ pub enum LogicalOperator {
     Distinct,
     Optional,
     Cartesian,
+    Eager,
+    Mutation {
+        kind: ClauseKind,
+    },
+    Commit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +89,11 @@ pub enum PhysicalOperator {
     Distinct,
     Optional,
     Cartesian,
+    Eager,
+    Mutation {
+        kind: ClauseKind,
+    },
+    Commit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,12 +160,12 @@ pub(crate) struct OrderItem {
     pub descending: bool,
 }
 
-struct ProjectionPlan {
-    projections: Vec<Projection>,
-    order: Vec<OrderItem>,
-    skip: usize,
-    limit: Option<usize>,
-    distinct: bool,
+pub(crate) struct ProjectionPlan {
+    pub(crate) projections: Vec<Projection>,
+    pub(crate) order: Vec<OrderItem>,
+    pub(crate) skip: usize,
+    pub(crate) limit: Option<usize>,
+    pub(crate) distinct: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -167,6 +181,7 @@ pub struct PreparedQuery {
     pub(crate) aggregate: bool,
     pub(crate) params: BTreeMap<String, Value>,
     pub(crate) mode: ExecutionMode,
+    pub(crate) write: Option<super::mutation::PreparedWrite>,
     pub logical: LogicalPlan,
     pub physical: PhysicalPlan,
     pub statistics: PlannerStatistics,
@@ -186,6 +201,34 @@ pub fn prepare(
     let commit = resolve_commit(connection, &options.snapshot)?;
     let graph_view = ResolvedGraphView::resolve(connection, &options.graph_view)?;
     let single = single_query(&ast.root)?;
+    if contains_mutation(single) {
+        let write = super::mutation::prepare_write(connection, single, query, &params, &options)?;
+        let columns = if ast.execution_mode == ExecutionMode::Explain {
+            vec!["plan".to_owned()]
+        } else {
+            write.columns.clone()
+        };
+        let logical = write.logical.clone();
+        let physical = build_physical(&logical, &write.matches_for_explain, false);
+        return Ok(PreparedQuery {
+            commit,
+            graph_view,
+            matches: Vec::new(),
+            projections: Vec::new(),
+            order: Vec::new(),
+            skip: 0,
+            limit: None,
+            distinct: false,
+            aggregate: false,
+            params,
+            mode: ast.execution_mode,
+            write: Some(write),
+            logical,
+            physical,
+            statistics: PlannerStatistics::default(),
+            columns,
+        });
+    }
     let (mut matches, return_clause) = lower_clauses(connection, single)?;
     let ProjectionPlan {
         projections,
@@ -220,10 +263,28 @@ pub fn prepare(
         aggregate,
         params,
         mode,
+        write: None,
         logical,
         physical,
         statistics,
         columns,
+    })
+}
+
+fn contains_mutation(single: &AstNode) -> bool {
+    single.children.iter().any(|clause| {
+        matches!(
+            clause.kind,
+            AstKind::Clause(
+                ClauseKind::Create
+                    | ClauseKind::Insert
+                    | ClauseKind::Merge
+                    | ClauseKind::Set
+                    | ClauseKind::Remove
+                    | ClauseKind::Delete
+                    | ClauseKind::DetachDelete
+            )
+        )
     })
 }
 
@@ -346,7 +407,7 @@ fn output_columns(mode: ExecutionMode, projections: &[Projection]) -> Vec<String
     }
 }
 
-fn lower_match(
+pub(crate) fn lower_match(
     connection: &Connection,
     clause: &AstNode,
     optional: bool,
@@ -607,7 +668,7 @@ fn validate_name_expression(node: &AstNode, node_labels: bool) -> QueryResult<()
     Ok(())
 }
 
-fn lower_projection(
+pub(crate) fn lower_projection(
     clause: &AstNode,
     source: &str,
     params: &BTreeMap<String, Value>,
@@ -822,158 +883,4 @@ fn optimize_node_scan(node: &mut NodeSpec, statistics: &PlannerStatistics) {
         node.scan_label = Some(*label_id);
         node.scan_label_name = node.label_names.get(index).cloned();
     }
-}
-
-fn build_logical(
-    matches: &[MatchStep],
-    sorted: bool,
-    skipped: bool,
-    limited: bool,
-    distinct: bool,
-    aggregate: bool,
-) -> LogicalPlan {
-    let mut operators = Vec::new();
-    let mut bound = BTreeSet::new();
-    for step in matches {
-        if step.optional {
-            operators.push(LogicalOperator::Optional);
-        }
-        append_pattern_operators(step, &mut bound, &mut operators);
-        if step.predicate.is_some() {
-            operators.push(LogicalOperator::Filter);
-        }
-    }
-    if aggregate {
-        operators.push(LogicalOperator::Aggregate);
-    }
-    if distinct {
-        operators.push(LogicalOperator::Distinct);
-    }
-    operators.push(LogicalOperator::Project);
-    if sorted {
-        operators.push(LogicalOperator::Sort);
-    }
-    if skipped {
-        operators.push(LogicalOperator::Skip);
-    }
-    if limited {
-        operators.push(LogicalOperator::Limit);
-    }
-    LogicalPlan { operators }
-}
-
-fn append_pattern_operators(
-    step: &MatchStep,
-    bound: &mut BTreeSet<String>,
-    operators: &mut Vec<LogicalOperator>,
-) {
-    for (index, part) in step.parts.iter().enumerate() {
-        if index > 0 {
-            operators.push(LogicalOperator::Cartesian);
-        }
-        append_pattern_operator(part, bound, operators);
-    }
-}
-
-fn append_pattern_operator(
-    part: &PatternPart,
-    bound: &mut BTreeSet<String>,
-    operators: &mut Vec<LogicalOperator>,
-) {
-    let start = part
-        .start
-        .variable
-        .clone()
-        .unwrap_or_else(|| "_anon".to_owned());
-    if !bound.contains(&start) {
-        operators.push(match &part.start.scan_label_name {
-            Some(label) => LogicalOperator::LabelScan {
-                variable: start.clone(),
-                label: label.clone(),
-            },
-            None => LogicalOperator::NodeScan {
-                variable: start.clone(),
-            },
-        });
-        bound.insert(start.clone());
-    }
-    let (Some(rel), Some(end)) = (&part.relationship, &part.end) else {
-        return;
-    };
-    let target = end
-        .variable
-        .clone()
-        .unwrap_or_else(|| "_anon_target".to_owned());
-    operators.push(if bound.contains(&target) {
-        LogicalOperator::ExpandInto {
-            from: start,
-            relationship: rel.variable.clone(),
-            to: target.clone(),
-        }
-    } else {
-        LogicalOperator::ExpandAll {
-            from: start,
-            relationship: rel.variable.clone(),
-            to: target.clone(),
-        }
-    });
-    bound.insert(target);
-}
-
-fn build_physical(logical: &LogicalPlan, matches: &[MatchStep], sorted: bool) -> PhysicalPlan {
-    let mut operators = Vec::new();
-    let mut relationships = matches
-        .iter()
-        .flat_map(|step| &step.parts)
-        .filter_map(|part| part.relationship.as_ref());
-    for operator in &logical.operators {
-        match operator {
-            LogicalOperator::NodeScan { variable } => operators.push(PhysicalOperator::NodeScan {
-                variable: variable.clone(),
-            }),
-            LogicalOperator::LabelScan { variable, label } => {
-                operators.push(PhysicalOperator::LabelIndexScan {
-                    variable: variable.clone(),
-                    label: label.clone(),
-                })
-            }
-            LogicalOperator::ExpandAll { from, .. } | LogicalOperator::ExpandInto { from, .. } => {
-                let relationship = relationships.next();
-                operators.push(PhysicalOperator::AdjacencySeek {
-                    from: from.clone(),
-                    relationship_type: relationship.and_then(|rel| rel.type_name.clone()),
-                    direction: relationship.map_or(Direction::Outgoing, |rel| rel.direction),
-                });
-            }
-            LogicalOperator::RelationshipScan { variable } => {
-                operators.push(PhysicalOperator::RelationshipScan {
-                    variable: variable.clone(),
-                })
-            }
-            LogicalOperator::Filter => operators.push(PhysicalOperator::Filter),
-            LogicalOperator::Project => operators.push(PhysicalOperator::Project),
-            LogicalOperator::Sort => operators.push(PhysicalOperator::ExternalSort),
-            LogicalOperator::Skip => operators.push(PhysicalOperator::Skip),
-            LogicalOperator::Limit => operators.push(PhysicalOperator::Limit),
-            LogicalOperator::Aggregate => operators.push(PhysicalOperator::Aggregate),
-            LogicalOperator::Distinct => operators.push(PhysicalOperator::Distinct),
-            LogicalOperator::Optional => operators.push(PhysicalOperator::Optional),
-            LogicalOperator::Cartesian => operators.push(PhysicalOperator::Cartesian),
-            LogicalOperator::TypeSeek { relationship_type } => {
-                operators.push(PhysicalOperator::AdjacencySeek {
-                    from: String::new(),
-                    relationship_type: Some(relationship_type.clone()),
-                    direction: Direction::Outgoing,
-                })
-            }
-        }
-    }
-    if sorted
-        && !operators
-            .iter()
-            .any(|operator| matches!(operator, PhysicalOperator::ExternalSort))
-    {
-        operators.push(PhysicalOperator::ExternalSort);
-    }
-    PhysicalPlan { operators }
 }

@@ -126,8 +126,14 @@ fn scope_ast_kind(rule: Rule, pair: &Pair<'_, Rule>) -> Option<AstKind> {
         Rule::when_expression => AstKind::CaseAlternative,
         Rule::let_binding => AstKind::LetBinding,
         Rule::merge_action => AstKind::MergeAction(merge_action_kind(pair)),
+        Rule::set_item => AstKind::SetItem,
         Rule::set_operator => AstKind::SetOperator(set_operator_kind(pair.as_str())),
+        Rule::assignable_property => AstKind::AssignableProperty,
         Rule::label_update => AstKind::LabelUpdate,
+        Rule::remove_item => AstKind::RemoveItem,
+        Rule::property_expression => AstKind::PropertyExpression,
+        Rule::map_entry => AstKind::MapEntry,
+        Rule::map_key => AstKind::MapKey,
         Rule::expression_list | Rule::function_arguments => AstKind::ArgumentList,
         Rule::subquery_scope => AstKind::SubqueryScope,
         Rule::subquery_import => AstKind::SubqueryImport,
@@ -531,6 +537,7 @@ pub(super) fn leaf_text(rule: Rule, text: &str) -> Option<String> {
         | Rule::property_exists_name
         | Rule::procedure_name
         | Rule::property_key
+        | Rule::map_key
         | Rule::label_name
         | Rule::graph_label
         | Rule::relationship_type_name

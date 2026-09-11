@@ -9,10 +9,15 @@ pub enum QueryErrorKind {
     Semantic,
     Type,
     Schema,
+    Constraint,
     InvalidArgument,
     VersionNotFound,
     BranchNotFound,
     TagNotFound,
+    GraphViewViolation,
+    BranchHeadMoved,
+    ReadOnlyAdapter,
+    ReadOnlySnapshot,
     Storage,
     Resource,
     Interrupted,
@@ -45,6 +50,22 @@ impl QueryError {
 
     pub fn semantic(message: impl Into<String>) -> Self {
         Self::new(QueryErrorKind::Semantic, message)
+    }
+
+    pub fn constraint(message: impl Into<String>) -> Self {
+        Self::new(QueryErrorKind::Constraint, message)
+    }
+
+    pub fn graph_view_violation(message: impl Into<String>) -> Self {
+        Self::new(QueryErrorKind::GraphViewViolation, message)
+    }
+
+    pub fn read_only_adapter(message: impl Into<String>) -> Self {
+        Self::new(QueryErrorKind::ReadOnlyAdapter, message)
+    }
+
+    pub fn read_only_snapshot(message: impl Into<String>) -> Self {
+        Self::new(QueryErrorKind::ReadOnlySnapshot, message)
     }
 
     pub fn internal(message: impl Into<String>) -> Self {
@@ -95,6 +116,10 @@ impl From<StorageError> for QueryError {
     fn from(error: StorageError) -> Self {
         match error {
             StorageError::Sqlite(error) => Self::from(error),
+            StorageError::BranchHeadMoved => Self::new(
+                QueryErrorKind::BranchHeadMoved,
+                "branch head moved during query commit",
+            ),
             error => Self::new(QueryErrorKind::Storage, error.to_string()),
         }
     }
@@ -117,7 +142,14 @@ impl From<rusqlite::Error> for QueryError {
             ) => QueryErrorKind::Resource,
             _ => QueryErrorKind::Storage,
         };
-        let mut mapped = Self::new(kind, error.to_string());
+        let message = match &error {
+            rusqlite::Error::SqliteFailure(_, Some(message)) => message.clone(),
+            rusqlite::Error::SqliteFailure(code, None) => {
+                format!("SQLite error code {}", code.extended_code)
+            }
+            _ => error.to_string(),
+        };
+        let mut mapped = Self::new(kind, message);
         mapped.sqlite_code = sqlite_code;
         mapped
     }

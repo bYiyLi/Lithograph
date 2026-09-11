@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use super::ast::{AstKind, AstNode, ClauseKind, ExpressionKind, QueryConnector, SubqueryKind};
 use super::error::FrontendError;
@@ -61,7 +61,28 @@ impl Analyzer<'_> {
         self.reject_aggregates(clause, "write patterns cannot contain aggregation")?;
         self.validate_write_relationships(kind, clause, input)?;
         self.validate_write_nodes(clause, input)?;
+        self.validate_write_property_references(clause, input)?;
         self.validate_expression_categories(clause, input)
+    }
+
+    fn validate_write_property_references(
+        &mut self,
+        clause: &AstNode,
+        input: &Scope,
+    ) -> Result<(), FrontendError> {
+        for element in clause.descendants().filter(|node| {
+            matches!(
+                node.kind,
+                AstKind::NodePattern | AstKind::RelationshipPattern
+            )
+        }) {
+            let mut properties = Vec::new();
+            collect_write_property_maps(element, &mut properties);
+            for property_map in properties {
+                self.validate_expression_references(property_map, input)?;
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn validate_delete_semantics(
@@ -537,7 +558,7 @@ impl Analyzer<'_> {
     }
 
     fn validate_write_nodes(&self, clause: &AstNode, input: &Scope) -> Result<(), FrontendError> {
-        let mut introduced = BTreeMap::<String, bool>::new();
+        let mut introduced = BTreeSet::new();
         for part in clause
             .descendants()
             .filter(|node| node.kind == AstKind::PatternPart)
@@ -572,17 +593,33 @@ impl Analyzer<'_> {
                     }
                     continue;
                 }
-                if let Some(first_decorated) = introduced.get(&variable)
-                    && (*first_decorated || decorated)
-                {
-                    return Err(self.semantic_error(
-                        node.span,
-                        format!("write pattern cannot impose new predicates on node {variable:?}"),
-                    ));
+                if introduced.contains(&variable) {
+                    if !has_relationship || decorated {
+                        return Err(self.semantic_error(
+                            node.span,
+                            format!(
+                                "write pattern cannot recreate or decorate bound node {variable:?}"
+                            ),
+                        ));
+                    }
+                    continue;
                 }
-                introduced.entry(variable).or_insert(decorated);
+                introduced.insert(variable);
             }
         }
         Ok(())
+    }
+}
+
+fn collect_write_property_maps<'a>(node: &'a AstNode, output: &mut Vec<&'a AstNode>) {
+    for child in &node.children {
+        if child.kind == AstKind::Where {
+            continue;
+        }
+        if matches!(child.kind, AstKind::Expression(ExpressionKind::Map)) {
+            output.push(child);
+            continue;
+        }
+        collect_write_property_maps(child, output);
     }
 }

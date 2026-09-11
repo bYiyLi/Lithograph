@@ -17,7 +17,7 @@ Profile 由 Neo4j Cypher 25 current-graph Manual + 2026.08 已公开 Cypher addi
 | `partial` | 部分 fixtures 通过，但该 capability family 未闭合 |
 | `done` | inventory 全部存在，positive/negative/composition fixtures 全部通过 |
 
-Phase 03 已交付 parser/AST/scope/type/value frontend foundation，因此与该 Phase 直接拥有的 capability family 已具有自动化实现证据并标为 `partial`；`partial` 不代表 query execution 或完整 family semantics 已完成。Phase 04+ 才拥有的 MATCH/result、完整 aggregation/ordering、built-in function/procedure、schema/index/search 等 family 在其 acceptance 未完成前仍保持 `planned`。
+Phase 03 已交付 parser/AST/scope/type/value frontend foundation；Phase 04 已交付第一条真实 read execution vertical slice；Phase 05 已交付 version-aware mutation/transaction vertical slice，包括 CREATE/INSERT、SET/REMOVE、DELETE/DETACH DELETE、MERGE foundation、Graph View write boundary、immutable Commit 与 rollback/concurrency。对应 capability family 因此已有自动化执行证据并标为 `partial`；`partial` 仍不代表该 family 的 frozen Profile inventory 已闭合。完整 aggregation/grouping、built-in function/procedure、advanced path/query composition、mutation completeness、schema/index/search 等继续由后续 owning Phase 完成。
 
 ## 3. Profile Boundary
 
@@ -43,24 +43,24 @@ Phase 03 已交付 parser/AST/scope/type/value frontend foundation，因此与�
 | Lexical / identifiers / parameters | keywords、escaped/unescaped identifiers、Unicode、parameter naming、comments、query options | `partial` | 03, 06 |
 | Literals / operators | boolean、numeric、string、list、map、temporal/spatial/vector/UUID literals/constructors、operator precedence | `partial` | 03, 06 |
 | Null / equality / ordering | three-valued logic、comparison、ordering、NaN、type ordering where specified | `partial` | 03, 06 |
-| MATCH | node/relationship pattern、labels/types/property predicates、multiple patterns | `planned` | 04, 06 |
-| OPTIONAL MATCH | outer/null preservation、predicate placement/composition | `planned` | 04, 06 |
-| FILTER / WHERE | predicate expressions、pattern predicates、scope | `planned` | 04, 06 |
-| RETURN / WITH / LET | projection、alias/scope、star、aggregation boundary、ordering | `planned` | 04, 06 |
+| MATCH | node/relationship pattern、labels/types/property predicates、multiple patterns | `partial` | 04, 06 |
+| OPTIONAL MATCH | outer/null preservation、predicate placement/composition | `partial` | 04, 06 |
+| FILTER / WHERE | predicate expressions、pattern predicates、scope | `partial` | 04, 06 |
+| RETURN / WITH / LET | projection、alias/scope、star、aggregation boundary、ordering | `partial` | 04, 06 |
 | UNWIND / FOR | list-to-row expansion、null/empty semantics、scope | `planned` | 04, 06 |
 | Aggregation / GROUP BY | implicit/explicit grouping、aggregates、distinct、ordering interaction | `planned` | 06 |
-| ORDER BY / SKIP / LIMIT | expression visibility、parameters、aggregation composition | `planned` | 04, 06 |
+| ORDER BY / SKIP / LIMIT | expression visibility、parameters、aggregation composition | `partial` | 04, 06 |
 | UNION | column contract、ALL/DISTINCT、type reconciliation、subquery composition | `planned` | 06 |
 | WHEN | conditional composed queries、scope/result compatibility | `planned` | 06 |
 | NEXT | sequential query composition and row handoff | `planned` | 06 |
 | CALL subqueries | imported variables、scope isolation、nested subqueries、UNION | `planned` | 06 |
 | EXISTS/COUNT/COLLECT subquery expressions | correlation、aggregation、null/empty semantics | `planned` | 06 |
-| CREATE / INSERT | node/relationship creation、properties、multi-row behavior | `planned` | 05, 06 |
-| SET / REMOVE | property/label mutation、map update、null-removes-property | `planned` | 05, 06 |
-| DELETE / DETACH DELETE | entity deletion、relationship integrity、row behavior | `planned` | 05, 06 |
-| MERGE | match/create branches、ON MATCH/CREATE semantics、locking/concurrency | `planned` | 05, 06 |
+| CREATE / INSERT | node/relationship creation、properties、multi-row behavior | `partial` | 05, 06 |
+| SET / REMOVE | property/label mutation、map update、null-removes-property | `partial` | 05, 06 |
+| DELETE / DETACH DELETE | entity deletion、relationship integrity、row behavior | `partial` | 05, 06 |
+| MERGE | match/create branches、ON MATCH/CREATE semantics、locking/concurrency | `partial` | 05, 06 |
 | FOREACH | update-only iteration and variable scope | `planned` | 06 |
-| Pattern semantics | directions、anonymous elements、label expressions、relationship type expressions | `planned` | 04, 06 |
+| Pattern semantics | directions、anonymous elements、label expressions、relationship type expressions | `partial` | 04, 06 |
 | Quantified / variable-length patterns | group variables、bounds、predicates、result cardinality | `planned` | 06 |
 | Match modes | repeatable/different relationship semantics | `planned` | 06 |
 | Path modes | walk/trail/acyclic/simple constraints as Profile specifies | `planned` | 06 |
@@ -86,8 +86,8 @@ Phase 03 已交付 parser/AST/scope/type/value frontend foundation，因此与�
 | LOAD CSV | headers、field parsing、URI source、periodic transaction composition | `planned` | 08 |
 | IN TRANSACTIONS | batch size、error behavior、status output、native transaction boundaries | `planned` | 08, 10 |
 | IN CONCURRENT TRANSACTIONS | concurrent batching、DISJOINT BY semantics、SQLite serialized commit | `planned` | 08, 10 |
-| EXPLAIN | semantic validation + plan without execution | `planned` | 04, 10 |
-| PROFILE | execution + operator runtime counters | `planned` | 04, 10 |
+| EXPLAIN | semantic validation + plan without execution | `partial` | 04, 10 |
+| PROFILE | execution + operator runtime counters | `partial` | 04, 10 |
 | SHOW current graph surfaces | functions/procedures/indexes/constraints/current graph type | `planned` | 06–08 |
 | Error compatibility | syntax position、semantic/type/constraint failures、transaction errors | `partial` | 03–10 |
 
@@ -98,6 +98,18 @@ Phase 03 的 inherited openCypher frontend regression 固定为：4,224 个合�
 `tests/fixtures/cypher25` 当前包含 15 个 frozen Profile fixtures，其中 12 个 parser-positive fixture 由 `phase03_parser_tck` 直接执行；新增覆盖 query preamble/options、braced conditional `UNION`、Match Mode + numeric-start parameter，以及 Cypher 25 `GROUP BY` / `RETURN ALL`。Fixture 的 `execution: planned` 仍表示完整 result semantics 尚由后续 owning Phase 完成，不与 Phase 03 parser evidence 混淆。
 
 这些证据只证明 parser/semantic/type foundation，不把尚未执行的 result semantics 标为 `done`。
+
+### Phase 04 read execution evidence
+
+Phase 04 的 targeted suite 覆盖真实 parser -> planner -> executor -> version-aware storage 路径，包括 multi-pattern、directed/incoming/undirected expansion、OPTIONAL null preservation、property access、basic `count()` / DISTINCT、ordering/skip/limit、Path/Node tagged value materialization、historical Snapshot、Graph View execution boundary、typed adjacency seek、external sort spill 与 missing-derived-statistics conservative planning。SQL Bridge `.load` probe 同时验证 scalar envelope 与 `lithograph_rows` row encoding 一致，Native smoke 验证 `COLUMNS -> ROW* -> SUMMARY` 和 callback cancel / `SQLITE_INTERRUPT`。
+
+这些证据只把上述 family 提升为 `partial`。例如 `RETURN *`、WITH/LET、grouped aggregation、完整 built-in function inventory、variable/quantified pattern、match/path mode、subquery/composition 仍由 Phase 06 / 10 的 frozen Profile acceptance 闭合。
+
+### Phase 05 mutation execution evidence
+
+Phase 05 的 67 个 targeted scenarios 覆盖真实 parser -> planner -> executor -> version-aware storage 路径，包括 Node/Relationship CREATE/INSERT、property/label SET/REMOVE、DELETE/DETACH DELETE、MERGE match/create 与 `ON MATCH` / `ON CREATE` foundation、multi-row clause barrier、Graph View write boundary、canonical net delta、empty-delta Commit、Branch CAS、historical read、stale writer、caller-owned transaction/savepoint、host interrupt 与全 PropertyValue family 的持久化边界。它们同时验证 write projection 的 DISTINCT/grouping/order/expression lowering、aggregate ORDER BY validation、已支持 function 的 argument/null semantics、zero-row unsupported function rejection、mutating EXPLAIN 与实际 lowering 一致，以及未拥有语义不会被静默近似执行。SQL Bridge `.load` probe 验证 invocation savepoint、scalar length failure、rows read-only、Graph View violation 与 reopen history；Native smoke 验证 mutating summary、callback cancel 和 fault-injection rollback。
+
+这些证据把四个 mutation family 提升为 `partial`，但不提前完成 Phase 06 的 SET map merge/replace 完整语义、FOREACH、advanced CREATE/INSERT variants、correlated/multi-row MERGE edge cases 或相邻完整 query-composition inventory。Fixed-offset ZonedDateTime 已持久化 round-trip；IANA named-zone 的 timezone/DST 规则仍由 Phase 06 闭合，当前 write 会明确拒绝而不会静默改写值。
 
 ## 5. 2025.06+ Cypher 25 Delta Inventory
 

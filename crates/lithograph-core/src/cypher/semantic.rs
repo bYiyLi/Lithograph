@@ -279,7 +279,7 @@ pub(super) fn is_pattern_comprehension(node: &AstNode) -> bool {
             .any(|child| child.kind == AstKind::Pattern)
 }
 
-pub(super) fn unescape_identifier(name: &str) -> String {
+pub(crate) fn unescape_identifier(name: &str) -> String {
     let trimmed = name.trim();
     if let Some(inner) = trimmed
         .strip_prefix('`')

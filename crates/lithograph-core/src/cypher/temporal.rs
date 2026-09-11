@@ -83,6 +83,10 @@ impl TimeValue {
         (self.instant_key(), self.offset_seconds)
     }
 
+    pub(crate) fn storage_components(&self) -> (u64, i32) {
+        (self.local_nanoseconds, self.offset_seconds)
+    }
+
     pub(super) fn offset_seconds(&self) -> i32 {
         self.offset_seconds
     }

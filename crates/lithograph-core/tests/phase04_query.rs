@@ -286,6 +286,13 @@ fn graph_view_normalization_and_invalid_options_match_contract() {
     );
     assert_eq!(required_duplicate, required_once);
 
+    let hierarchical = ExecutionOptions::parse_text(r#"{"at":"branch/team/feature"}"#)
+        .expect("hierarchical Branch selector");
+    assert_eq!(
+        hierarchical.snapshot,
+        SnapshotSelector::Branch("team/feature".to_owned())
+    );
+
     let labels_before: i64 = fixture
         .connection
         .query_row("SELECT count(*) FROM _lithograph_labels", [], |row| {
@@ -375,10 +382,8 @@ fn historical_snapshot_and_current_branch_are_isolated() {
         ExecutionOptions::default(),
     );
     assert_eq!(current, vec![vec![Value::Integer(34)]]);
-    let historical = ExecutionOptions {
-        snapshot: SnapshotSelector::Commit(fixture.first_commit.to_hex()),
-        ..ExecutionOptions::default()
-    };
+    let mut historical = ExecutionOptions::default();
+    historical.snapshot = SnapshotSelector::Commit(fixture.first_commit.to_hex());
     let old = rows(
         &fixture.connection,
         "MATCH (n:Person) WHERE n.name = 'Bob' RETURN n.age AS age",

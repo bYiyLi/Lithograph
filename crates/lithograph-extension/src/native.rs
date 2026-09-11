@@ -118,6 +118,12 @@ unsafe fn native_execute_impl(
         &inputs.params_json,
         &inputs.options_json,
     )?;
+    if execution.is_write() {
+        return with_savepoint(&connection, |connection| {
+            // SAFETY: callback and user_data originate from the active ABI invocation.
+            unsafe { emit_execution_events(connection, &mut execution, callback, user_data) }
+        });
+    }
     // SAFETY: callback and user_data originate from the active ABI invocation.
     unsafe { emit_execution_events(&connection, &mut execution, callback, user_data) }
 }
@@ -126,13 +132,7 @@ fn validate_native_execute_args(
     db: *mut ffi::sqlite3,
     callback: LithographEventCallbackV1,
 ) -> LithographResult<()> {
-    if db.is_null() {
-        return Err(LithographError::new(
-            ErrorCategory::InvalidArgument,
-            "db must not be NULL",
-            ffi::SQLITE_MISUSE,
-        ));
-    }
+    require_native_db(db)?;
     if callback.is_none() {
         return Err(LithographError::new(
             ErrorCategory::InvalidArgument,
@@ -186,7 +186,7 @@ unsafe fn emit_execution_events(
             &columns,
         )
     } {
-        let _ = execution.cancel(connection);
+        execution.cancel(connection)?;
         return Err(error);
     }
 
@@ -198,14 +198,12 @@ unsafe fn emit_execution_events(
             let event =
                 unsafe { emit_event(callback, user_data, LithographEventKindV1::Row, &payload) };
             if let Err(error) = event {
-                let _ = execution.cancel(connection);
+                execution.cancel(connection)?;
                 return Err(error);
             }
         }
         if batch.done {
-            let summary = batch
-                .summary
-                .ok_or_else(|| LithographError::internal("completed query is missing summary"))?;
+            let summary = execution.complete(connection)?;
             let payload = execution::summary_json(&summary).to_string();
             // SAFETY: the callback and user-data pointer come from this ABI invocation.
             return unsafe {
@@ -273,13 +271,7 @@ unsafe fn native_validate_impl(
     query: *const c_char,
     query_len: usize,
 ) -> LithographResult<()> {
-    if db.is_null() {
-        return Err(LithographError::new(
-            ErrorCategory::InvalidArgument,
-            "db must not be NULL",
-            ffi::SQLITE_MISUSE,
-        ));
-    }
+    require_native_db(db)?;
     require_native_connection_registered(db)?;
     // SAFETY: the public ABI requires this buffer to remain readable for the
     // duration of the call; `input_utf8` copies before returning.
@@ -294,6 +286,18 @@ unsafe fn native_validate_impl(
     require_initialized(&connection)?;
     validate_cypher(&query)?;
     Ok(())
+}
+
+fn require_native_db(db: *mut ffi::sqlite3) -> LithographResult<()> {
+    if db.is_null() {
+        Err(LithographError::new(
+            ErrorCategory::InvalidArgument,
+            "db must not be NULL",
+            ffi::SQLITE_MISUSE,
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn require_native_connection_registered(db: *mut ffi::sqlite3) -> LithographResult<()> {

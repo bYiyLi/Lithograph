@@ -111,12 +111,14 @@ pub(crate) fn resolve_commit(
 }
 
 fn resolve_branch(connection: &Connection, name: &str) -> QueryResult<HashId> {
-    storage::branch_head(connection, name).map_err(|_| {
-        QueryError::new(
+    match storage::branch_head(connection, name) {
+        Ok(commit) => Ok(commit),
+        Err(storage::StorageError::NotFound(_)) => Err(QueryError::new(
             QueryErrorKind::BranchNotFound,
             format!("Branch branch/{name} was not found"),
-        )
-    })
+        )),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub(crate) fn materialize_node(snapshot: &Snapshot<'_>, node_id: i64) -> QueryResult<NodeValue> {
@@ -204,7 +206,7 @@ fn snapshot_connection<'a>(snapshot: &'a Snapshot<'a>) -> &'a Connection {
     snapshot.connection_for_query()
 }
 
-fn property_value(value: storage::PropertyValue) -> QueryResult<Value> {
+pub(crate) fn property_value(value: storage::PropertyValue) -> QueryResult<Value> {
     match value {
         storage::PropertyValue::Boolean(value) => Ok(Value::Boolean(value)),
         storage::PropertyValue::Integer(value) => Ok(Value::Integer(value)),

@@ -25,12 +25,18 @@ impl GraphViewSelector {
 pub struct ExecutionOptions {
     pub snapshot: SnapshotSelector,
     pub graph_view: GraphViewSelector,
+    pub(crate) write_branch: Option<String>,
+    pub(crate) author: Option<String>,
+    pub(crate) message: Option<String>,
 }
 impl Default for ExecutionOptions {
     fn default() -> Self {
         Self {
             snapshot: SnapshotSelector::Current,
             graph_view: GraphViewSelector::default(),
+            write_branch: Some("main".to_owned()),
+            author: None,
+            message: None,
         }
     }
 }
@@ -45,35 +51,60 @@ impl ExecutionOptions {
             .as_object()
             .ok_or_else(|| QueryError::invalid_argument("options must be a JSON object"))?;
         validate_top_level_keys(object)?;
-        validate_optional_string(object, "author")?;
-        validate_optional_string(object, "message")?;
-        let branch = optional_nonempty_string(object, "branch")?;
-        let at = optional_nonempty_string(object, "at")?;
-        if branch.is_some() && at.is_some() {
-            return Err(QueryError::invalid_argument(
-                "options.branch and options.at are mutually exclusive",
-            ));
-        }
-        let snapshot = if let Some(branch) = branch {
-            SnapshotSelector::Branch(branch)
-        } else if let Some(at) = at {
-            parse_at(&at)?
-        } else {
-            SnapshotSelector::Current
-        };
-        let graph_view = match object.get("graphView") {
-            None => GraphViewSelector::default(),
-            Some(JsonValue::Object(value)) => parse_graph_view(value)?,
-            Some(_) => {
-                return Err(QueryError::invalid_argument(
-                    "options.graphView must be an object when present",
-                ));
-            }
-        };
+        let author = optional_nullable_string(object, "author")?;
+        let message = optional_nullable_string(object, "message")?;
+        let (snapshot, write_branch) = parse_snapshot_option(object)?;
+        let graph_view = parse_graph_view_option(object)?;
         Ok(Self {
             snapshot,
             graph_view,
+            write_branch,
+            author,
+            message,
         })
+    }
+}
+
+fn parse_snapshot_option(
+    object: &Map<String, JsonValue>,
+) -> QueryResult<(SnapshotSelector, Option<String>)> {
+    let branch = optional_nonempty_string(object, "branch")?;
+    let at = optional_nonempty_string(object, "at")?;
+    if branch.is_some() && at.is_some() {
+        return Err(QueryError::invalid_argument(
+            "options.branch and options.at are mutually exclusive",
+        ));
+    }
+    let (snapshot, write_branch) = if let Some(branch) = branch {
+        (SnapshotSelector::Branch(branch.clone()), Some(branch))
+    } else if let Some(at) = at {
+        (parse_at(&at)?, None)
+    } else {
+        (SnapshotSelector::Current, Some("main".to_owned()))
+    };
+    Ok((snapshot, write_branch))
+}
+
+fn parse_graph_view_option(object: &Map<String, JsonValue>) -> QueryResult<GraphViewSelector> {
+    match object.get("graphView") {
+        None => Ok(GraphViewSelector::default()),
+        Some(JsonValue::Object(value)) => parse_graph_view(value),
+        Some(_) => Err(QueryError::invalid_argument(
+            "options.graphView must be an object when present",
+        )),
+    }
+}
+
+fn optional_nullable_string(
+    object: &Map<String, JsonValue>,
+    key: &str,
+) -> QueryResult<Option<String>> {
+    match object.get(key) {
+        None | Some(JsonValue::Null) => Ok(None),
+        Some(JsonValue::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(QueryError::invalid_argument(format!(
+            "options.{key} must be a string or null"
+        ))),
     }
 }
 
@@ -87,18 +118,6 @@ fn validate_top_level_keys(object: &Map<String, JsonValue>) -> QueryResult<()> {
                 "unknown execution option {key}"
             )));
         }
-    }
-    Ok(())
-}
-
-fn validate_optional_string(object: &Map<String, JsonValue>, key: &str) -> QueryResult<()> {
-    if let Some(value) = object.get(key)
-        && !value.is_string()
-        && !value.is_null()
-    {
-        return Err(QueryError::invalid_argument(format!(
-            "options.{key} must be a string or null"
-        )));
     }
     Ok(())
 }
@@ -127,13 +146,16 @@ fn parse_at(value: &str) -> QueryResult<SnapshotSelector> {
             "options.at must use commit/<id>, branch/<name>, or tag/<name>",
         ));
     };
-    if name.is_empty() || name.contains('/') {
+    if name.is_empty() {
         return Err(QueryError::invalid_argument(
-            "options.at must contain exactly one non-empty selector value",
+            "options.at must contain a non-empty selector value",
         ));
     }
     match kind {
-        "commit" => Ok(SnapshotSelector::Commit(name.to_owned())),
+        "commit" if !name.contains('/') => Ok(SnapshotSelector::Commit(name.to_owned())),
+        "commit" => Err(QueryError::invalid_argument(
+            "options.at Commit selector must contain exactly one id",
+        )),
         "branch" => Ok(SnapshotSelector::Branch(name.to_owned())),
         "tag" => Ok(SnapshotSelector::Tag(name.to_owned())),
         _ => Err(QueryError::invalid_argument(

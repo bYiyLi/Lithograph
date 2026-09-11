@@ -19,6 +19,8 @@ typedef int (*execute_fn)(
 typedef int (*validate_fn)(sqlite3 *, const char *, size_t, char **);
 typedef void (*free_fn)(void *);
 
+static int64_t commit_count(sqlite3 *db);
+
 #ifdef _WIN32
 typedef HMODULE library_handle;
 
@@ -209,6 +211,22 @@ static int cancel_on_row_callback(
     return kind == LITHOGRAPH_EVENT_ROW_V1 ? 1 : 0;
 }
 
+static int cancel_on_summary_callback(
+    void *user_data,
+    lithograph_event_kind_v1 kind,
+    const unsigned char *json,
+    size_t json_len
+) {
+    (void)user_data;
+    (void)json;
+    (void)json_len;
+    if (callback_count < (int)(sizeof(callback_kinds) / sizeof(callback_kinds[0]))) {
+        callback_kinds[callback_count] = kind;
+    }
+    callback_count += 1;
+    return kind == LITHOGRAPH_EVENT_SUMMARY_V1 ? 1 : 0;
+}
+
 static void check_init_fault_rollback(const char *path) {
     sqlite3 *db = NULL;
     require(sqlite3_open(":memory:", &db) == SQLITE_OK, "failed to open fault-injection database");
@@ -282,6 +300,60 @@ static void check_release_fault_cleanup(const char *path) {
         error == NULL ? "init after release-fault cleanup failed" : error
     );
     sqlite3_free(error);
+    sqlite3_close(db);
+}
+
+static void check_write_release_fault_cleanup(const char *path) {
+    sqlite3 *db = NULL;
+    require(sqlite3_open(":memory:", &db) == SQLITE_OK, "failed to open write release-fault database");
+    load_extension(db, path);
+    char *error = NULL;
+    require(
+        sqlite3_exec(db, "SELECT lithograph_init();", NULL, NULL, &error) == SQLITE_OK,
+        error == NULL ? "write release-fault init failed" : error
+    );
+    sqlite3_free(error);
+    int64_t before = commit_count(db);
+    require(
+        sqlite3_set_authorizer(db, deny_internal_release, NULL) == SQLITE_OK,
+        "failed to set write release-fault authorizer"
+    );
+
+    error = NULL;
+    int rc = sqlite3_exec(
+        db,
+        "SELECT lithograph('CREATE (:ReleaseFaultWrite) FINISH');",
+        NULL,
+        NULL,
+        &error
+    );
+    require(rc != SQLITE_OK, "write release-fault invocation must fail");
+    require(
+        error != NULL && strstr(error, "LITHOGRAPH_INTERNAL_ERROR") != NULL,
+        "write release-fault fallback must surface INTERNAL_ERROR"
+    );
+    sqlite3_free(error);
+    require(sqlite3_get_autocommit(db) != 0, "write release-fault cleanup must restore autocommit");
+    require(
+        sqlite3_set_authorizer(db, NULL, NULL) == SQLITE_OK,
+        "failed to clear write release-fault authorizer"
+    );
+    require(commit_count(db) == before, "write release-fault cleanup left a Commit behind");
+
+    sqlite3_stmt *statement = NULL;
+    require(
+        sqlite3_prepare_v2(
+            db,
+            "SELECT count(*) FROM main._lithograph_labels WHERE name = 'ReleaseFaultWrite'",
+            -1,
+            &statement,
+            NULL
+        ) == SQLITE_OK,
+        "failed to prepare write release-fault dictionary check"
+    );
+    require(sqlite3_step(statement) == SQLITE_ROW, "write release-fault dictionary check returned no row");
+    require(sqlite3_column_int64(statement, 0) == 0, "write release-fault cleanup left dictionary state");
+    sqlite3_finalize(statement);
     sqlite3_close(db);
 }
 
@@ -535,6 +607,101 @@ static void check_native_read_events(
     lithograph_free(NULL);
 }
 
+static int64_t commit_count(sqlite3 *db) {
+    sqlite3_stmt *statement = NULL;
+    require(
+        sqlite3_prepare_v2(db, "SELECT count(*) FROM main._lithograph_commits", -1, &statement, NULL) == SQLITE_OK,
+        "failed to prepare Commit count"
+    );
+    require(sqlite3_step(statement) == SQLITE_ROW, "Commit count returned no row");
+    int64_t count = sqlite3_column_int64(statement, 0);
+    sqlite3_finalize(statement);
+    return count;
+}
+
+static void check_native_write_cancel(
+    execute_fn execute,
+    free_fn lithograph_free,
+    sqlite3 *db
+) {
+    const char *query = "CREATE (n:CancelledNative) RETURN n";
+    int64_t before = commit_count(db);
+    char *error_json = NULL;
+    callback_count = 0;
+    int rc = execute(
+        db,
+        query,
+        strlen(query),
+        "{}",
+        2,
+        "{}",
+        2,
+        cancel_on_row_callback,
+        NULL,
+        &error_json
+    );
+    require(rc == SQLITE_INTERRUPT, "cancelled native write must return SQLITE_INTERRUPT");
+    require_error(error_json, "RESOURCE_ERROR");
+    require(callback_count == 2, "cancelled native write must stop after COLUMNS and ROW");
+    require(callback_kinds[0] == LITHOGRAPH_EVENT_COLUMNS_V1, "write cancel must begin with COLUMNS");
+    require(callback_kinds[1] == LITHOGRAPH_EVENT_ROW_V1, "write cancel must occur on ROW");
+    lithograph_free(error_json);
+    require(commit_count(db) == before, "cancelled native write must not persist a Commit");
+
+    sqlite3_stmt *statement = NULL;
+    require(
+        sqlite3_prepare_v2(
+            db,
+            "SELECT json_extract(lithograph('MATCH (n:CancelledNative) RETURN count(n)'), '$.rows[0][0]')",
+            -1,
+            &statement,
+            NULL
+        ) == SQLITE_OK,
+        "failed to prepare cancelled-write verification"
+    );
+    require(sqlite3_step(statement) == SQLITE_ROW, "cancelled-write verification returned no row");
+    require(sqlite3_column_int64(statement, 0) == 0, "cancelled native write left graph data behind");
+    sqlite3_finalize(statement);
+
+    const char *summary_query = "CREATE (:CancelledAtSummary) FINISH";
+    before = commit_count(db);
+    error_json = NULL;
+    callback_count = 0;
+    rc = execute(
+        db,
+        summary_query,
+        strlen(summary_query),
+        "{}",
+        2,
+        "{}",
+        2,
+        cancel_on_summary_callback,
+        NULL,
+        &error_json
+    );
+    require(rc == SQLITE_INTERRUPT, "summary-cancelled native write must return SQLITE_INTERRUPT");
+    require_error(error_json, "RESOURCE_ERROR");
+    require(callback_count == 2, "summary cancellation must follow COLUMNS with SUMMARY");
+    require(callback_kinds[0] == LITHOGRAPH_EVENT_COLUMNS_V1, "summary cancel must begin with COLUMNS");
+    require(callback_kinds[1] == LITHOGRAPH_EVENT_SUMMARY_V1, "summary cancel must stop on SUMMARY");
+    lithograph_free(error_json);
+    require(commit_count(db) == before, "summary-cancelled native write must not persist a Commit");
+
+    require(
+        sqlite3_prepare_v2(
+            db,
+            "SELECT json_extract(lithograph('MATCH (n:CancelledAtSummary) RETURN count(n)'), '$.rows[0][0]')",
+            -1,
+            &statement,
+            NULL
+        ) == SQLITE_OK,
+        "failed to prepare summary-cancelled write verification"
+    );
+    require(sqlite3_step(statement) == SQLITE_ROW, "summary-cancelled write verification returned no row");
+    require(sqlite3_column_int64(statement, 0) == 0, "summary-cancelled native write left graph data behind");
+    sqlite3_finalize(statement);
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) {
         fprintf(stderr, "usage: native-abi-smoke <extension-path>\n");
@@ -635,6 +802,7 @@ int main(int argc, char **argv) {
     lithograph_free(error_json);
 
     check_native_read_events(execute, lithograph_free, db, query);
+    check_native_write_cancel(execute, lithograph_free, db);
 
     sqlite3_close(db);
 
@@ -649,6 +817,7 @@ int main(int argc, char **argv) {
 
     check_init_fault_rollback(path);
     check_release_fault_cleanup(path);
+    check_write_release_fault_cleanup(path);
     check_rollback_to_fault_cleanup(path);
     check_full_rollback_fault_discards_connection(path);
     check_release_fault_aborts_outer_transaction(path);

@@ -1,6 +1,6 @@
 # Phase 06：Cypher 25 Query Completeness
 
-**状态：`planned`**
+**状态：`ready`**
 
 ## 1. 目标
 

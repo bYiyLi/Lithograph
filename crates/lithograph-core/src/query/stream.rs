@@ -13,6 +13,10 @@ use super::spill::{
 };
 use super::{QueryError, QueryResult};
 
+mod project;
+mod write;
+use project::{order_values, project_row};
+
 const PIPELINE_BATCH: usize = 256;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -22,9 +26,42 @@ pub struct QueryMetrics {
     pub elapsed_micros: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryType {
+    Read,
+    Write,
+}
+
+impl QueryType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QueryCounters {
+    pub nodes_created: u64,
+    pub nodes_deleted: u64,
+    pub relationships_created: u64,
+    pub relationships_deleted: u64,
+    pub properties_set: u64,
+    pub properties_removed: u64,
+    pub labels_added: u64,
+    pub labels_removed: u64,
+    pub constraints_added: u64,
+    pub constraints_removed: u64,
+    pub indexes_added: u64,
+    pub indexes_removed: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuerySummary {
+    pub query_type: QueryType,
     pub commit: String,
+    pub counters: QueryCounters,
     pub metrics: QueryMetrics,
 }
 
@@ -47,7 +84,21 @@ pub struct QueryCursor {
     aggregate_state: Option<Vec<u64>>,
     barrier: BarrierState,
     spill_connection: Option<Connection>,
+    write_state: WriteState,
     finished: bool,
+}
+
+#[derive(Debug)]
+enum WriteState {
+    None,
+    Pending,
+    Active {
+        savepoint: String,
+        rows: Vec<Vec<Value>>,
+        offset: usize,
+        summary: QuerySummary,
+    },
+    Completed(QuerySummary),
 }
 
 #[derive(Debug)]
@@ -210,6 +261,29 @@ fn set_optional_null(row: &mut BindingRow, variable: Option<&str>) {
             .entry(variable.to_owned())
             .or_insert(BindingValue::Null);
     }
+}
+
+pub(crate) fn materialize_match_step(
+    snapshot: &Snapshot<'_>,
+    graph_view: &ResolvedGraphView,
+    params: &std::collections::BTreeMap<String, Value>,
+    input: Vec<BindingRow>,
+    step: &MatchStep,
+    metrics: &mut QueryMetrics,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<Vec<BindingRow>> {
+    let mut output = Vec::new();
+    for row in input {
+        let mut cursor = StepCursor::new(step.clone(), row);
+        loop {
+            check_interrupted(is_interrupted)?;
+            let Some(row) = cursor.next_row(snapshot, graph_view, params, metrics)? else {
+                break;
+            };
+            output.push(row);
+        }
+    }
+    Ok(output)
 }
 
 #[derive(Debug)]
@@ -585,6 +659,11 @@ impl QueryCursor {
         } else {
             BarrierState::Pending
         };
+        let write_state = if prepared.write.is_some() && prepared.mode != ExecutionMode::Explain {
+            WriteState::Pending
+        } else {
+            WriteState::None
+        };
         Self {
             pipeline: MatchPipeline::new(prepared.matches.clone()),
             prepared,
@@ -596,12 +675,17 @@ impl QueryCursor {
             aggregate_state: None,
             barrier,
             spill_connection: None,
+            write_state,
             finished: false,
         }
     }
 
     pub fn columns(&self) -> &[String] {
         &self.prepared.columns
+    }
+
+    pub fn is_write(&self) -> bool {
+        self.prepared.write.is_some() && self.prepared.mode != ExecutionMode::Explain
     }
 
     pub fn next_batch(
@@ -625,10 +709,16 @@ impl QueryCursor {
                 summary: None,
             });
         }
-        check_interrupted(is_interrupted)?;
+        if is_interrupted() {
+            self.cancel(connection)?;
+            return Err(QueryError::interrupted());
+        }
         let max_rows = max_rows.clamp(1, 4_096);
         if self.prepared.mode == ExecutionMode::Explain {
             return self.next_explain();
+        }
+        if self.prepared.write.is_some() {
+            return self.next_write(connection, max_rows, is_interrupted);
         }
         let snapshot = Snapshot::resolve(connection, self.prepared.commit)?;
         if self.prepared.aggregate {
@@ -691,49 +781,6 @@ impl QueryCursor {
             done: false,
             summary: None,
         })
-    }
-
-    fn next_aggregate(
-        &mut self,
-        snapshot: &Snapshot<'_>,
-        is_interrupted: &dyn Fn() -> bool,
-    ) -> QueryResult<QueryBatch> {
-        if self.aggregate_state.is_none() {
-            let mut counts = vec![0_u64; self.prepared.projections.len()];
-            loop {
-                check_interrupted(is_interrupted)?;
-                let Some(row) = self.pipeline.next_row(
-                    snapshot,
-                    &self.prepared.graph_view,
-                    &self.prepared.params,
-                    &mut self.metrics,
-                )?
-                else {
-                    break;
-                };
-                for (index, projection) in self.prepared.projections.iter().enumerate() {
-                    if expression::count_contributes(
-                        &projection.expression,
-                        snapshot,
-                        &row,
-                        &self.prepared.params,
-                    )? {
-                        counts[index] = counts[index].saturating_add(1);
-                    }
-                }
-            }
-            self.aggregate_state = Some(counts);
-        }
-        if self.prepared.skip > 0 || self.prepared.limit == Some(0) {
-            return self.finish(Vec::new());
-        }
-        let counts = self.aggregate_state.take().unwrap_or_default();
-        let row = counts
-            .into_iter()
-            .map(|value| Value::Integer(i64::try_from(value).unwrap_or(i64::MAX)))
-            .collect();
-        self.metrics.rows = 1;
-        self.finish(vec![row])
     }
 
     fn build_barrier(
@@ -918,22 +965,17 @@ impl QueryCursor {
         Ok(QueryBatch {
             rows,
             done: true,
-            summary: Some(QuerySummary {
-                commit: format!("commit/{}", self.prepared.commit.to_hex()),
-                metrics: self.metrics.clone(),
-            }),
+            summary: Some(self.read_summary()),
         })
     }
 
-    pub fn cancel(&mut self, _connection: &Connection) -> QueryResult<()> {
-        if let BarrierState::Ready(output) = &self.barrier {
-            let spill_connection = self.spill_connection.take().ok_or_else(|| {
-                QueryError::internal("spill output is missing its SQLite connection")
-            })?;
-            drop_temp_table(&spill_connection, &output.table)?;
+    fn read_summary(&self) -> QuerySummary {
+        QuerySummary {
+            query_type: QueryType::Read,
+            commit: format!("commit/{}", self.prepared.commit.to_hex()),
+            counters: QueryCounters::default(),
+            metrics: self.metrics.clone(),
         }
-        self.finished = true;
-        Ok(())
     }
 }
 
@@ -943,45 +985,4 @@ fn check_interrupted(is_interrupted: &dyn Fn() -> bool) -> QueryResult<()> {
     } else {
         Ok(())
     }
-}
-
-fn project_row(
-    prepared: &PreparedQuery,
-    snapshot: &Snapshot<'_>,
-    row: &BindingRow,
-) -> QueryResult<Vec<Value>> {
-    prepared
-        .projections
-        .iter()
-        .map(|projection| {
-            expression::evaluate(&projection.expression, snapshot, row, &prepared.params)
-        })
-        .collect()
-}
-
-fn order_values(
-    prepared: &PreparedQuery,
-    snapshot: &Snapshot<'_>,
-    binding: &BindingRow,
-    projected: &[Value],
-) -> QueryResult<Vec<Value>> {
-    let aliases = prepared
-        .columns
-        .iter()
-        .cloned()
-        .zip(projected.iter().cloned())
-        .collect::<std::collections::BTreeMap<_, _>>();
-    prepared
-        .order
-        .iter()
-        .map(|item| {
-            expression::evaluate_with_aliases(
-                &item.expression,
-                snapshot,
-                binding,
-                &prepared.params,
-                &aliases,
-            )
-        })
-        .collect()
 }

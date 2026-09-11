@@ -42,6 +42,20 @@ impl<'connection> Snapshot<'connection> {
         Self::resolve_with_checkpoint_skip(connection, commit, None)
     }
 
+    /// Resolves a Commit-pinned snapshot and overlays one query-local staged Layer.
+    ///
+    /// The staged Layer is never persisted by this helper. Mutation execution uses
+    /// it to apply Cypher clause-state semantics before the final Commit exists.
+    pub(crate) fn resolve_with_layer(
+        connection: &'connection Connection,
+        commit: HashId,
+        layer: &super::layer::LayerBuilder,
+    ) -> StorageResult<Self> {
+        let mut snapshot = Self::resolve(connection, commit)?;
+        snapshot.overlay.apply(layer.clone());
+        Ok(snapshot)
+    }
+
     pub(crate) fn resolve_without_target_checkpoint(
         connection: &'connection Connection,
         commit: HashId,

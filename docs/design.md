@@ -413,6 +413,8 @@ Physical Planner 使用规则重写与 cost estimate 联合选择访问路径。
 - relationship degree distribution；
 - Search index metadata。
 
+统计属于 derived data，不进入 Commit / Layer identity，也不成为查询 correctness 的真源。Checkpoint 可以把与该 Snapshot 对应的 versioned statistics 放在 checkpoint metadata 中；Planner 读取最近 checkpoint 的统计，再只按 checkpoint -> target Commit 的 bounded overlay 变化做增量修正。缺失、损坏或版本未知的统计必须退化为保守的 unknown estimate，而不是为每个 query 重新扫描完整 Snapshot 计算 cardinality；estimate 缺失只能影响 plan quality，不能改变结果。
+
 Planner 可以把 filter、projection、typed comparison 与部分 index seek 下推给 SQLite，但不能为了 SQL 转译便利改变 Cypher semantics。复杂 path、merge、version snapshot 与 semantic barriers 由 Lithograph executor 原生执行。
 
 ### 7.3 Streaming
@@ -592,6 +594,7 @@ Storage format 1 冻结以下 physical key 与 payload contract；后续若改�
 - Property `type_tag`：`1 Boolean`、`2 Integer`、`3 Float`、`4 String`、`5 List`、`6 Date`、`7 LocalTime`、`8 Time`、`9 LocalDateTime`、`10 ZonedDateTime`、`11 Duration`、`12 Point`、`13 Vector`、`14 UUID`。remove row 的 `type_tag` 与所有 payload column 均为 `NULL`。
 - Boolean / Integer / Date / LocalTime 使用 `int_value`；String 使用 `text_value`；Float 的 numeric value 使用 `real_value`，同时在 `aux_value` 保存 canonical binary64 bits，以保证 signed zero 与 canonical NaN 可重算；Time、LocalDateTime、ZonedDateTime 使用 `int_value` 保存主时间量并用 `aux_value` 保存其余 fixed-width/zone payload；List、Duration、Point、Vector、UUID 使用 `blob_value` 保存 LCE1 typed value bytes。
 - checkpoint property row 使用与 set property delta 完全相同的 tagged payload contract，不保存 remove row。
+- `_lithograph_checkpoints.metadata` 只保存可重建 derived metadata；当前统计 metadata 使用 versioned payload 记录该 checkpoint Snapshot 的 Node / Relationship 总量与 label / relationship-type cardinality。该 payload 不参与 Commit/Layer hash，缺失或不可解析时 Planner 必须保守降级，不能影响 Snapshot correctness。
 
 Storage format `2` 保留 format `1` 的全部 canonical graph table / key / LCE1 contract，并只增加 `_lithograph_commit_data` 与 `_lithograph_tags` 两个 mutable sidecar table。`data_json` 必须是合法 JSON value 的 UTF-8 JSON 表达；普通说明文本使用 JSON string。Commit Data 不作为 Cypher Property，因此不受 PropertyValue 持久化类型限制，Engine 只验证 JSON 合法性而不解释 key 或业务 schema。没有 `_lithograph_commit_data` row 表示该 Commit 没有 Data；显式 JSON `null` 是一个已存在的 Data value，与无 row 不同。
 

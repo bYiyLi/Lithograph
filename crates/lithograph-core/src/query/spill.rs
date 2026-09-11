@@ -285,7 +285,7 @@ fn decode_row(text: &str) -> QueryResult<Vec<Value>> {
         .map_err(Into::into)
 }
 
-fn distinct_row_key(row: &[Value]) -> QueryResult<String> {
+pub(super) fn distinct_row_key(row: &[Value]) -> QueryResult<String> {
     let key = row
         .iter()
         .map(distinct_value_key)

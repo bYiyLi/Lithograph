@@ -31,6 +31,10 @@ impl LocalDateTimeValue {
     pub(crate) fn comparison_key(&self) -> (i64, u64) {
         (self.days, self.nanoseconds)
     }
+
+    pub(crate) fn storage_components(&self) -> (i64, u64) {
+        (self.days, self.nanoseconds)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,5 +82,18 @@ impl ZonedDateTimeValue {
             self.offset_seconds,
             self.zone.as_str(),
         )
+    }
+
+    pub(crate) fn storage_components(&self) -> Result<(i64, u32, &str), ValueError> {
+        if validate_zone_id(&self.zone)?.is_none() {
+            return Err(ValueError::new(
+                "persisting named-zone ZonedDateTime values requires Phase 06 timezone rules",
+            ));
+        }
+        let seconds = self.instant_nanoseconds.div_euclid(1_000_000_000);
+        let nanoseconds = self.instant_nanoseconds.rem_euclid(1_000_000_000);
+        let seconds = i64::try_from(seconds)
+            .map_err(|_| ValueError::new("ZonedDateTime exceeds the persistent value range"))?;
+        Ok((seconds, nanoseconds as u32, self.zone.as_str()))
     }
 }
