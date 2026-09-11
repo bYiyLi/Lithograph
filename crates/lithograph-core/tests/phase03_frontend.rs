@@ -179,6 +179,16 @@ fn type_and_function_validation_catches_invalid_forms() {
     let error = validate("RETURN 'x' + 1").expect_err("incompatible +");
     assert_eq!(error.kind, FrontendErrorKind::Type);
 
+    for query in [
+        "RETURN (CASE WHEN true THEN 'x' END) - 1",
+        "RETURN (CASE 1 WHEN 1 THEN 'x' END) - 1",
+        "RETURN 1 + 'x' = 2",
+        "RETURN 1 - 'x' = 2",
+    ] {
+        let error = validate(query).expect_err(query);
+        assert_eq!(error.kind, FrontendErrorKind::Type, "{query}");
+    }
+
     let error = validate("RETURN (1 :: INTEGER) + 1").expect_err("type predicate is Boolean");
     assert_eq!(error.kind, FrontendErrorKind::Type);
 
@@ -824,9 +834,18 @@ fn runtime_value_equality_ordering_and_uuid_helpers_cover_edge_families() {
         Ok(Some(CypherComparison::Greater))
     );
 
-    assert!(
-        cypher_equals(&Value::Integer(1), &Value::String("1".into())).is_err(),
-        "incomparable equality types must error"
+    assert_eq!(
+        cypher_equals(&Value::Integer(1), &Value::String("1".into())),
+        Ok(Some(false)),
+        "Cypher equality across distinct value types is false"
+    );
+    assert_eq!(
+        cypher_equals(
+            &Value::List(vec![Value::Integer(1), Value::Integer(2)]),
+            &Value::String("foo".into())
+        ),
+        Ok(Some(false)),
+        "TCK List3 requires list/literal equality to be false"
     );
     assert!(
         cypher_compare(

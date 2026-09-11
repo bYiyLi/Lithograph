@@ -88,6 +88,7 @@ pub enum AstKind {
     Limit,
     ProjectionItem,
     StarProjection,
+    CaseAlternative,
     LetBinding,
     MergeAction(MergeActionKind),
     SetOperator(SetOperatorKind),

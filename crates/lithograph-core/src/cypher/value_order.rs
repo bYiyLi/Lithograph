@@ -41,7 +41,7 @@ pub fn cypher_order_compare(left: &Value, right: &Value) -> Result<Ordering, Val
             Ok(left.element_id.cmp(&right.element_id))
         }
         (Value::List(left), Value::List(right)) => sequence_order_compare(left, right),
-        (Value::Path(left), Value::Path(right)) => Ok(path_order_compare(left, right)),
+        (Value::Path(left), Value::Path(right)) => path_order_compare(left, right),
         (Value::Vector(left), Value::Vector(right)) => Ok(vector_order_compare(left, right)),
         (Value::Point(left), Value::Point(right)) => Ok(point_order_compare(left, right)),
         (Value::ZonedDateTime(left), Value::ZonedDateTime(right)) => {
@@ -127,7 +127,14 @@ fn map_order_compare(
     Ok(Ordering::Equal)
 }
 
-fn path_order_compare(left: &PathValue, right: &PathValue) -> Ordering {
+fn path_order_compare(left: &PathValue, right: &PathValue) -> Result<Ordering, ValueError> {
+    if left.nodes.len() != left.relationships.len().saturating_add(1)
+        || right.nodes.len() != right.relationships.len().saturating_add(1)
+    {
+        return Err(ValueError::new(
+            "PATH requires exactly one more node than relationship",
+        ));
+    }
     let left_len = left.nodes.len().saturating_add(left.relationships.len());
     let right_len = right.nodes.len().saturating_add(right.relationships.len());
     for index in 0..left_len.min(right_len) {
@@ -141,10 +148,10 @@ fn path_order_compare(left: &PathValue, right: &PathValue) -> Ordering {
                 .cmp(&right.relationships[index / 2].element_id)
         };
         if ordering != Ordering::Equal {
-            return ordering;
+            return Ok(ordering);
         }
     }
-    left_len.cmp(&right_len)
+    Ok(left_len.cmp(&right_len))
 }
 
 fn point_order_compare(left: &PointValue, right: &PointValue) -> Ordering {

@@ -179,7 +179,7 @@ relationship_variable = { symbolic_name }
 relationship_type_expression = { ":" ~ relationship_type_disjunction ~ (":" ~ relationship_type_disjunction)* }
 relationship_type_disjunction = { relationship_type_conjunction ~ ("|" ~ ":"? ~ relationship_type_conjunction)* }
 relationship_type_conjunction = { relationship_type_negation ~ ("&" ~ relationship_type_negation)* }
-relationship_type_negation = { "!"* ~ relationship_type_atom }
+relationship_type_negation = { name_negation_operator* ~ relationship_type_atom }
 relationship_type_atom = {
     relationship_type_name | dynamic_name | name_wildcard | "(" ~ relationship_type_disjunction ~ ")"
 }
@@ -190,11 +190,12 @@ range_literal = { integer_literal? ~ ".." ~ integer_literal? | integer_literal }
 label_expression = { ":" ~ label_disjunction ~ (":" ~ label_disjunction)* | KW_IS ~ label_disjunction }
 label_disjunction = { label_conjunction ~ ("|" ~ label_conjunction)* }
 label_conjunction = { label_negation ~ ("&" ~ label_negation)* }
-label_negation = { "!"* ~ label_atom }
+label_negation = { name_negation_operator* ~ label_atom }
 label_atom = { label_name | dynamic_name | name_wildcard | "(" ~ label_disjunction ~ ")" }
 label_name = { symbolic_name }
 dynamic_name = { "$" ~ "(" ~ expression ~ ")" }
 name_wildcard = { "%" }
+name_negation_operator = { "!" }
 
 quantifier = { "*" | "+" | "{" ~ (quantifier_range | quantifier_fixed) ~ "}" }
 quantifier_fixed = { quantifier_lower_bound }

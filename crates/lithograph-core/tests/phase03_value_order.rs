@@ -110,6 +110,12 @@ fn order_by_structural_same_family_ordering_is_stable() {
     });
     assert_eq!(cypher_order_compare(&short, &long), Ok(Ordering::Less));
     assert_eq!(cypher_order_compare(&long, &other), Ok(Ordering::Less));
+
+    let malformed = Value::Path(PathValue {
+        nodes: vec![node("n:1"), node("n:2")],
+        relationships: vec![],
+    });
+    assert!(cypher_order_compare(&malformed, &malformed).is_err());
 }
 
 #[test]

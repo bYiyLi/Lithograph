@@ -93,7 +93,7 @@ fn pattern_ast_kind(rule: Rule, pair: &Pair<'_, Rule>) -> Option<AstKind> {
             AstKind::NameExpression(NameExpressionKind::Conjunction)
         }
         Rule::label_negation | Rule::relationship_type_negation => {
-            AstKind::NameExpression(NameExpressionKind::Negation(negation_count(pair.as_str())))
+            AstKind::NameExpression(NameExpressionKind::Negation(negation_count(pair)))
         }
         Rule::label_atom | Rule::relationship_type_atom => {
             AstKind::NameExpression(NameExpressionKind::Atom)
@@ -123,6 +123,7 @@ fn scope_ast_kind(rule: Rule, pair: &Pair<'_, Rule>) -> Option<AstKind> {
         Rule::limit_clause => AstKind::Limit,
         Rule::projection_item => AstKind::ProjectionItem,
         Rule::star_projection => AstKind::StarProjection,
+        Rule::when_expression => AstKind::CaseAlternative,
         Rule::let_binding => AstKind::LetBinding,
         Rule::merge_action => AstKind::MergeAction(merge_action_kind(pair)),
         Rule::set_operator => AstKind::SetOperator(set_operator_kind(pair.as_str())),
@@ -354,10 +355,10 @@ fn set_operator_kind(text: &str) -> SetOperatorKind {
     }
 }
 
-fn negation_count(text: &str) -> usize {
-    text.trim_start()
-        .chars()
-        .take_while(|value| *value == '!')
+fn negation_count(pair: &Pair<'_, Rule>) -> usize {
+    pair.clone()
+        .into_inner()
+        .take_while(|child| child.as_rule() == Rule::name_negation_operator)
         .count()
 }
 

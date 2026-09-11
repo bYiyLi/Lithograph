@@ -334,13 +334,7 @@ pub fn cypher_equals(left: &Value, right: &Value) -> Result<Option<bool>, ValueE
         (Value::Path(path), Value::List(values)) | (Value::List(values), Value::Path(path)) => {
             Some(path_list_equals(path, values))
         }
-        _ => {
-            return Err(ValueError::new(format!(
-                "Cypher equality cannot compare {} with {}",
-                value_type_name(left),
-                value_type_name(right)
-            )));
-        }
+        _ => Some(false),
     };
     Ok(result)
 }

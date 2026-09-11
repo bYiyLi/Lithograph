@@ -199,8 +199,8 @@ fn infer_comparison_expression(node: &AstNode, source: &str) -> Result<CypherTyp
     if suffixes.is_empty() {
         return infer_from_children(node, source);
     }
-    for suffix in suffixes {
-        let _ = infer_expression(suffix, source)?;
+    for child in expression_children(node) {
+        let _ = infer_expression(child, source)?;
     }
     Ok(CypherType::Boolean)
 }
@@ -214,9 +214,33 @@ fn infer_list_expression(node: &AstNode, source: &str) -> Result<CypherType, Fro
 }
 
 fn infer_case_expression(node: &AstNode, source: &str) -> Result<CypherType, FrontendError> {
-    let types = expression_children(node)
-        .map(|child| infer_expression(child, source))
-        .collect::<Result<Vec<_>, _>>()?;
+    let Some(first_alternative) = node
+        .children
+        .iter()
+        .position(|child| child.kind == AstKind::CaseAlternative)
+    else {
+        let types = expression_children(node)
+            .map(|child| infer_expression(child, source))
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(common_type(&types));
+    };
+
+    let mut types = Vec::new();
+    for (index, child) in node.children.iter().enumerate() {
+        if child.kind == AstKind::CaseAlternative {
+            if let Some(result) = child
+                .children
+                .iter()
+                .rfind(|nested| matches!(nested.kind, AstKind::Expression(_)))
+            {
+                types.push(infer_expression(result, source)?);
+            }
+        } else if index > first_alternative && matches!(child.kind, AstKind::Expression(_)) {
+            // The only direct expression after CASE alternatives is ELSE. A simple CASE
+            // operand appears before the first alternative and is not a result value.
+            types.push(infer_expression(child, source)?);
+        }
+    }
     Ok(common_type(&types))
 }
 

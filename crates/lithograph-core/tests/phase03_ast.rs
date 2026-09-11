@@ -248,4 +248,16 @@ fn typed_discriminators_ignore_layout_and_comments() {
             .descendants()
             .any(|node| { node.kind == AstKind::ShowTarget(ShowTargetKind::CurrentGraphType) })
     );
+
+    for query in [
+        "MATCH (n:! /* gap */ !Person) RETURN n",
+        "MATCH ()-[:! /* gap */ !KNOWS]->() RETURN 1",
+    ] {
+        let ast = parse(query).unwrap_or_else(|error| panic!("{query}: {error}"));
+        assert!(
+            ast.root.descendants().any(|node| {
+                node.kind == AstKind::NameExpression(NameExpressionKind::Negation(2))
+            })
+        );
+    }
 }
