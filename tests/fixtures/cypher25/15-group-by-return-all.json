@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "cy25-group-by-return-all-parser",
+  "profile": {
+    "id": "CY25-2026.08",
+    "source": "https://neo4j.com/docs/cypher-manual/25/clauses/group-by/",
+    "version": "2026.07",
+    "family": "GROUP BY / RETURN ALL"
+  },
+  "execution": "planned",
+  "query": "MATCH (n:Item) RETURN ALL n.kind AS kind, avg(n.score) AS score GROUP BY kind",
+  "params": {},
+  "initial_graph": [],
+  "expected": {"kind": "parse", "valid": true}
+}

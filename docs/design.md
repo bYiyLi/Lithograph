@@ -73,7 +73,7 @@ Lithograph 的首个完整兼容基线命名为 `CY25-2026.08`。
 
 Cypher 25 会继续演进。Lithograph 的“完整兼容”始终针对一个冻结 Profile 判断；新的 Cypher 25 能力通过新的 Compatibility Profile 升级，不改变旧 Profile 的测试基线。
 
-查询中的 `CYPHER 25` prefix 被接受。Lithograph 不实现 Cypher 5 compatibility mode。
+Lithograph 默认且只执行 Cypher 25。查询接受显式 `CYPHER 25` version prefix，也接受 Cypher 自身的 `CYPHER <query-options>` preamble；两者可以组合为 `CYPHER 25 <query-options>`。与 `EXPLAIN` / `PROFILE` 组合时，兼容 Cypher 25 当前可接受的 preamble 顺序。显式选择 `CYPHER 5` 或其它非 25 version 必须拒绝。这里的 Cypher query options 属于语言 frontend，与第 4.4 节通过 Extension API 传入的 Lithograph execution-level Query Options 是两套独立接口，不得互相解释或覆盖。
 
 ### 3.2 完整兼容范围
 

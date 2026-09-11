@@ -1,4 +1,4 @@
-use super::ast::{AstKind, AstNode, TransactionDisjointKind};
+use super::ast::{AstKind, AstNode, SubqueryKind, TransactionDisjointKind};
 use super::error::FrontendError;
 use super::semantic::{Analyzer, Scope, unescape_identifier};
 
@@ -116,8 +116,13 @@ pub(super) fn query_body_returns_columns(node: &AstNode) -> bool {
         AstKind::QueryBody | AstKind::ComposedQuery | AstKind::ConditionalQuery => node
             .children
             .iter()
-            .filter(|child| !matches!(child.kind, AstKind::Subquery(_)))
+            .filter(|child| {
+                !matches!(child.kind, AstKind::Subquery(kind) if kind != SubqueryKind::Braced)
+            })
             .any(query_body_returns_columns),
+        AstKind::ConditionalBranch(_) | AstKind::Subquery(SubqueryKind::Braced) => {
+            node.children.iter().any(query_body_returns_columns)
+        }
         AstKind::SingleQuery => {
             node.children
                 .iter()

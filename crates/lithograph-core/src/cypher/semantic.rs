@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 
-use super::ast::{AstKind, AstNode, ClauseKind, ExpressionKind, QueryAst, QueryConnector};
+use super::ast::{
+    AstKind, AstNode, ClauseKind, ConditionalBranchKind, ExpressionKind, QueryAst, QueryConnector,
+    SubqueryKind,
+};
 use super::error::{FrontendError, FrontendErrorKind, Span};
 use super::parser::parse;
 use super::types::infer_expression;
@@ -48,6 +51,7 @@ impl Analyzer<'_> {
             AstKind::ComposedQuery => self.analyze_composed(node, input),
             AstKind::ConditionalQuery => self.analyze_conditional(node, input),
             AstKind::SingleQuery => self.analyze_single(node, input),
+            AstKind::Subquery(SubqueryKind::Braced) => self.analyze_braced_query(node, input),
             AstKind::Subquery(_) => self.analyze_subquery(node, input, true),
             _ => Ok(input.clone()),
         }
@@ -78,12 +82,12 @@ impl Analyzer<'_> {
         for child in &node.children {
             match child.kind {
                 AstKind::Connector(value) => connector = Some(value),
-                AstKind::SingleQuery => {
+                AstKind::SingleQuery | AstKind::Subquery(SubqueryKind::Braced) => {
                     let branch_input = match connector {
                         Some(QueryConnector::Next) => &previous,
                         _ => input,
                     };
-                    let output = self.analyze_single(child, branch_input)?;
+                    let output = self.analyze_node(child, branch_input)?;
                     if matches!(
                         connector,
                         Some(
@@ -116,11 +120,16 @@ impl Analyzer<'_> {
     ) -> Result<Scope, FrontendError> {
         let mut outputs = Vec::new();
         for branch in &node.children {
+            if !matches!(branch.kind, AstKind::ConditionalBranch(_)) {
+                continue;
+            }
             self.validate_branch_condition(branch, input)?;
-            if let Some(query) = branch
-                .descendants()
-                .find(|nested| matches!(nested.kind, AstKind::ComposedQuery | AstKind::SingleQuery))
-            {
+            if let Some(query) = branch.children.iter().find(|nested| {
+                matches!(
+                    nested.kind,
+                    AstKind::ComposedQuery | AstKind::Subquery(SubqueryKind::Braced)
+                )
+            }) {
                 outputs.push(self.analyze_node(query, input)?);
             }
         }
@@ -144,6 +153,9 @@ impl Analyzer<'_> {
         branch: &AstNode,
         input: &Scope,
     ) -> Result<(), FrontendError> {
+        if branch.kind != AstKind::ConditionalBranch(ConditionalBranchKind::When) {
+            return Ok(());
+        }
         let Some(expression) = branch
             .children
             .iter()
@@ -153,6 +165,21 @@ impl Analyzer<'_> {
         };
         self.validate_expression_references(expression, input)?;
         self.validate_types(expression)
+    }
+
+    fn analyze_braced_query(
+        &mut self,
+        node: &AstNode,
+        input: &Scope,
+    ) -> Result<Scope, FrontendError> {
+        let Some(body) = node
+            .children
+            .iter()
+            .find(|child| child.kind == AstKind::QueryBody)
+        else {
+            return Ok(input.clone());
+        };
+        self.analyze_query_body(body, input)
     }
 
     fn analyze_single(&mut self, node: &AstNode, input: &Scope) -> Result<Scope, FrontendError> {

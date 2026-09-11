@@ -95,6 +95,8 @@ Phase 03 已交付 parser/AST/scope/type/value frontend foundation，因此与�
 
 Phase 03 的 inherited openCypher frontend regression 固定为：4,224 个合法 query/query-precondition parser inputs 全部 parse；3,312 个非 compile-error `executing query` 全部通过 frontend validation；585 个 compile-time-error `executing query` 中，当前仍有 16 个由后续 owner 明确接管（7 个 procedure signature、1 个完整 built-in function inventory、8 个 aggregation/DISTINCT `ORDER BY` visibility/grouping）。`phase03_parser_tck` 锁定这 16 个 scenario 的精确集合，而不是“最多 16 个”的数量门槛；后续只能显式收缩，不能通过等量替换掩盖 regression。
 
+`tests/fixtures/cypher25` 当前包含 15 个 frozen Profile fixtures，其中 12 个 parser-positive fixture 由 `phase03_parser_tck` 直接执行；新增覆盖 query preamble/options、braced conditional `UNION`、Match Mode + numeric-start parameter，以及 Cypher 25 `GROUP BY` / `RETURN ALL`。Fixture 的 `execution: planned` 仍表示完整 result semantics 尚由后续 owning Phase 完成，不与 Phase 03 parser evidence 混淆。
+
 这些证据只证明 parser/semantic/type foundation，不把尚未执行的 result semantics 标为 `done`。
 
 ## 5. 2025.06+ Cypher 25 Delta Inventory

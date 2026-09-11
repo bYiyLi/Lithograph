@@ -12,7 +12,18 @@ use serde_json::json;
 fn cypher25_frozen_grammar_families_parse() {
     let queries = [
         "CYPHER 25 RETURN 1 AS n",
+        "CYPHER 25 PROFILE RETURN 1 AS n",
+        "CYPHER runtime=slotted EXPLAIN RETURN 1 AS n",
+        "PROFILE CYPHER 25 runtime=slotted RETURN 1 AS n",
         "EXPLAIN MATCH (n:Person)-[r:KNOWS]->(m) WHERE n.age >= 18 RETURN n, r, m",
+        "RETURN ALL $0param AS n",
+        "RETURN ALL (1) AS n",
+        "WITH ALL 1 AS n RETURN n",
+        "WITH ALL (1) AS n RETURN n",
+        "MATCH REPEATABLE ELEMENTS p = (:Node)-->{1,2}() RETURN p",
+        "MATCH DIFFERENT RELATIONSHIPS p = (:Node)-->{1,2}() RETURN p",
+        "{ RETURN 1 AS n UNION RETURN 2 AS n } UNION ALL RETURN 3 AS n",
+        "{ WHEN true THEN RETURN 1 AS n ELSE RETURN 2 AS n } UNION { WHEN false THEN RETURN 3 AS n ELSE RETURN 4 AS n }",
         "MATCH (n) FILTER n.active RETURN n NEXT MATCH (m) RETURN m",
         "WHEN true THEN RETURN 1 AS value ELSE RETURN 2 AS value",
         "UNWIND [1,2] AS x WITH x WHERE x > 1 RETURN x",
@@ -36,6 +47,21 @@ fn cypher25_frozen_grammar_families_parse() {
 }
 
 #[test]
+fn cypher25_frozen_grammar_rejects_invalid_new_syntax_combinations() {
+    for query in [
+        "MATCH DIFFERENT ELEMENTS (n)-->(m) RETURN n",
+        "MATCH REPEATABLE RELATIONSHIPS (n)-->(m) RETURN n",
+        "WHEN true THEN",
+        "WHEN true THEN RETURN 1 AS n ELSE",
+        "RETURN ALL DISTINCT 1 AS n",
+        "CYPHER 5 RETURN 1 AS n",
+    ] {
+        let error = parse(query).expect_err(query);
+        assert_eq!(error.kind, FrontendErrorKind::Parse, "{query}");
+    }
+}
+
+#[test]
 fn invalid_syntax_reports_stable_line_and_column() {
     let error = parse("MATCH (n)\nRETURN").expect_err("missing projection must fail");
     assert_eq!(error.kind, FrontendErrorKind::Parse);
@@ -53,6 +79,8 @@ fn scope_isolation_and_correlation_are_enforced() {
         "WITH [1,2] AS list RETURN any(x IN list WHERE x > 1) AS ok",
         "WITH [1,2] AS list RETURN [x IN list WHERE x > 1 | x] AS xs",
         "MATCH (n) CALL (n) { RETURN n AS x } RETURN x",
+        "CALL { { RETURN 1 AS x } UNION ALL { RETURN 2 AS x } } RETURN x",
+        "CALL { WHEN true THEN RETURN 1 AS x ELSE RETURN 2 AS x } RETURN x",
         "MATCH (n) RETURN EXISTS { MATCH (m) WHERE m.id = n.id } AS ok",
         "MATCH (n) WITH n AS x RETURN x",
     ] {

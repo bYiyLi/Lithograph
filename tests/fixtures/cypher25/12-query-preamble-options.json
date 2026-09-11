@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "cy25-query-preamble-options-parser",
+  "profile": {
+    "id": "CY25-2026.08",
+    "source": "https://neo4j.com/docs/cypher-manual/current/queries/",
+    "version": "2026.08",
+    "family": "Query prefix / options"
+  },
+  "execution": "planned",
+  "query": "PROFILE CYPHER 25 runtime=slotted RETURN 1 AS x",
+  "params": {},
+  "initial_graph": [],
+  "expected": {"kind": "parse", "valid": true}
+}

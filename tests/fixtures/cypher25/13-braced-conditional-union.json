@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "cy25-braced-conditional-union-parser",
+  "profile": {
+    "id": "CY25-2026.08",
+    "source": "https://neo4j.com/docs/cypher-manual/current/queries/composed-queries/conditional-queries/",
+    "version": "2025.06",
+    "family": "WHEN / UNION composition"
+  },
+  "execution": "planned",
+  "query": "{ WHEN true THEN RETURN 1 AS x ELSE RETURN 2 AS x } UNION ALL { WHEN false THEN RETURN 3 AS x ELSE RETURN 4 AS x }",
+  "params": {},
+  "initial_graph": [],
+  "expected": {"kind": "parse", "valid": true}
+}

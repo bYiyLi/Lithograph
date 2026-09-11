@@ -24,8 +24,11 @@ mod value;
 mod value_order;
 
 pub use ast::{
-    AstKind, AstNode, ClauseKind, ExecutionMode, ExpressionKind, LiteralKind, QueryAst,
-    QueryConnector,
+    AstKind, AstNode, ClauseKind, ConditionalBranchKind, ConstraintKind, ExecutionMode,
+    ExistenceModifierKind, ExpressionKind, GraphTypeOperationKind, LiteralKind, MatchModeKind,
+    MergeActionKind, NameExpressionKind, OrderDirectionKind, QueryAst, QueryConnector, QueryOption,
+    QueryOptionValue, SetOperatorKind, SetQuantifierKind, ShowTargetKind, TransactionDisjointKind,
+    TransactionErrorKind,
 };
 pub use error::{FrontendError, FrontendErrorKind, Span};
 pub use parser::parse;

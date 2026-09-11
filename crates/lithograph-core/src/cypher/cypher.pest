@@ -3,19 +3,26 @@ COMMENT = _{ line_comment | block_comment }
 line_comment = _{ "//" ~ (!NEWLINE ~ ANY)* }
 block_comment = _{ "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
 
-query = { SOI ~ execution_mode? ~ cypher_prefix? ~ query_body ~ semicolon? ~ EOI }
+query = { SOI ~ query_preamble? ~ query_body ~ semicolon? ~ EOI }
+query_preamble = _{ cypher_prefix ~ execution_mode? | execution_mode ~ cypher_prefix? }
 execution_mode = { KW_EXPLAIN | KW_PROFILE }
-cypher_prefix = { KW_CYPHER ~ "25" ~ query_option* }
+cypher_prefix = { KW_CYPHER ~ (cypher_version ~ query_option* | query_option+) }
+cypher_version = @{ ASCII_DIGIT+ }
 query_option = { symbolic_name ~ "=" ~ option_value }
-option_value = { symbolic_name | string_literal | integer_literal | float_literal }
+option_value = { symbolic_name | string_literal | float_literal | integer_literal }
 semicolon = _{ ";" }
 
 query_body = { conditional_query | composed_query }
 conditional_query = { when_branch ~ when_branch* ~ else_branch? }
-when_branch = { KW_WHEN ~ expression ~ KW_THEN ~ braced_query? ~ composed_query? }
-else_branch = { KW_ELSE ~ braced_query? ~ composed_query? }
+when_branch = { KW_WHEN ~ expression ~ KW_THEN ~ conditional_branch_query }
+else_branch = { KW_ELSE ~ conditional_branch_query }
+conditional_branch_query = _{ braced_query | composed_query }
 braced_query = { "{" ~ query_body ~ "}" }
-composed_query = { single_query ~ (query_connector ~ single_query)* }
+composed_query = {
+      single_query ~ (query_connector ~ composed_operand)*
+    | braced_query ~ query_connector ~ composed_operand ~ (query_connector ~ composed_operand)*
+}
+composed_operand = _{ single_query | braced_query }
 query_connector = { union_connector | KW_NEXT }
 union_connector = { KW_UNION ~ (KW_ALL | KW_DISTINCT)? }
 single_query = { clause+ }
@@ -50,7 +57,7 @@ clause = _{
 
 optional_match_clause = { KW_OPTIONAL ~ KW_MATCH ~ match_mode? ~ pattern ~ search_subclause* ~ where_subclause? }
 match_clause = { KW_MATCH ~ match_mode? ~ pattern ~ search_subclause* ~ where_subclause? }
-match_mode = { (KW_DIFFERENT | KW_REPEATABLE) ~ (KW_RELATIONSHIPS | KW_ELEMENTS) }
+match_mode = { KW_DIFFERENT ~ KW_RELATIONSHIPS | KW_REPEATABLE ~ KW_ELEMENTS }
 where_subclause = { KW_WHERE ~ expression }
 filter_clause = { KW_FILTER ~ expression }
 
@@ -63,7 +70,8 @@ search_score = { KW_SCORE ~ KW_AS ~ projection_alias }
 
 return_clause = { KW_RETURN ~ projection_body }
 with_clause = { KW_WITH ~ projection_body ~ where_subclause? }
-projection_body = { KW_DISTINCT? ~ projection_items ~ group_by? ~ order_by? ~ skip_clause? ~ limit_clause? }
+projection_body = { projection_quantifier? ~ projection_items ~ group_by? ~ order_by? ~ skip_clause? ~ limit_clause? }
+projection_quantifier = { KW_DISTINCT | KW_ALL ~ !("(" ~ predicate_variable ~ KW_IN) }
 projection_items = { projection_item ~ ("," ~ projection_item)* }
 projection_item = { star_projection | expression ~ projection_alias_clause? }
 star_projection = { "*" }
@@ -71,7 +79,8 @@ projection_alias_clause = { KW_AS ~ projection_alias }
 projection_alias = { symbolic_name }
 group_by = { KW_GROUP ~ KW_BY ~ expression_list }
 order_by = { KW_ORDER ~ KW_BY ~ order_item ~ ("," ~ order_item)* }
-order_item = { expression ~ (KW_ASC | KW_ASCENDING | KW_DESC | KW_DESCENDING)? }
+order_item = { expression ~ order_direction? }
+order_direction = { KW_ASC | KW_ASCENDING | KW_DESC | KW_DESCENDING }
 skip_clause = { (KW_SKIP | KW_OFFSET) ~ expression }
 limit_clause = { KW_LIMIT ~ expression }
 
@@ -89,7 +98,8 @@ insert_clause = { KW_INSERT ~ pattern }
 merge_clause = { KW_MERGE ~ pattern_part ~ merge_action* }
 merge_action = { KW_ON ~ (KW_CREATE | KW_MATCH) ~ set_clause }
 set_clause = { KW_SET ~ set_item ~ ("," ~ set_item)* }
-set_item = { assignable_property ~ ("=" | "+=") ~ expression | variable ~ ("=" | "+=") ~ expression | variable ~ label_update }
+set_item = { assignable_property ~ set_operator ~ expression | variable ~ set_operator ~ expression | variable ~ label_update }
+set_operator = { "+=" | "=" }
 assignable_property = { (variable | parenthesized_expression) ~ property_lookup+ }
 label_update = { (":" ~ label_name)+ }
 remove_clause = { KW_REMOVE ~ remove_item ~ ("," ~ remove_item)* }
@@ -124,22 +134,26 @@ transaction_error_continue = { KW_CONTINUE }
 transaction_error_break = { KW_BREAK }
 transaction_error_fail = { KW_FAIL }
 transaction_error_retry = {
-    KW_RETRY ~ transaction_retry_duration? ~ (KW_THEN ~ (KW_CONTINUE | KW_BREAK | KW_FAIL))?
+    KW_RETRY ~ transaction_retry_duration? ~ transaction_retry_fallback?
 }
+transaction_retry_fallback = { KW_THEN ~ (KW_CONTINUE | KW_BREAK | KW_FAIL) }
 transaction_retry_duration = { KW_FOR? ~ expression ~ (KW_SEC | KW_SECOND | KW_SECONDS) }
 transaction_status = { KW_REPORT ~ KW_STATUS ~ KW_AS ~ transaction_status_binding }
 transaction_status_binding = { symbolic_name }
 procedure_call = { procedure_name ~ procedure_args? ~ yield_clause? }
 procedure_name = { qualified_name }
 procedure_args = { "(" ~ expression_list? ~ ")" }
-yield_clause = { KW_YIELD ~ ("*" | yield_item ~ ("," ~ yield_item)*) ~ where_subclause? }
+yield_clause = { KW_YIELD ~ (yield_all | yield_item ~ ("," ~ yield_item)*) ~ where_subclause? }
+yield_all = { "*" }
 yield_item = { yield_name ~ projection_alias_clause? }
 yield_name = { symbolic_name }
 
 load_csv_clause = {
-    KW_LOAD ~ KW_CSV ~ (KW_WITH ~ KW_HEADERS)? ~ KW_FROM ~ expression ~ KW_AS ~ load_csv_binding
-    ~ (KW_FIELDTERMINATOR ~ string_literal)?
+    KW_LOAD ~ KW_CSV ~ load_csv_headers? ~ KW_FROM ~ expression ~ KW_AS ~ load_csv_binding
+    ~ load_csv_field_terminator?
 }
+load_csv_headers = { KW_WITH ~ KW_HEADERS }
+load_csv_field_terminator = { KW_FIELDTERMINATOR ~ string_literal }
 load_csv_binding = { symbolic_name }
 
 pattern = { pattern_part ~ ("," ~ pattern_part)* }
@@ -167,7 +181,7 @@ relationship_type_disjunction = { relationship_type_conjunction ~ ("|" ~ ":"? ~ 
 relationship_type_conjunction = { relationship_type_negation ~ ("&" ~ relationship_type_negation)* }
 relationship_type_negation = { "!"* ~ relationship_type_atom }
 relationship_type_atom = {
-    relationship_type_name | dynamic_name | "%" | "(" ~ relationship_type_disjunction ~ ")"
+    relationship_type_name | dynamic_name | name_wildcard | "(" ~ relationship_type_disjunction ~ ")"
 }
 relationship_type_name = { symbolic_name | dynamic_name }
 variable_length = { "*" ~ range_literal? }
@@ -177,9 +191,10 @@ label_expression = { ":" ~ label_disjunction ~ (":" ~ label_disjunction)* | KW_I
 label_disjunction = { label_conjunction ~ ("|" ~ label_conjunction)* }
 label_conjunction = { label_negation ~ ("&" ~ label_negation)* }
 label_negation = { "!"* ~ label_atom }
-label_atom = { label_name | dynamic_name | "%" | "(" ~ label_disjunction ~ ")" }
+label_atom = { label_name | dynamic_name | name_wildcard | "(" ~ label_disjunction ~ ")" }
 label_name = { symbolic_name }
 dynamic_name = { "$" ~ "(" ~ expression ~ ")" }
+name_wildcard = { "%" }
 
 quantifier = { "*" | "+" | "{" ~ (quantifier_range | quantifier_fixed) ~ "}" }
 quantifier_fixed = { quantifier_lower_bound }
@@ -278,13 +293,15 @@ vector_signed_integer = { KW_SIGNED ~ KW_INTEGER_TYPE }
 vector_coordinate_name = { KW_INTEGER_TYPE | KW_FLOAT_TYPE | symbolic_name }
 list_predicate_function = { (KW_ALL | KW_ANY | KW_NONE | KW_SINGLE) ~ "(" ~ predicate_variable ~ KW_IN ~ expression ~ (KW_WHERE ~ expression)? ~ ")" }
 predicate_variable = { symbolic_name }
-function_call = { function_name ~ "(" ~ KW_DISTINCT? ~ function_arguments? ~ ")" }
+function_call = { function_name ~ "(" ~ function_quantifier? ~ function_arguments? ~ ")" }
+function_quantifier = { KW_DISTINCT }
 function_arguments = { "*" | expression_list }
 pattern_expression = { node_pattern ~ relationship_chain+ }
 function_name = { qualified_name }
 qualified_name = { symbolic_name ~ ("." ~ symbolic_name)* }
 variable = { symbolic_name }
-parameter = @{ "$" ~ (symbolic_name_raw | ASCII_DIGIT+) }
+parameter = @{ "$" ~ parameter_name }
+parameter_name = { (XID_CONTINUE | "_")+ }
 
 list_literal = { "[" ~ expression_list? ~ "]" }
 list_comprehension = {
@@ -329,9 +346,11 @@ index_kind = { KW_LOOKUP | KW_RANGE | KW_TEXT | KW_POINT | KW_FULLTEXT | KW_VECT
 index_name = { symbolic_name }
 if_not_exists = { KW_IF ~ KW_NOT ~ KW_EXISTS }
 index_pattern = { node_pattern | node_pattern ~ relationship_pattern ~ node_pattern }
-index_target = { KW_EACH? ~ ("[" ~ expression_list ~ "]" | "(" ~ expression_list ~ ")" | expression) }
+index_target = { index_target_each? ~ ("[" ~ expression_list ~ "]" | "(" ~ expression_list ~ ")" | expression) }
+index_target_each = { KW_EACH }
 index_additional_properties = { KW_WITH ~ "[" ~ property_expression ~ ("," ~ property_expression)* ~ "]" }
-drop_index_clause = { KW_DROP ~ KW_INDEX ~ index_name ~ (KW_IF ~ KW_EXISTS)? }
+if_exists = { KW_IF ~ KW_EXISTS }
+drop_index_clause = { KW_DROP ~ KW_INDEX ~ index_name ~ if_exists? }
 
 create_constraint_clause = {
     KW_CREATE ~ KW_CONSTRAINT ~ constraint_name? ~ if_not_exists? ~ KW_FOR ~ index_pattern ~ KW_REQUIRE ~ constraint_requirement ~ options_clause?
@@ -342,12 +361,13 @@ property_type_constraint = { property_expression ~ (KW_IS? ~ "::" | KW_IS ~ KW_T
 constraint_property_or_tuple = { property_expression | "(" ~ property_expression ~ ("," ~ property_expression)* ~ ")" }
 expression_or_tuple = { expression | "(" ~ expression_list ~ ")" }
 constraint_kind = { (KW_NODE | KW_RELATIONSHIP)? ~ (KW_KEY | KW_UNIQUE) | KW_NOT ~ KW_NULL }
-drop_constraint_clause = { KW_DROP ~ KW_CONSTRAINT ~ constraint_name ~ (KW_IF ~ KW_EXISTS)? }
+drop_constraint_clause = { KW_DROP ~ KW_CONSTRAINT ~ constraint_name ~ if_exists? }
 options_clause = { KW_OPTIONS ~ map_literal }
 
 show_clause = {
-    KW_SHOW ~ show_target ~ (KW_AS ~ KW_GRAPH)? ~ show_yield? ~ where_subclause? ~ return_clause?
+    KW_SHOW ~ show_target ~ show_as_graph? ~ show_yield? ~ where_subclause? ~ return_clause?
 }
+show_as_graph = { KW_AS ~ KW_GRAPH }
 show_target = {
       KW_CURRENT ~ KW_GRAPH ~ KW_TYPE
     | index_kind? ~ KW_INDEXES

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "cy25-match-mode-parameter-parser",
+  "profile": {
+    "id": "CY25-2026.08",
+    "source": "https://neo4j.com/docs/cypher-manual/current/patterns/unique-relationship-paths/",
+    "version": "2025.06",
+    "family": "Match mode / parameter naming"
+  },
+  "execution": "planned",
+  "query": "MATCH REPEATABLE ELEMENTS p = (:Node)-->{1,2}() RETURN $0param AS value",
+  "params": {},
+  "initial_graph": [],
+  "expected": {"kind": "parse", "valid": true}
+}

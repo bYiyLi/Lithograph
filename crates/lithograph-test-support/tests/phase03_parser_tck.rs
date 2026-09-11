@@ -3,7 +3,43 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use lithograph_core::cypher::{parse, validate};
+use lithograph_test_support::compatibility::{ExpectedOutcome, load_fixture_directory};
 use lithograph_test_support::tck::{TckStepArgument, expand_scenarios, read_feature};
+
+#[test]
+fn cypher25_valid_parse_fixtures_parse() {
+    let root = repo_root().join("tests/fixtures/cypher25");
+    let fixtures = load_fixture_directory(&root).expect("CY25 fixture inventory should load");
+    let mut queries = 0_usize;
+    let mut failures = Vec::new();
+
+    for fixture in fixtures {
+        if !matches!(
+            fixture.expected,
+            ExpectedOutcome::Parse {
+                valid: true,
+                error: None
+            }
+        ) {
+            continue;
+        }
+        queries += 1;
+        if let Err(error) = parse(&fixture.query) {
+            failures.push(format!(
+                "{} @ {}:{}: {}\n{}",
+                fixture.id, error.line, error.column, error.message, fixture.query
+            ));
+        }
+    }
+
+    assert_eq!(queries, 12, "CY25 valid parser fixture inventory changed");
+    assert!(
+        failures.is_empty(),
+        "{} CY25 parser fixture failure(s):\n{}",
+        failures.len(),
+        failures.join("\n---\n")
+    );
+}
 
 #[test]
 fn all_vendored_opencypher_valid_queries_parse() {
