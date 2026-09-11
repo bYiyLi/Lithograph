@@ -72,8 +72,13 @@ $shellC = Join-Path $sourceDir "shell.c"
 $sqliteHeaderDir = $sourceDir
 $nativeSource = Join-Path $repoRoot "tests\native_abi_smoke.c"
 $lithographInclude = Join-Path $repoRoot "include"
+$sqliteObj = Join-Path $root "sqlite3-native.obj"
+$sqliteLib = Join-Path $root "sqlite3.lib"
 
 Invoke-VcCommand "cd /d `"$root`" && cl /nologo /O2 /DSQLITE_THREADSAFE=1 /DSQLITE_ENABLE_FTS5 `"$sqliteC`" `"$shellC`" /Fe`"$sqliteExe`""
+Invoke-VcCommand "cd /d `"$root`" && cl /nologo /c /O2 /w /DSQLITE_THREADSAFE=1 /DSQLITE_ENABLE_FTS5 `"$sqliteC`" /Fo`"$sqliteObj`""
+Invoke-VcCommand "cd /d `"$root`" && lib /nologo `"$sqliteObj`" /OUT:`"$sqliteLib`""
+$env:LIB = if ($env:LIB) { "$root;$env:LIB" } else { $root }
 
 $version = (& $sqliteExe ":memory:" "SELECT sqlite_version();").Trim()
 if ($version -ne "3.45.0") {
@@ -107,9 +112,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "Windows Phase 04 read query probe failed"
 }
 
-$sqliteObj = Join-Path $root "sqlite3-native.obj"
 $nativeObj = Join-Path $root "native-abi-smoke.obj"
-Invoke-VcCommand "cd /d `"$root`" && cl /nologo /c /O2 /w /DSQLITE_THREADSAFE=1 /DSQLITE_ENABLE_FTS5 `"$sqliteC`" /Fo`"$sqliteObj`""
 Invoke-VcCommand "cd /d `"$root`" && cl /nologo /c /std:c11 /W4 /WX /I`"$lithographInclude`" /I`"$sqliteHeaderDir`" `"$nativeSource`" /Fo`"$nativeObj`""
 Invoke-VcCommand "cd /d `"$root`" && link /nologo `"$nativeObj`" `"$sqliteObj`" /OUT:`"$nativeExe`""
 & $nativeExe $extension
