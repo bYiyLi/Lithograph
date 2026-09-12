@@ -151,17 +151,13 @@ fn point_property(value: &PointValue, key: &str) -> QueryResult<Value> {
     let coordinates = value.coordinates();
     let geographic = value.crs().starts_with("wgs-84");
     match key.to_ascii_lowercase().as_str() {
-        "x" | "longitude" => Ok(Value::Float(coordinates[0])),
-        "y" | "latitude" => Ok(Value::Float(coordinates[1])),
-        "z" => Ok(coordinates
-            .get(2)
-            .copied()
-            .map_or(Value::Null, Value::Float)),
-        "height" if geographic => Ok(coordinates
-            .get(2)
-            .copied()
-            .map_or(Value::Null, Value::Float)),
-        "height" => Ok(Value::Null),
+        "x" => Ok(Value::Float(coordinates[0])),
+        "y" => Ok(Value::Float(coordinates[1])),
+        "z" if coordinates.len() == 3 => Ok(Value::Float(coordinates[2])),
+        "longitude" if geographic => Ok(Value::Float(coordinates[0])),
+        "latitude" if geographic => Ok(Value::Float(coordinates[1])),
+        "height" if geographic && coordinates.len() == 3 => Ok(Value::Float(coordinates[2])),
+        "z" | "longitude" | "latitude" | "height" => Err(property_error(key)),
         "crs" => Ok(Value::String(value.crs().to_owned())),
         "srid" => Ok(Value::Integer(i64::from(value.srid()))),
         _ => Err(property_error(key)),

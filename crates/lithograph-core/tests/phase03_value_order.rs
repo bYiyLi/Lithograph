@@ -55,7 +55,7 @@ fn order_by_is_distinct_from_direct_comparison() {
 
     let wgs = Value::Point(PointValue::new("wgs-84", vec![0.0, 0.0]).expect("point"));
     let cartesian = Value::Point(PointValue::new("cartesian", vec![0.0, 0.0]).expect("point"));
-    assert!(cypher_compare(&wgs, &cartesian).is_err());
+    assert_eq!(cypher_compare(&wgs, &cartesian), Ok(None));
     assert_eq!(cypher_order_compare(&wgs, &cartesian), Ok(Ordering::Less));
 
     let uuid_a = uuid("00000000-0000-0000-0000-000000000001");

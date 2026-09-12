@@ -106,17 +106,17 @@ Phase-level review 已闭环：
 - query composition 使用统一 row/scope 模型；`WITH` / `LET` 同步绑定、`UNWIND` / `FOR` rebinding、`CALL` import/YIELD、`NEXT` row handoff/作用域清空、`UNION` column/flavor 和 query termination 均有正反例；
 - aggregation、expression subquery、dynamic label/type/property、advanced path、mutation 与 Graph View 都经过真实 parser -> planner -> executor -> versioned storage 路径，不为单一 fixture 增加 hidden compatibility mode；
 - current-graph function/procedure registry 同时驱动 semantic validation、runtime dispatch 和 `SHOW FUNCTIONS` / `SHOW PROCEDURES`；Phase-level review 进一步核对 frozen Manual 的函数 canonical name、category、overload、signature、return/argument metadata 与 deprecation 字段，`PROPERTY_EXISTS` 保持 syntax-owned predicate 而不伪装成 function row；registry metadata 不再以通用 `ANY` fallback 掩盖 inventory 漏项，缺失 frozen metadata 会作为内部一致性错误失败；未知名称及参数错误在执行前拒绝；LOAD CSV 上下文函数和 Phase 09 version procedures 仍由各自 owner 接入同一 registry；
-- temporal clock、IANA timezone/DST、numeric overflow/NaN、Unicode、UUID、VECTOR、Point 与 string interpolation 已覆盖 typed/null/error 边界；
+- temporal clock、IANA timezone/DST、numeric overflow/NaN、Unicode、UUID、VECTOR、Point 与 string interpolation 已覆盖 typed/null/error 边界；后续独立 review 进一步修正 Point 输入 null propagation、`crs`/`srid` 与坐标别名冲突校验、Point component 可用性、Point inequality 返回 `null`、geographic bounding box 跨 180° 经线，以及 WGS-84 3D distance 使用两点平均高度的语义，并用 frozen Manual/GQL contract 锁定回归；
 - mutation program 保持一次 top-level query 的 savepoint/Commit 原子性，跨 clause staged visibility、FOREACH、NODETACH/DETACH、path delete、dynamic SET/REMOVE 与 correlated multi-row MERGE 均复用 storage/version API；
 - 普通标量函数不再触发 Phase 06 program materialization；复合 operator 的大规模 streaming/spill 与 10M/100M memory gate 按既有路线由 Phase 10 验收，不在本 Phase 冒充 release-scale 证据。
 
 ## 7. 验证证据
 
-- `phase06_query` 53/53，覆盖 composition、aggregation、path、function/value、procedure/SHOW、mutation、Graph View、temporal 与错误语义；
+- `phase06_query` 54/54，覆盖 composition、aggregation、path、function/value、procedure/SHOW、mutation、Graph View、temporal、spatial Point 边界与错误语义；
 - Phase 04/05 regression 为 26/26 与 67/67；`phase03_parser_tck` 4/4，继承 4,224 parser、3,312 frontend-success、585 compile-error inventory，剩余 7 个 deferred scenario 全部由后续 procedure catalog/signature owner 接管，另有 1 个旧 openCypher relationship-reuse scenario 被 Cypher 25 新语义取代；
 - `phase06_compatibility` 对 17 个 frozen fixtures 报告 15 passed、2 planned、0 failed；两个 planned family 仅为 Phase 07 Graph Type 与 Phase 08 SEARCH；
-- SQLite Extension 真实 `.load`、SQL Bridge/Native ABI、workspace format/check/Clippy/test、canonical CI 与 repository quality gate 均通过；最新 review quality snapshot 为 duplicated lines 0.98%、coverage regions 80.38%、functions 83.46%、lines 82.72%，production file hard budget 无违规；
-- 对 frozen Manual 与本地 Neo4j 2026.07.1 oracle 复核了 clause composition、NEXT/CALL/UNION、SHOW metadata、path uniqueness、string/null、temporal、aggregate 边界与错误类别；2026.08 delta 以 frozen official Manual 为准。
+- SQLite Extension 真实 `.load`、SQL Bridge/Native ABI、workspace format/check/Clippy/test、canonical CI 与 repository quality gate 均通过；最新 review quality snapshot 为 duplicated lines 0.98%、coverage regions 80.55%、functions 83.54%、lines 82.85%，production file hard budget 与 complexity gate 无违规；
+- 对 frozen Manual 与本地 Neo4j 2026.07.1 oracle 复核了 clause composition、NEXT/CALL/UNION、SHOW metadata、path uniqueness、string/null、temporal、aggregate 边界与错误类别；最新独立 review 另以 frozen official Manual/GQL status contract 复核 Point null、constructor invalid forms、component access、inequality、WGS-84 3D distance 与跨 180° 经线 bounding box，2026.08 delta 仍以 frozen official Manual 为准。
 
 ## 8. 完成条件
 

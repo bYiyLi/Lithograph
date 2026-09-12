@@ -851,13 +851,13 @@ fn runtime_value_equality_ordering_and_uuid_helpers_cover_edge_families() {
         Ok(Some(false)),
         "TCK List3 requires list/literal equality to be false"
     );
-    assert!(
+    assert_eq!(
         cypher_compare(
             &Value::Point(PointValue::new("cartesian", vec![1.0, 2.0]).expect("point")),
             &Value::Point(PointValue::new("cartesian", vec![1.0, 3.0]).expect("point")),
-        )
-        .is_err(),
-        "POINT cannot use direct ordering comparison"
+        ),
+        Ok(None),
+        "POINT inequality comparisons produce null"
     );
 }
 

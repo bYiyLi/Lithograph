@@ -113,11 +113,11 @@ Phase 05 的 67 个 targeted scenarios 覆盖真实 parser -> planner -> executo
 
 ### Phase 06 query-completeness evidence
 
-Phase 06 的 53 个 targeted scenarios 覆盖统一 row/scope 执行模型下的 WITH/LET、UNWIND/FOR、UNION/WHEN/NEXT、CALL 与 expression subquery、implicit/explicit grouping、完整 aggregate inventory、advanced/quantified path、Match/Path Mode、selector/shortest、current-query function inventory、current-graph procedures/SHOW、dynamic name/property mutation、FOREACH、NODETACH/DETACH、Graph View composition、temporal clock/IANA DST、numeric overflow/NaN、Unicode、UUID、VECTOR、Point 与 string interpolation。Phase 04/05 regression 26/26 与 67/67 同时通过。
+Phase 06 的 54 个 targeted scenarios 覆盖统一 row/scope 执行模型下的 WITH/LET、UNWIND/FOR、UNION/WHEN/NEXT、CALL 与 expression subquery、implicit/explicit grouping、完整 aggregate inventory、advanced/quantified path、Match/Path Mode、selector/shortest、current-query function inventory、current-graph procedures/SHOW、dynamic name/property mutation、FOREACH、NODETACH/DETACH、Graph View composition、temporal clock/IANA DST、numeric overflow/NaN、Unicode、UUID、VECTOR、Point 与 string interpolation；Point regression 额外锁定输入 null propagation、`crs`/`srid` 与坐标/第三维别名冲突、CRS/维度相关 component access、direct inequality 的 `null` 结果、geographic antimeridian bounding box 与 WGS-84 3D average-height distance。Phase 04/05 regression 26/26 与 67/67 同时通过。
 
 统一 registry 已关闭未知 function 静默执行，并支撑当前 query functions、aggregates、`db.labels` / `db.propertyKeys` / `db.relationshipTypes` 与 `SHOW FUNCTIONS` / `SHOW PROCEDURES`。Built-in functions 仍标为 `partial`，仅因为 Phase 08 LOAD CSV 上下文函数 `file()` / `linenumber()` 尚未进入执行器；Procedure CALL 与 SHOW 也只因 Phase 07–09 将继续注册 Schema/index 与 version surfaces 而保持 `partial`，不表示 Phase 06 current-graph surface 未完成。
 
-17 个 frozen fixtures 的真实报告为 15 passed、2 planned、0 failed；两个 planned family 仅为后续 Graph Type 与 SEARCH。Phase 06 的 composition/path/function/mutation oracle 结合 frozen official Manual 与 Neo4j 2026.07.1 实例复核；2026.08 delta 以 frozen Manual 为准。复合执行器的 release-scale streaming/spill 与 10M/100M memory gate 仍由 Phase 10 明确验收，Phase 06 不把 targeted semantic evidence 描述为规模证明。
+17 个 frozen fixtures 的真实报告为 15 passed、2 planned、0 failed；两个 planned family 仅为后续 Graph Type 与 SEARCH。Phase 06 的 composition/path/function/mutation oracle 结合 frozen official Manual 与 Neo4j 2026.07.1 实例复核；最新独立 review 的 Point null、constructor invalid forms、component access、inequality、WGS-84 3D distance 与 antimeridian bounding box 由 frozen official Manual/GQL status contract 再次复核；2026.08 delta 以 frozen Manual 为准。复合执行器的 release-scale streaming/spill 与 10M/100M memory gate 仍由 Phase 10 明确验收，Phase 06 不把 targeted semantic evidence 描述为规模证明。
 
 ## 5. 2025.06+ Cypher 25 Delta Inventory
 

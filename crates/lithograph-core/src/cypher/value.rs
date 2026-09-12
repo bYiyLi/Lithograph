@@ -341,7 +341,7 @@ pub fn cypher_equals(left: &Value, right: &Value) -> Result<Option<bool>, ValueE
 
 /// Comparison semantics for `<`, `<=`, `>`, and `>=`.
 ///
-/// `Ok(None)` is the Cypher `null` result (including direct DURATION comparisons),
+/// `Ok(None)` is the Cypher `null` result (including direct DURATION and POINT comparisons),
 /// while `Unordered` represents NaN, for which every ordering predicate is false.
 /// Incomparable types return an error instead of being silently treated as null.
 pub fn cypher_compare(left: &Value, right: &Value) -> Result<Option<CypherComparison>, ValueError> {
@@ -377,7 +377,9 @@ pub fn cypher_compare(left: &Value, right: &Value) -> Result<Option<CypherCompar
         (Value::ZonedDateTime(left), Value::ZonedDateTime(right)) => {
             CypherComparison::from(compare_zoned_datetime(left, right))
         }
-        (Value::Duration(_), Value::Duration(_)) => return Ok(None),
+        (Value::Duration(_), Value::Duration(_)) | (Value::Point(_), Value::Point(_)) => {
+            return Ok(None);
+        }
         _ => {
             return Err(ValueError::new(format!(
                 "Cypher ordering comparison cannot compare {} with {}",

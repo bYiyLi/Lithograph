@@ -7,6 +7,8 @@ use rusqlite::Connection;
 
 #[path = "phase06_query/mutation.rs"]
 mod mutation;
+#[path = "phase06_query/spatial.rs"]
+mod spatial;
 #[path = "phase06_query/temporal.rs"]
 mod temporal;
 
@@ -532,22 +534,6 @@ fn round_modes_and_vector_list_conversions_follow_the_frozen_profile() {
         ]]
     );
     assert!(query_error(&connection, "RETURN round(1.2, 1, 'UNKNOWN')").contains("mode"));
-}
-
-#[test]
-fn spatial_vector_and_temporal_constructors_compose() {
-    let connection = fresh_storage();
-    let result = rows(
-        &connection,
-        "RETURN point.distance(point({x: 0.0, y: 0.0}), point({x: 3.0, y: 4.0})) AS distance, vector_distance(vector([0.0, 0.0], 2, FLOAT64), vector([3.0, 4.0], 2, FLOAT64), EUCLIDEAN) AS vectorDistance, date('2024-02-29') AS date, datetime('2024-03-31T01:30:00+01:00[Europe/Paris]') AS zoned",
-    );
-    assert_eq!(result.len(), 1);
-    assert_eq!(result[0][0], Value::Float(5.0));
-    assert_eq!(result[0][1], Value::Float(5.0));
-    assert!(matches!(result[0][2], Value::Date(ref value) if value.as_str() == "2024-02-29"));
-    assert!(
-        matches!(result[0][3], Value::ZonedDateTime(ref value) if value.zone() == "Europe/Paris")
-    );
 }
 
 #[test]

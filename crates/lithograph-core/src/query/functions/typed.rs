@@ -258,16 +258,65 @@ fn uuid_bits(values: &[Value], most: bool) -> QueryResult<Value> {
 
 fn point(values: &[Value]) -> QueryResult<Value> {
     require_arity(values, 1, 1)?;
-    let Value::Map(map) = &values[0] else {
-        if matches!(values[0], Value::Null) {
-            return Ok(Value::Null);
-        }
-        return Err(QueryError::new(
+    let Some(map) = point_map(&values[0])? else {
+        return Ok(Value::Null);
+    };
+    if point_has_null_argument(map) {
+        return Ok(Value::Null);
+    }
+    let (geographic, coordinates) = point_coordinates(map)?;
+    let crs = point_crs(map, geographic, coordinates.len() == 3)?;
+    validate_point_coordinate_system(geographic, &crs)?;
+    PointValue::new(&crs, coordinates)
+        .map(Value::Point)
+        .map_err(Into::into)
+}
+
+fn point_map(value: &Value) -> QueryResult<Option<&std::collections::BTreeMap<String, Value>>> {
+    match value {
+        Value::Map(map) => Ok(Some(map)),
+        Value::Null => Ok(None),
+        _ => Err(QueryError::new(
             QueryErrorKind::Type,
             "point() requires Map",
+        )),
+    }
+}
+
+fn point_has_null_argument(map: &std::collections::BTreeMap<String, Value>) -> bool {
+    const POINT_ARGUMENTS: &[&str] = &[
+        "x",
+        "y",
+        "z",
+        "longitude",
+        "latitude",
+        "height",
+        "crs",
+        "srid",
+    ];
+    map.iter().any(|(name, value)| {
+        POINT_ARGUMENTS.contains(&name.as_str()) && matches!(value, Value::Null)
+    })
+}
+
+fn point_coordinates(
+    map: &std::collections::BTreeMap<String, Value>,
+) -> QueryResult<(bool, Vec<f64>)> {
+    let has_cartesian_coordinates = map.contains_key("x") || map.contains_key("y");
+    let has_geographic_coordinates = map.contains_key("longitude") || map.contains_key("latitude");
+    if has_cartesian_coordinates && has_geographic_coordinates {
+        return Err(QueryError::new(
+            QueryErrorKind::Type,
+            "point coordinates must use either x/y or longitude/latitude",
         ));
-    };
-    let geographic = map.contains_key("longitude") || map.contains_key("latitude");
+    }
+    if map.contains_key("height") && map.contains_key("z") {
+        return Err(QueryError::new(
+            QueryErrorKind::Type,
+            "point coordinates must use either height or z",
+        ));
+    }
+    let geographic = has_geographic_coordinates;
     let first = number(map.get(if geographic { "longitude" } else { "x" }))?;
     let second = number(map.get(if geographic { "latitude" } else { "y" }))?;
     let third = map
@@ -275,14 +324,21 @@ fn point(values: &[Value]) -> QueryResult<Value> {
         .or_else(|| map.get("z"))
         .map(number_value)
         .transpose()?;
-    let crs = point_crs(map, geographic, third.is_some())?;
     let mut coordinates = vec![first, second];
     if let Some(third) = third {
         coordinates.push(third);
     }
-    PointValue::new(&crs, coordinates)
-        .map(Value::Point)
-        .map_err(Into::into)
+    Ok((geographic, coordinates))
+}
+
+fn validate_point_coordinate_system(geographic: bool, crs: &str) -> QueryResult<()> {
+    if geographic && !crs.starts_with("wgs-84") {
+        return Err(QueryError::new(
+            QueryErrorKind::Type,
+            "longitude/latitude coordinates require a WGS-84 coordinate system",
+        ));
+    }
+    Ok(())
 }
 
 fn point_crs(
@@ -290,6 +346,12 @@ fn point_crs(
     geographic: bool,
     three_dimensional: bool,
 ) -> QueryResult<String> {
+    if map.contains_key("crs") && map.contains_key("srid") {
+        return Err(QueryError::new(
+            QueryErrorKind::Type,
+            "point crs and srid cannot both be specified",
+        ));
+    }
     let named = match map.get("crs") {
         Some(Value::String(value)) => Some(value.to_ascii_lowercase()),
         Some(_) => {
@@ -309,14 +371,6 @@ fn point_crs(
         Some(_) => return temporal_type_error("point srid must be Integer"),
         None => None,
     };
-    if let (Some(named), Some(numbered)) = (&named, numbered)
-        && named != numbered
-    {
-        return Err(QueryError::new(
-            QueryErrorKind::Type,
-            "point crs and srid identify different coordinate systems",
-        ));
-    }
     Ok(named.unwrap_or_else(|| {
         numbered
             .map_or_else(
@@ -370,13 +424,28 @@ fn point_within_bbox(values: &[Value]) -> QueryResult<Value> {
     if point.crs() != lower.crs() || point.crs() != upper.crs() {
         return Ok(Value::Null);
     }
+    let point_coordinates = point.coordinates();
+    let lower_coordinates = lower.coordinates();
+    let upper_coordinates = upper.coordinates();
+    let longitude_inside = if point.crs().starts_with("wgs-84") {
+        let value = point_coordinates[0];
+        let lower = lower_coordinates[0];
+        let upper = upper_coordinates[0];
+        if lower <= upper {
+            value >= lower && value <= upper
+        } else {
+            value >= lower || value <= upper
+        }
+    } else {
+        point_coordinates[0] >= lower_coordinates[0] && point_coordinates[0] <= upper_coordinates[0]
+    };
+    let remaining_coordinates_inside = point_coordinates[1..]
+        .iter()
+        .zip(&lower_coordinates[1..])
+        .zip(&upper_coordinates[1..])
+        .all(|((value, lower), upper)| value >= lower && value <= upper);
     Ok(Value::Boolean(
-        point
-            .coordinates()
-            .iter()
-            .zip(lower.coordinates())
-            .zip(upper.coordinates())
-            .all(|((value, lower), upper)| value >= lower && value <= upper),
+        longitude_inside && remaining_coordinates_inside,
     ))
 }
 
@@ -648,15 +717,23 @@ fn vector_numbers_f32(value: &VectorValue) -> Vec<f32> {
 }
 
 fn geographic_distance(left: &[f64], right: &[f64]) -> f64 {
+    const WGS84_EARTH_RADIUS_METERS: f64 = 6_378_140.0;
     let longitude = (right[0] - left[0]).to_radians();
     let latitude = (right[1] - left[1]).to_radians();
     let a = (latitude / 2.0).sin().powi(2)
         + left[1].to_radians().cos()
             * right[1].to_radians().cos()
             * (longitude / 2.0).sin().powi(2);
-    let surface = 6_371_000.0 * 2.0 * a.sqrt().atan2((1.0 - a).sqrt());
+    let a = a.clamp(0.0, 1.0);
+    let central_angle = 2.0 * a.sqrt().atan2((1.0 - a).sqrt());
+    let average_height = if left.len() == 3 && right.len() == 3 {
+        (left[2] + right[2]) / 2.0
+    } else {
+        0.0
+    };
+    let surface = (WGS84_EARTH_RADIUS_METERS + average_height) * central_angle;
     if left.len() == 3 && right.len() == 3 {
-        (surface.powi(2) + (right[2] - left[2]).powi(2)).sqrt()
+        surface.hypot(right[2] - left[2])
     } else {
         surface
     }
