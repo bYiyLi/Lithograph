@@ -81,10 +81,10 @@ Phase 10 Compatibility / Scale / Release Closure
 | HNSW / vector SEARCH | 08 | 10 |
 | LOAD CSV / transaction batching | 08 | 10 |
 | Diff / Patch | 09 | 09 |
-| Three-way Merge / conflict | 09 | 09 |
+| Three-way Merge / Merge Session / conflict resolution | 09 | 09 |
 | Rebase / Squash | 09 | 09 |
 | Reset / Revert / History / GC | 09 | 09 |
-| Commit Data / Tag sidecar + storage format 1→2 migration | 09 | 09 |
+| Commit Data / Tag / Merge Session operational storage + storage format 1→2 migration | 09 | 09 |
 | Explicit empty-delta Commit / cursor-based DAG history | 09 | 09 |
 | Compatibility closure | 10 | 10 |
 | Scale / crash / migration / cross-platform release | 10 | 10 |
@@ -156,12 +156,20 @@ DDL index definition
 branch A/B
  -> divergence
  -> diff to merge-base
- -> slot merge
- -> conflict or resolved patch
- -> constraint validation
- -> two-parent commit
+ -> merge.start pins ours/theirs
+ -> durable Merge Session
+ -> bounded conflict pages
+ -> incremental resolve (revision++)
+ -> exact candidate inspection at revision R
+ -> merge.finalize read-prepare/validate at revision R
+ -> short writer: revision CAS + target-head CAS
+ -> install prepared canonical/derived result
+ -> one two-parent commit / fast-forward
+ -> session cleanup
  -> time-travel verification
 ```
+
+Phase 09 必须证明 conflict resolution 与 finalize preparation 期间没有长期 SQLite writer ownership、没有 intermediate Commit/ref move；Session restart 后可恢复 resolution 进度。Candidate inspection 与 finalize 必须由同一 session revision 绑定，昂贵的 merge/candidate/constraint 计算在 read phase 完成，短 writer 只负责重新验证 revision + target Branch、安装 prepared result 与原子清理 Session，避免上层 validation 与最终提交之间出现 TOCTOU。
 
 ## 5. Cross-cutting Gates
 
@@ -173,7 +181,7 @@ branch A/B
 - Graph View visibility：Phase 04 建立 read boundary，Phase 05 建立 write boundary，Phase 06–08 覆盖新增 operator/index/search path，Phase 10 做跨 surface closure；
 - transaction rollback：Phase 05 开始；
 - historical correctness：Phase 02 后所有 storage/index Feature 都验证；
-- storage migration：Phase 01 建立 versioning；Phase 09 实现 Commit Data / Tag 所需的 format `1 -> 2` 显式迁移且保持既有 Commit ID；Phase 10 完成 release-grade fixtures；
+- storage migration：Phase 01 建立 versioning；Phase 09 实现 Commit Data / Tag / Merge Session 所需的 format `1 -> 2` 显式迁移且保持既有 Commit ID；Phase 10 完成 release-grade fixtures；
 - fuzz / crash / scale：对应模块成熟后逐步加入，Phase 10 做 closure。
 
 ## 6. 禁止的返工路径

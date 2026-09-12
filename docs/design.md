@@ -138,7 +138,7 @@ Lithograph v1 的 canonical graph storage 固定属于目标 connection 的 SQLi
 
 `.load` 只注册 Extension API，不修改数据库内容。`lithograph_init()` 在当前 database 内原子创建或迁移 `_lithograph_*` 内部结构，并创建表示空图的 Root Commit 与默认 `main` Branch。
 
-首次初始化生成一个 RFC 9562 UUID 作为 `databaseId`，保存在 `_lithograph_meta`，在该 database 的整个生命周期和 storage migration 中保持不变。Storage format `1` 是首个 canonical graph-storage baseline；加入 Commit Data / Tag sidecar 后，首个公开 release 的 current storage format 固定为 `2`。最终 Extension 对 fresh database 直接创建 format `2`；已存在 format `1` database 只能通过第 14.3 节定义的显式 `1 -> 2` migration 升级，既有 Commit ID 不重算。
+首次初始化生成一个 RFC 9562 UUID 作为 `databaseId`，保存在 `_lithograph_meta`，在该 database 的整个生命周期和 storage migration 中保持不变。Storage format `1` 是首个 canonical graph-storage baseline；加入 Commit Data / Tag sidecar 与 Merge Session operational storage 后，首个公开 release 的 current storage format 固定为 `2`。最终 Extension 对 fresh database 直接创建 format `2`；已存在 format `1` database 只能通过第 14.3 节定义的显式 `1 -> 2` migration 升级，既有 Commit ID 不重算。
 
 重复执行 `lithograph_init()` 是幂等的。数据库格式高于当前 Extension 可理解版本时直接返回 `FORMAT_TOO_NEW`，不得自动降级或重写历史。
 
@@ -334,7 +334,7 @@ Native API 接收现有 `sqlite3*`、Cypher text、parameter JSON、option JSON 
 - `graphView` 可以与 `branch` 或只读 `at` 组合；它们决定 base Snapshot，初始 visibility 按该 Snapshot 计算，read-write query 的后续 clause 再按第 7.7 节基于前序 staged writes 后的 graph state 重新计算；
 - `graphView` 只约束 graph-data query / mutation / Search 的可见数据。Schema、Constraint、Index definition 和 Version Procedure 不属于 Graph View；这些 command/procedure 与 `graphView` 同时出现时返回 `INVALID_ARGUMENT`，避免把子图错误解释成独立 Schema 或 Version repository。
 
-对 Version Procedure：`branch` query option 只为“对当前 Branch 操作”的 procedure 临时选择 target（`commit.create`、`patch.apply`、`merge`、`rebase`、`squash`、`reset`、`revert`）；它不永久改变 connection checkout。`branch.create/delete/checkout/list`、`tag.*` 与 `commit.data.*` 自己显式指定或管理 target，和 query-level `branch` option 同时出现时返回 `INVALID_ARGUMENT`。任何 version mutation 与 `at` 同时出现都返回 `READ_ONLY_SNAPSHOT`。
+对 Version Procedure：`branch` query option 只为“对当前 Branch 操作”的 procedure 临时选择 target（`commit.create`、`patch.apply`、`merge.start`、`rebase`、`squash`、`reset`、`revert`）；它不永久改变 connection checkout。`merge.finalize` 的 target 已由 Session 固定，`merge.get/list/conflicts/resolve/abort` 也不重新选择 target；这些 procedure 与 query-level `branch` 同时出现时返回 `INVALID_ARGUMENT`。`merge.start/get/list/conflicts/resolve/abort` 不保存未来 Commit metadata，因此与 `author` / `message` 同时出现也返回 `INVALID_ARGUMENT`；只有 `merge.finalize` 接受 `author/message`，且仅 diverged `merged` 结果真正写入新 Commit。`branch.create/delete/checkout/list`、`tag.*` 与 `commit.data.*` 自己显式指定或管理 target，同样不接受 query-level `branch`。任何 version mutation 与 `at` 同时出现都返回 `READ_ONLY_SNAPSHOT`。
 
 Parameters JSON 与 result JSON 共用第 13.1 节 tagged-value encoding。普通 JSON primitive/list/map 直接映射到对应 Cypher value；需要保留 INTEGER64 边界、Temporal、Point、Vector 或 UUID 类型时必须使用 `$type` tagged form。
 
@@ -352,9 +352,29 @@ Native explicit transaction 的 begin options 使用独立的 transaction-level 
 - `branch` 省略时使用当前 connection active Branch；开始后 target Branch 固定，后续 `tx_execute` 不能切换 Branch；
 - `expectedHead` 可省略；提供时只接受 resolved `commit/<id>`，并在取得 writer ownership 后与 target Branch 当前 head 原子比较，不一致返回 `BRANCH_HEAD_MOVED` 且 transaction 不开始；
 - `author` / `message` 只属于最终唯一 Commit；各 `tx_execute` 不再接受自己的 Commit metadata；
-- `tx_execute` 可以使用 query-local `graphView`，但 `branch` / `at` / `author` / `message` 等 transaction-owned options 返回 `INVALID_ARGUMENT`；
+- `tx_execute` 可以使用 query-local `graphView`，但 `branch` / `at` / `author` / `message` / `mergeSession` 等会选择另一 transaction/version context 的 options 返回 `INVALID_ARGUMENT`；
 - Version Procedure、Branch/Tag/Commit Data mutation、checkout/GC，以及 `CALL { ... } IN TRANSACTIONS` / `IN CONCURRENT TRANSACTIONS` 不能在 explicit transaction 内嵌套执行，返回 `TRANSACTION_BOUNDARY_REQUIRED`；
 - `LOAD CSV` 和未来其它拥有 file/network external-I/O authority 的 query 同样不能在 explicit transaction 内执行，返回 `TRANSACTION_BOUNDARY_REQUIRED`。External I/O 继续由普通 execution / 第 9.6 节 batching 管理，避免从 `tx_begin` 起长期占用 SQLite single-writer ownership。普通 current-graph read/write 与 Schema/Constraint/Index command 仍可在 explicit transaction 内执行。
+
+Merge Session candidate inspection 使用同一 execution options surface，而不是增加第二套 query API：
+
+```json
+{
+  "mergeSession": {
+    "id": "merge-session/<uuid>",
+    "revision": 7
+  },
+  "graphView": {
+    "requireAllLabels": ["tenant_acme"]
+  }
+}
+```
+
+- `mergeSession.id` 是第 10.5 节定义的 opaque Merge Session identity，不是 version descriptor；`revision` 必须与该 Session 当前 revision 精确相等，否则返回 `MERGE_SESSION_CHANGED`；
+- `mergeSession` 与 `branch` / `at` / `author` / `message` 互斥，可以与 query-local `graphView` 组合；
+- 只有当前没有 unresolved merge conflict 的 Session 才能读取 candidate；仍有 unresolved conflict 时返回 `MERGE_CONFLICT`；
+- candidate execution 只允许普通 current-graph read、Search 与 Schema/Constraint/Index introspection。graph/schema/index mutation 返回 `READ_ONLY_SNAPSHOT`；Version Procedure、transaction-owning subquery 与 `LOAD CSV` 返回 `TRANSACTION_BOUNDARY_REQUIRED`；
+- candidate query 绑定 `(session, revision)` 而不是 Commit，因此 `summary.commit = null`，并通过第 13.1 节的 `summary.mergeSession` 返回实际 session/revision。调用方可以用同一 revision 执行多次一致性检查，随后把该 revision 交给 `merge.finalize`；若期间 resolution 改变，finalize 必须以 `MERGE_SESSION_CHANGED` 拒绝旧验证结果。
 
 ## 5. Property Graph 与 Value Model
 
@@ -567,7 +587,7 @@ Mutable Branch refs
 
 每个 Commit 的 graph layer 表示相对 **first parent** 的标准化变化。Merge Commit 的 second parent 只记录第二条历史边；合并后的完整 delta 仍相对 first parent 保存，因此 Snapshot 重建只需沿 first-parent chain 应用 layer。
 
-Commit Data 与 Tag 不加入上述 canonical graph Snapshot source of truth。它们是独立的 mutable sidecar：Commit Data 只解释某个 Commit，Tag 只命名某个 Commit；修改它们不能改变既有 Commit、Layer、Schema hash 或 Snapshot resolution。
+Commit Data、Tag 与 Merge Session 不加入上述 canonical graph Snapshot source of truth。Commit Data 只解释某个 Commit，Tag 只命名某个 Commit；Merge Session 是尚未 finalize 的 mutable operational workspace。修改这些 mutable state 不能改变既有 Commit、Layer、Schema hash 或 Snapshot resolution。Merge Session 只有在 `merge.finalize` 成功时才通过正常 Commit/ref transaction 影响 canonical history。
 
 ### 8.2 Internal Tables
 
@@ -609,6 +629,20 @@ _lithograph_commit_data
 _lithograph_tags
   name TEXT PRIMARY KEY
   commit_id BLOB NOT NULL
+
+_lithograph_merge_sessions
+  id TEXT PRIMARY KEY
+  target_branch TEXT NOT NULL
+  ours_commit BLOB NOT NULL
+  theirs_commit BLOB NOT NULL
+  revision INTEGER NOT NULL
+  created_at INTEGER NOT NULL
+
+_lithograph_merge_resolutions
+  session_id TEXT NOT NULL
+  conflict_id BLOB NOT NULL
+  resolution_json TEXT NOT NULL
+  PRIMARY KEY(session_id, conflict_id)
 
 _lithograph_layers
   id INTEGER PRIMARY KEY
@@ -658,7 +692,13 @@ Storage format 1 冻结以下 physical key 与 payload contract；后续若改�
 - checkpoint property row 使用与 set property delta 完全相同的 tagged payload contract，不保存 remove row。
 - `_lithograph_checkpoints.metadata` 只保存可重建 derived metadata；当前统计 metadata 使用 versioned payload 记录该 checkpoint Snapshot 的 Node / Relationship 总量与 label / relationship-type cardinality。该 payload 不参与 Commit/Layer hash，缺失或不可解析时 Planner 必须保守降级，不能影响 Snapshot correctness。
 
-Storage format `2` 保留 format `1` 的全部 canonical graph table / key / LCE1 contract，并只增加 `_lithograph_commit_data` 与 `_lithograph_tags` 两个 mutable sidecar table。`data_json` 必须是合法 JSON value 的 UTF-8 JSON 表达；普通说明文本使用 JSON string。Commit Data 不作为 Cypher Property，因此不受 PropertyValue 持久化类型限制，Engine 只验证 JSON 合法性而不解释 key 或业务 schema。没有 `_lithograph_commit_data` row 表示该 Commit 没有 Data；显式 JSON `null` 是一个已存在的 Data value，与无 row 不同。
+Storage format `2` 保留 format `1` 的全部 canonical graph table / key / LCE1 contract，并增加 Commit Data / Tag sidecar 与 Merge Session operational state。`data_json` 必须是合法 JSON value 的 UTF-8 JSON 表达；普通说明文本使用 JSON string。Commit Data 不作为 Cypher Property，因此不受 PropertyValue 持久化类型限制，Engine 只验证 JSON 合法性而不解释 key 或业务 schema。没有 `_lithograph_commit_data` row 表示该 Commit 没有 Data；显式 JSON `null` 是一个已存在的 Data value，与无 row 不同。
+
+Merge Session `id` 使用 `merge-session/<RFC-9562-uuid>` 的 lowercase text，但在所有 API 中视为 opaque token，不能当作 `branch/`、`tag/` 或 `commit/` version descriptor。`ours_commit` / `theirs_commit` 是 Session 创建时 pin 的 immutable Commit；`revision` 从 `1` 开始，只在 resolution set 发生有效变化时单调递增；`created_at` 使用 UTC Unix epoch microseconds，只用于 operational listing/diagnostics，不参与任何 Commit hash 或 merge correctness。`resolution_json` 使用第 10.5 节的 `ours | theirs | value` shape，其中 explicit value 使用第 13.1 节 Lithograph JSON typed-value encoding。Conflict 集合、merge candidate 与分页 materialization 不作为持久化真源，可从 pinned Commit + resolution set 确定性重算；实现可以使用 query-local / TEMP spill，但不能要求把全部 conflict 或 candidate Snapshot 永久 materialize 到 main schema。
+
+Merge Session encoding/semantics 是 storage format `2` contract 的一部分；未来若 merge algorithm/session encoding 的不兼容变化会让同一 pinned inputs + resolution set 得到不同 candidate，必须通过显式 storage-format migration 处理 open Session，不能在升级后静默用新语义重新解释旧 Session。
+
+Open Merge Session 是 GC reachability root：其 `ours_commit` / `theirs_commit` 及所需 ancestors 在 Session finalize/abort 前不能被 canonical GC 删除。Session finalize/abort 会原子删除 session + resolution rows；derived candidate/conflict spill 随时可以丢弃重建。
 
 Storage format 1 的 canonical explicit index inventory 除 table primary key 外固定包含：dictionary name unique indexes、Layer hash unique index，以及第 8.3 节列出的 relationship outgoing/incoming/global-identity、label reverse lookup。不得依赖 SQLite 自动生成且名称/布局不受 Lithograph 控制的 secondary index 作为 canonical access path。
 
@@ -772,7 +812,7 @@ pin active branch head
 
 上图的 `SQLite COMMIT` 对 Native API 表示 Engine 自己拥有的 transaction commit；对 SQL Bridge 表示内部 SAVEPOINT 成功 release 后，由宿主 SQLite autocommit/outer transaction 决定最终 durability。SQL Bridge 不能从 function callback 提前 commit caller-owned transaction。
 
-普通 auto-commit execution 中，每个成功的 **graph / Schema / Index mutating query** 都产生一个 Commit，即使 effective delta 为空；这样 graph history 与 write intent 一致。Native explicit transaction 改变的是多个 execution 的 Commit boundary，而不是这些 query 的 Cypher mutation semantics，规则见 9.2。Version ref/control procedure 不一概产生 Commit：`branch.create/delete`、`reset` 与 fast-forward merge 只原子修改 ref，`branch.checkout` 只修改 connection-local context，`gc` 只做 reachability cleanup；`patch.apply`、non-fast-forward `merge` 与 `revert` 会产生 Commit。
+普通 auto-commit execution 中，每个成功的 **graph / Schema / Index mutating query** 都产生一个 Commit，即使 effective delta 为空；这样 graph history 与 write intent 一致。Native explicit transaction 改变的是多个 execution 的 Commit boundary，而不是这些 query 的 Cypher mutation semantics，规则见 9.2。Version ref/control procedure 不一概产生 Commit：`branch.create/delete`、`reset` 与 `merge.finalize` 的 fast-forward 结果只原子修改 ref，`branch.checkout` 只修改 connection-local context，`gc` 只做 reachability cleanup，Merge Session 的 start/resolve/abort 只修改 operational workspace；`patch.apply`、`merge.finalize` 的 diverged `merged` 结果与 `revert` 会产生 Commit。
 
 ### 9.2 Native Explicit Transaction
 
@@ -906,7 +946,13 @@ CALL lithograph.tag.delete(name)
 CALL lithograph.log([version [, limit [, cursor]]])
 CALL lithograph.diff(before, after)
 CALL lithograph.patch.apply(patch)
-CALL lithograph.merge(source [, options])
+CALL lithograph.merge.start(source [, expectedHead])
+CALL lithograph.merge.get(session)
+CALL lithograph.merge.list([limit [, cursor]])
+CALL lithograph.merge.conflicts(session [, limit [, cursor]])
+CALL lithograph.merge.resolve(session, expectedRevision, resolutions)
+CALL lithograph.merge.finalize(session, expectedRevision)
+CALL lithograph.merge.abort(session, expectedRevision)
 CALL lithograph.rebase(onto [, options])
 CALL lithograph.squash(since)
 CALL lithograph.reset(target)
@@ -932,14 +978,20 @@ Procedure result 是普通 Cypher rows，因此可以与 `YIELD` / `RETURN` 组�
 - `log(version, limit, cursor)`：`version` 省略时使用 active Branch；第一次调用把 version 解析并 pin 成 immutable start Commit。`limit` 省略时默认 `100`，必须为正整数；`cursor` 是 opaque continuation，包含 start Commit 与 DAG traversal frontier，只能用于同一 pinned traversal，Branch / Tag 后续移动不改变已开始的分页；
 - `diff(before, after)`：两个参数都必须是 version descriptor；
 - `patch.apply(patch)`：Commit author/message 使用 execution-level query options；
-- `merge(source, options)`：`source` 接受任意 version descriptor；procedure options 只支持 `resolutions`；Commit author/message 使用 execution-level query options；
+- `merge.start(source, expectedHead)`：`source` 接受任意 version descriptor；target 使用 query-level `branch` 或 active Branch。可选 `expectedHead` 只接受 resolved `commit/<id>`，用于要求 Session 的 pinned `ours` 必须精确等于调用方已验证的 target head；省略时使用调用开始实际 pin 到的 target head。成功创建 durable Merge Session 并计算初始 candidate/conflict 状态；**不创建 Commit、不移动 Branch，包括 fast-forward 情况**；
+- `merge.get(session)`：在一个 SQLite read snapshot 内读取 Session 当前 pinned inputs/revision，并基于同一 revision 的 resolution set 计算 status 与 unresolved conflict count，不能返回 revision/status 来自不同瞬间的混合结果；
+- `merge.list(limit, cursor)`：分页枚举**调用期间当前存在**的 open Merge Session；`limit` 默认 `100`，按 session id binary ascending，cursor opaque。它只读取持久化 session metadata，不为了 listing 重算 candidate/conflict；需要 `status/unresolved` 时对具体 Session 调用 `merge.get`。list 是 operational inventory，不 pin 一个跨多页不可变的 Session 集合；并发 start/finalize/abort 可以改变后续 page，调用方需要最新完整 inventory 时从首屏重新枚举；
+- `merge.conflicts(session, limit, cursor)`：分页返回该 Session 当前 revision 的 conflict；cursor 绑定 session + revision，resolution 改变后旧 cursor 返回 `MERGE_SESSION_CHANGED`；
+- `merge.resolve(session, expectedRevision, resolutions)`：`expectedRevision` 必须等于当前 revision；同一调用原子 set/replace 一组 conflict resolution，unknown conflictId / duplicate conflictId / 非法 choice/value 返回 `INVALID_ARGUMENT`。在**当前 revision** 上，如果整批 resolution 与已保存值完全相同则是 no-op、revision 不变；只要 resolution set 有有效变化，revision 就只递增一次。使用 stale `expectedRevision` 的重试仍返回 `MERGE_SESSION_CHANGED`，即使 payload 恰好与当前值相同，v1 不另外维护 request-id 幂等日志；
+- `merge.finalize(session, expectedRevision)`：只在 expected revision 精确匹配且 unresolved conflict 为 `0` 时运行；Commit author/message 使用 finalize execution-level query options。取得 target Branch writer ownership 后必须再次确认 head 仍等于 Session 的 pinned `ours`；不一致返回 `BRANCH_HEAD_MOVED` 且 Session 保留；
+- `merge.abort(session, expectedRevision)`：进入短 writer boundary 后要求 Session revision 仍等于 `expectedRevision`，匹配时原子删除 Session/resolution，不创建 Commit、不移动 Branch；stale caller 返回 `MERGE_SESSION_CHANGED`，避免用旧状态误删别人刚更新的 conflict resolution；
 - `rebase(onto, options)`：把 active Branch 在 merge-base 之后的 first-parent commit sequence 逐个 replay 到 `onto`；procedure options 只支持 `resolutions`；replayed Commit 默认保留各自旧 author/message，不使用 execution-level author/message 覆盖历史 intent；
 - `squash(since)`：`since` 必须是 active Branch head 的 ancestor descriptor，把 `since..HEAD` 的最终结构化变化压成一个新 Commit；新 Commit author/message 使用 execution-level query options；
 - `reset(target)`：把 active Branch ref 移到 target descriptor 当前解析出的 Commit；
 - `revert(commit, options)`：commit 必须是 `commit/<id>`；procedure options 只支持 `mainline`；Commit author/message 使用 execution-level query options；
 - `gc()`：没有参数。
 
-`merge/rebase.options.resolutions` 是 list of map：
+`merge.resolve(..., resolutions)` 与 `rebase.options.resolutions` 共用同一 resolution item shape：
 
 ```text
 [
@@ -970,7 +1022,13 @@ Procedure result 是普通 Cypher rows，因此可以与 `YIELD` / `RETURN` 组�
 | `log` | 每个 Commit 一行 `commit, parents, author, message, committedAt, cursor`；`cursor` 可从该 row 之后继续，遍历结束时为 `null` |
 | `diff` | 一行 `patch` map |
 | `patch.apply` | 一行 `commit` |
-| `merge` | 一行 `status, commit, conflicts`；冲突时 `commit = null` |
+| `merge.start` | 一行 `session, targetBranch, ours, theirs, revision, status, unresolved` |
+| `merge.get` | 一行 `session, targetBranch, ours, theirs, revision, status, unresolved` |
+| `merge.list` | 每个 open Session 一行 `session, targetBranch, ours, theirs, revision, createdAt, cursor` |
+| `merge.conflicts` | 每个 conflict 一行 `session, revision, conflictId, slot, base, ours, theirs, resolution, cursor` |
+| `merge.resolve` | 一行 `session, revision, status, unresolved` |
+| `merge.finalize` | 一行 `status, commit`；`up_to_date | fast_forward | merged` |
+| `merge.abort` | 一行 `session` |
 | `rebase` | 一行 `status, commit, rewritten, conflicts`；冲突时 `commit = null` |
 | `squash` | 一行 `from, previousHead, commit` |
 | `reset` | 一行 `from, to` |
@@ -1019,7 +1077,7 @@ Patch 是一个 map：
 
 Diff / Patch 只描述 canonical graph / Schema / Index Snapshot change。Commit Data、Tag、Branch ref 不进入 patch。显式 empty-delta Commit 与其 parent 的 `diff` 可以合法返回空 `operations`；这不表示两个 Commit identity 相同。
 
-### 10.5 Three-way Merge
+### 10.5 Three-way Merge 与 Merge Session
 
 Merge 使用 Git 风格 three-way model：
 
@@ -1033,13 +1091,22 @@ merge-base
 
 目标 Branch 当前 head 是 `ours` / first parent；source 是 `theirs` / second parent。Merge result layer 相对 `ours` 保存。
 
-Merge 开始时同时解析并 pin `ours` 与 `source` Commit。Source Branch 后续移动不改变本次 merge 已 pin 的 `theirs`；目标 Branch 在写入前仍执行 9.4 的 head compare，目标发生变化则返回 `BRANCH_HEAD_MOVED`。
+Merge 使用**可恢复的 Merge Session**，把“计算/解决冲突/检查 candidate”与“最终 Commit + Branch move”分开。`merge.start` 同时解析并 pin `ours` 与 `source` Commit，并持久化 Session；Source Branch 后续移动不改变本次 merge 已 pin 的 `theirs`。Session 创建后不长期持有 SQLite writer ownership，用户或上层系统可以跨多个调用、connection reopen 甚至 process restart 分页查看和逐步解决大量冲突。
 
-默认 merge 行为与 Git 的普通 fast-forward 语义一致：
+`merge.start` 的 merge-base / candidate/conflict 计算可以在 read path 上完成，但 Session row 真正建立前 `ours/theirs` 还不是 GC root。开始持久化时必须进入一个短 SQLite write transaction，在该边界内重新确认两个 pinned Commit 仍存在，再原子写入 Session；如果其间某个 Commit 已被 GC，返回 `VERSION_NOT_FOUND` 且不创建 partial Session。调用方提供 `expectedHead` 时，还必须在**同一个 writer boundary** 内确认 target Branch 当前 head 仍精确等于 `expectedHead`，否则返回 `BRANCH_HEAD_MOVED` 且不创建 Session；成功 Session 的 `ours=expectedHead`。省略 `expectedHead` 时，target Branch 在 read-path 计算后移动不要求 start 失败，因为 Session 明确保存计算时 pin 的原 `ours`，最终是否还能提交由 finalize 的 target-head CAS 决定。
 
-- `theirs == ours` 或 `theirs` 是 `ours` ancestor -> `status = up_to_date`，不写 Commit、不移动 Branch；
-- `ours` 是 `theirs` ancestor -> fast-forward target Branch 到 `theirs`，`status = fast_forward`，不创建额外 Merge Commit；
-- 其它 divergence -> 执行 three-way merge，成功后创建 two-parent Merge Commit，`status = merged`。
+Merge Session 是 operational workspace，不是 Commit、Branch、Tag 或 Version Descriptor。Session 的 authoritative state 只有 pinned `ours/theirs`、resolution set 与单调 `revision`；candidate/conflict 都从这些 immutable inputs 确定性计算。多个 Session 可以并存，也可以针对同一 target Branch 并行准备；只有 finalize 时的 target-head CAS 决定谁能够提交。
+
+`merge.start` 计算出的初始 status 使用：
+
+- `theirs == ours` 或 `theirs` 是 `ours` ancestor -> `status = up_to_date`；
+- `ours` 是 `theirs` ancestor -> `status = fast_forward`；
+- 其它 divergence 且存在 unresolved conflict -> `status = conflicted`；
+- 其它 divergence 且 conflict 已全部解决/不存在 -> `status = ready`。
+
+这些 status 在 `merge.start/get/resolve` 阶段都**不会**修改 canonical history。即使是 fast-forward，也要等 `merge.finalize` 才能移动 target Branch，使调用方可以在 ref move 前对 pinned candidate 做额外只读验证。
+
+用于 candidate inspection 的逻辑 Snapshot 固定为：`up_to_date` 读取 pinned `ours`；`fast_forward` 读取 pinned `theirs`；`ready` 读取基于 pinned `ours/theirs` + 当前 resolution set 计算出的 merged candidate。`conflicted` 没有完整 candidate，不能进入 candidate query context。
 
 Merge-base 使用 Git-style “best common ancestors”：先找所有同时可达且不是另一 common ancestor 祖先的 best bases。只有一个时直接作为 base。存在多个 criss-cross best bases 时，按 Commit ID ascending 递归合成一个 **virtual base**；virtual-base merge 使用同一 logical-slot three-way rule，但冲突 slot 记录为内部 `unknown` sentinel。最终 merge 中，base 为 `unknown` 且 `ours != theirs` 时必须报告 conflict；`ours == theirs` 时可以自动接受该相同值。Virtual base 不写入 Commit DAG。
 
@@ -1060,13 +1127,34 @@ Conflict 的最小 logical slot：
 - 一侧删除 Node、另一侧新增或修改仍依赖该 Node 的 Relationship -> conflict；
 - graph slot 虽无直接冲突，但 merged state 违反最终 Graph Type / Constraint -> constraint conflict。
 
-存在 conflict 时 Merge **不写任何部分结果**，返回结构化 conflicts：`conflict_id + slot + base + ours + theirs`。
+存在 conflict 时 Session **不写任何 Commit/ref 部分结果**。`merge.conflicts` 以 bounded page 返回当前 revision 的 conflict inventory，包括已经有 resolution 与仍 unresolved 的项；结果按 canonical `slot` UTF-8 bytes、再按 `conflictId` bytes 升序，cursor 绑定 session + revision。大量 conflict 不要求一次 materialize 到 result 或 caller memory。Conflict ID 仍由 pinned merge inputs + logical slot/value 确定性生成。
 
-再次调用 `lithograph.merge` 时可提供 per-conflict resolution：`ours`、`theirs` 或显式 replacement value。全部 conflict 解决且 constraints 通过后才创建 two-parent Merge Commit。
+`merge.resolve` 可以多次调用，每次只提交一批 `ours` / `theirs` / explicit replacement value，并允许后续用同一个 conflictId 替换之前选择。为避免在大量 conflict 校验时长期占用 writer，Engine 先在 `expectedRevision=R` 的 SQLite read snapshot 上 pin Session/resolution set，应用本次 proposed resolution 到 operation-local state，并在这个只读阶段完成 conflictId / explicit-value type validation、candidate/conflict 重算以及**本次成功 operation 应返回的 resulting revision/status/unresolved**：整批与已有 resolution 完全相同则 resulting revision 仍为 `R`，存在有效变化则为 `R+1`。随后进入短 write transaction / writer boundary，**重新**读取 Session 并要求 revision 仍为 `R`，否则返回 `MERGE_SESSION_CHANGED`。只有 CAS 成功才原子 set/replace resolution 并把 revision 至多增加一次；返回的 status/unresolved 使用前述 deterministic proposed state，因此不需要在 writer lock 内重新扫描大型 conflict set。一次 resolution 可能使旧 conflict 消失，也可能暴露新的 constraint conflict。任何 unresolved conflict 时都不能 finalize。
 
-Merge 不解释或合并 Commit Data，也不移动 Tag。Diverged merge 新建的 Merge Commit 默认没有 Commit Data；调用方需要时在 merge 成功后显式 set。Fast-forward 只移动目标 Branch 到已有 source Commit，因此该 Commit 原有 Data 保持可见。
+如果某个已经保存 resolution 的 conflict 因其它 resolution 改变而暂时不再出现在当前 conflict inventory，该 resolution 作为 **dormant resolution** 保留：它当前不作用于 candidate、不计入 unresolved，也不出现在 `merge.conflicts` 当前页；若同一 pinned merge inputs 下完全相同的 deterministic conflictId 后续重新出现，则自动重新应用原 resolution。这样逐步解决不会因为 conflict dependency 的出现/消失丢失已完成工作，同时 conflictId 绑定的 slot/value hash 又保证旧 resolution 不会被套到另一个不同 conflict。
 
-Conflict ID 是对 `merge-base identity + ours commit + theirs commit + slot + base/ours/theirs canonical values` 的 BLAKE3 hash；同一 merge 输入重复执行得到相同 conflict ID。Branch head 在首次 conflict 计算后发生变化时，旧 resolution 不允许套用，返回 `BRANCH_HEAD_MOVED`。
+当 unresolved conflict 为 `0` 时，调用方可以通过 `options.mergeSession={id,revision}` 使用普通只读 Cypher / Search / Schema introspection 检查**这一版精确 candidate**。每次 candidate execution 在自己的 SQLite read snapshot 内同时读取 Session、校验 requested revision 并 pin 对应 resolution set；如果 operation 开始时当前 revision 已不同则返回 `MERGE_SESSION_CHANGED`，operation 开始后的并发 resolution 不会改变该 execution 已 pin 的 candidate。这提供通用的上层 candidate-validation boundary，而 Lithograph 不需要知道调用方的业务规则。一个调用方可以在 revision `R` 上执行多次检查，随后调用 `merge.finalize(session,R)`；如果检查期间任何 resolution 被修改，revision 会变化，旧 finalize 以 `MERGE_SESSION_CHANGED` 失败。因此“被验证的 candidate”和“准备提交的 candidate”不会静默漂移。
+
+`merge.finalize` 是唯一会影响 canonical history 的 Session operation。它分成 preparation 与短 writer finalize 两段，不能把大型 merge 重算放进 writer lock：
+
+1. 在 `expectedRevision=R` 的 SQLite read snapshot 上 pin Session/resolution set，确认 unresolved=`0`，确定性构造 exact candidate、canonical net delta / schema result，并完成可在只读阶段证明的完整 graph/Schema/Constraint/canonical-integrity validation；这些 prepared result 只是本次 operation-local state，不创建新的持久 workspace；
+2. 开启 Engine-owned SQLite write transaction / 取得 writer ownership，使并发 `merge.resolve/abort/finalize`、GC 与 Branch write 被 SQLite 串行化；
+3. 在该 writer boundary **内部**重新读取 Session，验证其仍存在、revision 仍为 `R` 且 unresolved=`0`；随后读取 target Branch：Branch 已不存在返回 `BRANCH_NOT_FOUND`，存在但 head 不等于 pinned `ours` 返回 `BRANCH_HEAD_MOVED`。这些失败都保留 Session；不能先 check revision/head 再取得 writer；
+4. 如果上述 CAS 成立，prepared candidate 仍由同一 immutable `ours/theirs` + revision `R` resolution set 唯一决定，不需要在 writer 内再次执行完整 merge/conflict scan；只执行依赖实际写入边界的 final storage/integrity recheck，并安装必要的 canonical/derived write result；
+5. `up_to_date`：不写 Commit、不移动 Branch；`fast_forward`：只把 Branch 移到 pinned `theirs`；`ready`：创建 parent1=`ours`、parent2=`theirs` 的 Merge Commit，Layer 相对 `ours` 保存；
+6. Branch move / Commit write（若有）与 Session/resolution 删除在**同一个 SQLite transaction**完成。
+
+因此用户可以解决 1 个、100 个或 100,000 个冲突而不产生 intermediate Commit；Branch 也不会因为逐步 resolution 移动。只有最终 finalize 成功时历史才出现一次结果。
+
+`merge.finalize` 成功时 `commit` 总是非空 resolved identity：`up_to_date` 返回 pinned `ours`，`fast_forward` 返回 pinned `theirs`，`merged` 返回新建 Merge Commit。这样调用方不需要根据 status 再执行一次 Branch read 才知道最终 Snapshot。
+
+Merge Session operation 的稳定失败优先级固定为：Session 不存在先返回 `MERGE_SESSION_NOT_FOUND`；需要 expected revision 的 operation 在 Session 存在但 revision 不匹配时返回 `MERGE_SESSION_CHANGED`；candidate inspection / finalize 在当前 revision 仍有 unresolved conflict 时返回 `MERGE_CONFLICT`；finalize 再检查 target Branch 的 `BRANCH_NOT_FOUND` / `BRANCH_HEAD_MOVED`；通过这些 concurrency/boundary checks 后才报告 candidate 的 Schema/Constraint/storage validation error。这样 stale caller 不会因为后续 candidate 内容变化得到误导性的业务错误。
+
+Merge 不解释或合并 Commit Data，也不移动 Tag。Diverged finalize 新建的 Merge Commit 默认没有 Commit Data；调用方需要时在 finalize 成功后显式 set。Fast-forward finalize 只移动目标 Branch 到已有 source Commit，因此该 Commit 原有 Data 保持可见。
+
+Conflict ID 是对 `merge-base identity + ours commit + theirs commit + slot + base/ours/theirs canonical values` 的 BLAKE3 hash；同一 pinned merge inputs 得到相同 conflict ID。Session resolution 可以长期保存，但不会绕过 target Branch concurrency：target head 在 Session 生命周期内发生变化时，已有 conflict resolution 仍可查看，`merge.finalize` 必须返回 `BRANCH_HEAD_MOVED`，调用方重新 start 新 Session 后不能把旧 resolution 静默套到新 merge inputs。
+
+Session 自身是持久 operational state：connection/process crash 后可以通过 `merge.get/list` 恢复进度；`merge.abort(session, expectedRevision)` 以 revision CAS 显式放弃。Lithograph v1 不自动按 TTL 删除 open Session，避免在长时间人工/AI conflict resolution 中丢失工作；调用方负责 finalize/abort，`merge.list` 提供可发现的清理入口。Open Session 同时保护 pinned history 免受 GC。
 
 ### 10.6 Rebase
 
@@ -1104,9 +1192,9 @@ Squash 不聚合被压缩 Commit 的 Commit Data，也不移动 Tag。新 Commit
 
 Reset / Revert 不修改既有 Commit Data 或 Tag；Revert 创建的新 Commit 默认没有 Data。
 
-Canonical history 不自动 GC。`lithograph.gc()` 只删除从任何 Branch **或 Tag** 都不可达的 Commit / Layer；derived checkpoint/index/cache 可以自动回收，因为可重建。
+Canonical history 不自动 GC。`lithograph.gc()` 只删除从任何 Branch、Tag **或 open Merge Session** 都不可达的 Commit / Layer；derived checkpoint/index/cache 可以自动回收，因为可重建。
 
-GC 对 canonical objects 按 reachability 删除：Commit 不可达后，其 Commit Data sidecar 一起删除；其 Layer 只有在没有其它 reachable Commit 引用时才删除；Schema object 同理。Tag 本身是 root，不由 GC 自动删除。Dictionary identity/name 是 database-global append-only metadata，即使当前没有 reachable Snapshot 使用也不回收，避免 ID 重用和历史/patch 解释变化。
+GC 对 canonical objects 按 reachability 删除：Commit 不可达后，其 Commit Data sidecar 一起删除；其 Layer 只有在没有其它 reachable Commit 引用时才删除；Schema object 同理。Tag 与 open Merge Session 都提供 root；Tag 不由 GC 自动删除，Merge Session 只由 finalize/abort 删除。Dictionary identity/name 是 database-global append-only metadata，即使当前没有 reachable Snapshot 使用也不回收，避免 ID 重用和历史/patch 解释变化。
 
 Lithograph 的 versioned-state contract 是**单个 SQLite database 内的本地状态演进机制**；Git / TerminusDB 只提供 Commit DAG、Branch、Diff/Merge 等机制参考，不规定调用方把 Commit 解释成软件版本、时间点、场景还是其它业务状态。Commit/Branch/Tag/Diff/Merge/Rebase/Squash 等全部在同一个 `databaseId` 内工作。跨 SQLite database 或跨网络的 clone/fetch/push/pull 属于复制/传输层，不是 Lithograph Extension v1 的 Version Procedure contract；SQLite backup/file replication 可以复制整个 repository，但两个独立 `databaseId` 不通过 Version API 隐式合并 identity space。
 
@@ -1191,7 +1279,7 @@ SQL Bridge 的完整 envelope：
 }
 ```
 
-`summary.queryType` 使用封闭值 `read | write | schema | version | mixed`。普通 `lithograph()` / `lithograph_v1_execute` 中，`summary.commit` 是该 query 执行所 pin 的最终可观察 Snapshot：read query 为读取 Commit，graph/schema write 为新 Commit，ref-only version operation 为操作后的 active-branch Commit。Native explicit transaction 的 `tx_execute` 是唯一例外：statement 只作用于 staged state，因此其 `summary.commit = null`；最终 durable Commit 由 `tx_commit` 单独返回。`summary.counters` 至少固定包含：
+`summary.queryType` 使用封闭值 `read | write | schema | version | mixed`。普通 `lithograph()` / `lithograph_v1_execute` 中，`summary.commit` 是该 query 执行所 pin 的最终可观察 Snapshot：read query 为读取 Commit，graph/schema write 为新 Commit，ref-only version operation 为操作后的 active-branch Commit。Native explicit transaction 的 `tx_execute` statement 只作用于 staged state，因此其 `summary.commit = null`；最终 durable Commit 由 `tx_commit` 单独返回。Merge Session candidate query 同样不是 durable Commit，因此 `summary.commit = null`，并额外返回 `summary.mergeSession={"id":"merge-session/...","revision":N}`；其它 execution 省略 `mergeSession` 字段。`summary.counters` 至少固定包含：
 
 ```text
 nodesCreated
@@ -1250,6 +1338,8 @@ BRANCH_NOT_FOUND
 TAG_NOT_FOUND
 BRANCH_HEAD_MOVED
 MERGE_CONFLICT
+MERGE_SESSION_NOT_FOUND
+MERGE_SESSION_CHANGED
 TRANSACTION_BOUNDARY_REQUIRED
 READ_ONLY_ADAPTER
 READ_ONLY_SNAPSHOT
@@ -1287,6 +1377,7 @@ Native API 返回 SQLite primary result code + 结构化 `error_json`；SQL Brid
 - Branch ref 指向存在 Commit；
 - Tag ref 指向存在 Commit；
 - Commit Data row 指向存在 Commit 且 `data_json` 是合法 JSON；
+- Merge Session 的 `ours_commit` / `theirs_commit` 存在，session id/revision 合法，resolution row 只引用存在 Session 且 `resolution_json` 符合 public resolution encoding；
 - Commit parents、Layer、Schema object 均存在；
 - Commit / Layer / Schema hash 可重算且匹配；
 - Relationship endpoint 在对应 Snapshot 存在；
@@ -1302,6 +1393,8 @@ Native explicit transaction 在 `tx_commit` 前没有 public intermediate Commit
 
 Commit Data set/clear 与 Tag create/move/delete 同样必须是单 SQLite transaction 的原子 sidecar/ref mutation；crash/reopen 后只允许看到操作前或操作后状态，不允许出现半写 JSON、Tag 指向不存在 Commit 或 ref/data 与返回成功状态不一致。
 
+Merge Session start/resolve/abort 每次都是短 SQLite transaction，crash 后只能观察到该 operation 完整发生前或后的一版 session/revision/resolution state。`merge.finalize` 把最终 Commit/ref move（若有）与 Session 删除放在同一 SQLite transaction，因此 crash/reopen 不允许出现“Branch 已移动但 Session 仍可重复 finalize”或“Session 已删除但 Merge Commit/ref move 没有发生”的合法状态。Open Session 本身允许跨 restart 恢复，不需要保持原 connection。
+
 ### 14.3 Storage Migration
 
 Storage format version 记录在 `_lithograph_meta`。升级迁移必须：
@@ -1312,7 +1405,7 @@ Storage format version 记录在 `_lithograph_meta`。升级迁移必须：
 - 新 Engine 继续读取历史 `format_version`；
 - 旧 Engine 遇到更高 format version 直接拒绝写入和读取需要新格式语义的 graph。
 
-首个正式 migration path 是 `1 -> 2`：只增加 Commit Data / Tag sidecar storage 与对应 integrity / GC semantics，不改写任何既有 Commit、Layer、Schema object 或 hash input。Migration 在一个 SQLite transaction 内创建新 canonical internal objects、把 `storageFormat` 提升到 `2`，失败时整体 rollback。Format `1` database 不存在 Commit Data / Tag，因此迁移不需要为历史 Commit 合成 annotation 或 ref；升级后它们从空集合开始。
+首个正式 migration path 是 `1 -> 2`：增加 Commit Data / Tag sidecar 与 Merge Session operational storage，以及对应 integrity / GC semantics；不改写任何既有 Commit、Layer、Schema object 或 hash input。Migration 在一个 SQLite transaction 内创建新 internal objects、把 `storageFormat` 提升到 `2`，失败时整体 rollback。Format `1` database 不存在 Commit Data / Tag / Merge Session，因此迁移不需要为历史 Commit 合成 annotation、ref 或 workspace；升级后三者从空集合开始。
 
 ## 15. Deployment 与 Runtime Boundary
 
@@ -1370,6 +1463,7 @@ Lithograph 是 embedded extension，没有独立 account / role / authentication
 - planner statistics 可以增量刷新，不能要求每个 query 扫描全图计算 cardinality；
 - Graph View 不能通过预先 materialize 整个子图实现；scan/seek/expand/search 必须在现有 Snapshot access path 上按需执行 visibility check，且不得因 view 导致本可 seek 的查询退化为无条件全图扫描；
 - 10M Node / 100M Relationship benchmark tier 必须作为 release hardening 的真实规模验证，覆盖 traversal、indexed lookup、write、history、diff 与 search；通过条件是正确完成、无 OOM、无意外全图扫描，并建立可持续 regression baseline。
+- Merge conflict enumeration 必须 bounded/pageable；大量 conflict 的 start/list/resolve/finalize 不能要求一次把全部 conflict 或完整 candidate materialize 到 caller memory。Open Session 只持久化 pinned inputs + resolution set，candidate/conflict 可以重算或临时 spill。
 
 ## 18. 关键架构决定与取舍
 
@@ -1442,6 +1536,13 @@ Lithograph 是 embedded extension，没有独立 account / role / authentication
 - 依据：通用数据库调用方存在一个逻辑变化需要跨多个 query 读取中间结果、分配 identity、修改 graph + Schema/Constraint/Index，但版本历史只应出现最终一致 Snapshot 的需求。把每个 query 自动提交后再 squash 会产生真实 intermediate history；把 raw Structural Patch 变成普通 CRUD language 又会复制 Cypher mutation semantics。
 - 备选：只允许“一条 Cypher query -> 一个 Commit”；用 caller-owned SQLite transaction 包裹多个 Commit；要求调用方构造 Structural Patch；完成后自动 squash/rewrite history；建立独立 server/session transaction layer。
 - 取舍：Engine 必须维护跨 execution 的 staged snapshot、transaction-level temporal clock、final net-delta canonicalization 与 fail-closed cleanup；active transaction 持有 SQLite single-writer ownership，长事务会阻塞其它写入。换取的是标准 Cypher 25 仍为正常 mutation language，同时获得明确的 version atomicity 和 one logical change -> one Commit 语义。
+
+### D11 Merge 使用持久 Merge Session 分离冲突解决与最终 Commit
+
+- 决定：Three-way merge 先创建 durable、非历史的 Merge Session，pin `ours/theirs`，通过分页 conflict + incremental resolution 逐步得到 candidate；Session 以单调 revision 标识 resolution state，candidate 通过 `options.mergeSession={id,revision}` 只读检查。只有 `merge.finalize(session, expectedRevision)` 可以创建 Merge Commit/fast-forward 并移动 Branch，同时删除 Session。
+- 依据：大型 merge 可能存在大量冲突，需要 AI/用户跨多个调用逐步解决；在整个交互期间持有 SQLite writer 会阻塞数据库，而一次性 `merge(source,resolutions)` 又要求 caller 把所有 conflict 放入一次上下文。上层系统还需要在最终 ref move 前检查自己的业务不变量。Pinned Commit + session revision + finalize target-head CAS 可以在不嵌入上层 callback、不保持长 writer transaction 的前提下保证“检查的 candidate == 最终准备提交的 candidate”。
+- 备选：一次性 merge + 全量 resolutions；长生命周期 SQLite/Native transaction；merge prepare/finalize 但 candidate 只存内存；finalize-time application callback；让上层先 merge 再 revert invalid result。
+- 取舍：format 2 增加 mutable Merge Session/resolution operational storage，GC 需要把 open Session 当 root，Version API 增加 session lifecycle 与 revision concurrency；换取 resumable conflict resolution、bounded conflict pagination、crash recovery、上层 pre-commit candidate validation，以及历史中始终只有最终一次 merge/fast-forward 结果。
 
 ## 19. 参考基线
 

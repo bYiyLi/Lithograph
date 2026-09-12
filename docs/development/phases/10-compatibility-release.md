@@ -48,6 +48,7 @@ after branch move / before SQLite commit
 before/after Commit Data sidecar write
 before/after Tag ref create/move/delete
 explicit transaction after begin / after staged execute / before final layer / after commit row / before branch move / explicit abort / connection teardown cleanup
+Merge Session start expected-head race / after start / resolve read-to-writer revision race / after resolution batch / candidate read-revision race / finalize prepare-to-writer race / before finalize branch CAS / after merge commit before session delete / stale abort / abort cleanup
 checkpoint/index rebuild
 migration steps
 ```
@@ -57,7 +58,7 @@ migration steps
 ### Feature 10.4 Storage migration
 
 - previous-format fixture；
-- format `1 -> 2` forward migration，验证 Commit Data / Tag sidecar 建立且既有 Commit ID/history 不变；
+- format `1 -> 2` forward migration，验证 Commit Data / Tag / Merge Session operational storage 建立且既有 Commit ID/history 不变；
 - migration rollback；
 - too-new format rejection；
 - Commit ID/history preservation；
@@ -80,6 +81,7 @@ Release tier：
 - variable path；
 - write batch + commit；
 - multi-execution Native explicit transaction + single Commit；
+- large-conflict Merge Session：bounded conflict pagination、multi-round resolution、candidate inspection、read-phase finalize preparation、short-writer single finalize；
 - historical query；
 - cursor-based large Commit-DAG traversal；
 - Tag lookup / GC-root reachability；
@@ -107,7 +109,7 @@ Windows x86_64/arm64
 - symbol/ABI check；
 - real SQLite `.load`；
 - `lithograph_init`；
-- read/write/history/Tag/Commit-Data/explicit-Commit/explicit-transaction smoke；
+- read/write/history/Tag/Commit-Data/explicit-Commit/explicit-transaction/Merge-Session smoke；
 - storage-format interoperability fixture。
 
 同一平台 artifact 额外在支持矩阵中的 SQLite **3.45.0 minimum** 与当前稳定 SQLite runtime 各执行一次 load/init/read/write smoke，证明 loadable-extension ABI 不依赖构建机私有 SQLite。
@@ -128,6 +130,7 @@ Review：
 - Commit Data / Tag 保持 sidecar 边界：不改变 immutable Commit hash/Snapshot，Tag 不自动移动且参与 GC root；
 - paginated history cursor pin immutable start Commit，不因 Branch/Tag 后续移动漂移；
 - Native explicit transaction 保持 connection-scoped ABI、multi-execution -> one Commit、`expectedHead` CAS、cross-execution Graph View staged visibility、`LOAD CSV` boundary、fail-closed abort/connection teardown 与短 single-writer boundary；caller-owned SQLite transaction / Cypher transaction batching 没有被错误折叠成同一语义；
+- Merge Session 保持 durable operational workspace 而不是第二套 history：不跨 conflict-resolution / finalize preparation 生命周期持有 writer，conflict bounded/pageable，start expected-head、resolve/finalize/abort revision CAS 正确，revision 精确绑定 candidate inspection/finalize，open Session 参与 GC root，只有 finalize 的短 writer phase 才能 Commit/移动 Branch；
 
 ### Feature 10.8 Documentation closure
 
@@ -147,9 +150,10 @@ Review：
 - [ ] Graph View cross-surface fixture 覆盖 scan/seek/path/subquery/aggregation/write/full-text/vector/historical read：read/search/historical result 与对应 Snapshot 的物理诱导子图 oracle 一致，read-write query 与逐 clause graph-state oracle 一致，Schema/Constraint 仍按完整 canonical graph 验证，且不存在 visibility/write bypass；
 - [ ] fuzz/property suite 无未解决 correctness finding；
 - [ ] crash/recovery/migration suite 全通过；
-- [ ] format `1 -> 2` migration 保持全部既有 Commit ID、Snapshot 与 history semantics，Commit Data/Tag sidecar crash/reopen 与 rollback 行为正确；
+- [ ] format `1 -> 2` migration 保持全部既有 Commit ID、Snapshot 与 history semantics，Commit Data/Tag/Merge Session storage 的 crash/reopen 与 rollback 行为正确；
 - [ ] Tag、Commit Data、explicit empty-delta Commit 与 cursor-based DAG History 的 Phase 09 acceptance 在 release matrix 中回归通过；
 - [ ] Native explicit transaction 的 C ABI/ownership、multi-execution single-Commit、expected-head mismatch、cross-execution Graph View、`LOAD CSV` rejection、execute/callback/cancel/commit/abort/connection-teardown rollback、transaction/statement clock 与 staged-isolation acceptance 在 release matrix 中回归通过；
+- [ ] Merge Session 的 restart recovery、large-conflict pagination、incremental resolution、start expected-head、revision/cursor stale detection、candidate read-only inspection、read-prepare + short-writer finalize、target-head CAS、stale-abort protection、single finalize 与 GC-root acceptance 在 release matrix 中回归通过；
 - [ ] 10M/100M benchmark gate 通过；
 - [ ] 所有 release artifacts real-load acceptance 通过；
 - [ ] cross-platform storage fixture interoperable；
