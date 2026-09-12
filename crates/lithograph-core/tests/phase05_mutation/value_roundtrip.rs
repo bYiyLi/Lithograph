@@ -89,33 +89,26 @@ fn mutation_persists_and_reads_each_supported_property_value_family() {
 }
 
 #[test]
-fn named_zone_persistence_fails_atomically_until_timezone_rules_are_available() {
+fn named_zone_persistence_round_trips_with_timezone_rules() {
     let connection = fresh_storage();
-    let before = branch_head(&connection, "main").expect("head before named-zone write");
-    let params = BTreeMap::from([(
-        "value".to_owned(),
-        Value::ZonedDateTime(
-            ZonedDateTimeValue::parse("2026-09-11T12:34:56+08:00", "Asia/Shanghai")
-                .expect("named-zone datetime"),
-        ),
-    )]);
+    let value = Value::ZonedDateTime(
+        ZonedDateTimeValue::parse("2026-09-11T12:34:56+08:00", "Asia/Shanghai")
+            .expect("named-zone datetime"),
+    );
+    let params = BTreeMap::from([("value".to_owned(), value.clone())]);
 
-    let error = execute_with_params(
+    let (_, summary) = execute_with_params(
         &connection,
         "CREATE (:NamedZoneValue {value:$value}) FINISH",
         params,
         ExecutionOptions::default(),
     )
-    .expect_err("named-zone persistence must not silently change the original offset");
+    .expect("persist named-zone datetime");
 
-    assert_eq!(error.kind, QueryErrorKind::Type);
+    assert_eq!(summary.counters.nodes_created, 1);
+    assert_eq!(summary.counters.properties_set, 1);
     assert_eq!(
-        branch_head(&connection, "main").expect("head after named-zone rejection"),
-        before
-    );
-    assert!(
-        lithograph_core::storage::find_label(&connection, "NamedZoneValue")
-            .expect("find rejected named-zone label")
-            .is_none()
+        read_rows(&connection, "MATCH (node:NamedZoneValue) RETURN node.value"),
+        vec![vec![value]]
     );
 }

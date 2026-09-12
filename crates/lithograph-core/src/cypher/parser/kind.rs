@@ -41,6 +41,7 @@ fn query_or_clause_ast_kind(rule: Rule, pair: &Pair<'_, Rule>) -> Option<AstKind
         Rule::set_clause => AstKind::Clause(ClauseKind::Set),
         Rule::remove_clause => AstKind::Clause(ClauseKind::Remove),
         Rule::delete_clause => AstKind::Clause(ClauseKind::Delete),
+        Rule::nodetach_delete_clause => AstKind::Clause(ClauseKind::Delete),
         Rule::detach_delete_clause => AstKind::Clause(ClauseKind::DetachDelete),
         Rule::foreach_clause => AstKind::Clause(ClauseKind::Foreach),
         Rule::call_clause => AstKind::Clause(ClauseKind::Call),
@@ -59,8 +60,10 @@ fn query_or_clause_ast_kind(rule: Rule, pair: &Pair<'_, Rule>) -> Option<AstKind
 
 fn pattern_ast_kind(rule: Rule, pair: &Pair<'_, Rule>) -> Option<AstKind> {
     let kind = match rule {
-        Rule::pattern | Rule::pattern_element => AstKind::Pattern,
+        Rule::pattern | Rule::pattern_element | Rule::simple_path_pattern => AstKind::Pattern,
         Rule::pattern_part => AstKind::PatternPart,
+        Rule::grouped_pattern => AstKind::QuantifiedPattern,
+        Rule::relationship_chain => AstKind::RelationshipChain,
         Rule::path_assignment => AstKind::PathAssignment,
         Rule::path_mode => AstKind::PathMode(path_mode_kind(pair.as_str())),
         Rule::path_selector_all => AstKind::PathSelector(PathSelectorKind::All),
@@ -116,6 +119,8 @@ fn scope_ast_kind(rule: Rule, pair: &Pair<'_, Rule>) -> Option<AstKind> {
             AstKind::SetQuantifier(set_quantifier_kind(pair.as_str()))
         }
         Rule::group_by => AstKind::GroupBy,
+        Rule::group_by_all => AstKind::GroupByAll,
+        Rule::group_by_empty => AstKind::GroupByEmpty,
         Rule::order_by => AstKind::OrderBy,
         Rule::order_direction => AstKind::OrderDirection(order_direction_kind(pair.as_str())),
         Rule::where_subclause | Rule::inline_where => AstKind::Where,
@@ -138,6 +143,7 @@ fn scope_ast_kind(rule: Rule, pair: &Pair<'_, Rule>) -> Option<AstKind> {
         Rule::subquery_scope => AstKind::SubqueryScope,
         Rule::subquery_import => AstKind::SubqueryImport,
         Rule::subquery_scope_all => AstKind::SubqueryScopeAll,
+        Rule::transaction_subclause => AstKind::TransactionSubclause,
         Rule::transaction_concurrent => AstKind::TransactionConcurrent,
         Rule::transaction_batch => AstKind::TransactionBatch,
         Rule::transaction_disjoint => AstKind::TransactionDisjoint(transaction_disjoint_kind(pair)),
@@ -162,6 +168,8 @@ fn scope_ast_kind(rule: Rule, pair: &Pair<'_, Rule>) -> Option<AstKind> {
         Rule::yield_item => AstKind::YieldItem,
         Rule::yield_name => AstKind::YieldName,
         Rule::predicate_variable => AstKind::PredicateVariable,
+        Rule::reduction_accumulator => AstKind::ReductionAccumulator,
+        Rule::reduction_variable => AstKind::ReductionVariable,
         Rule::let_variable
         | Rule::unwind_variable
         | Rule::for_variable
@@ -199,6 +207,10 @@ fn schema_ast_kind(rule: Rule, pair: &Pair<'_, Rule>) -> Option<AstKind> {
         Rule::vector_signed_integer | Rule::vector_coordinate_name => {
             AstKind::VectorCoordinateTypeName
         }
+        Rule::vector_distance_metric => AstKind::VectorDistanceMetric,
+        Rule::normalization_form => AstKind::NormalizationForm,
+        Rule::trim_specification => AstKind::TrimSpecification,
+        Rule::trim_from_arguments => AstKind::TrimFromArguments,
         Rule::type_expression => AstKind::TypeExpression,
         Rule::type_term => AstKind::TypeTerm,
         Rule::type_parameters => AstKind::TypeParameters,
@@ -248,17 +260,27 @@ fn expression_ast_kind(rule: Rule) -> AstKind {
         Rule::not_expression => AstKind::Expression(ExpressionKind::Not),
         Rule::comparison_expression => AstKind::Expression(ExpressionKind::Comparison),
         Rule::comparison_suffix => AstKind::ComparisonSuffix,
-        Rule::subscript => AstKind::Subscript,
+        Rule::subscript | Rule::dynamic_property_lookup => AstKind::Subscript,
         Rule::additive_expression => AstKind::Expression(ExpressionKind::Additive),
         Rule::multiplicative_expression => AstKind::Expression(ExpressionKind::Multiplicative),
         Rule::power_expression => AstKind::Expression(ExpressionKind::Power),
         Rule::unary_expression => AstKind::Expression(ExpressionKind::Unary),
         Rule::postfix_expression => AstKind::Expression(ExpressionKind::Postfix),
         Rule::property_exists_function
+        | Rule::trim_function_call
+        | Rule::normalize_function_call
+        | Rule::vector_distance_function_call
+        | Rule::vector_norm_function_call
         | Rule::vector_function_call
         | Rule::list_predicate_function
+        | Rule::reduce_function
+        | Rule::all_reduce_function
         | Rule::function_call => AstKind::Expression(ExpressionKind::FunctionCall),
-        Rule::property_exists_name => AstKind::FunctionName,
+        Rule::property_exists_name
+        | Rule::trim_function_name
+        | Rule::normalize_function_name
+        | Rule::vector_distance_function_name
+        | Rule::vector_norm_function_name => AstKind::FunctionName,
         Rule::list_literal | Rule::list_comprehension | Rule::pattern_comprehension => {
             AstKind::Expression(ExpressionKind::List)
         }
@@ -308,11 +330,16 @@ fn connector(pair: &Pair<'_, Rule>) -> QueryConnector {
 }
 
 fn path_mode_kind(text: &str) -> PathModeKind {
-    match text.to_ascii_uppercase().as_str() {
+    match text
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase()
+        .as_str()
+    {
         "WALK" => PathModeKind::Walk,
         "TRAIL" => PathModeKind::Trail,
         "ACYCLIC" => PathModeKind::Acyclic,
-        "SIMPLE" => PathModeKind::Simple,
         _ => unreachable!("path_mode grammar only accepts known modes"),
     }
 }
@@ -444,9 +471,12 @@ fn show_target_kind(pair: &Pair<'_, Rule>) -> ShowTargetKind {
         ShowTargetKind::Indexes
     } else if direct_has_rule(pair, Rule::KW_CONSTRAINTS) {
         ShowTargetKind::Constraints
-    } else if direct_has_rule(pair, Rule::KW_FUNCTIONS) {
+    } else if direct_has_rule(pair, Rule::KW_FUNCTION) || direct_has_rule(pair, Rule::KW_FUNCTIONS)
+    {
         ShowTargetKind::Functions
-    } else if direct_has_rule(pair, Rule::KW_PROCEDURES) {
+    } else if direct_has_rule(pair, Rule::KW_PROCEDURE)
+        || direct_has_rule(pair, Rule::KW_PROCEDURES)
+    {
         ShowTargetKind::Procedures
     } else {
         unreachable!("show_target grammar only accepts known targets")
@@ -481,8 +511,8 @@ fn index_kind(text: &str) -> IndexKind {
     }
 }
 
-pub(super) fn leaf_text(rule: Rule, text: &str) -> Option<String> {
-    let canonical_type = match rule {
+fn canonical_type_text(rule: Rule) -> Option<&'static str> {
+    match rule {
         Rule::type_any_property_value | Rule::type_property_value => Some("PROPERTY VALUE"),
         Rule::type_any_relationship | Rule::type_any_edge => Some("RELATIONSHIP"),
         Rule::type_any_vertex | Rule::type_any_node => Some("NODE"),
@@ -497,8 +527,11 @@ pub(super) fn leaf_text(rule: Rule, text: &str) -> Option<String> {
         Rule::vector_type => Some("VECTOR"),
         Rule::vector_signed_integer => Some("INTEGER"),
         _ => None,
-    };
-    if let Some(canonical_type) = canonical_type {
+    }
+}
+
+pub(super) fn leaf_text(rule: Rule, text: &str) -> Option<String> {
+    if let Some(canonical_type) = canonical_type_text(rule) {
         return Some(canonical_type.to_owned());
     }
     match rule {
@@ -515,6 +548,8 @@ pub(super) fn leaf_text(rule: Rule, text: &str) -> Option<String> {
         | Rule::yield_name
         | Rule::vector_function_call
         | Rule::list_predicate_function
+        | Rule::reduce_function
+        | Rule::all_reduce_function
         | Rule::predicate_variable
         | Rule::subquery_scope
         | Rule::subquery_import
@@ -531,6 +566,8 @@ pub(super) fn leaf_text(rule: Rule, text: &str) -> Option<String> {
         | Rule::for_variable
         | Rule::foreach_variable
         | Rule::comprehension_variable
+        | Rule::reduction_accumulator
+        | Rule::reduction_variable
         | Rule::variable
         | Rule::parameter
         | Rule::function_name
@@ -547,6 +584,13 @@ pub(super) fn leaf_text(rule: Rule, text: &str) -> Option<String> {
         | Rule::graph_alias
         | Rule::type_simple_name
         | Rule::vector_coordinate_name
+        | Rule::vector_distance_metric
+        | Rule::normalization_form
+        | Rule::trim_specification
+        | Rule::trim_function_name
+        | Rule::normalize_function_name
+        | Rule::vector_distance_function_name
+        | Rule::vector_norm_function_name
         | Rule::vector_dimension
         | Rule::null_literal
         | Rule::boolean_literal
@@ -554,6 +598,11 @@ pub(super) fn leaf_text(rule: Rule, text: &str) -> Option<String> {
         | Rule::float_literal
         | Rule::string_literal
         | Rule::interpolated_string
+        | Rule::comparison_suffix
+        | Rule::subscript
+        | Rule::dynamic_property_lookup
+        | Rule::list_comprehension
+        | Rule::map_projection_item
         | Rule::comparison_operator
         | Rule::KW_IN
         | Rule::KW_CONTAINS

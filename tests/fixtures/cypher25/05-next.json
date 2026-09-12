@@ -7,9 +7,14 @@
     "version": "2025.06",
     "family": "NEXT"
   },
-  "execution": "planned",
+  "execution": "enabled",
   "query": "RETURN 1 AS x NEXT RETURN x AS x",
   "params": {},
   "initial_graph": [],
-  "expected": {"kind": "parse", "valid": true}
+  "expected": {
+    "kind": "rows",
+    "columns": ["x"],
+    "ordered": true,
+    "rows": [[{"type": "integer", "value": 1}]]
+  }
 }

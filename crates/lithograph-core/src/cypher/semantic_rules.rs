@@ -1,10 +1,15 @@
 use std::collections::BTreeSet;
 
-use super::ast::{AstKind, AstNode, ClauseKind, ExpressionKind, QueryConnector, SubqueryKind};
-use super::error::FrontendError;
+use super::ast::{
+    AstKind, AstNode, ClauseKind, ExpressionKind, MatchModeKind, PathModeKind, PathSelectorKind,
+    QuantifierKind, QueryConnector, SubqueryKind,
+};
+use super::error::{FrontendError, Span};
 use super::semantic::{Analyzer, BindingKind, Scope, unescape_identifier};
 use super::semantic_expression::function_name;
-use super::semantic_projection::{find_descendant, projection_items, simple_projection_variable};
+use super::semantic_projection::{
+    find_descendant, has_star_projection, projection_items, simple_projection_variable,
+};
 use super::semantic_rule_helpers::{
     contains_aggregate, is_aggregate_call, reference_key, simple_expression_variable,
     statically_negative_integer, top_level_argument_expressions,
@@ -19,12 +24,12 @@ impl Analyzer<'_> {
             _ => None,
         }) {
             let current = match connector {
-                QueryConnector::UnionAll => Some(true),
-                QueryConnector::Union | QueryConnector::UnionDistinct => Some(false),
-                QueryConnector::Next => None,
-            };
-            let Some(current) = current else {
-                continue;
+                QueryConnector::UnionAll => true,
+                QueryConnector::Union | QueryConnector::UnionDistinct => false,
+                QueryConnector::Next => {
+                    flavor = None;
+                    continue;
+                }
             };
             if let Some(expected) = flavor
                 && expected != current
@@ -45,7 +50,7 @@ impl Analyzer<'_> {
         scope: &Scope,
     ) -> Result<(), FrontendError> {
         self.reject_aggregates(clause, "MATCH/FILTER predicates cannot contain aggregation")?;
-        self.validate_pattern_relationship_reuse(clause)?;
+        self.validate_path_modes_and_selectors(clause)?;
         self.validate_variable_length_bounds(clause)?;
         self.validate_pattern_predicates(clause, scope)?;
         self.validate_predicate_types(clause, scope)?;
@@ -59,10 +64,86 @@ impl Analyzer<'_> {
         input: &Scope,
     ) -> Result<(), FrontendError> {
         self.reject_aggregates(clause, "write patterns cannot contain aggregation")?;
+        self.validate_create_insert_label_syntax(kind, clause)?;
         self.validate_write_relationships(kind, clause, input)?;
         self.validate_write_nodes(clause, input)?;
         self.validate_write_property_references(clause, input)?;
         self.validate_expression_categories(clause, input)
+    }
+
+    fn validate_create_insert_label_syntax(
+        &self,
+        kind: ClauseKind,
+        clause: &AstNode,
+    ) -> Result<(), FrontendError> {
+        let mut colon_separated = false;
+        let mut ampersand_separated = false;
+        for labels in clause
+            .descendants()
+            .filter(|node| node.kind == AstKind::LabelExpression)
+        {
+            let direct_groups = labels
+                .children
+                .iter()
+                .filter(|node| {
+                    node.kind
+                        == AstKind::NameExpression(super::ast::NameExpressionKind::Disjunction)
+                })
+                .count();
+            colon_separated |= direct_groups > 1;
+            ampersand_separated |= labels.descendants().any(|node| {
+                node.kind == AstKind::NameExpression(super::ast::NameExpressionKind::Conjunction)
+                    && node
+                        .children
+                        .iter()
+                        .filter(|child| {
+                            matches!(
+                                child.kind,
+                                AstKind::NameExpression(super::ast::NameExpressionKind::Negation(
+                                    _
+                                ))
+                            )
+                        })
+                        .count()
+                        > 1
+            });
+            if kind == ClauseKind::Insert
+                && labels.descendants().any(|node| {
+                    node.kind == AstKind::NameExpression(super::ast::NameExpressionKind::Dynamic)
+                })
+            {
+                return Err(
+                    self.semantic_error(labels.span, "INSERT does not support dynamic node labels")
+                );
+            }
+        }
+        if kind == ClauseKind::Insert
+            && clause.descendants().any(|node| {
+                node.kind == AstKind::RelationshipPattern
+                    && node.descendants().any(|child| {
+                        child.kind
+                            == AstKind::NameExpression(super::ast::NameExpressionKind::Dynamic)
+                    })
+            })
+        {
+            return Err(self.semantic_error(
+                clause.span,
+                "INSERT does not support dynamic relationship types",
+            ));
+        }
+        if kind == ClauseKind::Insert && colon_separated {
+            return Err(self.semantic_error(
+                clause.span,
+                "INSERT requires ampersands between multiple node labels",
+            ));
+        }
+        if kind == ClauseKind::Create && colon_separated && ampersand_separated {
+            return Err(self.semantic_error(
+                clause.span,
+                "CREATE cannot mix colon and ampersand label separators in one clause",
+            ));
+        }
+        Ok(())
     }
 
     fn validate_write_property_references(
@@ -154,40 +235,96 @@ impl Analyzer<'_> {
         replace_scope: bool,
     ) -> Result<(), FrontendError> {
         let body = find_descendant(clause, AstKind::ProjectionBody).unwrap_or(clause);
-        if body
-            .descendants()
-            .any(|node| node.kind == AstKind::StarProjection)
-            && input.is_empty()
-            && !replace_scope
-        {
+        self.validate_projection_star(body, input, replace_scope)?;
+
+        let items = projection_items(body);
+        let group_by = body
+            .children
+            .iter()
+            .find(|node| node.kind == AstKind::GroupBy);
+        let grouping_expressions = self.grouping_expressions(group_by, &items);
+        let grouping_keys = self.grouping_reference_keys(group_by, &items, &grouping_expressions);
+        if let Some(group_by) = group_by {
+            self.validate_group_by(group_by, input, output, &grouping_expressions)?;
+        }
+        let aggregating = group_by.is_some() || items.iter().any(|item| contains_aggregate(item));
+        self.validate_projection_items(
+            &items,
+            input,
+            replace_scope,
+            &grouping_keys,
+            &grouping_expressions,
+            group_by,
+        )?;
+        self.validate_order_visibility(body, input, output)?;
+        if aggregating {
+            self.validate_aggregate_order(body, output, &grouping_keys, &grouping_expressions)?;
+        } else {
+            self.reject_order_aggregation(body)?;
+        }
+        self.validate_skip_limit(body)?;
+        self.validate_projection_suffix(clause, input, output, replace_scope)?;
+        Ok(())
+    }
+
+    fn validate_projection_star(
+        &self,
+        body: &AstNode,
+        input: &Scope,
+        replace_scope: bool,
+    ) -> Result<(), FrontendError> {
+        if has_star_projection(body) && input.is_empty() && !replace_scope {
             return Err(self.semantic_error(
                 body.span,
                 "star projection requires at least one variable in scope",
             ));
         }
+        Ok(())
+    }
 
-        let items = projection_items(body);
-        let grouping_keys = items
-            .iter()
-            .filter_map(|item| self.simple_grouping_key(item))
-            .collect::<BTreeSet<_>>();
+    fn validate_projection_items(
+        &mut self,
+        items: &[&AstNode],
+        input: &Scope,
+        replace_scope: bool,
+        grouping_keys: &BTreeSet<String>,
+        grouping_expressions: &[&AstNode],
+        group_by: Option<&AstNode>,
+    ) -> Result<(), FrontendError> {
         for item in items {
-            self.validate_projection_item(item, input, replace_scope, &grouping_keys)?;
-        }
-        self.validate_order_visibility(body, input, output, replace_scope)?;
-        self.validate_skip_limit(body)?;
-
-        if replace_scope {
-            let mut evaluation_scope = input.clone();
-            evaluation_scope.extend(output.clone());
-            for child in &clause.children {
-                if child.kind == AstKind::ProjectionBody {
-                    continue;
-                }
-                self.validate_expression_references(child, &evaluation_scope)?;
-                self.validate_expression_categories(child, &evaluation_scope)?;
-                self.validate_predicate_types(child, &evaluation_scope)?;
+            self.validate_projection_item(
+                item,
+                input,
+                replace_scope,
+                grouping_keys,
+                grouping_expressions,
+            )?;
+            if let Some(group_by) = group_by {
+                self.validate_explicit_group_projection(item, group_by, grouping_expressions)?;
             }
+        }
+        Ok(())
+    }
+
+    fn validate_projection_suffix(
+        &mut self,
+        clause: &AstNode,
+        input: &Scope,
+        output: &Scope,
+        replace_scope: bool,
+    ) -> Result<(), FrontendError> {
+        if !replace_scope {
+            return Ok(());
+        }
+        let mut evaluation_scope = input.clone();
+        evaluation_scope.extend(output.clone());
+        for child in &clause.children {
+            if child.kind == AstKind::ProjectionBody {
+                continue;
+            }
+            self.validate_expression_references(child, &evaluation_scope)?;
+            self.validate_expression_categories(child, &evaluation_scope)?;
+            self.validate_predicate_types(child, &evaluation_scope)?;
         }
         Ok(())
     }
@@ -249,18 +386,17 @@ impl Analyzer<'_> {
         input: &Scope,
         require_alias: bool,
         grouping_keys: &BTreeSet<String>,
+        grouping_expressions: &[&AstNode],
     ) -> Result<(), FrontendError> {
         self.validate_expression_references(item, input)?;
         self.reject_pattern_expressions(item)?;
         self.validate_expression_categories(item, input)?;
         self.validate_types(item)?;
-        self.validate_aggregation_expression(item, grouping_keys)?;
+        self.validate_aggregation_expression(item, grouping_keys, grouping_expressions)?;
         if require_alias
             && find_descendant(item, AstKind::ProjectionAlias).is_none()
             && simple_projection_variable(item).is_none()
-            && !item
-                .descendants()
-                .any(|node| node.kind == AstKind::StarProjection)
+            && !has_star_projection(item)
         {
             return Err(self.semantic_error(
                 item.span,
@@ -275,19 +411,246 @@ impl Analyzer<'_> {
         body: &AstNode,
         input: &Scope,
         output: &Scope,
-        _replace_scope: bool,
     ) -> Result<(), FrontendError> {
+        let distinct = body.descendants().any(|node| {
+            matches!(
+                node.kind,
+                AstKind::SetQuantifier(super::ast::SetQuantifierKind::Distinct)
+            )
+        });
         let mut visible = input.clone();
         visible.extend(output.clone());
+        let projected = projection_items(body)
+            .into_iter()
+            .filter_map(projection_expression)
+            .collect::<Vec<_>>();
         for order in body
             .descendants()
             .filter(|node| node.kind == AstKind::OrderBy)
         {
-            self.validate_expression_references(order, &visible)?;
-            self.validate_expression_categories(order, &visible)?;
+            if distinct {
+                let mut expressions = Vec::new();
+                collect_surface_expressions(order, &mut expressions);
+                for expression in expressions {
+                    let expression_visible = if projected
+                        .iter()
+                        .any(|projection| same_syntax(projection, expression))
+                    {
+                        &visible
+                    } else {
+                        output
+                    };
+                    self.validate_expression_references(expression, expression_visible)?;
+                    self.validate_expression_categories(expression, expression_visible)?;
+                }
+            } else {
+                self.validate_expression_references(order, &visible)?;
+                self.validate_expression_categories(order, &visible)?;
+            }
             self.validate_types(order)?;
         }
         Ok(())
+    }
+
+    fn validate_aggregate_order(
+        &self,
+        body: &AstNode,
+        output: &Scope,
+        grouping_keys: &BTreeSet<String>,
+        grouping_expressions: &[&AstNode],
+    ) -> Result<(), FrontendError> {
+        let projected_aggregates = projection_items(body)
+            .into_iter()
+            .flat_map(AstNode::descendants)
+            .filter(|node| is_aggregate_call(node))
+            .collect::<Vec<_>>();
+        let output_references = output
+            .keys()
+            .map(|name| format!("{}:{name};", name.len()))
+            .collect::<BTreeSet<_>>();
+        for order in body
+            .descendants()
+            .filter(|node| node.kind == AstKind::OrderBy)
+        {
+            for aggregate in order.descendants().filter(|node| is_aggregate_call(node)) {
+                if aggregate.children.iter().any(contains_aggregate) {
+                    return Err(self
+                        .semantic_error(aggregate.span, "aggregating functions cannot be nested"));
+                }
+                if !projected_aggregates
+                    .iter()
+                    .any(|projected| same_syntax(projected, aggregate))
+                {
+                    return Err(self.semantic_error(
+                        aggregate.span,
+                        "ORDER BY aggregation must also be projected",
+                    ));
+                }
+            }
+            let mut references = BTreeSet::new();
+            self.collect_grouping_references(order, &mut references, grouping_expressions);
+            if let Some(reference) = references.iter().find(|reference| {
+                !grouping_keys.contains(*reference) && !output_references.contains(*reference)
+            }) {
+                return Err(self.semantic_error(
+                    order.span,
+                    format!("aggregating ORDER BY uses ungrouped reference {reference:?}"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn reject_order_aggregation(&self, body: &AstNode) -> Result<(), FrontendError> {
+        if let Some(aggregate) = body
+            .descendants()
+            .find(|node| node.kind == AstKind::OrderBy)
+            .and_then(|order| order.descendants().find(|node| is_aggregate_call(node)))
+        {
+            Err(self.semantic_error(
+                aggregate.span,
+                "ORDER BY cannot introduce aggregation after a non-aggregating projection",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn grouping_expressions<'a>(
+        &self,
+        group_by: Option<&'a AstNode>,
+        items: &[&'a AstNode],
+    ) -> Vec<&'a AstNode> {
+        let Some(group_by) = group_by else {
+            return Vec::new();
+        };
+        if group_by
+            .descendants()
+            .any(|node| node.kind == AstKind::GroupByAll)
+        {
+            return items
+                .iter()
+                .filter(|item| !contains_aggregate(item))
+                .filter_map(|item| projection_expression(item))
+                .collect();
+        }
+        if group_by
+            .descendants()
+            .any(|node| node.kind == AstKind::GroupByEmpty)
+        {
+            return Vec::new();
+        }
+        let mut expressions = Vec::new();
+        collect_surface_expressions(group_by, &mut expressions);
+        expressions
+    }
+
+    fn grouping_reference_keys(
+        &self,
+        group_by: Option<&AstNode>,
+        items: &[&AstNode],
+        grouping_expressions: &[&AstNode],
+    ) -> BTreeSet<String> {
+        if group_by.is_none() {
+            return items
+                .iter()
+                .filter_map(|item| self.simple_grouping_key(item))
+                .collect();
+        }
+        let mut keys = grouping_expressions
+            .iter()
+            .filter_map(|expression| self.simple_expression_grouping_key(expression))
+            .collect::<BTreeSet<_>>();
+        for item in items.iter().filter(|item| !contains_aggregate(item)) {
+            let alias = find_descendant(item, AstKind::ProjectionAlias)
+                .and_then(|node| node.text.as_deref())
+                .map(unescape_identifier);
+            if alias.is_some_and(|alias| {
+                grouping_expressions.iter().any(|expression| {
+                    simple_expression_variable(expression)
+                        .map(unescape_identifier)
+                        .as_deref()
+                        == Some(alias.as_str())
+                })
+            }) && let Some(key) = self.simple_grouping_key(item)
+            {
+                keys.insert(key);
+            }
+        }
+        keys
+    }
+
+    fn validate_group_by(
+        &mut self,
+        group_by: &AstNode,
+        input: &Scope,
+        output: &Scope,
+        grouping_expressions: &[&AstNode],
+    ) -> Result<(), FrontendError> {
+        let mut visible = input.clone();
+        visible.extend(output.clone());
+        for expression in grouping_expressions {
+            self.reject_aggregates(expression, "GROUP BY cannot contain aggregation")?;
+            self.reject_pattern_expressions(expression)?;
+            self.validate_expression_references(expression, &visible)?;
+            self.validate_expression_categories(expression, &visible)?;
+            self.validate_types(expression)?;
+        }
+        if group_by
+            .descendants()
+            .any(|node| node.kind == AstKind::GroupByEmpty)
+            && !grouping_expressions.is_empty()
+        {
+            return Err(self.semantic_error(group_by.span, "GROUP BY () cannot contain keys"));
+        }
+        Ok(())
+    }
+
+    fn validate_explicit_group_projection(
+        &self,
+        item: &AstNode,
+        group_by: &AstNode,
+        grouping_expressions: &[&AstNode],
+    ) -> Result<(), FrontendError> {
+        if contains_aggregate(item)
+            || group_by
+                .descendants()
+                .any(|node| node.kind == AstKind::GroupByAll)
+        {
+            return Ok(());
+        }
+        let Some(expression) = projection_expression(item) else {
+            return Ok(());
+        };
+        let exact_key = grouping_expressions
+            .iter()
+            .any(|key| same_expression_syntax(key, expression));
+        let alias_key = find_descendant(item, AstKind::ProjectionAlias)
+            .and_then(|node| node.text.as_deref())
+            .map(unescape_identifier)
+            .is_some_and(|alias| {
+                grouping_expressions.iter().any(|key| {
+                    simple_expression_variable(key)
+                        .map(unescape_identifier)
+                        .as_deref()
+                        == Some(alias.as_str())
+                })
+            });
+        if exact_key || alias_key {
+            return Ok(());
+        }
+        let mut references = BTreeSet::new();
+        self.collect_grouping_references(expression, &mut references, &[]);
+        let volatile = expression
+            .descendants()
+            .any(|node| function_name(node).as_deref() == Some("rand"));
+        if references.is_empty() && !volatile {
+            return Ok(());
+        }
+        Err(self.semantic_error(
+            item.span,
+            "non-aggregating projection expression must be a GROUP BY key",
+        ))
     }
 
     fn validate_skip_limit(&self, body: &AstNode) -> Result<(), FrontendError> {
@@ -334,6 +697,7 @@ impl Analyzer<'_> {
         &self,
         item: &AstNode,
         grouping_keys: &BTreeSet<String>,
+        grouping_expressions: &[&AstNode],
     ) -> Result<(), FrontendError> {
         for aggregate in item.descendants().filter(|node| is_aggregate_call(node)) {
             if aggregate.children.iter().any(contains_aggregate) {
@@ -353,7 +717,7 @@ impl Analyzer<'_> {
         }
         if contains_aggregate(item) {
             let mut references = BTreeSet::new();
-            self.collect_grouping_references(item, &mut references);
+            self.collect_grouping_references(item, &mut references, grouping_expressions);
             if let Some(reference) = references
                 .iter()
                 .find(|reference| !grouping_keys.contains(*reference))
@@ -375,6 +739,10 @@ impl Analyzer<'_> {
             .children
             .iter()
             .find(|child| matches!(child.kind, AstKind::Expression(_)))?;
+        self.simple_expression_grouping_key(expression)
+    }
+
+    fn simple_expression_grouping_key(&self, expression: &AstNode) -> Option<String> {
         if expression.descendants().any(|node| {
             matches!(
                 node.kind,
@@ -394,35 +762,16 @@ impl Analyzer<'_> {
         reference_key(expression)
     }
 
-    fn collect_grouping_references(&self, node: &AstNode, output: &mut BTreeSet<String>) {
-        if matches!(node.kind, AstKind::Subquery(_)) || is_aggregate_call(node) {
+    fn collect_grouping_references(
+        &self,
+        node: &AstNode,
+        output: &mut BTreeSet<String>,
+        grouping_expressions: &[&AstNode],
+    ) {
+        if grouping_reference_barrier(node, grouping_expressions) {
             return;
         }
-        if matches!(node.kind, AstKind::Expression(ExpressionKind::List))
-            && node
-                .descendants()
-                .any(|child| child.kind == AstKind::BindingVariable)
-        {
-            return;
-        }
-        if matches!(node.kind, AstKind::Expression(ExpressionKind::FunctionCall))
-            && node
-                .children
-                .iter()
-                .any(|child| child.kind == AstKind::PredicateVariable)
-        {
-            return;
-        }
-        if matches!(node.kind, AstKind::Expression(ExpressionKind::Postfix))
-            && !node.descendants().any(is_aggregate_call)
-            && node
-                .descendants()
-                .any(|child| child.kind == AstKind::PropertyKey)
-            && node
-                .descendants()
-                .any(|child| child.kind == AstKind::Variable)
-            && let Some(reference) = reference_key(node)
-        {
+        if let Some(reference) = postfix_grouping_reference(node) {
             output.insert(reference);
             return;
         }
@@ -433,7 +782,7 @@ impl Analyzer<'_> {
             return;
         }
         for child in &node.children {
-            self.collect_grouping_references(child, output);
+            self.collect_grouping_references(child, output, grouping_expressions);
         }
     }
 
@@ -445,26 +794,130 @@ impl Analyzer<'_> {
         }
     }
 
-    fn validate_pattern_relationship_reuse(&self, clause: &AstNode) -> Result<(), FrontendError> {
-        for part in clause
-            .descendants()
+    fn validate_path_modes_and_selectors(&self, clause: &AstNode) -> Result<(), FrontendError> {
+        let match_mode = clause
+            .children
+            .iter()
+            .find_map(|node| match node.kind {
+                AstKind::MatchMode(mode) => Some(mode),
+                _ => None,
+            })
+            .unwrap_or(MatchModeKind::DifferentRelationships);
+        let Some(pattern) = clause
+            .children
+            .iter()
+            .find(|node| node.kind == AstKind::Pattern)
+        else {
+            return Ok(());
+        };
+        let parts = pattern
+            .children
+            .iter()
             .filter(|node| node.kind == AstKind::PatternPart)
+            .collect::<Vec<_>>();
+        let mut effective_mode = None;
+        let mut selective_span = None;
+        for part in &parts {
+            let (mode, part_selective_span) =
+                self.validate_path_part(part, match_mode, effective_mode)?;
+            effective_mode = Some(mode);
+            selective_span = selective_span.or(part_selective_span);
+        }
+        if match_mode == MatchModeKind::DifferentRelationships
+            && parts.len() > 1
+            && let Some(span) = selective_span
         {
-            let mut seen = BTreeSet::new();
-            for relationship in part
+            return Err(self.semantic_error(
+                span,
+                "DIFFERENT RELATIONSHIPS allows a selective path selector only with one path pattern",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_path_part(
+        &self,
+        part: &AstNode,
+        match_mode: MatchModeKind,
+        expected_mode: Option<PathModeKind>,
+    ) -> Result<(PathModeKind, Option<Span>), FrontendError> {
+        let explicit_mode = part.children.iter().find_map(|node| match node.kind {
+            AstKind::PathMode(mode) => Some((node, mode)),
+            _ => None,
+        });
+        let mode = explicit_mode.map_or(PathModeKind::Walk, |(_, mode)| mode);
+        if expected_mode.is_some_and(|expected| expected != mode) {
+            return Err(self.semantic_error(
+                part.span,
+                "all path patterns in one MATCH must use the same path mode",
+            ));
+        }
+        if match_mode == MatchModeKind::RepeatableElements && mode != PathModeKind::Walk {
+            return Err(self.semantic_error(
+                part.span,
+                "REPEATABLE ELEMENTS can only be combined with the WALK path mode",
+            ));
+        }
+        if let Some((path_mode, _)) = explicit_mode
+            && part
                 .descendants()
-                .filter(|node| node.kind == AstKind::RelationshipVariable)
-            {
-                let Some(name) = relationship.text.as_deref() else {
-                    continue;
-                };
-                let name = unescape_identifier(name);
-                if !seen.insert(name.clone()) {
-                    return Err(self.semantic_error(
-                        relationship.span,
-                        format!("relationship variable {name:?} cannot be reused in one pattern"),
-                    ));
-                }
+                .any(|node| node.kind == AstKind::VariableLength)
+        {
+            return Err(self.semantic_error(
+                path_mode.span,
+                "explicit path modes cannot be combined with legacy variable-length relationships",
+            ));
+        }
+        if match_mode == MatchModeKind::RepeatableElements {
+            self.validate_repeatable_bounds(part)?;
+        }
+        let selective_span = part
+            .children
+            .iter()
+            .find(|node| {
+                matches!(
+                    node.kind,
+                    AstKind::PathSelector(kind) if kind != PathSelectorKind::All
+                )
+            })
+            .map(|node| node.span);
+        Ok((mode, selective_span))
+    }
+
+    fn validate_repeatable_bounds(&self, part: &AstNode) -> Result<(), FrontendError> {
+        for quantifier in part
+            .descendants()
+            .filter(|node| matches!(node.kind, AstKind::Quantifier(_)))
+        {
+            let AstKind::Quantifier(kind) = quantifier.kind else {
+                unreachable!();
+            };
+            let bounded = kind == QuantifierKind::Fixed
+                || (kind == QuantifierKind::Range
+                    && quantifier
+                        .descendants()
+                        .any(|node| node.kind == AstKind::QuantifierUpperBound));
+            if !bounded {
+                return Err(self.semantic_error(
+                    quantifier.span,
+                    "REPEATABLE ELEMENTS requires an upper bound on every quantified path",
+                ));
+            }
+        }
+        for length in part
+            .descendants()
+            .filter(|node| node.kind == AstKind::VariableLength)
+        {
+            let text = length.text.as_deref().unwrap_or_default();
+            let bounded = text
+                .split_once("..")
+                .is_none_or(|(_, upper)| !upper.trim().is_empty())
+                && text.trim() != "*";
+            if !bounded {
+                return Err(self.semantic_error(
+                    length.span,
+                    "REPEATABLE ELEMENTS requires an upper bound on every variable-length relationship",
+                ));
             }
         }
         Ok(())
@@ -608,6 +1061,87 @@ impl Analyzer<'_> {
             }
         }
         Ok(())
+    }
+}
+
+fn same_syntax(left: &AstNode, right: &AstNode) -> bool {
+    left.kind == right.kind
+        && left.text == right.text
+        && left.children.len() == right.children.len()
+        && left
+            .children
+            .iter()
+            .zip(&right.children)
+            .all(|(left, right)| same_syntax(left, right))
+}
+
+fn same_expression_syntax<'a>(left: &'a AstNode, right: &'a AstNode) -> bool {
+    fn core(mut node: &AstNode) -> &AstNode {
+        while matches!(node.kind, AstKind::Expression(_))
+            && node.text.is_none()
+            && node.children.len() == 1
+        {
+            node = &node.children[0];
+        }
+        node
+    }
+
+    same_syntax(core(left), core(right))
+}
+
+fn grouping_reference_barrier(node: &AstNode, grouping_expressions: &[&AstNode]) -> bool {
+    if grouping_expressions
+        .iter()
+        .any(|grouping| same_expression_syntax(grouping, node))
+        || matches!(node.kind, AstKind::Subquery(_))
+        || is_aggregate_call(node)
+    {
+        return true;
+    }
+    if matches!(node.kind, AstKind::Expression(ExpressionKind::List))
+        && node
+            .descendants()
+            .any(|child| child.kind == AstKind::BindingVariable)
+    {
+        return true;
+    }
+    matches!(node.kind, AstKind::Expression(ExpressionKind::FunctionCall))
+        && node.children.iter().any(|child| {
+            matches!(
+                child.kind,
+                AstKind::PredicateVariable | AstKind::ReductionAccumulator
+            )
+        })
+}
+
+fn postfix_grouping_reference(node: &AstNode) -> Option<String> {
+    if !matches!(node.kind, AstKind::Expression(ExpressionKind::Postfix))
+        || node.descendants().any(is_aggregate_call)
+        || !node
+            .descendants()
+            .any(|child| child.kind == AstKind::PropertyKey)
+        || !node
+            .descendants()
+            .any(|child| child.kind == AstKind::Variable)
+    {
+        return None;
+    }
+    reference_key(node)
+}
+
+fn projection_expression(item: &AstNode) -> Option<&AstNode> {
+    item.children
+        .iter()
+        .find(|node| matches!(node.kind, AstKind::Expression(_)))
+}
+
+fn collect_surface_expressions<'a>(node: &'a AstNode, output: &mut Vec<&'a AstNode>) {
+    if matches!(node.kind, AstKind::Expression(ExpressionKind::Expression)) {
+        output.push(node);
+        return;
+    }
+    for child in &node.children {
+        collect_surface_expressions(child, output);
     }
 }
 

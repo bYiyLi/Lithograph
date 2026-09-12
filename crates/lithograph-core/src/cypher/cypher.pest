@@ -49,6 +49,7 @@ clause = _{
     | set_clause
     | remove_clause
     | detach_delete_clause
+    | nodetach_delete_clause
     | delete_clause
     | foreach_clause
     | call_clause
@@ -77,7 +78,9 @@ projection_item = { star_projection | expression ~ projection_alias_clause? }
 star_projection = { "*" }
 projection_alias_clause = { KW_AS ~ projection_alias }
 projection_alias = { symbolic_name }
-group_by = { KW_GROUP ~ KW_BY ~ expression_list }
+group_by = { KW_GROUP ~ KW_BY ~ (group_by_all | group_by_empty | expression_list) }
+group_by_all = { KW_ALL }
+group_by_empty = { "(" ~ ")" }
 order_by = { KW_ORDER ~ KW_BY ~ order_item ~ ("," ~ order_item)* }
 order_item = { expression ~ order_direction? }
 order_direction = { KW_ASC | KW_ASCENDING | KW_DESC | KW_DESCENDING }
@@ -100,15 +103,16 @@ merge_action = { KW_ON ~ (KW_CREATE | KW_MATCH) ~ set_clause }
 set_clause = { KW_SET ~ set_item ~ ("," ~ set_item)* }
 set_item = { assignable_property ~ set_operator ~ expression | variable ~ set_operator ~ expression | variable ~ label_update }
 set_operator = { "+=" | "=" }
-assignable_property = { (variable | parenthesized_expression) ~ property_lookup+ }
-label_update = { (":" ~ label_name)+ }
+assignable_property = { (variable | parenthesized_expression) ~ (property_lookup+ | dynamic_property_lookup) }
+label_update = { (":" ~ (label_name | dynamic_name))+ }
 remove_clause = { KW_REMOVE ~ remove_item ~ ("," ~ remove_item)* }
 remove_item = { property_expression | variable ~ label_update }
 detach_delete_clause = { KW_DETACH ~ KW_DELETE ~ expression_list }
+nodetach_delete_clause = { KW_NODETACH ~ KW_DELETE ~ expression_list }
 delete_clause = { KW_DELETE ~ expression_list }
 foreach_clause = { KW_FOREACH ~ "(" ~ foreach_variable ~ KW_IN ~ expression ~ "|" ~ update_clause+ ~ ")" }
 foreach_variable = { symbolic_name }
-update_clause = _{ create_clause | insert_clause | merge_clause | set_clause | remove_clause | detach_delete_clause | delete_clause | foreach_clause }
+update_clause = _{ create_clause | insert_clause | merge_clause | set_clause | remove_clause | detach_delete_clause | nodetach_delete_clause | delete_clause | foreach_clause }
 
 call_clause = { KW_CALL ~ (subquery_call | procedure_call) }
 subquery_call = { subquery_scope? ~ "{" ~ query_body ~ "}" ~ transaction_subclause? }
@@ -159,7 +163,7 @@ load_csv_binding = { symbolic_name }
 pattern = { pattern_part ~ ("," ~ pattern_part)* }
 pattern_part = { path_assignment? ~ path_selector? ~ path_mode? ~ pattern_element }
 path_assignment = { pattern_variable ~ "=" }
-path_mode = { KW_WALK | KW_TRAIL | KW_ACYCLIC | KW_SIMPLE }
+path_mode = { (KW_WALK | KW_TRAIL | KW_ACYCLIC) ~ path_or_paths? }
 pattern_element = { path_segment+ }
 path_segment = _{ grouped_pattern | simple_path_pattern }
 simple_path_pattern = { node_pattern ~ relationship_chain* }
@@ -236,6 +240,7 @@ comparison_suffix = {
     | KW_ENDS ~ KW_WITH ~ additive_expression
     | KW_CONTAINS ~ additive_expression
     | KW_IS ~ KW_NOT? ~ KW_NULL
+    | KW_IS ~ KW_NOT? ~ normalization_form? ~ KW_NORMALIZED
     | KW_IS ~ KW_NOT? ~ (KW_TYPED ~ type_expression | "::" ~ type_expression)
     | label_is_predicate
 }
@@ -254,9 +259,10 @@ postfix_expression = { primary_expression ~ postfix_operator* }
 postfix_operator = { property_lookup | subscript | label_predicate | type_predicate_shorthand }
 label_predicate = { ":" ~ label_disjunction }
 property_lookup = { "." ~ property_key }
-property_expression = { variable ~ property_lookup+ }
+property_expression = { variable ~ (property_lookup+ | dynamic_property_lookup) }
 property_key = { symbolic_name }
 subscript = { "[" ~ (slice | expression)? ~ "]" }
+dynamic_property_lookup = { "[" ~ expression ~ "]" }
 slice = { expression? ~ ".." ~ expression? }
 type_predicate_shorthand = { "::" ~ type_expression }
 
@@ -269,8 +275,14 @@ primary_expression = {
     | pattern_comprehension
     | map_projection
     | property_exists_function
+    | trim_function_call
+    | normalize_function_call
+    | vector_distance_function_call
+    | vector_norm_function_call
     | vector_function_call
     | list_predicate_function
+    | all_reduce_function
+    | reduce_function
     | function_call
     | pattern_expression
     | interpolated_string
@@ -288,12 +300,39 @@ primary_expression = {
 parenthesized_expression = { "(" ~ expression ~ ")" }
 property_exists_function = { property_exists_name ~ "(" ~ expression ~ "," ~ property_key ~ ")" }
 property_exists_name = { KW_PROPERTY_EXISTS }
-vector_function_call = { KW_VECTOR ~ "(" ~ expression ~ "," ~ expression ~ ("," ~ vector_coordinate_literal)? ~ ")" }
+trim_function_call = { trim_function_name ~ "(" ~ (trim_from_arguments | expression) ~ ")" }
+trim_function_name = @{ ^"trim" ~ !ident_continue }
+trim_from_arguments = {
+      trim_specification ~ expression? ~ trim_from_keyword ~ expression
+    | expression ~ trim_from_keyword ~ expression
+    | trim_from_keyword ~ expression
+}
+trim_specification = @{ (^"LEADING" | ^"TRAILING" | ^"BOTH") ~ !ident_continue }
+trim_from_keyword = _{ ^"FROM" ~ !ident_continue }
+normalize_function_call = { normalize_function_name ~ "(" ~ expression ~ ("," ~ normalization_form)? ~ ")" }
+normalize_function_name = @{ ^"normalize" ~ !ident_continue }
+normalization_form = @{ (^"NFC" | ^"NFD" | ^"NFKC" | ^"NFKD") ~ !ident_continue }
+vector_distance_function_call = { vector_distance_function_name ~ "(" ~ expression ~ "," ~ expression ~ "," ~ vector_distance_metric ~ ")" }
+vector_norm_function_call = { vector_norm_function_name ~ "(" ~ expression ~ "," ~ vector_distance_metric ~ ")" }
+vector_distance_function_name = @{ ^"vector_distance" ~ !ident_continue }
+vector_norm_function_name = @{ ^"vector_norm" ~ !ident_continue }
+vector_distance_metric = @{ (^"EUCLIDEAN_SQUARED" | ^"EUCLIDEAN" | ^"MANHATTAN" | ^"COSINE" | ^"DOT" | ^"HAMMING") ~ !ident_continue }
+vector_function_call = { KW_VECTOR ~ "(" ~ expression ~ "," ~ expression ~ ("," ~ vector_coordinate_literal ~ (KW_NOT ~ KW_NULL)?)? ~ ")" }
 vector_coordinate_literal = _{ vector_signed_integer | vector_coordinate_name }
 vector_signed_integer = { KW_SIGNED ~ KW_INTEGER_TYPE }
 vector_coordinate_name = { KW_INTEGER_TYPE | KW_FLOAT_TYPE | symbolic_name }
 list_predicate_function = { (KW_ALL | KW_ANY | KW_NONE | KW_SINGLE) ~ "(" ~ predicate_variable ~ KW_IN ~ expression ~ (KW_WHERE ~ expression)? ~ ")" }
 predicate_variable = { symbolic_name }
+reduce_function = {
+    KW_REDUCE ~ "(" ~ reduction_accumulator ~ "=" ~ expression ~ ","
+    ~ reduction_variable ~ KW_IN ~ expression ~ "|" ~ expression ~ ")"
+}
+all_reduce_function = {
+    KW_ALLREDUCE ~ "(" ~ reduction_accumulator ~ "=" ~ expression ~ ","
+    ~ reduction_variable ~ KW_IN ~ expression ~ "|" ~ expression ~ "," ~ expression ~ ")"
+}
+reduction_accumulator = { symbolic_name }
+reduction_variable = { symbolic_name }
 function_call = { function_name ~ "(" ~ function_quantifier? ~ function_arguments? ~ ")" }
 function_quantifier = { KW_DISTINCT }
 function_arguments = { "*" | expression_list }
@@ -373,10 +412,10 @@ show_target = {
       KW_CURRENT ~ KW_GRAPH ~ KW_TYPE
     | index_kind? ~ KW_INDEXES
     | KW_CONSTRAINTS
-    | KW_FUNCTIONS
-    | KW_PROCEDURES
+    | (KW_FUNCTION | KW_FUNCTIONS)
+    | (KW_PROCEDURE | KW_PROCEDURES)
 }
-show_yield = { KW_YIELD ~ ("*" | projection_items) ~ order_by? ~ skip_clause? ~ limit_clause? }
+show_yield = { KW_YIELD ~ (yield_all | projection_items) ~ order_by? ~ skip_clause? ~ limit_clause? }
 
 graph_type_clause = { KW_ALTER ~ KW_CURRENT ~ KW_GRAPH ~ KW_TYPE ~ graph_type_operation ~ graph_type_spec }
 graph_type_operation = { KW_SET | KW_ADD | KW_ALTER | KW_DROP }
@@ -465,6 +504,7 @@ ident_continue = _{ XID_CONTINUE | "_" }
 KW_ADD = @{ ^"ADD" ~ !ident_continue }
 KW_ACYCLIC = @{ ^"ACYCLIC" ~ !ident_continue }
 KW_ALL = @{ ^"ALL" ~ !ident_continue }
+KW_ALLREDUCE = @{ ^"ALLREDUCE" ~ !ident_continue }
 KW_ALTER = @{ ^"ALTER" ~ !ident_continue }
 KW_AND = @{ ^"AND" ~ !ident_continue }
 KW_ANY = @{ ^"ANY" ~ !ident_continue }
@@ -514,6 +554,7 @@ KW_FOR = @{ ^"FOR" ~ !ident_continue }
 KW_FOREACH = @{ ^"FOREACH" ~ !ident_continue }
 KW_FROM = @{ ^"FROM" ~ !ident_continue }
 KW_FULLTEXT = @{ ^"FULLTEXT" ~ !ident_continue }
+KW_FUNCTION = @{ ^"FUNCTION" ~ !ident_continue }
 KW_FUNCTIONS = @{ ^"FUNCTIONS" ~ !ident_continue }
 KW_GRAPH = @{ ^"GRAPH" ~ !ident_continue }
 KW_GROUP = @{ ^"GROUP" ~ !ident_continue }
@@ -540,8 +581,10 @@ KW_MATCH = @{ ^"MATCH" ~ !ident_continue }
 KW_MERGE = @{ ^"MERGE" ~ !ident_continue }
 KW_NEXT = @{ ^"NEXT" ~ !ident_continue }
 KW_NODE = @{ ^"NODE" ~ !ident_continue }
+KW_NODETACH = @{ ^"NODETACH" ~ !ident_continue }
 KW_NOT = @{ ^"NOT" ~ !ident_continue }
 KW_NONE = @{ ^"NONE" ~ !ident_continue }
+KW_NORMALIZED = @{ ^"NORMALIZED" ~ !ident_continue }
 KW_NULL = @{ ^"NULL" ~ !ident_continue }
 KW_OF = @{ ^"OF" ~ !ident_continue }
 KW_OFFSET = @{ ^"OFFSET" ~ !ident_continue }
@@ -555,11 +598,13 @@ KW_PATHS = @{ ^"PATHS" ~ !ident_continue }
 KW_POINT = @{ ^"POINT" ~ !ident_continue }
 KW_PROPERTY = @{ ^"PROPERTY" ~ !ident_continue }
 KW_PROPERTY_EXISTS = @{ ^"PROPERTY_EXISTS" ~ !ident_continue }
+KW_PROCEDURE = @{ ^"PROCEDURE" ~ !ident_continue }
 KW_PROCEDURES = @{ ^"PROCEDURES" ~ !ident_continue }
 KW_PROFILE = @{ ^"PROFILE" ~ !ident_continue }
 KW_RANGE = @{ ^"RANGE" ~ !ident_continue }
 KW_RELATIONSHIP = @{ ^"RELATIONSHIP" ~ !ident_continue }
 KW_RELATIONSHIPS = @{ ^"RELATIONSHIPS" ~ !ident_continue }
+KW_REDUCE = @{ ^"REDUCE" ~ !ident_continue }
 KW_REMOVE = @{ ^"REMOVE" ~ !ident_continue }
 KW_REPEATABLE = @{ ^"REPEATABLE" ~ !ident_continue }
 KW_REPORT = @{ ^"REPORT" ~ !ident_continue }
@@ -574,7 +619,6 @@ KW_SECOND = @{ ^"SECOND" ~ !ident_continue }
 KW_SECONDS = @{ ^"SECONDS" ~ !ident_continue }
 KW_SET = @{ ^"SET" ~ !ident_continue }
 KW_SIGNED = @{ ^"SIGNED" ~ !ident_continue }
-KW_SIMPLE = @{ ^"SIMPLE" ~ !ident_continue }
 KW_SHORTEST = @{ ^"SHORTEST" ~ !ident_continue }
 KW_SHOW = @{ ^"SHOW" ~ !ident_continue }
 KW_SKIP = @{ ^"SKIP" ~ !ident_continue }

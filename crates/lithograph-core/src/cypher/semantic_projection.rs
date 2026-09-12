@@ -22,8 +22,18 @@ fn collect_projection_items<'a>(node: &'a AstNode, output: &mut Vec<&'a AstNode>
 }
 
 pub(super) fn has_star_projection(node: &AstNode) -> bool {
-    node.descendants()
-        .any(|child| child.kind == AstKind::StarProjection)
+    contains_surface_kind(node, AstKind::StarProjection)
+}
+
+fn contains_surface_kind(node: &AstNode, kind: AstKind) -> bool {
+    if matches!(node.kind, AstKind::Subquery(_)) {
+        return false;
+    }
+    node.kind == kind
+        || node
+            .children
+            .iter()
+            .any(|child| contains_surface_kind(child, kind.clone()))
 }
 
 pub(super) fn simple_projection_variable(item: &AstNode) -> Option<&str> {

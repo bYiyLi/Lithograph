@@ -7,7 +7,7 @@
     "version": "2025.10",
     "family": "VECTOR"
   },
-  "execution": "planned",
+  "execution": "enabled",
   "query": "RETURN vector([1, 2, 3], 3, INTEGER) AS embedding",
   "params": {},
   "initial_graph": [],

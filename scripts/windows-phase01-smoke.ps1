@@ -115,6 +115,10 @@ if ($LASTEXITCODE -ne 0) {
 if ($LASTEXITCODE -ne 0) {
     throw "Windows Phase 05 mutation/transaction probe failed"
 }
+& cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase06 -- $extension
+if ($LASTEXITCODE -ne 0) {
+    throw "Windows Phase 06 Cypher completeness probe failed"
+}
 
 $nativeObj = Join-Path $root "native-abi-smoke.obj"
 Invoke-VcCommand "cd /d `"$root`" && cl /nologo /c /std:c11 /W4 /WX /I`"$lithographInclude`" /I`"$sqliteHeaderDir`" `"$nativeSource`" /Fo`"$nativeObj`""

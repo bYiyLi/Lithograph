@@ -7,7 +7,7 @@
     "version": "2026.08",
     "family": "Error compatibility"
   },
-  "execution": "planned",
+  "execution": "enabled",
   "query": "MATCH (p:Person) RETURN",
   "params": {},
   "initial_graph": [],

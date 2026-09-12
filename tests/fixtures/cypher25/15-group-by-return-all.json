@@ -7,9 +7,25 @@
     "version": "2026.07",
     "family": "GROUP BY / RETURN ALL"
   },
-  "execution": "planned",
-  "query": "MATCH (n:Item) RETURN ALL n.kind AS kind, avg(n.score) AS score GROUP BY kind",
+  "execution": "enabled",
+  "query": "MATCH (n:Item) RETURN ALL n.kind AS kind, avg(n.score) AS score GROUP BY ALL",
   "params": {},
-  "initial_graph": [],
-  "expected": {"kind": "parse", "valid": true}
+  "initial_graph": [
+    "CREATE (:Item {kind:'a', score:1}), (:Item {kind:'a', score:3}), (:Item {kind:'b', score:2})"
+  ],
+  "expected": {
+    "kind": "rows",
+    "columns": ["kind", "score"],
+    "ordered": false,
+    "rows": [
+      [
+        {"type": "string", "value": "a"},
+        {"type": "float", "value": "2"}
+      ],
+      [
+        {"type": "string", "value": "b"},
+        {"type": "float", "value": "2"}
+      ]
+    ]
+  }
 }

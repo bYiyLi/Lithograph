@@ -293,7 +293,7 @@ Native API 接收现有 `sqlite3*`、Cypher text、parameter JSON、option JSON 
 - 两个 Label array 按精确 Label name 的 set 语义规范化，同一数组中的重复项去重；同一 Label 在规范化后同时出现在 `requireAllLabels` 与 `excludeAnyLabels` 时返回 `INVALID_ARGUMENT`；
 - Label 按 Lithograph Label dictionary 的精确名称语义比较，不做 case folding 或 Unicode normalization。解析 Graph View 本身不得创建 Label dictionary entry：当前 graph state 中尚不存在的 required Label 使既有 Node 均不可见，尚不存在的 excluded Label 当前没有过滤效果；如果后续合法 Cypher write 通过正常 Label mutation 创建该名称，后续 clause 按更新后的 graph state 重新计算 visibility；
 - Graph View v1 不定义独立 Relationship selector：Relationship 只有在其 source 和 target Node 都可见时才可见，因此 view 是由 Node visibility 诱导出的 Property Subgraph；
-- `graphView` 可以与 `branch` 或只读 `at` 组合；它们决定 base Snapshot，初始 visibility 按该 Snapshot 计算，read-write query 的后续 clause 再按第 7.6 节基于前序 staged writes 后的 graph state 重新计算；
+- `graphView` 可以与 `branch` 或只读 `at` 组合；它们决定 base Snapshot，初始 visibility 按该 Snapshot 计算，read-write query 的后续 clause 再按第 7.7 节基于前序 staged writes 后的 graph state 重新计算；
 - `graphView` 只约束 graph-data query / mutation / Search 的可见数据。Schema、Constraint、Index definition 和 Version Procedure 不属于 Graph View；这些 command/procedure 与 `graphView` 同时出现时返回 `INVALID_ARGUMENT`，避免把子图错误解释成独立 Schema 或 Version repository。
 
 对 Version Procedure：`branch` query option 只为“对当前 Branch 操作”的 procedure 临时选择 target（`commit.create`、`patch.apply`、`merge`、`rebase`、`squash`、`reset`、`revert`）；它不永久改变 connection checkout。`branch.create/delete/checkout/list`、`tag.*` 与 `commit.data.*` 自己显式指定或管理 target，和 query-level `branch` option 同时出现时返回 `INVALID_ARGUMENT`。任何 version mutation 与 `at` 同时出现都返回 `READ_ONLY_SNAPSHOT`。
@@ -429,13 +429,19 @@ Executor 使用 row pipeline。没有 `ORDER BY`、global aggregation、`DISTINC
 
 `CALL { ... } IN TRANSACTIONS` / `IN CONCURRENT TRANSACTIONS` 是例外：它们按第 9.5 节让每个 inner batch transaction 各自 pin 对应的 Branch head，而不是让整个 outer query 共用一个 immutable Commit。query-level `graphView` selector 在这些 batch 间保持不变，但 visibility 必须基于各 batch 自己的 pinned Snapshot 与该 batch 内已经完成的 staged clause writes 计算。
 
-### 7.5 Cancellation 与 Connection State
+### 7.5 Temporal Clock Boundary
+
+一次 top-level Lithograph execution 是 Cypher temporal clock 的 transaction boundary。`date/time/localtime/localdatetime/datetime.transaction()` 在 execution 开始时取值；同一 execution 内的 `.statement()` 使用同一个开始时刻，因此两者相等且在所有 cursor batch 中稳定。`.realtime()` 每次求值读取 wall clock，不保证稳定。timezone 参数只改变同一 instant 的本地表示，不改变 clock identity。
+
+caller-owned outer SQLite transaction 可以把多个 Lithograph execution 的 durability 合并到一次 `COMMIT` / `ROLLBACK`，但不把这些 execution 合并成一个 Cypher query transaction；每次 invocation 仍取得自己的 transaction/statement clock。第 9.5 节的 transaction subquery 由每个 inner batch transaction 各自取得 transaction clock。
+
+### 7.6 Cancellation 与 Connection State
 
 Executor 在 batch/operator boundary 与长路径/搜索循环中检查 SQLite interrupt state；host 调用 `sqlite3_interrupt()` 后 query 尽快停止并返回 `SQLITE_INTERRUPT`。Native event callback 返回非零是同一 cancellation 语义的另一入口。
 
 Active Branch、temporary query options、prepared-plan/cache handle、current error/cancellation state 全部属于单个 `sqlite3*` connection 或单个 query。禁止使用 process-global mutable query/branch/parser state。跨线程使用同一 `sqlite3*` 是否允许完全遵循 host SQLite threading mode；Lithograph 不为一个不允许并发使用的 connection 增加第二套线程安全保证。
 
-### 7.6 Graph View Execution Boundary
+### 7.7 Graph View Execution Boundary
 
 Graph View 是 Lithograph Execution API 的 query-local visibility / mutation boundary。它解决调用方需要在同一个 versioned Property Graph 内把不同逻辑数据空间交给完整 Cypher 执行、又不能依赖 query rewrite 或 result post-filter 的问题。
 
@@ -624,7 +630,7 @@ Lithograph Canonical Encoding v1（`LCE1`）固定所有进入 Layer/Schema/Comm
 
 `VALUE` 的第一个 field 是单字节 `type_tag`，后续 field 按对应 value contract 编码。List 使用 `uleb128(element_count) + repeated(uleb128(value_record_len) + VALUE_record)`；Point 保存 signed 64-bit CRS identifier、ULEB128 coordinate count 与 canonical binary64 coordinates；Vector 保存单字节 coordinate type（`1 i8`、`2 i16`、`3 i32`、`4 i64`、`5 f32`、`6 f64`）、ULEB128 dimension 与 packed little-endian coordinates，floating vector NaN 同样 canonicalize 为 quiet NaN；UUID field 固定为 RFC 9562 16-byte network-order value。
 
-`COMMIT` fields 固定顺序为 `format_version, parent1, parent2, layer_hash, schema_hash, author, message, committed_at`。optional field 使用首字节 `0` 表示 absent、`1 + payload` 表示 present。Root Commit 使用 `parent1 = null`、`parent2 = null`、`author = null`、`message = null`、`committed_at = 0`；因此 empty Layer、empty Schema 与 Root Commit 都是 deterministic content-addressed object。普通 Commit 的 `committed_at` 仍遵循第 8.4 节 connection clock contract。
+`COMMIT` fields 固定顺序为 `format_version, parent1, parent2, layer_hash, schema_hash, author, message, committed_at`。optional field 使用首字节 `0` 表示 absent、`1 + payload` 表示 present。Root Commit 使用 `parent1 = null`、`parent2 = null`、`author = null`、`message = null`、`committed_at = 0`；因此 empty Layer、empty Schema 与 Root Commit 都是 deterministic content-addressed object。普通 Commit 的 `committed_at` 仍遵循第 8.4 节 commit timestamp contract。
 
 `LCE1` 属于 storage-format contract。修改上述编码必须提升 storage format，并通过 migration 保持旧 Commit ID 可验证。
 
@@ -667,7 +673,7 @@ Commit Data 与 Tag name/ref 不进入 Layer / Schema / Commit hash。更新或�
 
 `format_version` 是 hash input 的一部分。后续 storage migration 不允许静默重算既有 Commit ID。
 
-`committed_at` 使用 UTC Unix epoch microseconds，由成功创建 Commit 的 Engine connection clock 取得。它属于 Commit metadata 和 hash input，但不作为 DAG ancestry 或 merge correctness 的依据。
+`committed_at` 使用 UTC Unix epoch microseconds，在 Commit finalize 时读取 Engine wall clock。它属于 Commit metadata 和 hash input，但不作为 DAG ancestry 或 merge correctness 的依据，也不复用第 7.5 节的 query transaction/statement temporal clock。
 
 ### 8.5 Snapshot Resolution
 

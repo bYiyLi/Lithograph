@@ -7,9 +7,14 @@
     "version": "2026.08",
     "family": "String interpolation"
   },
-  "execution": "planned",
+  "execution": "enabled",
   "query": "WITH 'Alice' AS name RETURN s\"Hello {name}\" AS greeting",
   "params": {},
   "initial_graph": [],
-  "expected": {"kind": "parse", "valid": true}
+  "expected": {
+    "kind": "rows",
+    "columns": ["greeting"],
+    "ordered": true,
+    "rows": [[{"type": "string", "value": "Hello Alice"}]]
+  }
 }

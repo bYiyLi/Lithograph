@@ -32,20 +32,29 @@ fn explain_of_a_mutating_query_is_read_only_and_completable() {
 }
 
 #[test]
-fn explain_does_not_hide_unsupported_match_semantics_in_a_write_plan() {
+fn explain_validates_advanced_match_semantics_in_a_write_plan() {
     let connection = fresh_storage();
-    let error = prepare(
+    let prepared = prepare(
         &connection,
         "EXPLAIN MATCH DIFFERENT RELATIONSHIPS (a)-->(b) CREATE (:NeverWritten) FINISH",
         BTreeMap::new(),
         ExecutionOptions::default(),
     )
-    .expect_err("EXPLAIN must validate the MATCH operators in a mutating plan");
+    .expect("EXPLAIN must accept the Phase 06 MATCH mode in a mutating plan");
+    let plan = prepared.physical.explain();
 
-    assert_eq!(error.kind, QueryErrorKind::Semantic);
+    assert!(plan.contains("NodeScan"), "missing NodeScan in:\n{plan}");
+    assert!(
+        plan.contains("AdjacencySeek"),
+        "missing relationship expansion in:\n{plan}"
+    );
+    assert!(
+        plan.contains("Mutation { kind: Create }"),
+        "missing CREATE in:\n{plan}"
+    );
     assert!(
         lithograph_core::storage::find_label(&connection, "NeverWritten")
-            .expect("find label from rejected EXPLAIN")
+            .expect("find label from read-only EXPLAIN")
             .is_none()
     );
 }
@@ -79,17 +88,17 @@ fn mutating_explain_reports_read_projection_and_barrier_operators() {
 }
 
 #[test]
-fn mutating_explain_rejects_the_same_unsupported_grouping_as_execution() {
+fn mutating_explain_accepts_phase06_grouping() {
     let connection = fresh_storage();
-    let error = prepare(
+    let prepared = prepare(
         &connection,
         "EXPLAIN CREATE (n) RETURN count(n) AS total, n",
         BTreeMap::new(),
         ExecutionOptions::default(),
     )
-    .expect_err("EXPLAIN must validate Phase 05 projection execution scope");
+    .expect("EXPLAIN must use the complete aggregation planner");
 
-    assert_eq!(error.kind, QueryErrorKind::Semantic);
+    assert!(prepared.physical.explain().contains("Aggregate"));
 }
 
 #[test]
@@ -360,7 +369,7 @@ fn mutation_failure_rolls_back_identity_dictionary_layer_commit_and_branch() {
 }
 
 #[test]
-fn unsupported_collection_projections_fail_instead_of_mutating_as_empty_values() {
+fn collection_projections_mutate_with_their_materialized_values() {
     let connection = fresh_storage();
     execute(
         &connection,
@@ -368,39 +377,35 @@ fn unsupported_collection_projections_fail_instead_of_mutating_as_empty_values()
         ExecutionOptions::default(),
     )
     .expect("seed projection targets");
-    let before = branch_head(&connection, "main").expect("head before unsupported expressions");
-
-    let error = execute(
+    let (_, map_summary) = execute(
         &connection,
         "MATCH (source:Source), (target:Target) SET target = source{.*} FINISH",
         ExecutionOptions::default(),
     )
-    .expect_err("unsupported map projection must not compile as an empty map");
-    assert_eq!(error.kind, QueryErrorKind::Semantic);
+    .expect("map projection replacement");
+    assert_eq!(map_summary.counters.properties_set, 1);
+    assert_eq!(map_summary.counters.properties_removed, 1);
     assert_eq!(
-        branch_head(&connection, "main").expect("head after map projection"),
-        before
-    );
-    assert_eq!(
-        read_rows(&connection, "MATCH (target:Target) RETURN target.kept"),
-        vec![vec![Value::Integer(2)]]
+        read_rows(
+            &connection,
+            "MATCH (target:Target) RETURN target.copied, target.kept"
+        ),
+        vec![vec![Value::Integer(1), Value::Null]]
     );
 
-    let error = execute(
+    let (_, list_summary) = execute(
         &connection,
         "CREATE (:ListProbe {items:[x IN [1, 2] | x]}) FINISH",
         ExecutionOptions::default(),
     )
-    .expect_err("unsupported list comprehension must not compile as an empty list");
-    assert_eq!(error.kind, QueryErrorKind::Semantic);
+    .expect("list comprehension property");
+    assert_eq!(list_summary.counters.nodes_created, 1);
     assert_eq!(
-        branch_head(&connection, "main").expect("head after list comprehension"),
-        before
-    );
-    assert!(
-        lithograph_core::storage::find_label(&connection, "ListProbe")
-            .expect("find rejected list-comprehension label")
-            .is_none()
+        read_rows(&connection, "MATCH (node:ListProbe) RETURN node.items"),
+        vec![vec![Value::List(vec![
+            Value::Integer(1),
+            Value::Integer(2)
+        ])]]
     );
 }
 

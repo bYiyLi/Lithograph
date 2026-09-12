@@ -1,4 +1,6 @@
-use super::ast::{AstKind, AstNode, ClauseKind, ExpressionKind, SubqueryKind};
+use super::ast::{
+    AstKind, AstNode, ClauseKind, ExpressionKind, QueryConnector, ShowTargetKind, SubqueryKind,
+};
 use super::error::{FrontendError, FrontendErrorKind};
 use super::parser::parse_expression_fragment_at;
 use super::semantic::{
@@ -36,13 +38,13 @@ impl Analyzer<'_> {
             ClauseKind::Set | ClauseKind::Remove => self.analyze_reference_only(clause, input),
             ClauseKind::Delete | ClauseKind::DetachDelete => self.analyze_delete(clause, input),
             ClauseKind::LoadCsv => self.analyze_load_csv(clause, input),
+            ClauseKind::Show => self.analyze_show(clause, input),
             ClauseKind::CreateIndex
             | ClauseKind::DropIndex
             | ClauseKind::CreateConstraint
             | ClauseKind::DropConstraint
-            | ClauseKind::Show
-            | ClauseKind::GraphType
-            | ClauseKind::Finish => Ok(input.clone()),
+            | ClauseKind::GraphType => Ok(input.clone()),
+            ClauseKind::Finish => Ok(Scope::new()),
         }
     }
 
@@ -238,20 +240,27 @@ impl Analyzer<'_> {
                 .ok_or_else(|| {
                     self.semantic_error(binding.span, "LET binding is missing a variable")
                 })?;
-            self.validate_expression_references(binding, &scope)?;
+            self.validate_expression_references(binding, input)?;
             self.validate_types(binding)?;
             self.validate_non_aggregate_expression_context(
                 binding,
-                &scope,
+                input,
                 "LET cannot contain aggregation",
             )?;
+            let name = unescape_identifier(name);
+            if scope.contains_key(&name) {
+                return Err(self.semantic_error(
+                    binding.span,
+                    format!("LET variable {name:?} is already defined"),
+                ));
+            }
             let kind = binding
                 .children
                 .iter()
                 .find(|child| matches!(child.kind, AstKind::Expression(_)))
                 .map(|expression| expression_binding_kind(expression, self.source))
                 .unwrap_or(BindingKind::Unknown);
-            scope.insert(unescape_identifier(name), kind);
+            scope.insert(name, kind);
         }
         Ok(scope)
     }
@@ -274,8 +283,98 @@ impl Analyzer<'_> {
                 self.semantic_error(clause.span, "binding clause is missing a variable")
             })?;
         let mut scope = input.clone();
-        scope.insert(unescape_identifier(binding), BindingKind::Unknown);
+        let binding = unescape_identifier(binding);
+        if scope.contains_key(&binding) {
+            return Err(self.semantic_error(
+                clause.span,
+                format!("binding variable {binding:?} is already defined"),
+            ));
+        }
+        scope.insert(binding, BindingKind::Unknown);
         Ok(scope)
+    }
+
+    fn analyze_show(&mut self, clause: &AstNode, input: &Scope) -> Result<Scope, FrontendError> {
+        let show_fields = show_all_scope(clause);
+        let default = show_default_scope(clause);
+        let Some(yield_node) = show_yield_node(clause) else {
+            if !input.is_empty() {
+                return Err(self.semantic_error(
+                    clause.span,
+                    "composable SHOW requires an explicit YIELD column list and a concluding clause",
+                ));
+            }
+            if clause
+                .children
+                .iter()
+                .any(|node| node.kind == AstKind::Clause(ClauseKind::Return))
+            {
+                return Err(self
+                    .semantic_error(clause.span, "SHOW RETURN requires an explicit YIELD clause"));
+            }
+            self.validate_show_where(clause, &show_fields)?;
+            return Ok(default);
+        };
+        if !input.is_empty()
+            && yield_node
+                .descendants()
+                .any(|node| node.kind == AstKind::YieldAll)
+        {
+            return Err(
+                self.semantic_error(yield_node.span, "composable SHOW does not allow YIELD *")
+            );
+        }
+        for item in projection_items(yield_node) {
+            let Some(source) = simple_projection_variable(item) else {
+                return Err(self.semantic_error(
+                    item.span,
+                    "SHOW YIELD accepts only output field names with optional aliases",
+                ));
+            };
+            if !show_fields.contains_key(&unescape_identifier(source)) {
+                return Err(self.semantic_error(
+                    item.span,
+                    "SHOW YIELD can reference only fields produced by the SHOW command",
+                ));
+            }
+        }
+        let mut all = input.clone();
+        all.extend(show_fields);
+        let projection = show_projection_clause(yield_node);
+        let yielded = self.analyze_projection(&projection, &all, true)?;
+        if let Some(name) = yielded.keys().find(|name| input.contains_key(*name)) {
+            return Err(self.semantic_error(
+                yield_node.span,
+                format!("SHOW YIELD variable {name} is already declared"),
+            ));
+        }
+        let mut visible = input.clone();
+        visible.extend(yielded);
+        self.validate_show_where(clause, &visible)?;
+        if let Some(return_clause) = clause
+            .children
+            .iter()
+            .find(|node| node.kind == AstKind::Clause(ClauseKind::Return))
+        {
+            self.analyze_projection(return_clause, &visible, false)
+        } else {
+            Ok(visible)
+        }
+    }
+
+    fn validate_show_where(
+        &mut self,
+        clause: &AstNode,
+        scope: &Scope,
+    ) -> Result<(), FrontendError> {
+        if let Some(where_clause) = clause
+            .children
+            .iter()
+            .find(|node| node.kind == AstKind::Where)
+        {
+            self.analyze_filter(where_clause, scope)?;
+        }
+        Ok(())
     }
 
     fn analyze_foreach(&mut self, clause: &AstNode, input: &Scope) -> Result<Scope, FrontendError> {
@@ -300,7 +399,7 @@ impl Analyzer<'_> {
         inner.insert(unescape_identifier(binding), BindingKind::Value);
         for nested in &clause.children {
             if let AstKind::Clause(kind) = nested.kind {
-                let _ = self.analyze_clause(kind, nested, &inner)?;
+                inner = self.analyze_clause(kind, nested, &inner)?;
             }
         }
         Ok(input.clone())
@@ -324,20 +423,110 @@ impl Analyzer<'_> {
             return Ok(scope);
         }
         self.validate_procedure_arguments(clause, input)?;
-        let mut scope = input.clone();
-        for item in clause
+        let standalone = self.standalone_procedure_call == Some(clause.span);
+        let yield_all = clause
+            .descendants()
+            .any(|node| node.kind == AstKind::YieldAll);
+        let yield_items = clause
             .descendants()
             .filter(|node| node.kind == AstKind::YieldItem)
+            .collect::<Vec<_>>();
+        let procedure = clause
+            .descendants()
+            .find(|node| node.kind == AstKind::FunctionName)
+            .and_then(|node| node.text.as_deref())
+            .and_then(crate::query::registry::procedure);
+        self.validate_procedure_yield_shape(
+            clause,
+            standalone,
+            yield_all,
+            &yield_items,
+            procedure,
+        )?;
+        let mut scope = input.clone();
+        self.bind_procedure_yields(&mut scope, standalone, yield_all, &yield_items, procedure)?;
+        if let Some(where_clause) = clause
+            .descendants()
+            .find(|node| node.kind == AstKind::Where)
         {
-            let name = yield_output_name(item);
-            if !name.is_empty() && scope.insert(name.clone(), BindingKind::Value).is_some() {
+            self.analyze_filter(where_clause, &scope)?;
+        }
+        Ok(scope)
+    }
+
+    fn validate_procedure_yield_shape(
+        &self,
+        clause: &AstNode,
+        standalone: bool,
+        yield_all: bool,
+        yield_items: &[&AstNode],
+        procedure: Option<crate::query::registry::ProcedureDefinition>,
+    ) -> Result<(), FrontendError> {
+        if !standalone && yield_all {
+            return Err(self.semantic_error(
+                clause.span,
+                "YIELD * is only valid for a standalone procedure call",
+            ));
+        }
+        if !standalone
+            && yield_items.is_empty()
+            && procedure.is_some_and(|definition| !definition.outputs.is_empty())
+        {
+            return Err(self.semantic_error(
+                clause.span,
+                "a procedure call inside a larger query requires an explicit YIELD column list",
+            ));
+        }
+        Ok(())
+    }
+
+    fn bind_procedure_yields(
+        &self,
+        scope: &mut Scope,
+        standalone: bool,
+        yield_all: bool,
+        yield_items: &[&AstNode],
+        procedure: Option<crate::query::registry::ProcedureDefinition>,
+    ) -> Result<(), FrontendError> {
+        if (yield_all || (standalone && yield_items.is_empty()))
+            && let Some(definition) = procedure
+        {
+            for name in definition.outputs {
+                scope.insert((*name).to_owned(), BindingKind::Value);
+            }
+        }
+        for item in yield_items {
+            self.bind_procedure_yield_item(scope, item, procedure)?;
+        }
+        Ok(())
+    }
+
+    fn bind_procedure_yield_item(
+        &self,
+        scope: &mut Scope,
+        item: &AstNode,
+        procedure: Option<crate::query::registry::ProcedureDefinition>,
+    ) -> Result<(), FrontendError> {
+        if let Some(definition) = procedure {
+            let source = find_descendant(item, AstKind::YieldName)
+                .and_then(|node| node.text.as_deref())
+                .map(unescape_identifier)
+                .unwrap_or_default();
+            if !definition.outputs.contains(&source.as_str()) {
                 return Err(self.semantic_error(
                     item.span,
-                    format!("YIELD output shadows existing variable {name:?}"),
+                    format!("procedure does not yield output field {source:?}"),
                 ));
             }
         }
-        Ok(scope)
+        let name = yield_output_name(item);
+        if !name.is_empty() && scope.insert(name.clone(), BindingKind::Value).is_some() {
+            return Err(self.semantic_error(
+                item.span,
+                format!("YIELD output shadows existing variable {name:?}"),
+            ));
+        }
+        Ok(())
     }
 
     fn validate_procedure_arguments(
@@ -377,19 +566,14 @@ impl Analyzer<'_> {
             .descendants()
             .find(|child| child.kind == AstKind::QueryBody)
         {
-            let mut output = self.analyze_node(body, &imported)?;
-            if !super::semantic_transaction::query_body_returns_columns(body) {
-                output.clear();
-            }
-            if let Some(name) = status_name
-                && output.insert(name.clone(), BindingKind::Value).is_some()
-            {
-                return Err(self.semantic_error(
-                    node.span,
-                    format!("transaction status shadows subquery output {name:?}"),
-                ));
-            }
-            return Ok(output);
+            return self.analyze_subquery_body(
+                node,
+                body,
+                outer,
+                &imported,
+                scope_node.is_some(),
+                status_name,
+            );
         }
         let mut local = imported;
         self.bind_pattern(node, &mut local)?;
@@ -397,6 +581,66 @@ impl Analyzer<'_> {
             self.validate_references_inner(child, &local, true)?;
         }
         Ok(Scope::new())
+    }
+
+    fn analyze_subquery_body(
+        &mut self,
+        node: &AstNode,
+        body: &AstNode,
+        outer: &Scope,
+        imported: &Scope,
+        has_scope_node: bool,
+        status_name: Option<String>,
+    ) -> Result<Scope, FrontendError> {
+        let legacy_call = node.kind == AstKind::Subquery(SubqueryKind::Call) && !has_scope_node;
+        let globals = if legacy_call {
+            Scope::new()
+        } else {
+            imported.clone()
+        };
+        let previous_globals = std::mem::replace(&mut self.global_scope, globals);
+        let previous_nonconcluding_len = self.nonconcluding_queries.len();
+        if matches!(
+            node.kind,
+            AstKind::Subquery(SubqueryKind::Exists | SubqueryKind::Count)
+        ) {
+            super::semantic::collect_terminal_single_query_spans(
+                body,
+                &mut self.nonconcluding_queries,
+            );
+        }
+        let analyzed = if legacy_call {
+            self.analyze_call_body_with_importing_with(body, outer)
+        } else {
+            self.analyze_node(body, imported)
+        };
+        self.global_scope = previous_globals;
+        self.nonconcluding_queries
+            .truncate(previous_nonconcluding_len);
+        let mut output = analyzed?;
+        if !super::semantic_transaction::query_body_returns_columns(body) {
+            output.clear();
+        }
+        self.bind_transaction_status(node, &mut output, status_name)?;
+        Ok(output)
+    }
+
+    fn bind_transaction_status(
+        &self,
+        node: &AstNode,
+        output: &mut Scope,
+        status_name: Option<String>,
+    ) -> Result<(), FrontendError> {
+        let Some(name) = status_name else {
+            return Ok(());
+        };
+        if output.insert(name.clone(), BindingKind::Value).is_some() {
+            return Err(self.semantic_error(
+                node.span,
+                format!("transaction status shadows subquery output {name:?}"),
+            ));
+        }
+        Ok(())
     }
 
     fn import_scope(&self, node: &AstNode, outer: &Scope) -> Result<Scope, FrontendError> {
@@ -424,6 +668,271 @@ impl Analyzer<'_> {
             scope.insert(key, kind);
         }
         Ok(scope)
+    }
+
+    fn analyze_call_body_with_importing_with(
+        &mut self,
+        body: &AstNode,
+        outer: &Scope,
+    ) -> Result<Scope, FrontendError> {
+        let query = body
+            .children
+            .iter()
+            .find(|child| {
+                matches!(
+                    child.kind,
+                    AstKind::ComposedQuery | AstKind::ConditionalQuery | AstKind::SingleQuery
+                )
+            })
+            .ok_or_else(|| self.semantic_error(body.span, "CALL subquery has no query body"))?;
+        self.analyze_call_query_with_importing_with(query, outer)
+            .map(|(_, output)| output)
+    }
+
+    fn analyze_call_query_with_importing_with(
+        &mut self,
+        query: &AstNode,
+        outer: &Scope,
+    ) -> Result<(bool, Scope), FrontendError> {
+        match query.kind {
+            AstKind::SingleQuery => {
+                let imported = self.importing_with_scope(query, outer)?;
+                let used_importing_with = imported.is_some();
+                let output =
+                    self.analyze_node(query, imported.as_ref().unwrap_or(&Scope::new()))?;
+                Ok((used_importing_with, output))
+            }
+            AstKind::Subquery(SubqueryKind::Braced) => {
+                let body = query
+                    .children
+                    .iter()
+                    .find(|child| child.kind == AstKind::QueryBody)
+                    .ok_or_else(|| {
+                        self.semantic_error(query.span, "braced query is missing its body")
+                    })?;
+                let nested = body
+                    .children
+                    .iter()
+                    .find(|child| {
+                        matches!(
+                            child.kind,
+                            AstKind::ComposedQuery
+                                | AstKind::ConditionalQuery
+                                | AstKind::SingleQuery
+                        )
+                    })
+                    .ok_or_else(|| {
+                        self.semantic_error(body.span, "braced query has no executable query")
+                    })?;
+                self.analyze_call_query_with_importing_with(nested, outer)
+            }
+            AstKind::ComposedQuery => self.analyze_call_composed(query, outer),
+            AstKind::ConditionalQuery => self
+                .analyze_node(query, &Scope::new())
+                .map(|output| (false, output)),
+            _ => Err(self.semantic_error(query.span, "invalid CALL subquery body")),
+        }
+    }
+
+    fn analyze_call_composed(
+        &mut self,
+        query: &AstNode,
+        outer: &Scope,
+    ) -> Result<(bool, Scope), FrontendError> {
+        self.validate_union_connectors(query)?;
+        let mut previous = Scope::new();
+        let mut segment_input = Scope::new();
+        let mut connector = None;
+        let mut union_output: Option<Scope> = None;
+        let mut used_importing_with = false;
+        let mut segment_operands = Vec::new();
+        let mut uses_segment_input = false;
+        for child in &query.children {
+            match child.kind {
+                AstKind::Connector(value) => {
+                    if self.advance_composed_connector(
+                        value,
+                        &mut previous,
+                        &mut segment_input,
+                        &mut segment_operands,
+                        &mut union_output,
+                    )? {
+                        uses_segment_input = true;
+                    }
+                    connector = Some(value);
+                }
+                AstKind::SingleQuery | AstKind::Subquery(SubqueryKind::Braced) => {
+                    let (used, output) = if uses_segment_input {
+                        (false, self.analyze_node(child, &segment_input)?)
+                    } else {
+                        self.analyze_call_query_with_importing_with(child, outer)?
+                    };
+                    used_importing_with |= used;
+                    self.validate_composed_union_output(
+                        child,
+                        connector,
+                        &previous,
+                        &output,
+                        &mut union_output,
+                    )?;
+                    previous = output;
+                    segment_operands.push(child);
+                    connector = None;
+                }
+                _ => {}
+            }
+        }
+        if used_importing_with
+            && query
+                .children
+                .iter()
+                .any(|child| child.kind == AstKind::Connector(QueryConnector::Next))
+        {
+            return Err(self.semantic_error(
+                query.span,
+                "NEXT cannot be used with the deprecated importing WITH syntax",
+            ));
+        }
+        Ok((used_importing_with, previous))
+    }
+
+    fn importing_with_scope(
+        &self,
+        single: &AstNode,
+        outer: &Scope,
+    ) -> Result<Option<Scope>, FrontendError> {
+        let Some(first) = single
+            .children
+            .iter()
+            .find(|child| matches!(child.kind, AstKind::Clause(_)))
+        else {
+            return Ok(None);
+        };
+        if first.kind != AstKind::Clause(ClauseKind::With) {
+            return Ok(None);
+        }
+        let body = find_descendant(first, AstKind::ProjectionBody).unwrap_or(first);
+        let has_star = has_star_projection(body);
+        let references_outer = body.descendants().any(|node| {
+            node.kind == AstKind::Variable
+                && node
+                    .text
+                    .as_deref()
+                    .map(unescape_identifier)
+                    .is_some_and(|name| outer.contains_key(&name))
+        });
+        if !has_star && !references_outer {
+            return Ok(None);
+        }
+        if first
+            .children
+            .iter()
+            .any(|child| child.kind == AstKind::Where)
+            || body.descendants().any(|node| {
+                matches!(
+                    node.kind,
+                    AstKind::SetQuantifier(_)
+                        | AstKind::GroupBy
+                        | AstKind::OrderBy
+                        | AstKind::Skip
+                        | AstKind::Limit
+                )
+            })
+        {
+            return Err(self.semantic_error(
+                first.span,
+                "importing WITH accepts only direct outer-variable references",
+            ));
+        }
+        if has_star {
+            if projection_items(body).len() != 1 {
+                return Err(self.semantic_error(
+                    first.span,
+                    "importing WITH * cannot include additional projection items",
+                ));
+            }
+            return Ok(Some(outer.clone()));
+        }
+        let mut imported = Scope::new();
+        for item in projection_items(body) {
+            if find_descendant(item, AstKind::ProjectionAlias).is_some() {
+                return Err(
+                    self.semantic_error(item.span, "importing WITH cannot alias an outer variable")
+                );
+            }
+            let name = simple_projection_variable(item)
+                .map(unescape_identifier)
+                .ok_or_else(|| {
+                    self.semantic_error(
+                        item.span,
+                        "importing WITH accepts only direct outer-variable references",
+                    )
+                })?;
+            let binding = outer.get(&name).copied().ok_or_else(|| {
+                self.semantic_error(
+                    item.span,
+                    format!("importing WITH references undefined outer variable {name:?}"),
+                )
+            })?;
+            imported.insert(name, binding);
+        }
+        Ok(Some(imported))
+    }
+
+    pub(super) fn validate_global_redeclaration(
+        &self,
+        kind: ClauseKind,
+        clause: &AstNode,
+    ) -> Result<(), FrontendError> {
+        if self.global_scope.is_empty() {
+            return Ok(());
+        }
+        if matches!(kind, ClauseKind::With | ClauseKind::Return) {
+            let body = find_descendant(clause, AstKind::ProjectionBody).unwrap_or(clause);
+            for item in projection_items(body) {
+                let (name, _) = self.projection_binding(item, &self.global_scope);
+                let Some(name) = name.filter(|name| self.global_scope.contains_key(name)) else {
+                    continue;
+                };
+                let direct = find_descendant(item, AstKind::ProjectionAlias).is_none()
+                    && simple_projection_variable(item)
+                        .map(unescape_identifier)
+                        .is_some_and(|variable| variable == name);
+                if !direct {
+                    return Err(self.semantic_error(
+                        item.span,
+                        format!("subquery cannot re-declare imported variable {name:?}"),
+                    ));
+                }
+            }
+        }
+        let bindings = match kind {
+            ClauseKind::Let => clause
+                .descendants()
+                .filter(|node| node.kind == AstKind::LetBinding)
+                .filter_map(|node| find_descendant(node, AstKind::BindingVariable))
+                .collect::<Vec<_>>(),
+            ClauseKind::Unwind | ClauseKind::For | ClauseKind::Foreach => {
+                find_descendant(clause, AstKind::BindingVariable)
+                    .into_iter()
+                    .collect()
+            }
+            ClauseKind::LoadCsv => find_descendant(clause, AstKind::LoadCsvBinding)
+                .into_iter()
+                .collect(),
+            _ => Vec::new(),
+        };
+        for binding in bindings {
+            if let Some(name) = binding.text.as_deref().map(unescape_identifier)
+                && self.global_scope.contains_key(&name)
+            {
+                return Err(self.semantic_error(
+                    binding.span,
+                    format!("subquery cannot re-declare imported variable {name:?}"),
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn analyze_load_csv(
@@ -514,6 +1023,20 @@ impl Analyzer<'_> {
             }
             return Ok(());
         }
+        if self.validate_reference_node(node, scope)? {
+            return Ok(());
+        }
+        for child in &node.children {
+            self.validate_references_inner(child, scope, nested_subquery)?;
+        }
+        Ok(())
+    }
+
+    fn validate_reference_node(
+        &mut self,
+        node: &AstNode,
+        scope: &Scope,
+    ) -> Result<bool, FrontendError> {
         if node.kind == AstKind::Variable {
             let name = unescape_identifier(node.text.as_deref().unwrap_or_default());
             if !scope.contains_key(&name) {
@@ -526,8 +1049,75 @@ impl Analyzer<'_> {
         ) {
             self.validate_interpolation(node, scope)?;
         }
-        for child in &node.children {
-            self.validate_references_inner(child, scope, nested_subquery)?;
+        let is_reduction = node
+            .children
+            .iter()
+            .any(|child| child.kind == AstKind::ReductionAccumulator);
+        if is_reduction {
+            self.validate_reduction_expression(node, scope)?;
+        }
+        Ok(is_reduction)
+    }
+
+    fn validate_reduction_expression(
+        &mut self,
+        node: &AstNode,
+        scope: &Scope,
+    ) -> Result<(), FrontendError> {
+        let accumulator = node
+            .children
+            .iter()
+            .find(|child| child.kind == AstKind::ReductionAccumulator)
+            .and_then(|child| child.text.as_deref())
+            .ok_or_else(|| {
+                self.semantic_error(node.span, "reduction function has no accumulator variable")
+            })?;
+        let variable = node
+            .children
+            .iter()
+            .find(|child| child.kind == AstKind::ReductionVariable)
+            .and_then(|child| child.text.as_deref())
+            .ok_or_else(|| {
+                self.semantic_error(node.span, "reduction function has no step variable")
+            })?;
+        let accumulator = unescape_identifier(accumulator);
+        let variable = unescape_identifier(variable);
+        if accumulator == variable {
+            return Err(self.semantic_error(
+                node.span,
+                "reduction accumulator and step variable must be different",
+            ));
+        }
+        let expressions = node
+            .children
+            .iter()
+            .filter(|child| matches!(child.kind, AstKind::Expression(_)))
+            .collect::<Vec<_>>();
+        if !(3..=4).contains(&expressions.len()) {
+            return Err(self.semantic_error(node.span, "invalid reduction expression shape"));
+        }
+        self.validate_references_inner(expressions[0], scope, false)?;
+        self.validate_references_inner(expressions[1], scope, false)?;
+        match infer_expression(expressions[1], self.source)? {
+            CypherType::List(_) | CypherType::Any | CypherType::Null => {}
+            _ => {
+                return Err(self.semantic_error(
+                    expressions[1].span,
+                    "reduction IN expression must produce a List",
+                ));
+            }
+        }
+        let mut local = scope.clone();
+        local.insert(accumulator, BindingKind::Unknown);
+        local.insert(variable, BindingKind::Unknown);
+        for expression in expressions.iter().skip(2) {
+            self.validate_references_inner(expression, &local, false)?;
+            if contains_aggregate(expression) {
+                return Err(self.semantic_error(
+                    expression.span,
+                    "reduction expressions cannot contain aggregation",
+                ));
+            }
         }
         Ok(())
     }
@@ -640,4 +1230,97 @@ impl Analyzer<'_> {
         }
         Ok(())
     }
+}
+
+pub(crate) fn show_yield_node(clause: &AstNode) -> Option<&AstNode> {
+    clause.children.iter().find(|node| {
+        !matches!(node.kind, AstKind::Clause(_))
+            && node
+                .descendants()
+                .any(|child| matches!(child.kind, AstKind::YieldAll | AstKind::ProjectionItem))
+    })
+}
+
+pub(crate) fn show_projection_clause(yield_node: &AstNode) -> AstNode {
+    fn projection_child(node: &AstNode) -> AstNode {
+        let mut node = node.clone();
+        if node.kind == AstKind::YieldAll {
+            node.kind = AstKind::StarProjection;
+        }
+        node.children = node.children.iter().map(projection_child).collect();
+        node
+    }
+
+    AstNode {
+        kind: AstKind::Clause(ClauseKind::Return),
+        span: yield_node.span,
+        text: None,
+        children: vec![AstNode {
+            kind: AstKind::ProjectionBody,
+            span: yield_node.span,
+            text: None,
+            children: yield_node.children.iter().map(projection_child).collect(),
+        }],
+    }
+}
+
+fn show_all_scope(clause: &AstNode) -> Scope {
+    let fields: &[&str] = if show_target(clause) == Some(ShowTargetKind::Procedures) {
+        &[
+            "name",
+            "description",
+            "mode",
+            "worksOnSystem",
+            "signature",
+            "argumentDescription",
+            "returnDescription",
+            "admin",
+            "rolesExecution",
+            "rolesBoostedExecution",
+            "isDeprecated",
+            "deprecatedBy",
+            "option",
+        ]
+    } else {
+        &[
+            "name",
+            "category",
+            "description",
+            "signature",
+            "isBuiltIn",
+            "argumentDescription",
+            "returnDescription",
+            "aggregating",
+            "rolesExecution",
+            "rolesBoostedExecution",
+            "isDeprecated",
+            "deprecatedBy",
+        ]
+    };
+    fields
+        .iter()
+        .map(|name| ((*name).to_owned(), BindingKind::Value))
+        .collect()
+}
+
+fn show_default_scope(clause: &AstNode) -> Scope {
+    let mut scope = show_all_scope(clause);
+    if show_target(clause) == Some(ShowTargetKind::Procedures) {
+        scope.retain(|name, _| {
+            matches!(
+                name.as_str(),
+                "name" | "description" | "mode" | "worksOnSystem"
+            )
+        });
+    } else {
+        scope.retain(|name, _| matches!(name.as_str(), "name" | "category" | "description"));
+    }
+    scope
+}
+
+fn show_target(clause: &AstNode) -> Option<ShowTargetKind> {
+    clause.descendants().find_map(|node| match node.kind {
+        AstKind::ShowTarget(target) => Some(target),
+        _ => None,
+    })
 }

@@ -146,6 +146,14 @@ pub(super) fn build_physical(
             LogicalOperator::Distinct => operators.push(PhysicalOperator::Distinct),
             LogicalOperator::Optional => operators.push(PhysicalOperator::Optional),
             LogicalOperator::Cartesian => operators.push(PhysicalOperator::Cartesian),
+            LogicalOperator::Let => operators.push(PhysicalOperator::Let),
+            LogicalOperator::Unwind => operators.push(PhysicalOperator::Unwind),
+            LogicalOperator::Union { distinct } => operators.push(PhysicalOperator::Union {
+                distinct: *distinct,
+            }),
+            LogicalOperator::Subquery => operators.push(PhysicalOperator::Subquery),
+            LogicalOperator::When => operators.push(PhysicalOperator::When),
+            LogicalOperator::Next => operators.push(PhysicalOperator::Next),
             LogicalOperator::Eager => operators.push(PhysicalOperator::Eager),
             LogicalOperator::Mutation { kind } => {
                 operators.push(PhysicalOperator::Mutation { kind: *kind })

@@ -68,3 +68,5 @@ LITHOGRAPH_SQLITE3="$sqlite_bin" \
   cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase04 -- "$extension"
 LITHOGRAPH_SQLITE3="$sqlite_bin" \
   cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase05 -- "$extension"
+LITHOGRAPH_SQLITE3="$sqlite_bin" \
+  cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase06 -- "$extension"

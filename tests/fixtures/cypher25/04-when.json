@@ -7,9 +7,14 @@
     "version": "2025.06",
     "family": "WHEN"
   },
-  "execution": "planned",
+  "execution": "enabled",
   "query": "WHEN true THEN RETURN 1 AS x ELSE RETURN 2 AS x",
   "params": {},
   "initial_graph": [],
-  "expected": {"kind": "parse", "valid": true}
+  "expected": {
+    "kind": "rows",
+    "columns": ["x"],
+    "ordered": true,
+    "rows": [[{"type": "integer", "value": 1}]]
+  }
 }

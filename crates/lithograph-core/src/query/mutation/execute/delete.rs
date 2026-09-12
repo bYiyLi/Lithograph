@@ -9,56 +9,58 @@ pub(super) fn apply_delete(
     graph_view: &ResolvedGraphView,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<()> {
-    for relationship_pass in [true, false] {
-        for row in rows {
-            for variable in variables
-                .iter()
-                .filter(|variable| is_relationship_binding(row, variable) == relationship_pass)
-            {
-                check_interrupted(is_interrupted)?;
-                apply_delete_value(
-                    context,
-                    row,
-                    variable,
-                    detach,
-                    clause_input,
-                    graph_view,
-                    is_interrupted,
-                )?;
-            }
+    validate_delete_values(rows, variables)?;
+    for row in rows {
+        for variable in variables {
+            check_interrupted(is_interrupted)?;
+            delete_relationship_value(
+                context,
+                row.values.get(variable),
+                clause_input,
+                graph_view,
+                is_interrupted,
+            )?;
+        }
+    }
+    for row in rows {
+        for variable in variables {
+            check_interrupted(is_interrupted)?;
+            delete_node_value(
+                context,
+                row.values.get(variable),
+                detach,
+                clause_input,
+                graph_view,
+                is_interrupted,
+            )?;
         }
     }
     Ok(())
 }
 
-fn is_relationship_binding(row: &BindingRow, variable: &str) -> bool {
-    matches!(
-        row.values.get(variable),
-        Some(BindingValue::Relationship(_))
-    )
+fn validate_delete_values(rows: &[BindingRow], variables: &[String]) -> QueryResult<()> {
+    if rows.iter().any(|row| {
+        variables
+            .iter()
+            .any(|variable| matches!(row.values.get(variable), Some(BindingValue::Scalar(_))))
+    }) {
+        return Err(QueryError::new(
+            QueryErrorKind::Type,
+            "DELETE requires Node, Relationship, Path, or null values",
+        ));
+    }
+    Ok(())
 }
 
-fn apply_delete_value(
+fn delete_relationship_value(
     context: &mut MutationContext<'_, '_>,
-    row: &BindingRow,
-    variable: &str,
-    detach: bool,
+    value: Option<&BindingValue>,
     clause_input: &Snapshot<'_>,
     graph_view: &ResolvedGraphView,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<()> {
     let staged = context.staged_snapshot()?;
-    match row.values.get(variable) {
-        Some(BindingValue::Null) | None => Ok(()),
-        Some(BindingValue::Node(id)) => delete_bound_node(
-            context,
-            clause_input,
-            &staged,
-            *id,
-            detach,
-            graph_view,
-            is_interrupted,
-        ),
+    match value {
         Some(BindingValue::Relationship(record)) => delete_bound_relationship(
             context,
             clause_input,
@@ -67,11 +69,96 @@ fn apply_delete_value(
             graph_view,
             is_interrupted,
         ),
-        Some(BindingValue::Path { .. }) => Err(QueryError::new(
-            QueryErrorKind::Type,
-            "DELETE requires Node, Relationship, or null values",
-        )),
+        Some(BindingValue::Path { relationships, .. }) => delete_path_relationships(
+            context,
+            clause_input,
+            relationships,
+            graph_view,
+            is_interrupted,
+        ),
+        Some(BindingValue::Node(_) | BindingValue::Null) | None => Ok(()),
+        Some(BindingValue::Scalar(_)) => unreachable!("DELETE values are validated first"),
     }
+}
+
+fn delete_node_value(
+    context: &mut MutationContext<'_, '_>,
+    value: Option<&BindingValue>,
+    detach: bool,
+    clause_input: &Snapshot<'_>,
+    graph_view: &ResolvedGraphView,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<()> {
+    match value {
+        Some(BindingValue::Node(id)) => {
+            let staged = context.staged_snapshot()?;
+            delete_bound_node(
+                context,
+                clause_input,
+                &staged,
+                *id,
+                detach,
+                graph_view,
+                is_interrupted,
+            )
+        }
+        Some(BindingValue::Path { nodes, .. }) => delete_path_nodes(
+            context,
+            clause_input,
+            nodes,
+            detach,
+            graph_view,
+            is_interrupted,
+        ),
+        Some(BindingValue::Relationship(_) | BindingValue::Null) | None => Ok(()),
+        Some(BindingValue::Scalar(_)) => unreachable!("DELETE values are validated first"),
+    }
+}
+
+fn delete_path_relationships(
+    context: &mut MutationContext<'_, '_>,
+    clause_input: &Snapshot<'_>,
+    relationships: &[RelationshipRecord],
+    graph_view: &ResolvedGraphView,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<()> {
+    for relationship in relationships {
+        check_interrupted(is_interrupted)?;
+        let staged = context.staged_snapshot()?;
+        delete_bound_relationship(
+            context,
+            clause_input,
+            &staged,
+            *relationship,
+            graph_view,
+            is_interrupted,
+        )?;
+    }
+    Ok(())
+}
+
+fn delete_path_nodes(
+    context: &mut MutationContext<'_, '_>,
+    clause_input: &Snapshot<'_>,
+    nodes: &[i64],
+    detach: bool,
+    graph_view: &ResolvedGraphView,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<()> {
+    for id in nodes {
+        check_interrupted(is_interrupted)?;
+        let staged = context.staged_snapshot()?;
+        delete_bound_node(
+            context,
+            clause_input,
+            &staged,
+            *id,
+            detach,
+            graph_view,
+            is_interrupted,
+        )?;
+    }
+    Ok(())
 }
 
 fn delete_bound_node(

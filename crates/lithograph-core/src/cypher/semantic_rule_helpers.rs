@@ -130,19 +130,5 @@ pub(super) fn contains_aggregate(node: &AstNode) -> bool {
 }
 
 pub(super) fn is_aggregate_call(node: &AstNode) -> bool {
-    function_name(node).is_some_and(|name| {
-        matches!(
-            name.as_str(),
-            "avg"
-                | "collect"
-                | "count"
-                | "max"
-                | "min"
-                | "percentilecont"
-                | "percentiledisc"
-                | "stdev"
-                | "stdevp"
-                | "sum"
-        )
-    })
+    function_name(node).is_some_and(|name| super::is_aggregating_function(&name))
 }

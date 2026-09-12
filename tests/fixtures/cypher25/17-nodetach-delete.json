@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "id": "cy25-nodetach-delete",
+  "profile": {
+    "id": "CY25-2026.08",
+    "source": "https://neo4j.com/docs/cypher-manual/25/clauses/delete/",
+    "version": "2026.08",
+    "family": "DELETE / NODETACH DELETE"
+  },
+  "execution": "enabled",
+  "query": "CREATE (node:Disposable) WITH node NODETACH DELETE node RETURN count(*) AS rows",
+  "params": {},
+  "initial_graph": [],
+  "expected": {
+    "kind": "rows",
+    "columns": ["rows"],
+    "ordered": true,
+    "rows": [[{"type": "integer", "value": 1}]]
+  }
+}

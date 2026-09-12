@@ -1,6 +1,7 @@
-pub(super) struct InterpolationFragment<'a> {
-    pub(super) text: &'a str,
-    pub(super) offset: usize,
+pub(crate) struct InterpolationFragment<'a> {
+    pub(crate) text: &'a str,
+    pub(crate) offset: usize,
+    pub(crate) end: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -12,13 +13,13 @@ enum LexState {
     BlockComment,
 }
 
-pub(super) fn interpolation_fragments(
+pub(crate) fn interpolation_fragments(
     text: &str,
 ) -> Result<Vec<InterpolationFragment<'_>>, String> {
     let body = interpolation_body(text)?;
     let bytes = body.as_bytes();
     let mut output = Vec::new();
-    let body_offset = text.len().saturating_sub(body.len());
+    let body_offset = text.len().saturating_sub(body.len()).saturating_sub(1);
     let mut start = None;
     let mut depth = 0_usize;
     let mut state = LexState::Normal;
@@ -144,6 +145,7 @@ fn push_fragment<'a>(
     output.push(InterpolationFragment {
         text: fragment,
         offset: body_offset + begin + leading,
+        end: body_offset + end,
     });
     Ok(())
 }

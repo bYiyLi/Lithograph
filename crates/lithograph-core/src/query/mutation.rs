@@ -16,7 +16,7 @@ use crate::storage::{
 
 use super::expression::{self, BindingRow, BindingValue, Expr, compile_expression, is_count};
 use super::graph::{ResolvedGraphView, property_value};
-use super::options::{ExecutionOptions, GraphViewSelector, SnapshotSelector};
+use super::options::{ExecutionOptions, GraphViewSelector, writable_branch};
 use super::plan::{
     Direction, LogicalOperator, LogicalPlan, MatchStep, OrderItem, Projection, ProjectionPlan,
     append_pattern_operators, lower_match, lower_projection,
@@ -28,7 +28,7 @@ use crate::cypher::unescape_identifier;
 const SCAN_BATCH: usize = 256;
 
 mod execute;
-pub(crate) use execute::execute_write;
+pub(crate) use execute::{execute_program, execute_write};
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedWrite {
@@ -53,7 +53,7 @@ enum WriteClause {
     Set(Vec<SetItem>),
     Remove(Vec<RemoveItem>),
     Delete {
-        variables: Vec<String>,
+        expressions: Vec<Expr>,
         detach: bool,
     },
     Merge(MergePlan),
@@ -78,14 +78,14 @@ struct WritePatternPart {
 #[derive(Debug, Clone)]
 struct NodeWriteSpec {
     variable: Option<String>,
-    labels: Vec<String>,
+    labels: Vec<WriteName>,
     properties: Option<Expr>,
 }
 
 #[derive(Debug, Clone)]
 struct RelationshipWriteSpec {
     variable: Option<String>,
-    relationship_type: String,
+    relationship_type: WriteName,
     direction: Direction,
     properties: Option<Expr>,
 }
@@ -94,7 +94,7 @@ struct RelationshipWriteSpec {
 enum SetItem {
     Property {
         variable: String,
-        key: String,
+        key: WritePropertyKey,
         value: Expr,
     },
     Properties {
@@ -104,7 +104,7 @@ enum SetItem {
     },
     Labels {
         variable: String,
-        labels: Vec<String>,
+        labels: Vec<WriteName>,
     },
 }
 
@@ -112,12 +112,24 @@ enum SetItem {
 enum RemoveItem {
     Property {
         variable: String,
-        key: String,
+        key: WritePropertyKey,
     },
     Labels {
         variable: String,
-        labels: Vec<String>,
+        labels: Vec<WriteName>,
     },
+}
+
+#[derive(Debug, Clone)]
+enum WriteName {
+    Static(String),
+    Dynamic(Expr),
+}
+
+#[derive(Debug, Clone)]
+enum WritePropertyKey {
+    Static(String),
+    Dynamic(Expr),
 }
 
 #[derive(Debug, Clone)]
@@ -190,29 +202,7 @@ pub(crate) fn prepare_write(
     params: &BTreeMap<String, Value>,
     options: &ExecutionOptions,
 ) -> QueryResult<PreparedWrite> {
-    let branch = match &options.snapshot {
-        SnapshotSelector::Current => options.write_branch.clone().ok_or_else(|| {
-            QueryError::internal("current execution options are missing a writable Branch")
-        })?,
-        SnapshotSelector::Branch(snapshot_branch) => match options.write_branch.as_ref() {
-            Some(write_branch) if write_branch == snapshot_branch => write_branch.clone(),
-            Some(_) => {
-                return Err(QueryError::invalid_argument(
-                    "execution options contain inconsistent Branch snapshot and write target",
-                ));
-            }
-            None => {
-                return Err(QueryError::read_only_snapshot(
-                    "mutating queries cannot execute against options.at historical snapshots",
-                ));
-            }
-        },
-        SnapshotSelector::Commit(_) | SnapshotSelector::Tag(_) => {
-            return Err(QueryError::read_only_snapshot(
-                "mutating queries cannot execute against options.at historical snapshots",
-            ));
-        }
-    };
+    let branch = writable_branch(options)?;
     let mut clauses = Vec::new();
     let mut projection = None;
     let mut logical = Vec::new();
@@ -290,7 +280,7 @@ fn lower_plan_clause(
         }
         ClauseKind::Delete | ClauseKind::DetachDelete => mutation_clause(
             WriteClause::Delete {
-                variables: lower_delete_variables(clause)?,
+                expressions: lower_delete_expressions(clause)?,
                 detach: kind == ClauseKind::DetachDelete,
             },
             kind,
@@ -483,23 +473,16 @@ fn lower_node_write_spec(node: &AstNode) -> QueryResult<NodeWriteSpec> {
         .find(|child| child.kind == AstKind::PatternVariable)
         .and_then(|child| child.text.as_deref())
         .map(unescape_identifier);
-    let labels = node
-        .descendants()
-        .filter(|child| child.kind == AstKind::LabelName)
-        .filter_map(|child| child.text.as_deref())
-        .map(unescape_identifier)
-        .collect::<Vec<_>>();
+    let labels = lower_write_names(node, AstKind::LabelName)?;
     if node.descendants().any(|child| match child.kind {
         AstKind::NameExpression(
-            NameExpressionKind::Dynamic
-            | NameExpressionKind::Wildcard
-            | NameExpressionKind::Negation(1..),
+            NameExpressionKind::Wildcard | NameExpressionKind::Negation(1..),
         ) => true,
         AstKind::NameExpression(NameExpressionKind::Disjunction) => child.children.len() > 1,
         _ => false,
     }) {
         return Err(QueryError::semantic(
-            "Phase 05 mutation patterns require static positive conjunctive labels",
+            "mutation patterns require positive conjunctive or dynamic labels",
         ));
     }
     let properties = node
@@ -531,29 +514,22 @@ fn lower_relationship_write_spec(node: &AstNode) -> QueryResult<RelationshipWrit
         .find(|child| child.kind == AstKind::RelationshipVariable)
         .and_then(|child| child.text.as_deref())
         .map(unescape_identifier);
-    let types = node
-        .descendants()
-        .filter(|child| child.kind == AstKind::RelationshipTypeName)
-        .filter_map(|child| child.text.as_deref())
-        .map(unescape_identifier)
-        .collect::<BTreeSet<_>>();
+    let types = lower_write_names(node, AstKind::RelationshipTypeName)?;
     if node.descendants().any(|child| {
         matches!(
             child.kind,
             AstKind::NameExpression(
-                NameExpressionKind::Dynamic
-                    | NameExpressionKind::Wildcard
-                    | NameExpressionKind::Negation(1..)
+                NameExpressionKind::Wildcard | NameExpressionKind::Negation(1..)
             )
         )
     }) {
         return Err(QueryError::semantic(
-            "Phase 05 relationship mutations require one static positive Relationship Type",
+            "relationship mutations require one positive static or dynamic Relationship Type",
         ));
     }
     if types.len() != 1 {
         return Err(QueryError::semantic(
-            "Phase 05 relationship mutations require exactly one static Relationship Type",
+            "relationship mutations require exactly one Relationship Type expression",
         ));
     }
     if node
@@ -591,7 +567,9 @@ fn lower_relationship_write_spec(node: &AstNode) -> QueryResult<RelationshipWrit
         .transpose()?;
     Ok(RelationshipWriteSpec {
         variable,
-        relationship_type: types.into_iter().next().unwrap_or_default(),
+        relationship_type: types.into_iter().next().ok_or_else(|| {
+            QueryError::semantic("relationship mutation is missing its Relationship Type")
+        })?,
         direction,
         properties,
     })
@@ -640,7 +618,7 @@ fn lower_set_item(item: &AstNode) -> QueryResult<SetItem> {
 
 fn lower_label_set_item(item: &AstNode, labels: &AstNode) -> QueryResult<SetItem> {
     let variable = direct_variable(item, "SET label item is missing its variable")?;
-    let labels = label_names(labels);
+    let labels = lower_write_names(labels, AstKind::LabelName)?;
     Ok(SetItem::Labels { variable, labels })
 }
 
@@ -690,7 +668,7 @@ fn lower_remove_items(clause: &AstNode) -> QueryResult<Vec<RemoveItem>> {
                 .find(|child| child.kind == AstKind::LabelUpdate)
             {
                 let variable = direct_variable(item, "REMOVE label item is missing variable")?;
-                let labels = label_names(labels);
+                let labels = lower_write_names(labels, AstKind::LabelName)?;
                 return Ok(RemoveItem::Labels { variable, labels });
             }
             let property = item
@@ -723,19 +701,88 @@ fn variable_name(node: Option<&AstNode>, missing: &str) -> QueryResult<String> {
         .ok_or_else(|| QueryError::semantic(missing))
 }
 
-fn label_names(node: &AstNode) -> Vec<String> {
-    node.descendants()
-        .filter(|child| child.kind == AstKind::LabelName)
-        .filter_map(|child| child.text.as_deref())
-        .map(unescape_identifier)
-        .collect()
+fn lower_write_names(node: &AstNode, static_kind: AstKind) -> QueryResult<Vec<WriteName>> {
+    let mut names = node
+        .descendants()
+        .filter_map(|child| {
+            if child.kind == static_kind
+                && !child.descendants().any(|nested| {
+                    nested.kind == AstKind::NameExpression(NameExpressionKind::Dynamic)
+                })
+            {
+                return child
+                    .text
+                    .as_deref()
+                    .map(unescape_identifier)
+                    .map(WriteName::Static)
+                    .map(Ok);
+            }
+            if child.kind == AstKind::NameExpression(NameExpressionKind::Dynamic) {
+                return child
+                    .children
+                    .iter()
+                    .find(|nested| matches!(nested.kind, AstKind::Expression(_)))
+                    .map(compile_expression)
+                    .map(|result| result.map(WriteName::Dynamic));
+            }
+            None
+        })
+        .collect::<QueryResult<Vec<_>>>()?;
+    names.dedup_by(|left, right| {
+        matches!((left, right), (WriteName::Static(left), WriteName::Static(right)) if left == right)
+    });
+    Ok(names)
+}
+
+fn resolve_write_names(
+    names: &[WriteName],
+    snapshot: &Snapshot<'_>,
+    row: &BindingRow,
+    params: &BTreeMap<String, Value>,
+) -> QueryResult<Vec<String>> {
+    let mut output = Vec::new();
+    for name in names {
+        match name {
+            WriteName::Static(name) => output.push(name.clone()),
+            WriteName::Dynamic(expression) => {
+                match expression::evaluate(expression, snapshot, row, params)? {
+                    Value::String(value) => output.push(value),
+                    Value::List(values) => {
+                        for value in values {
+                            let Value::String(value) = value else {
+                                return Err(QueryError::new(
+                                    QueryErrorKind::Type,
+                                    "dynamic label/type list must contain only non-null Strings",
+                                ));
+                            };
+                            output.push(value);
+                        }
+                    }
+                    _ => {
+                        return Err(QueryError::new(
+                            QueryErrorKind::Type,
+                            "dynamic label/type expression must be a non-null String or List<String>",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    if output.iter().any(String::is_empty) {
+        return Err(QueryError::semantic(
+            "dynamic label/type expression cannot produce an empty name",
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    output.retain(|name| seen.insert(name.clone()));
+    Ok(output)
 }
 
 fn direct_property_target(
     node: &AstNode,
     missing_variable: &str,
     unsupported: &str,
-) -> QueryResult<(String, String)> {
+) -> QueryResult<(String, WritePropertyKey)> {
     let target = node
         .children
         .iter()
@@ -751,21 +798,33 @@ fn direct_property_target(
         return Err(QueryError::semantic(unsupported));
     };
     let variable = unescape_identifier(&variable);
-    let mut keys = node
+    let keys = node
         .descendants()
         .filter(|child| child.kind == AstKind::PropertyKey)
         .filter_map(|child| child.text.as_deref())
-        .map(unescape_identifier);
-    let key = keys
-        .next()
-        .ok_or_else(|| QueryError::semantic(unsupported))?;
-    if keys.next().is_some() {
-        return Err(QueryError::semantic(unsupported));
-    }
+        .map(unescape_identifier)
+        .collect::<Vec<_>>();
+    let subscripts = node
+        .children
+        .iter()
+        .filter(|child| child.kind == AstKind::Subscript)
+        .collect::<Vec<_>>();
+    let key = match (keys.as_slice(), subscripts.as_slice()) {
+        ([key], []) => WritePropertyKey::Static(key.clone()),
+        ([], [subscript]) => {
+            let expression = subscript
+                .children
+                .iter()
+                .find(|child| matches!(child.kind, AstKind::Expression(_)))
+                .ok_or_else(|| QueryError::semantic(unsupported))?;
+            WritePropertyKey::Dynamic(compile_expression(expression)?)
+        }
+        _ => return Err(QueryError::semantic(unsupported)),
+    };
     Ok((variable, key))
 }
 
-fn lower_delete_variables(clause: &AstNode) -> QueryResult<Vec<String>> {
+fn lower_delete_expressions(clause: &AstNode) -> QueryResult<Vec<Expr>> {
     let expressions = clause
         .descendants()
         .find(|node| node.kind == AstKind::ArgumentList)
@@ -774,14 +833,7 @@ fn lower_delete_variables(clause: &AstNode) -> QueryResult<Vec<String>> {
         .children
         .iter()
         .filter(|node| matches!(node.kind, AstKind::Expression(_)))
-        .map(|expression| {
-            let Expr::Variable(variable) = compile_expression(expression)? else {
-                return Err(QueryError::semantic(
-                    "Phase 05 DELETE requires direct Node/Relationship variables",
-                ));
-            };
-            Ok(unescape_identifier(&variable))
-        })
+        .map(compile_expression)
         .collect()
 }
 

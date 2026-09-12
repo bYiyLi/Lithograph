@@ -38,7 +38,7 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 
 ## 3. 当前基线
 
-当前仓库已经完成 Phase 00 Engineering Foundation、Phase 01 SQLite Extension Boundary、Phase 02 Version-aware Storage Core、Phase 03 Cypher Frontend and Value Semantics、Phase 04 Read Query Engine 与 Phase 05 Mutation, Transaction and Commit。除既有 read foundation 外，现已具备 Graph View write boundary、CREATE/INSERT、SET/REMOVE、DELETE/DETACH DELETE、MERGE foundation、multi-row/barrier execution、canonical net delta、每次 top-level mutation 的 immutable Layer/Commit、Branch CAS，以及与 autocommit、caller-owned transaction/savepoint、SQL Bridge 和 Native cancel 组合的原子 rollback。Phase 04/05 仍是冻结 Cypher 25 Profile 的 read/write vertical slice，完整 current-graph query/path/expression/function/mutation semantics 继续由 Phase 06 接管。最低 SQLite 3.45.0 与当前 SQLite 3.51.0 的真实 `.load`、Phase 01–05 probe、Native ABI、质量与 compatibility regression 均已通过。
+当前仓库已经完成 Phase 00 Engineering Foundation、Phase 01 SQLite Extension Boundary、Phase 02 Version-aware Storage Core、Phase 03 Cypher Frontend and Value Semantics、Phase 04 Read Query Engine、Phase 05 Mutation, Transaction and Commit 与 Phase 06 Cypher 25 Query Completeness。现有 current-graph engine 已闭合非 Schema/Search/Version 专项的 query composition、aggregation、advanced path、expression/function/value、mutation 和 current-graph registry/SHOW semantics，并在同一 Graph View、version-aware storage、Commit/savepoint 与 SQL Bridge/Native 边界上执行。Phase 07 开始接管 versioned Schema、Constraint 与 standard index；LOAD CSV/Search、Version operations 和 release-scale streaming/compatibility closure 仍分别属于 Phase 08–10。最低 SQLite 3.45.0 与当前 SQLite 3.51.0 的真实 `.load`、Phase 01–06 probe、Native ABI、质量与 compatibility regression 均已通过。
 
 当前 Design 进一步确认了通用版本化状态能力：Commit 保持 immutable；Commit Data 是可修改 JSON sidecar；Tag 是显式可移动但不会随写入自动前进的 named ref；允许显式创建 empty-delta Commit；History 需要 opaque cursor 做 bounded DAG traversal。它们不回开 Phase 02/03：实现 owner 是 Phase 09，其中 storage format 从 development baseline `1` 显式迁移到首个公开 release 的 format `2`；Phase 10 负责 migration/scale/recovery closure。
 
@@ -48,9 +48,10 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 - Phase 03：`done`；
 - Phase 04：`done`；
 - Phase 05：`done`；
-- Phase 06：`ready`；
-- Phase 07–10：`planned`；
-- `docs/development/cypher25-compatibility.md` 把 Phase 03 frontend/value、Phase 04 read execution 与 Phase 05 versioned mutation 证据对应的 family 标为 `partial`；完整函数/聚合/procedure/path/mutation completeness 或 schema/search semantics 继续保持其后续 owner 状态。
+- Phase 06：`done`；
+- Phase 07：`ready`；
+- Phase 08–10：`planned`；
+- `docs/development/cypher25-compatibility.md` 已把 Phase 06 闭合的 query/path/value/aggregation/mutation family 标为 `done`；LOAD CSV 上下文函数、version procedure、Schema/index/Search、完整 SHOW、PROFILE 与 release error closure 继续保持其后续 owner 状态。
 
 ## 4. 路线总览
 
@@ -62,8 +63,8 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 | [03 Cypher Frontend and Value Semantics](phases/03-cypher-frontend-values.md) | `done` | `CY25-2026.08` parser/AST/scope/type/value foundation | 00–02 |
 | [04 Read Query Engine](phases/04-read-query-engine.md) | `done` | Graph View read boundary、MATCH/RETURN vertical slice、planner/executor、indexed traversal、streaming | 02–03 |
 | [05 Mutation, Transaction and Commit](phases/05-mutation-transaction-commit.md) | `done` | Graph View write boundary、Cypher writes、每次写入 Commit、rollback/concurrency | 02–04 |
-| [06 Cypher 25 Query Completeness](phases/06-cypher25-query-completeness.md) | `ready` | current-graph query/path/expression/function/subquery semantics 完整并继承 Graph View | 03–05 |
-| [07 Schema, Constraint and Standard Indexes](phases/07-schema-constraint-index.md) | `planned` | Graph Type、Constraint、lookup/range/text/point index；indexed read 遵守 Graph View | 05–06 |
+| [06 Cypher 25 Query Completeness](phases/06-cypher25-query-completeness.md) | `done` | current-graph query/path/expression/function/subquery semantics 完整并继承 Graph View | 03–05 |
+| [07 Schema, Constraint and Standard Indexes](phases/07-schema-constraint-index.md) | `ready` | Graph Type、Constraint、lookup/range/text/point index；indexed read 遵守 Graph View | 05–06 |
 | [08 Search and Data Ingestion](phases/08-search-ingestion.md) | `planned` | Full-text、Vector/HNSW、SEARCH、LOAD CSV 并遵守 Graph View | 06–07 |
 | [09 Versioned State Operations](phases/09-version-control-operations.md) | `planned` | format 1→2、Commit Data、Tag、explicit Commit、cursor History、branch/time-travel/diff/patch/merge/rebase/squash/reset/revert/gc | 05、07–08 |
 | [10 Compatibility Closure and Release Hardening](phases/10-compatibility-release.md) | `planned` | 100% applicable Profile、10M/100M scale、recovery/migration、跨平台 release | 00–09 |

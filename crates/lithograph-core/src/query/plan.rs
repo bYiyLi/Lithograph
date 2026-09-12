@@ -8,7 +8,7 @@ use crate::cypher::{
 };
 use crate::storage::{self, HashId, LabelId, RelationshipTypeId};
 
-use super::expression::{Expr, compile_expression, is_count};
+use super::expression::{Expr, compile_expression, is_count, surface_expressions};
 use super::graph::{ResolvedGraphView, resolve_commit};
 use super::stats::PlannerStatistics;
 use super::{ExecutionOptions, QueryError, QueryResult};
@@ -51,6 +51,14 @@ pub enum LogicalOperator {
     Distinct,
     Optional,
     Cartesian,
+    Let,
+    Unwind,
+    Union {
+        distinct: bool,
+    },
+    Subquery,
+    When,
+    Next,
     Eager,
     Mutation {
         kind: ClauseKind,
@@ -89,6 +97,14 @@ pub enum PhysicalOperator {
     Distinct,
     Optional,
     Cartesian,
+    Let,
+    Unwind,
+    Union {
+        distinct: bool,
+    },
+    Subquery,
+    When,
+    Next,
     Eager,
     Mutation {
         kind: ClauseKind,
@@ -182,10 +198,18 @@ pub struct PreparedQuery {
     pub(crate) params: BTreeMap<String, Value>,
     pub(crate) mode: ExecutionMode,
     pub(crate) write: Option<super::mutation::PreparedWrite>,
+    pub(crate) program: Option<super::completeness::PreparedProgram>,
     pub logical: LogicalPlan,
     pub physical: PhysicalPlan,
     pub statistics: PlannerStatistics,
     pub columns: Vec<String>,
+}
+
+struct PrepareContext {
+    commit: HashId,
+    graph_view: ResolvedGraphView,
+    params: BTreeMap<String, Value>,
+    mode: ExecutionMode,
 }
 
 pub fn prepare(
@@ -196,39 +220,76 @@ pub fn prepare(
 ) -> QueryResult<PreparedQuery> {
     let ast = cypher::parse(query)?;
     cypher::analyze(&ast, query)?;
-    reject_query_composition(&ast.root)?;
     validate_parameters(&ast.root, &params)?;
     let commit = resolve_commit(connection, &options.snapshot)?;
     let graph_view = ResolvedGraphView::resolve(connection, &options.graph_view)?;
+    let context = PrepareContext {
+        commit,
+        graph_view,
+        params,
+        mode: ast.execution_mode,
+    };
+    if super::completeness::requires_program(&ast.root) {
+        let program = super::completeness::prepare_program(&ast, query, &options)?;
+        return Ok(program_query(
+            context.commit,
+            context.graph_view,
+            context.params,
+            context.mode,
+            program,
+        ));
+    }
+    reject_query_composition(&ast.root)?;
     let single = single_query(&ast.root)?;
     if contains_mutation(single) {
-        let write = super::mutation::prepare_write(connection, single, query, &params, &options)?;
-        let columns = if ast.execution_mode == ExecutionMode::Explain {
-            vec!["plan".to_owned()]
-        } else {
-            write.columns.clone()
-        };
-        let logical = write.logical.clone();
-        let physical = build_physical(&logical, &write.matches_for_explain, false);
-        return Ok(PreparedQuery {
-            commit,
-            graph_view,
-            matches: Vec::new(),
-            projections: Vec::new(),
-            order: Vec::new(),
-            skip: 0,
-            limit: None,
-            distinct: false,
-            aggregate: false,
-            params,
-            mode: ast.execution_mode,
-            write: Some(write),
-            logical,
-            physical,
-            statistics: PlannerStatistics::default(),
-            columns,
-        });
+        return prepare_write_query(connection, single, query, &options, context);
     }
+    prepare_read_query(connection, single, query, context)
+}
+
+fn prepare_write_query(
+    connection: &Connection,
+    single: &AstNode,
+    query: &str,
+    options: &ExecutionOptions,
+    context: PrepareContext,
+) -> QueryResult<PreparedQuery> {
+    let write =
+        super::mutation::prepare_write(connection, single, query, &context.params, options)?;
+    let columns = if context.mode == ExecutionMode::Explain {
+        vec!["plan".to_owned()]
+    } else {
+        write.columns.clone()
+    };
+    let logical = write.logical.clone();
+    let physical = build_physical(&logical, &write.matches_for_explain, false);
+    Ok(PreparedQuery {
+        commit: context.commit,
+        graph_view: context.graph_view,
+        matches: Vec::new(),
+        projections: Vec::new(),
+        order: Vec::new(),
+        skip: 0,
+        limit: None,
+        distinct: false,
+        aggregate: false,
+        params: context.params,
+        mode: context.mode,
+        write: Some(write),
+        program: None,
+        logical,
+        physical,
+        statistics: PlannerStatistics::default(),
+        columns,
+    })
+}
+
+fn prepare_read_query(
+    connection: &Connection,
+    single: &AstNode,
+    query: &str,
+    context: PrepareContext,
+) -> QueryResult<PreparedQuery> {
     let (mut matches, return_clause) = lower_clauses(connection, single)?;
     let ProjectionPlan {
         projections,
@@ -236,12 +297,11 @@ pub fn prepare(
         skip,
         limit,
         distinct,
-    } = lower_projection(return_clause, query, &params)?;
+    } = lower_projection(return_clause, query, &context.params)?;
     let aggregate = validate_aggregation(&projections)?;
-    let statistics = planner_statistics(connection, commit, &graph_view, &matches)?;
+    let statistics = planner_statistics(connection, context.commit, &context.graph_view, &matches)?;
     optimize_node_scans(&mut matches, &statistics);
-    let mode = ast.execution_mode;
-    let columns = output_columns(mode, &projections);
+    let columns = output_columns(context.mode, &projections);
     let logical = build_logical(
         &matches,
         !order.is_empty(),
@@ -252,8 +312,8 @@ pub fn prepare(
     );
     let physical = build_physical(&logical, &matches, !order.is_empty());
     Ok(PreparedQuery {
-        commit,
-        graph_view,
+        commit: context.commit,
+        graph_view: context.graph_view,
         matches,
         projections,
         order,
@@ -261,14 +321,48 @@ pub fn prepare(
         limit,
         distinct,
         aggregate,
-        params,
-        mode,
+        params: context.params,
+        mode: context.mode,
         write: None,
+        program: None,
         logical,
         physical,
         statistics,
         columns,
     })
+}
+
+fn program_query(
+    commit: HashId,
+    graph_view: ResolvedGraphView,
+    params: BTreeMap<String, Value>,
+    mode: ExecutionMode,
+    program: super::completeness::PreparedProgram,
+) -> PreparedQuery {
+    let columns = if mode == ExecutionMode::Explain {
+        vec!["plan".to_owned()]
+    } else {
+        program.columns.clone()
+    };
+    PreparedQuery {
+        commit,
+        graph_view,
+        matches: Vec::new(),
+        projections: Vec::new(),
+        order: Vec::new(),
+        skip: 0,
+        limit: None,
+        distinct: false,
+        aggregate: false,
+        params,
+        mode,
+        write: None,
+        logical: program.logical.clone(),
+        physical: program.physical.clone(),
+        statistics: PlannerStatistics::default(),
+        columns,
+        program: Some(program),
+    }
 }
 
 fn contains_mutation(single: &AstNode) -> bool {
@@ -745,9 +839,7 @@ pub(crate) fn lower_projection(
 }
 
 fn lower_order(node: &AstNode) -> QueryResult<Vec<OrderItem>> {
-    let mut expressions = Vec::new();
-    collect_surface_expressions(node, &mut expressions);
-    expressions.sort_by_key(|expression| expression.span.start);
+    let expressions = surface_expressions(node);
     let mut directions = node
         .descendants()
         .filter_map(|child| match child.kind {
@@ -775,20 +867,8 @@ fn lower_order(node: &AstNode) -> QueryResult<Vec<OrderItem>> {
         .collect()
 }
 
-fn collect_surface_expressions<'a>(node: &'a AstNode, output: &mut Vec<&'a AstNode>) {
-    for child in &node.children {
-        if matches!(child.kind, AstKind::Expression(_)) {
-            output.push(child);
-        } else {
-            collect_surface_expressions(child, output);
-        }
-    }
-}
-
 fn first_surface_expression(node: &AstNode) -> QueryResult<&AstNode> {
-    let mut expressions = Vec::new();
-    collect_surface_expressions(node, &mut expressions);
-    expressions
+    surface_expressions(node)
         .into_iter()
         .next()
         .ok_or_else(|| QueryError::semantic("clause is missing its expression"))

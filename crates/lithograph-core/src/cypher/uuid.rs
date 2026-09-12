@@ -4,6 +4,10 @@ use super::value::ValueError;
 pub struct UuidValue([u8; 16]);
 
 impl UuidValue {
+    pub fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
     pub fn parse(text: &str) -> Result<Self, ValueError> {
         if text.len() != 36 || !matches_hyphens(text.as_bytes()) {
             return Err(ValueError::new(

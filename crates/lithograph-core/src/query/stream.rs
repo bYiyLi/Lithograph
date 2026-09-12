@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 
 use crate::cypher::{ExecutionMode, Value};
@@ -78,6 +79,7 @@ pub struct QueryCursor {
     pipeline: MatchPipeline,
     metrics: QueryMetrics,
     started: Instant,
+    statement_time: DateTime<Utc>,
     skipped: usize,
     emitted: usize,
     explain_emitted: bool,
@@ -85,6 +87,8 @@ pub struct QueryCursor {
     barrier: BarrierState,
     spill_connection: Option<Connection>,
     write_state: WriteState,
+    program_rows: Option<Vec<Vec<Value>>>,
+    program_offset: usize,
     finished: bool,
 }
 
@@ -256,10 +260,10 @@ impl StepCursor {
 }
 
 fn set_optional_null(row: &mut BindingRow, variable: Option<&str>) {
-    if let Some(variable) = variable {
-        row.values
-            .entry(variable.to_owned())
-            .or_insert(BindingValue::Null);
+    if let Some(variable) = variable
+        && !row.values.contains_key(variable)
+    {
+        row.insert(variable.to_owned(), BindingValue::Null);
     }
 }
 
@@ -588,8 +592,7 @@ fn bind_node(
             "variable {variable} is not a Node binding"
         ))),
         None => {
-            row.values
-                .insert(variable.to_owned(), BindingValue::Node(node_id));
+            row.insert(variable.to_owned(), BindingValue::Node(node_id));
             Ok(Some(row))
         }
     }
@@ -612,7 +615,7 @@ fn bind_relationship(
             "variable {variable} is not a Relationship binding"
         ))),
         None => {
-            row.values.insert(
+            row.insert(
                 variable.to_owned(),
                 BindingValue::Relationship(relationship),
             );
@@ -640,7 +643,7 @@ fn bind_path(
             "variable {variable} is not a Path binding"
         ))),
         None => {
-            row.values.insert(
+            row.insert(
                 variable.to_owned(),
                 BindingValue::Path {
                     nodes,
@@ -659,7 +662,13 @@ impl QueryCursor {
         } else {
             BarrierState::Pending
         };
-        let write_state = if prepared.write.is_some() && prepared.mode != ExecutionMode::Explain {
+        let write_state = if (prepared.write.is_some()
+            || prepared
+                .program
+                .as_ref()
+                .is_some_and(|program| program.writes))
+            && prepared.mode != ExecutionMode::Explain
+        {
             WriteState::Pending
         } else {
             WriteState::None
@@ -669,6 +678,7 @@ impl QueryCursor {
             prepared,
             metrics: QueryMetrics::default(),
             started: Instant::now(),
+            statement_time: Utc::now(),
             skipped: 0,
             emitted: 0,
             explain_emitted: false,
@@ -676,6 +686,8 @@ impl QueryCursor {
             barrier,
             spill_connection: None,
             write_state,
+            program_rows: None,
+            program_offset: 0,
             finished: false,
         }
     }
@@ -685,7 +697,13 @@ impl QueryCursor {
     }
 
     pub fn is_write(&self) -> bool {
-        self.prepared.write.is_some() && self.prepared.mode != ExecutionMode::Explain
+        (self.prepared.write.is_some()
+            || self
+                .prepared
+                .program
+                .as_ref()
+                .is_some_and(|program| program.writes))
+            && self.prepared.mode != ExecutionMode::Explain
     }
 
     pub fn next_batch(
@@ -702,6 +720,7 @@ impl QueryCursor {
         max_rows: usize,
         is_interrupted: &dyn Fn() -> bool,
     ) -> QueryResult<QueryBatch> {
+        let _statement_clock = super::functions::install_statement_time(self.statement_time);
         if self.finished {
             return Ok(QueryBatch {
                 rows: Vec::new(),
@@ -717,8 +736,11 @@ impl QueryCursor {
         if self.prepared.mode == ExecutionMode::Explain {
             return self.next_explain();
         }
-        if self.prepared.write.is_some() {
+        if self.is_write() {
             return self.next_write(connection, max_rows, is_interrupted);
+        }
+        if self.prepared.program.is_some() {
+            return self.next_program_read(connection, max_rows, is_interrupted);
         }
         let snapshot = Snapshot::resolve(connection, self.prepared.commit)?;
         if self.prepared.aggregate {
@@ -741,6 +763,48 @@ impl QueryCursor {
         self.explain_emitted = true;
         self.metrics.rows = 1;
         self.finish(vec![vec![Value::String(self.prepared.physical.explain())]])
+    }
+
+    fn next_program_read(
+        &mut self,
+        connection: &Connection,
+        max_rows: usize,
+        is_interrupted: &dyn Fn() -> bool,
+    ) -> QueryResult<QueryBatch> {
+        if self.program_rows.is_none() {
+            let program = self
+                .prepared
+                .program
+                .as_ref()
+                .ok_or_else(|| QueryError::internal("Phase 06 program is missing"))?;
+            let rows = super::completeness::execute_prepared_read(
+                connection,
+                program,
+                self.prepared.commit,
+                &self.prepared.graph_view,
+                &self.prepared.params,
+                self.prepared.mode,
+                &mut self.metrics,
+                is_interrupted,
+            )?;
+            self.metrics.rows = rows.len().try_into().unwrap_or(u64::MAX);
+            self.program_rows = Some(rows);
+        }
+        let rows = self
+            .program_rows
+            .as_ref()
+            .ok_or_else(|| QueryError::internal("Phase 06 program rows are missing"))?;
+        let end = self.program_offset.saturating_add(max_rows).min(rows.len());
+        let batch_rows = rows[self.program_offset..end].to_vec();
+        self.program_offset = end;
+        if self.program_offset >= rows.len() {
+            return self.finish(batch_rows);
+        }
+        Ok(QueryBatch {
+            rows: batch_rows,
+            done: false,
+            summary: None,
+        })
     }
 
     fn next_direct(

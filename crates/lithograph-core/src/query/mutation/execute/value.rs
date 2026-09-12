@@ -230,6 +230,10 @@ pub(super) fn binding_owner(row: &BindingRow, variable: &str) -> QueryResult<(Ow
             QueryErrorKind::Type,
             format!("mutation target {variable} is a Path"),
         )),
+        Some(BindingValue::Scalar(_)) => Err(QueryError::new(
+            QueryErrorKind::Type,
+            format!("mutation target {variable} must be a Node or Relationship"),
+        )),
     }
 }
 
@@ -260,7 +264,7 @@ pub(super) fn require_visible_owner(
             None => staged.relationship(record.id)?.is_some(),
         },
         Some(BindingValue::Null) | None => true,
-        Some(BindingValue::Path { .. }) => false,
+        Some(BindingValue::Path { .. } | BindingValue::Scalar(_)) => false,
     };
     if visible {
         Ok(())
@@ -424,11 +428,28 @@ fn validate_aggregate_order(
 
 fn contains_count(expression: &Expr) -> bool {
     match expression {
-        Expr::Function(name, arguments) => {
-            name.eq_ignore_ascii_case("count") || arguments.iter().any(contains_count)
-        }
+        Expr::Function {
+            name,
+            args: arguments,
+            ..
+        } => name.eq_ignore_ascii_case("count") || arguments.iter().any(contains_count),
         Expr::List(items) => items.iter().any(contains_count),
         Expr::Map(entries) => entries.values().any(contains_count),
+        Expr::Case { .. }
+        | Expr::ListComprehension { .. }
+        | Expr::ListPredicate { .. }
+        | Expr::Reduce { .. }
+        | Expr::AllReduce { .. }
+        | Expr::MapProjection { .. }
+        | Expr::Subscript { .. }
+        | Expr::IsNull { .. }
+        | Expr::NormalizedPredicate { .. }
+        | Expr::TypePredicate { .. }
+        | Expr::LabelPredicate { .. }
+        | Expr::Interpolated(_)
+        | Expr::Subquery { .. }
+        | Expr::PatternPredicate(_)
+        | Expr::PatternComprehension(_) => false,
         Expr::Property(base, _) | Expr::Unary(_, base) => contains_count(base),
         Expr::Binary(_, left, right) => contains_count(left) || contains_count(right),
         Expr::Literal(_) | Expr::Variable(_) | Expr::Parameter(_) => false,
@@ -443,12 +464,29 @@ fn uses_only_aliases(expression: &Expr, aliases: &BTreeMap<String, Value>) -> bo
             .values()
             .all(|value| uses_only_aliases(value, aliases)),
         Expr::Property(base, _) | Expr::Unary(_, base) => uses_only_aliases(base, aliases),
-        Expr::Function(_, arguments) => arguments
+        Expr::Function {
+            args: arguments, ..
+        } => arguments
             .iter()
             .all(|argument| uses_only_aliases(argument, aliases)),
         Expr::Binary(_, left, right) => {
             uses_only_aliases(left, aliases) && uses_only_aliases(right, aliases)
         }
+        Expr::Case { .. }
+        | Expr::ListComprehension { .. }
+        | Expr::ListPredicate { .. }
+        | Expr::Reduce { .. }
+        | Expr::AllReduce { .. }
+        | Expr::MapProjection { .. }
+        | Expr::Subscript { .. }
+        | Expr::IsNull { .. }
+        | Expr::NormalizedPredicate { .. }
+        | Expr::TypePredicate { .. }
+        | Expr::LabelPredicate { .. }
+        | Expr::Interpolated(_)
+        | Expr::Subquery { .. }
+        | Expr::PatternPredicate(_)
+        | Expr::PatternComprehension(_) => false,
         Expr::Literal(_) | Expr::Parameter(_) => true,
     }
 }

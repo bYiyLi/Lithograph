@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "id": "cy25-normalized-predicate",
+  "profile": {
+    "id": "CY25-2026.08",
+    "source": "https://neo4j.com/docs/cypher-manual/25/expressions/predicates/string-operators/",
+    "version": "2026.06",
+    "family": "String predicates"
+  },
+  "execution": "enabled",
+  "query": "WITH '\u00e4' AS composed, 'a\u0308' AS decomposed RETURN composed IS NORMALIZED AS nfc, composed IS NFD NORMALIZED AS nfd, decomposed IS NOT NORMALIZED AS notNfc",
+  "params": {},
+  "initial_graph": [],
+  "expected": {
+    "kind": "rows",
+    "columns": ["nfc", "nfd", "notNfc"],
+    "ordered": true,
+    "rows": [[
+      {"type": "boolean", "value": true},
+      {"type": "boolean", "value": false},
+      {"type": "boolean", "value": true}
+    ]]
+  }
+}

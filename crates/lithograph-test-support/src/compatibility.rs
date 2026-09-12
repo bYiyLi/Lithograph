@@ -771,7 +771,7 @@ mod tests {
     fn cypher25_fixture_inventory_is_valid() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/cypher25");
         let fixtures = load_fixture_directory(&root).expect("CY25 fixture inventory should load");
-        assert_eq!(fixtures.len(), 15);
+        assert_eq!(fixtures.len(), 17);
         assert!(
             fixtures
                 .iter()

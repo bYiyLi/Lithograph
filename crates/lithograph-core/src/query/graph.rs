@@ -1,8 +1,11 @@
 use std::collections::BTreeMap;
 
+use chrono::{Offset, TimeZone, Utc};
 use rusqlite::Connection;
 
-use crate::cypher::{NodeValue, RelationshipValue, Value};
+use crate::cypher::{
+    NodeValue, RelationshipValue, Value, format_date_from_days, format_local_time, format_offset,
+};
 use crate::storage::{self, HashId, LabelId, OwnerKind, RelationshipRecord, Snapshot};
 
 use super::options::{GraphViewSelector, SnapshotSelector};
@@ -222,7 +225,7 @@ pub(crate) fn property_value(value: storage::PropertyValue) -> QueryResult<Value
             Ok(Value::Date(crate::cypher::DateValue::parse(&text)?))
         }
         storage::PropertyValue::LocalTime(nanoseconds) => Ok(Value::LocalTime(
-            crate::cypher::LocalTimeValue::parse(&format_time(nanoseconds))?,
+            crate::cypher::LocalTimeValue::parse(&format_local_time(nanoseconds))?,
         )),
         storage::PropertyValue::Time {
             nanoseconds,
@@ -230,7 +233,7 @@ pub(crate) fn property_value(value: storage::PropertyValue) -> QueryResult<Value
         } => {
             let text = format!(
                 "{}{}",
-                format_time(nanoseconds),
+                format_local_time(nanoseconds),
                 format_offset(offset_seconds)
             );
             Ok(Value::Time(crate::cypher::TimeValue::parse(&text)?))
@@ -239,7 +242,7 @@ pub(crate) fn property_value(value: storage::PropertyValue) -> QueryResult<Value
             let text = format!(
                 "{}T{}",
                 format_date_from_days(day),
-                format_time(nanoseconds)
+                format_local_time(nanoseconds)
             );
             Ok(Value::LocalDateTime(
                 crate::cypher::LocalDateTimeValue::parse(&text)?,
@@ -345,7 +348,7 @@ fn vector_value(value: storage::VectorValue) -> QueryResult<Value> {
 }
 
 fn zoned_datetime_value(value: storage::ZonedDateTimeValue) -> QueryResult<Value> {
-    let offset = fixed_zone_offset(&value.zone_id).unwrap_or(0);
+    let offset = zone_offset_at(&value.zone_id, value.epoch_seconds, value.nanoseconds)?;
     let local_seconds = value
         .epoch_seconds
         .checked_add(i64::from(offset))
@@ -358,12 +361,34 @@ fn zoned_datetime_value(value: storage::ZonedDateTimeValue) -> QueryResult<Value
     let text = format!(
         "{}T{}{}",
         format_date_from_days(day),
-        format_time(nanos),
+        format_local_time(nanos),
         format_offset(offset)
     );
     Ok(Value::ZonedDateTime(
         crate::cypher::ZonedDateTimeValue::parse(&text, &value.zone_id)?,
     ))
+}
+
+fn zone_offset_at(zone: &str, seconds: i64, nanoseconds: u32) -> QueryResult<i32> {
+    if let Some(offset) = fixed_zone_offset(zone) {
+        return Ok(offset);
+    }
+    let timezone = zone.parse::<chrono_tz::Tz>().map_err(|_| {
+        QueryError::internal(format!(
+            "persisted ZonedDateTime has unknown IANA zone {zone:?}"
+        ))
+    })?;
+    let instant = Utc
+        .timestamp_opt(seconds, nanoseconds)
+        .single()
+        .ok_or_else(|| {
+            QueryError::internal("persisted ZonedDateTime is outside the IANA timezone range")
+        })?;
+    Ok(instant
+        .with_timezone(&timezone)
+        .offset()
+        .fix()
+        .local_minus_utc())
 }
 
 fn fixed_zone_offset(zone: &str) -> Option<i32> {
@@ -384,50 +409,6 @@ fn fixed_zone_offset(zone: &str) -> Option<i32> {
         .ok()?;
     let sign = if bytes[0] == b'-' { -1 } else { 1 };
     Some(sign * (hour * 3_600 + minute * 60))
-}
-
-fn format_time(nanoseconds: u64) -> String {
-    let hour = nanoseconds / 3_600_000_000_000;
-    let minute = nanoseconds / 60_000_000_000 % 60;
-    let second = nanoseconds / 1_000_000_000 % 60;
-    let fraction = nanoseconds % 1_000_000_000;
-    if fraction == 0 {
-        return format!("{hour:02}:{minute:02}:{second:02}");
-    }
-    let fraction = format!("{fraction:09}").trim_end_matches('0').to_owned();
-    format!("{hour:02}:{minute:02}:{second:02}.{fraction}")
-}
-
-fn format_offset(offset_seconds: i32) -> String {
-    if offset_seconds == 0 {
-        return "Z".to_owned();
-    }
-    let sign = if offset_seconds < 0 { '-' } else { '+' };
-    let value = offset_seconds.unsigned_abs();
-    format!("{sign}{:02}:{:02}", value / 3_600, value % 3_600 / 60)
-}
-
-fn format_date_from_days(days: i64) -> String {
-    let (year, month, day) = civil_from_days(days);
-    if (0..=9_999).contains(&year) {
-        format!("{year:04}-{month:02}-{day:02}")
-    } else {
-        format!("{year}-{month:02}-{day:02}")
-    }
-}
-
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let mut year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = mp + if mp < 10 { 3 } else { -9 };
-    year += i64::from(month <= 2);
-    (year, month as u32, day as u32)
 }
 
 fn uuid_text(bytes: [u8; 16]) -> String {

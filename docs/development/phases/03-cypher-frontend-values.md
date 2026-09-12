@@ -90,7 +90,7 @@ Phase-level review 已闭环：
 - frozen grammar review 补齐并锁定了 Cypher query preamble/options、`EXPLAIN` / `PROFILE` 组合顺序、`RETURN/WITH ALL`（包括 parenthesized expression）、精确 Match Mode、数字开头 parameter、braced conditional `UNION` 与 `GROUP BY` parser surface；空 `WHEN ... THEN` / `ELSE` 和非法 Match Mode 组合会在 parser boundary 拒绝；
 - downstream 会改变行为的 frontend discriminator 不再在 lowering 时丢失：query options、`ALL/DISTINCT`、Match Mode、`ORDER BY` direction、`MERGE ON CREATE/ON MATCH`、`SET =/+=`、transaction retry fallback、`LOAD CSV` modifiers、Label/Relationship Type expression、Schema/Index/Graph Type name/operation 等均保留为 Lithograph-owned typed AST；multi-token discriminator 由 parse-tree rule 判断，不依赖空白/comment spelling；Label/Relationship Type 连续 negation 也按显式 parser operator node 计数，因此 `!` 之间存在合法 layout/comment 时不会丢失 negation 层数；braced/conditional subquery 的 scope/output traversal 同步修正；
 - openCypher inherited parser corpus 固定覆盖 4,224 个合法 query/query-precondition；3,312 个非 compile-error `executing query` 全部通过 frontend validation；585 个 compile-time error 中 Phase 03 可静态判定的场景全部拒绝；
-- 当前 16 个仍由 frontend 接受的 openCypher compile-time-error query 均属于后续明确 owner：7 个依赖 procedure catalog/signature（Phase 06–09）、1 个依赖完整 built-in function inventory（Phase 06）、8 个依赖完整 aggregation/DISTINCT `ORDER BY` visibility/grouping semantics（Phase 06）。`phase03_parser_tck` 锁定的是这 16 个 scenario 的精确集合，而不是数量上限；后续只能显式收缩，不能用等量替换掩盖 regression；
+- Phase 06 已关闭当时 16 个 deferred scenario 中的完整 built-in function inventory 与 8 个 aggregation/DISTINCT `ORDER BY` visibility/grouping gap；当前只剩 7 个 procedure catalog/signature scenario 由后续 procedure owner 接管，并显式记录 1 个被 Cypher 25 Match Mode 新语义取代的旧 relationship-reuse scenario；`phase03_parser_tck` 锁定精确集合，不能用等量替换掩盖 regression；
 - CALL import、LOAD CSV binding、relationship direction、YIELD alias、escaped identifier、grouping reference、unary integer boundary 与 expression-subquery kind 均由 AST 结构驱动；raw query text 不再承担 scope/type/legality 判断，interpolation fragment error span 会映射回原始 query 的全局 line/column；
 - scope/correlation、graph-element category、pattern predicate、write/read clause legality、property type、literal range、numeric/null/type comparison、parameter legality均已有 negative fixtures；comparison 会对左右 operand 对称执行静态类型验证，`CASE` 通过显式 alternative AST 节点提取 `THEN`/`ELSE` 结果类型，不把 simple `CASE` operand 误当作结果；
 - 40 层 nested List TCK query 曾触发小栈 stack overflow；AST traversal 改为 iterative DFS，type inference 增加 transparent-expression peeling 后，在 2 MiB thread stack 与正式 TCK suite 中均通过；
@@ -102,12 +102,12 @@ Phase-level review 已闭环：
 ## 7. 验证证据
 
 - `cargo test --locked -p lithograph-core --test phase03_frontend --test phase03_ast --test phase03_value_order`：22/22 + 4/4 + 4/4，共 30 个 Phase 03 core integration tests 通过；
-- `cargo test --locked -p lithograph-test-support --test phase03_parser_tck`：4/4 通过；除锁定 4,224 parser corpus、3,312 frontend-success corpus、585 compile-error corpus 与精确 16 个后续 Phase ownership scenario 外，还直接执行 15 个 `CY25-2026.08` fixture inventory 中的 12 个 parser-positive fixtures；
+- `cargo test --locked -p lithograph-test-support --test phase03_parser_tck`：4/4 通过；除锁定 4,224 parser corpus、3,312 frontend-success corpus、585 compile-error corpus、精确 7 个 deferred 与 1 个 Cypher 25 superseded scenario 外，还直接执行 17 个 `CY25-2026.08` fixture inventory 中的 5 个显式 parser-positive fixtures；
 - Phase 02 regression：`phase02_storage` 13/13、`phase02_checkpoint_integrity` 8/8 通过；
-- `cargo test --locked -p lithograph-extension --all-features`：7/7 通过；真实 SQLite `lithograph_validate()` 与 Native ABI validation/error-category surface 通过；
+- `cargo test --locked -p lithograph-extension --all-features`：8/8 通过；真实 SQLite `lithograph_validate()` 与 Native ABI validation/error-category surface 通过；
 - `cargo make quality`：vendor/LCE1 golden、file budget、format、workspace Clippy、Rustdoc、complexity、duplicate、unused dependency、supply-chain、coverage 全部通过；coverage 为 regions 82.53%、functions 84.53%、lines 84.24%，`value_order.rs` line coverage 为 88.76%；
 - `scripts/ci.sh`：SQLite 3.51.0 与最低 SQLite 3.45.0 的真实 `.load`、Phase 01/02/03 probes、artifact inspection、Native ABI、compatibility harness/inventory 全部通过。Harness self-check 中 1 个 intentional failure 是 harness 自检预期，不是产品失败。
 
 ## 8. 完成条件
 
-Frontend/value foundation 已满足 read planner 前置合同；Phase 03 `done`，Phase 04 转 `ready`。完整 aggregation/order/function/procedure semantics 仍由 compatibility matrix 指定的后续 Phase 负责，不把 frontend foundation 误标为完整 Cypher execution。
+Frontend/value foundation 已满足 read planner 前置合同；Phase 03 保持 `done`。Phase 06 已闭合 aggregation/order/current-query function semantics；后续 procedure catalog、Schema/Search 与 release closure 仍按 compatibility matrix 的 owning Phase 执行，不能把 frontend foundation 单独误标为完整 Cypher execution。

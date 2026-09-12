@@ -167,7 +167,6 @@ fn type_and_function_validation_catches_invalid_forms() {
         "RETURN local_datetime() AS dt",
         "RETURN duration('P1D') AS d",
         "RETURN point({x: 1, y: 2}) AS p",
-        "RETURN size(vector([1,2], 2, INTEGER8)) AS size",
         "RETURN toInteger(true) AS n",
         "RETURN toFloat('1.5') AS n",
         "RETURN toString(date('2026-09-10')) AS s",
@@ -175,6 +174,10 @@ fn type_and_function_validation_catches_invalid_forms() {
         validate(query).unwrap_or_else(|error| panic!("{query}: {error}"));
     }
     validate("RETURN vector([1,2], 2, INTEGER) AS v").expect("vector signature");
+    validate("RETURN size(vector([1,2], 2, INTEGER8)) AS size")
+        .expect("size() accepts Vector input");
+    let error = validate("RETURN size({a: 1}) AS size").expect_err("size() must reject Map input");
+    assert_eq!(error.kind, FrontendErrorKind::Type);
 
     let error = validate("RETURN 'x' + 1").expect_err("incompatible +");
     assert_eq!(error.kind, FrontendErrorKind::Type);
@@ -198,7 +201,6 @@ fn type_and_function_validation_catches_invalid_forms() {
         "RETURN uuid(1, 2, 3)",
         "RETURN duration()",
         "RETURN duration('P1D', 1)",
-        "RETURN duration('P1D', 'unused-pattern')",
         "RETURN point()",
         "RETURN point(1)",
         "RETURN point({}, {})",
@@ -212,6 +214,8 @@ fn type_and_function_validation_catches_invalid_forms() {
         let error = validate(query).expect_err(query);
         assert_eq!(error.kind, FrontendErrorKind::Type, "{query}");
     }
+    validate("RETURN duration('5 hours', \"h 'hours'\")")
+        .expect("duration input and pattern are part of the frozen profile");
 }
 
 #[test]
@@ -312,11 +316,11 @@ fn interpolation_errors_are_mapped_to_the_original_query_span() {
     let error =
         validate("WITH 1 AS x RETURN s\"ok {missing}\" AS y").expect_err("undefined variable");
     assert_eq!(error.kind, FrontendErrorKind::Semantic);
-    assert_eq!((error.line, error.column), (1, 27));
+    assert_eq!((error.line, error.column), (1, 26));
 
     let error =
         validate("WITH 1 AS x\nRETURN s\"ok { missing }\" AS y").expect_err("undefined variable");
-    assert_eq!((error.line, error.column), (2, 16));
+    assert_eq!((error.line, error.column), (2, 15));
 }
 
 #[test]
@@ -769,7 +773,7 @@ fn malformed_lithograph_json_is_rejected_at_the_value_boundary() {
         json!({"$type":"Duration","value":"PT1S1H"}),
         json!({"$type":"Point","crs":"bogus","coordinates":[1,2]}),
         json!({"$type":"Point","crs":"wgs-84","coordinates":[1,2,3]}),
-        json!({"$type":"Point","crs":"wgs-84","coordinates":[181,2]}),
+        json!({"$type":"Point","crs":"wgs-84","coordinates":[1,91]}),
         json!({"$type":"UUID","value":"not-a-uuid"}),
         json!({"$type":"UUID","value":"550e8400-e29b-41d4-a716-44665544000z"}),
         json!({"$type":"Integer","value":"1","extra":true}),
@@ -794,10 +798,10 @@ fn runtime_value_equality_ordering_and_uuid_helpers_cover_edge_families() {
     assert_eq!(fixed_zone.zone(), "+08:00");
     assert!(ZonedDateTimeValue::parse("2026-09-10T12:00:00+08:00", "+07:00").is_err());
     let named_zone = ZonedDateTimeValue::parse(
-        "2026-09-10T12:00:00+08:00",
+        "2026-09-10T12:00:00-03:00",
         "America/Argentina/Buenos_Aires",
     )
-    .expect("syntactically valid IANA-style zone id is preserved");
+    .expect("IANA timezone offset is validated and preserved");
     assert_eq!(named_zone.zone(), "America/Argentina/Buenos_Aires");
 
     let left_map = BTreeMap::from([("x".to_owned(), Value::Integer(1))]);

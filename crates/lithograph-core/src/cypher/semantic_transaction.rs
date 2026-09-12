@@ -111,30 +111,90 @@ fn transaction_status_name(statuses: &[&AstNode]) -> Option<String> {
     })
 }
 
-pub(super) fn query_body_returns_columns(node: &AstNode) -> bool {
+pub(crate) fn query_body_returns_columns(node: &AstNode) -> bool {
+    query_body_terminal_matches(node, single_query_returns_columns)
+}
+
+pub(crate) fn query_body_ends_with_call(node: &AstNode) -> bool {
+    query_body_terminal_matches(node, single_query_ends_with_call)
+}
+
+fn query_body_terminal_matches(node: &AstNode, terminal: fn(&AstNode) -> bool) -> bool {
     match node.kind {
-        AstKind::QueryBody | AstKind::ComposedQuery | AstKind::ConditionalQuery => node
+        AstKind::QueryBody
+        | AstKind::Subquery(SubqueryKind::Braced)
+        | AstKind::Subquery(SubqueryKind::Call) => node
             .children
             .iter()
-            .filter(|child| {
-                !matches!(child.kind, AstKind::Subquery(kind) if kind != SubqueryKind::Braced)
+            .find(|child| {
+                matches!(
+                    child.kind,
+                    AstKind::QueryBody
+                        | AstKind::ComposedQuery
+                        | AstKind::ConditionalQuery
+                        | AstKind::SingleQuery
+                )
             })
-            .any(query_body_returns_columns),
-        AstKind::ConditionalBranch(_) | AstKind::Subquery(SubqueryKind::Braced) => {
-            node.children.iter().any(query_body_returns_columns)
-        }
-        AstKind::SingleQuery => {
-            node.children
+            .is_some_and(|child| query_body_terminal_matches(child, terminal)),
+        AstKind::ComposedQuery => node
+            .children
+            .iter()
+            .rev()
+            .find(|child| matches!(child.kind, AstKind::SingleQuery | AstKind::Subquery(_)))
+            .is_some_and(|child| query_body_terminal_matches(child, terminal)),
+        AstKind::ConditionalQuery => {
+            let mut branches = node
+                .children
                 .iter()
-                .rev()
-                .find_map(|child| match child.kind {
-                    AstKind::Clause(kind) => Some(kind),
-                    _ => None,
-                })
-                == Some(super::ast::ClauseKind::Return)
+                .filter(|child| matches!(child.kind, AstKind::ConditionalBranch(_)));
+            branches
+                .next()
+                .is_some_and(|branch| query_body_terminal_matches(branch, terminal))
+                && branches.all(|branch| query_body_terminal_matches(branch, terminal))
         }
+        AstKind::ConditionalBranch(_) => node
+            .children
+            .iter()
+            .find(|child| {
+                matches!(
+                    child.kind,
+                    AstKind::QueryBody
+                        | AstKind::ComposedQuery
+                        | AstKind::ConditionalQuery
+                        | AstKind::Subquery(SubqueryKind::Braced)
+                )
+            })
+            .is_some_and(|child| query_body_terminal_matches(child, terminal)),
+        AstKind::SingleQuery => terminal(node),
         _ => false,
     }
+}
+
+fn single_query_returns_columns(node: &AstNode) -> bool {
+    let Some(clause) = node
+        .children
+        .iter()
+        .rev()
+        .find(|child| matches!(child.kind, AstKind::Clause(_)))
+    else {
+        return false;
+    };
+    clause.kind == AstKind::Clause(super::ast::ClauseKind::Return)
+        || (clause.kind == AstKind::Clause(super::ast::ClauseKind::Show)
+            && clause
+                .descendants()
+                .any(|child| child.kind == AstKind::Clause(super::ast::ClauseKind::Return)))
+}
+
+fn single_query_ends_with_call(node: &AstNode) -> bool {
+    node.children
+        .iter()
+        .rev()
+        .find_map(|child| match child.kind {
+            AstKind::Clause(kind) => Some(kind),
+            _ => None,
+        })
+        == Some(super::ast::ClauseKind::Call)
 }
 
 fn descendants_of_kind(node: &AstNode, predicate: impl Fn(&AstKind) -> bool) -> Vec<&AstNode> {

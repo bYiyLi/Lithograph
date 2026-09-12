@@ -81,40 +81,35 @@ fn floating_division_by_zero_preserves_ieee_values() {
 }
 
 #[test]
-fn unsupported_pattern_semantics_are_rejected_instead_of_silently_approximated() {
+fn phase06_pattern_semantics_execute_instead_of_being_silently_approximated() {
     let fixture = fixture();
-    for query in [
-        "MATCH (n:Person|Secret) RETURN n",
-        "MATCH (n:!Secret) RETURN n",
-        "MATCH (n:Person {age: 41}) RETURN n",
-        "MATCH (n:Person WHERE n.age > 30) RETURN n",
-        "MATCH (a)-[:KNOWS*1..2]->(b) RETURN a",
-        "MATCH (a)-[:KNOWS {since: 1}]->(b) RETURN a",
+    for (query, expected) in [
+        ("MATCH (n:Person|Secret) RETURN count(n)", 4),
+        ("MATCH (n:!Secret) RETURN count(n)", 3),
+        ("MATCH (n:Person {age: 41}) RETURN count(n)", 1),
+        ("MATCH (n:Person WHERE n.age > 30) RETURN count(n)", 2),
+        ("MATCH (a)-[:KNOWS*1..2]->(b) RETURN count(*)", 4),
+        ("MATCH (a)-[:KNOWS {since: 1}]->(b) RETURN count(*)", 0),
     ] {
-        let error = prepare(
-            &fixture.connection,
-            query,
-            BTreeMap::new(),
-            ExecutionOptions::default(),
-        )
-        .expect_err("unsupported Phase 04 pattern syntax must be rejected");
-        assert_eq!(error.kind, QueryErrorKind::Semantic, "query: {query}");
-        assert!(error.message.contains("Phase 04"), "query: {query}");
+        assert_eq!(
+            rows(&fixture.connection, query, ExecutionOptions::default()),
+            vec![vec![Value::Integer(expected)]],
+            "query: {query}"
+        );
     }
 }
 
 #[test]
-fn distinct_aggregate_arguments_are_rejected_until_phase06() {
+fn distinct_aggregate_arguments_execute_with_phase06_semantics() {
     let fixture = fixture();
-    let error = prepare(
-        &fixture.connection,
-        "MATCH (n:Person) RETURN count(DISTINCT n.age) AS total",
-        BTreeMap::new(),
-        ExecutionOptions::default(),
-    )
-    .expect_err("count(DISTINCT ...) must not be approximated as count(...)");
-    assert_eq!(error.kind, QueryErrorKind::Semantic);
-    assert!(error.message.contains("DISTINCT aggregate"));
+    assert_eq!(
+        rows(
+            &fixture.connection,
+            "MATCH (n:Person) RETURN count(DISTINCT n.age) AS total",
+            ExecutionOptions::default(),
+        ),
+        vec![vec![Value::Integer(3)]]
+    );
 }
 
 #[test]

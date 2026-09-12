@@ -1,6 +1,6 @@
 # Phase 07：Schema, Constraint and Standard Indexes
 
-**状态：`planned`**
+**状态：`ready`**
 
 ## 1. 目标
 
@@ -12,7 +12,7 @@
 
 ## 3. Design Inputs
 
-- `docs/design.md` 第 4.4、7.6、8、10–11 节；
+- `docs/design.md` 第 4.4、7.7、8、10–11 节；
 - `docs/development/cypher25-compatibility.md`。
 
 ## 4. Features

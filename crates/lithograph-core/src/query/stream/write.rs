@@ -12,23 +12,44 @@ impl QueryCursor {
         max_rows: usize,
         is_interrupted: &dyn Fn() -> bool,
     ) -> QueryResult<QueryBatch> {
+        self.start_pending_write(connection, is_interrupted)?;
+        self.cancel_interrupted_write(connection, is_interrupted)?;
+        self.next_active_write_batch(max_rows)
+    }
+
+    fn start_pending_write(
+        &mut self,
+        connection: &Connection,
+        is_interrupted: &dyn Fn() -> bool,
+    ) -> QueryResult<()> {
         if matches!(self.write_state, WriteState::Pending) {
             let ordinal = NEXT_WRITE_SAVEPOINT.fetch_add(1, Ordering::Relaxed);
             let savepoint = format!("lithograph_write_{ordinal}");
             connection.execute_batch(&format!("SAVEPOINT {savepoint}"))?;
-            let write =
-                self.prepared.write.clone().ok_or_else(|| {
-                    QueryError::internal("write query is missing its mutation plan")
-                })?;
             let outcome = catch_unwind(AssertUnwindSafe(|| {
-                super::super::mutation::execute_write(
-                    connection,
-                    &write,
-                    self.prepared.commit,
-                    &self.prepared.params,
-                    &mut self.metrics,
-                    is_interrupted,
-                )
+                if let Some(write) = self.prepared.write.as_ref() {
+                    super::super::mutation::execute_write(
+                        connection,
+                        write,
+                        self.prepared.commit,
+                        &self.prepared.params,
+                        &mut self.metrics,
+                        is_interrupted,
+                    )
+                } else if let Some(program) = self.prepared.program.as_ref() {
+                    super::super::mutation::execute_program(
+                        connection,
+                        program,
+                        self.prepared.commit,
+                        &self.prepared.params,
+                        &mut self.metrics,
+                        is_interrupted,
+                    )
+                } else {
+                    Err(QueryError::internal(
+                        "write query is missing its mutation plan",
+                    ))
+                }
             }));
             let outcome = match outcome {
                 Ok(Ok(outcome)) => outcome,
@@ -59,22 +80,32 @@ impl QueryCursor {
                 summary,
             };
         }
+        Ok(())
+    }
 
-        if is_interrupted() {
-            let savepoint = match &self.write_state {
-                WriteState::Active { savepoint, .. } => savepoint.clone(),
-                _ => {
-                    return Err(QueryError::internal(
-                        "write cursor reached an invalid execution state",
-                    ));
-                }
-            };
-            self.finished = true;
-            rollback_write_savepoint(connection, &savepoint)?;
-            self.write_state = WriteState::None;
-            return Err(QueryError::interrupted());
+    fn cancel_interrupted_write(
+        &mut self,
+        connection: &Connection,
+        is_interrupted: &dyn Fn() -> bool,
+    ) -> QueryResult<()> {
+        if !is_interrupted() {
+            return Ok(());
         }
+        let savepoint = match &self.write_state {
+            WriteState::Active { savepoint, .. } => savepoint.clone(),
+            _ => {
+                return Err(QueryError::internal(
+                    "write cursor reached an invalid execution state",
+                ));
+            }
+        };
+        self.finished = true;
+        rollback_write_savepoint(connection, &savepoint)?;
+        self.write_state = WriteState::None;
+        Err(QueryError::interrupted())
+    }
 
+    fn next_active_write_batch(&mut self, max_rows: usize) -> QueryResult<QueryBatch> {
         let WriteState::Active {
             savepoint: _,
             rows,

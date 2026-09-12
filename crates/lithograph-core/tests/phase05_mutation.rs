@@ -691,9 +691,9 @@ fn delete_does_not_downgrade_property_expressions_to_their_owner_variable() {
         "MATCH (n:Kept) DELETE n.value FINISH",
         ExecutionOptions::default(),
     )
-    .expect_err("Phase 05 only executes direct graph-variable DELETE targets");
+    .expect_err("scalar DELETE expressions must fail without deleting their owner");
 
-    assert_eq!(error.kind, QueryErrorKind::Semantic);
+    assert_eq!(error.kind, QueryErrorKind::Type);
     assert_eq!(
         branch_head(&connection, "main").expect("unchanged head"),
         before

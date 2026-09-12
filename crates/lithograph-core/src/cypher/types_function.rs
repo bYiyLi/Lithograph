@@ -11,7 +11,7 @@ pub(super) fn infer_function(node: &AstNode, source: &str) -> Result<CypherType,
         .iter()
         .find(|child| child.kind == AstKind::FunctionName)
         .and_then(|child| child.text.as_deref())
-        .or_else(|| node.text.as_deref().and_then(vector_function_name))
+        .or_else(|| node.text.as_deref().and_then(special_function_name))
         .unwrap_or_default()
         .to_ascii_lowercase();
     let arguments = function_arguments(node);
@@ -20,6 +20,13 @@ pub(super) fn infer_function(node: &AstNode, source: &str) -> Result<CypherType,
     }
     if let Some(value) = infer_structural_function(&name, &arguments, node, source)? {
         return Ok(value);
+    }
+    if !super::is_builtin_function(&name) {
+        return Err(type_error(
+            source,
+            node.span,
+            format!("unknown current-graph function {name}"),
+        ));
     }
     match name.as_str() {
         "tostring" => typed_unary_result(
@@ -78,10 +85,21 @@ pub(super) fn infer_function(node: &AstNode, source: &str) -> Result<CypherType,
         "exists" => unary_result(&name, &arguments, node, source, CypherType::Boolean),
         "property_exists" => {
             require_arity(&name, &arguments, 1, node.span, source)?;
+            require_type(
+                &arguments,
+                &[CypherType::Node, CypherType::Relationship],
+                node.span,
+                source,
+                "PROPERTY_EXISTS() expects a Node or Relationship",
+            )?;
             Ok(CypherType::Boolean)
         }
         "count" => Ok(CypherType::Integer),
         "all" | "any" | "none" | "single" => Ok(CypherType::Boolean),
+        "allreduce" => Ok(CypherType::Boolean),
+        "reduce" => arguments.first().map_or(Ok(CypherType::Any), |initial| {
+            infer_expression(initial, source)
+        }),
         _ => Ok(CypherType::Any),
     }
 }
@@ -252,9 +270,32 @@ fn infer_duration_constructor(
     node: &AstNode,
     source: &str,
 ) -> Result<CypherType, FrontendError> {
-    require_arity("duration", arguments, 1, node.span, source)?;
-    let _ = infer_expression(arguments[0], source)?;
-    Ok(CypherType::Duration)
+    match arguments {
+        [input] => {
+            let _ = infer_expression(input, source)?;
+            Ok(CypherType::Duration)
+        }
+        [input, pattern] => {
+            require_expression_type(
+                input,
+                &[CypherType::String],
+                source,
+                "duration() input must be a String when a pattern is provided",
+            )?;
+            require_expression_type(
+                pattern,
+                &[CypherType::String],
+                source,
+                "duration() pattern must be a String",
+            )?;
+            Ok(CypherType::Duration)
+        }
+        _ => Err(type_error(
+            source,
+            node.span,
+            "duration() expects input and an optional pattern",
+        )),
+    }
 }
 
 fn infer_vector_constructor(
@@ -535,7 +576,6 @@ fn type_compatible(actual: &CypherType, expected: &CypherType) -> bool {
     }
 }
 
-fn vector_function_name(text: &str) -> Option<&str> {
-    text.get(..6)
-        .filter(|prefix| prefix.eq_ignore_ascii_case("vector"))
+fn special_function_name(text: &str) -> Option<&str> {
+    text.split_once('(').map(|(name, _)| name.trim())
 }

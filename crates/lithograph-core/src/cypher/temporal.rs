@@ -26,6 +26,15 @@ impl DateValue {
     pub(crate) fn days(&self) -> i64 {
         self.days
     }
+
+    pub(crate) fn from_days(days: i64) -> Result<Self, ValueError> {
+        let text = format_date_from_days(days);
+        Self::parse(&text)
+    }
+
+    pub(crate) fn from_components(year: i64, month: u32, day: u32) -> Result<Self, ValueError> {
+        Self::parse(&format_date(year, month, day))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +58,13 @@ impl LocalTimeValue {
 
     pub(crate) fn nanoseconds(&self) -> u64 {
         self.nanoseconds
+    }
+
+    pub(crate) fn from_nanoseconds(nanoseconds: u64) -> Result<Self, ValueError> {
+        if nanoseconds >= 86_400 * 1_000_000_000 {
+            return Err(ValueError::new("LocalTime nanoseconds exceed one day"));
+        }
+        Self::parse(&format_local_time(nanoseconds))
     }
 }
 
@@ -87,7 +103,18 @@ impl TimeValue {
         (self.local_nanoseconds, self.offset_seconds)
     }
 
-    pub(super) fn offset_seconds(&self) -> i32 {
+    pub(crate) fn from_components(
+        local_nanoseconds: u64,
+        offset_seconds: i32,
+    ) -> Result<Self, ValueError> {
+        Self::parse(&format!(
+            "{}{}",
+            format_local_time(local_nanoseconds),
+            format_offset(offset_seconds)
+        ))
+    }
+
+    pub(crate) fn offset_seconds(&self) -> i32 {
         self.offset_seconds
     }
 }
@@ -131,6 +158,43 @@ impl DurationValue {
 
     pub(crate) fn components(&self) -> (i64, i64, i64, i64) {
         (self.months, self.days, self.seconds, self.nanoseconds)
+    }
+
+    pub(crate) fn from_decimal_groups(
+        months: f64,
+        days: f64,
+        seconds: f64,
+    ) -> Result<Self, ValueError> {
+        if !months.is_finite() || !days.is_finite() || !seconds.is_finite() {
+            return Err(ValueError::new("Duration component must be finite"));
+        }
+        let whole_months = months.trunc();
+        let days = days + (months - whole_months) * (48_699.0 / 1_600.0);
+        let whole_days = days.trunc();
+        let seconds = seconds + (days - whole_days) * 86_400.0;
+        let whole_seconds = seconds.trunc();
+        let mut nanoseconds = ((seconds - whole_seconds) * 1_000_000_000.0).round();
+        let mut whole_seconds = whole_seconds;
+        if nanoseconds >= 1_000_000_000.0 {
+            whole_seconds += 1.0;
+            nanoseconds -= 1_000_000_000.0;
+        } else if nanoseconds <= -1_000_000_000.0 {
+            whole_seconds -= 1.0;
+            nanoseconds += 1_000_000_000.0;
+        }
+        for value in [whole_months, whole_days, whole_seconds, nanoseconds] {
+            if value < i64::MIN as f64 || value > i64::MAX as f64 {
+                return Err(ValueError::new(
+                    "Duration component is outside INTEGER64 range",
+                ));
+            }
+        }
+        Ok(Self::from_components(
+            whole_months as i64,
+            whole_days as i64,
+            whole_seconds as i64,
+            nanoseconds as i64,
+        ))
     }
 }
 
@@ -290,7 +354,7 @@ fn parse_offset(text: &str) -> Result<i32, ValueError> {
     Ok(sign * (hour as i32 * 3_600 + minute as i32 * 60))
 }
 
-fn format_offset(offset_seconds: i32) -> String {
+pub(crate) fn format_offset(offset_seconds: i32) -> String {
     if offset_seconds == 0 {
         return "Z".to_owned();
     }
@@ -301,6 +365,42 @@ fn format_offset(offset_seconds: i32) -> String {
         absolute / 3_600,
         (absolute % 3_600) / 60
     )
+}
+
+pub(crate) fn format_local_time(nanoseconds: u64) -> String {
+    let hour = nanoseconds / 3_600_000_000_000;
+    let minute = nanoseconds / 60_000_000_000 % 60;
+    let second = nanoseconds / 1_000_000_000 % 60;
+    let fraction = nanoseconds % 1_000_000_000;
+    if fraction == 0 {
+        format!("{hour:02}:{minute:02}:{second:02}")
+    } else {
+        let fraction = format!("{fraction:09}").trim_end_matches('0').to_owned();
+        format!("{hour:02}:{minute:02}:{second:02}.{fraction}")
+    }
+}
+
+pub(crate) fn format_date_from_days(days: i64) -> String {
+    let (year, month, day) = civil_from_days(days);
+    if (0..=9_999).contains(&year) {
+        format!("{year:04}-{month:02}-{day:02}")
+    } else {
+        format!("{year}-{month:02}-{day:02}")
+    }
+}
+
+pub(crate) fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    (year, month as u32, day as u32)
 }
 
 pub(super) fn validate_zone_id(zone: &str) -> Result<Option<i32>, ValueError> {
@@ -327,9 +427,8 @@ pub(super) fn validate_zone_id(zone: &str) -> Result<Option<i32>, ValueError> {
     {
         return Err(ValueError::new("ZonedDateTime zone id has invalid syntax"));
     }
-    // IANA zone-rule lookup, alias resolution, and DST/offset validation are
-    // execution semantics. Phase 03 preserves the exact syntactically valid
-    // zone id without making the value model depend on an OS timezone database.
+    zone.parse::<chrono_tz::Tz>()
+        .map_err(|_| ValueError::new("ZonedDateTime zone id is not a recognized IANA zone"))?;
     Ok(None)
 }
 
@@ -342,10 +441,12 @@ fn parse_duration(text: &str) -> Result<(i64, i64, i64, i64), ValueError> {
             "Duration must contain at least one component",
         ));
     }
-    let mut months = 0_i64;
-    let mut days = 0_i64;
-    let mut seconds = 0_i64;
-    let mut nanoseconds = 0_i64;
+    if let Some(value) = parse_extended_duration(body)? {
+        return Ok(value.components());
+    }
+    let mut months = 0.0_f64;
+    let mut days = 0.0_f64;
+    let mut seconds = 0.0_f64;
     let mut in_time = false;
     let mut start = 0_usize;
     let bytes = body.as_bytes();
@@ -386,15 +487,7 @@ fn parse_duration(text: &str) -> Result<(i64, i64, i64, i64), ValueError> {
                 ));
             }
             *last_order = Some(order);
-            apply_duration_component(
-                number,
-                unit,
-                in_time,
-                &mut months,
-                &mut days,
-                &mut seconds,
-                &mut nanoseconds,
-            )?;
+            apply_duration_component(number, unit, in_time, &mut months, &mut days, &mut seconds)?;
             components += 1;
             if in_time {
                 time_components += 1;
@@ -411,7 +504,40 @@ fn parse_duration(text: &str) -> Result<(i64, i64, i64, i64), ValueError> {
     if start != bytes.len() || components == 0 || (in_time && time_components == 0) {
         return Err(ValueError::new("Duration has an incomplete component"));
     }
-    Ok((months, days, seconds, nanoseconds))
+    DurationValue::from_decimal_groups(months, days, seconds).map(|value| value.components())
+}
+
+fn parse_extended_duration(body: &str) -> Result<Option<DurationValue>, ValueError> {
+    let Some((date, time)) = body.split_once('T') else {
+        return Ok(None);
+    };
+    let date = date.split('-').collect::<Vec<_>>();
+    let time = time.split(':').collect::<Vec<_>>();
+    if date.len() != 3
+        || time.len() != 3
+        || date.iter().chain(time.iter()).any(|value| value.is_empty())
+    {
+        return Ok(None);
+    }
+    if date[..2]
+        .iter()
+        .chain(time[..2].iter())
+        .any(|value| !value.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Ok(None);
+    }
+    let years = parse_duration_number(date[0])?;
+    let months = parse_duration_number(date[1])?;
+    let days = parse_duration_number(date[2])?;
+    let hours = parse_duration_number(time[0])?;
+    let minutes = parse_duration_number(time[1])?;
+    let seconds = parse_duration_number(time[2])?;
+    DurationValue::from_decimal_groups(
+        years * 12.0 + months,
+        days,
+        hours * 3_600.0 + minutes * 60.0 + seconds,
+    )
+    .map(Some)
 }
 
 fn duration_component_order(unit: char, in_time: bool) -> Option<u8> {
@@ -431,85 +557,59 @@ fn apply_duration_component(
     number: &str,
     unit: char,
     in_time: bool,
-    months: &mut i64,
-    days: &mut i64,
-    seconds: &mut i64,
-    nanoseconds: &mut i64,
+    months: &mut f64,
+    days: &mut f64,
+    seconds: &mut f64,
 ) -> Result<(), ValueError> {
-    if unit == 'S' && in_time {
-        let (whole, nanos) = parse_decimal_seconds(number)?;
-        *seconds = seconds
-            .checked_add(whole)
-            .ok_or_else(|| ValueError::new("Duration seconds overflow INTEGER64"))?;
-        *nanoseconds = nanoseconds
-            .checked_add(nanos)
-            .ok_or_else(|| ValueError::new("Duration nanoseconds overflow INTEGER64"))?;
-        return Ok(());
-    }
-    if number.contains('.') {
-        return Err(ValueError::new(
-            "Canonical Duration only permits a fractional seconds component",
-        ));
-    }
-    let value = number
-        .parse::<i64>()
-        .map_err(|_| ValueError::new("Duration component is outside INTEGER64 range"))?;
+    let value = parse_duration_number(number)?;
     match (in_time, unit) {
-        (false, 'Y') => checked_add_scaled(months, value, 12, "Duration months"),
-        (false, 'M') => checked_add_scaled(months, value, 1, "Duration months"),
-        (false, 'W') => checked_add_scaled(days, value, 7, "Duration days"),
-        (false, 'D') => checked_add_scaled(days, value, 1, "Duration days"),
-        (true, 'H') => checked_add_scaled(seconds, value, 3_600, "Duration seconds"),
-        (true, 'M') => checked_add_scaled(seconds, value, 60, "Duration seconds"),
+        (false, 'Y') => add_duration_component(months, value * 12.0),
+        (false, 'M') => add_duration_component(months, value),
+        (false, 'W') => add_duration_component(days, value * 7.0),
+        (false, 'D') => add_duration_component(days, value),
+        (true, 'H') => add_duration_component(seconds, value * 3_600.0),
+        (true, 'M') => add_duration_component(seconds, value * 60.0),
+        (true, 'S') => add_duration_component(seconds, value),
         _ => Err(ValueError::new(
             "Duration component uses an invalid unit or position",
         )),
     }
 }
 
-fn parse_decimal_seconds(text: &str) -> Result<(i64, i64), ValueError> {
-    let (whole, fraction) = match text.split_once('.') {
-        Some((whole, fraction)) => (whole, Some(fraction)),
-        None => (text, None),
-    };
-    let whole = whole
-        .parse::<i64>()
-        .map_err(|_| ValueError::new("Duration seconds are outside INTEGER64 range"))?;
-    let Some(fraction) = fraction else {
-        return Ok((whole, 0));
-    };
-    if fraction.is_empty()
-        || fraction.len() > 9
-        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+fn parse_duration_number(text: &str) -> Result<f64, ValueError> {
+    let unsigned = text.strip_prefix(['+', '-']).unwrap_or(text);
+    let mut parts = unsigned.split('.');
+    let whole = parts.next().unwrap_or_default();
+    let fraction = parts.next();
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.is_some_and(|value| {
+            value.is_empty() || value.len() > 9 || !value.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        || parts.next().is_some()
     {
         return Err(ValueError::new(
-            "Duration fractional seconds must contain one to nine digits",
+            "Duration component must be a decimal number with at most nine fractional digits",
         ));
     }
-    let magnitude = fraction
-        .parse::<i64>()
-        .map_err(|_| ValueError::new("Duration fractional seconds are invalid"))?
-        * 10_i64.pow(9 - fraction.len() as u32);
-    let nanos = if text.starts_with('-') {
-        -magnitude
-    } else {
-        magnitude
-    };
-    Ok((whole, nanos))
+    let value = text
+        .parse::<f64>()
+        .map_err(|_| ValueError::new("Duration component is outside the supported range"))?;
+    if !value.is_finite() {
+        return Err(ValueError::new(
+            "Duration component is outside the supported range",
+        ));
+    }
+    Ok(value)
 }
 
-fn checked_add_scaled(
-    target: &mut i64,
-    value: i64,
-    scale: i64,
-    name: &str,
-) -> Result<(), ValueError> {
-    let scaled = value
-        .checked_mul(scale)
-        .ok_or_else(|| ValueError::new(format!("{name} overflow INTEGER64")))?;
-    *target = target
-        .checked_add(scaled)
-        .ok_or_else(|| ValueError::new(format!("{name} overflow INTEGER64")))?;
+fn add_duration_component(target: &mut f64, value: f64) -> Result<(), ValueError> {
+    *target += value;
+    if !target.is_finite() {
+        return Err(ValueError::new(
+            "Duration component is outside the supported range",
+        ));
+    }
     Ok(())
 }
 
@@ -523,7 +623,7 @@ fn parse_two_digits(text: &str, name: &str) -> Result<u32, ValueError> {
         .map_err(|_| ValueError::new(format!("{name} is invalid")))
 }
 
-fn days_in_month(year: i64, month: u32) -> u32 {
+pub(crate) fn days_in_month(year: i64, month: u32) -> u32 {
     match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
@@ -537,7 +637,7 @@ fn is_leap_year(year: i64) -> bool {
     year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
 
-fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+pub(crate) fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     let year = year - i64::from(month <= 2);
     let era = if year >= 0 { year } else { year - 399 } / 400;
     let year_of_era = year - era * 400;

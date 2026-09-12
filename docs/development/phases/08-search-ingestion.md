@@ -12,7 +12,7 @@
 
 ## 3. Design Inputs
 
-- `docs/design.md` 第 4.4、7.6、9、11–13 节；
+- `docs/design.md` 第 4.4、7.7、9、11–13 节；
 - `docs/development/cypher25-compatibility.md`。
 
 ## 4. Features

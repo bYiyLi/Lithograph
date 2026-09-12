@@ -65,6 +65,28 @@ impl ExecutionOptions {
     }
 }
 
+pub(super) fn writable_branch(options: &ExecutionOptions) -> QueryResult<String> {
+    match &options.snapshot {
+        SnapshotSelector::Current => options.write_branch.clone().ok_or_else(|| {
+            QueryError::internal("current execution options are missing a writable Branch")
+        }),
+        SnapshotSelector::Branch(snapshot_branch) => match options.write_branch.as_ref() {
+            Some(write_branch) if write_branch == snapshot_branch => Ok(write_branch.clone()),
+            Some(_) => Err(QueryError::invalid_argument(
+                "execution options contain inconsistent Branch snapshot and write target",
+            )),
+            None => Err(QueryError::read_only_snapshot(
+                "mutating queries cannot execute against options.at historical snapshots",
+            )),
+        },
+        SnapshotSelector::Commit(_) | SnapshotSelector::Tag(_) => {
+            Err(QueryError::read_only_snapshot(
+                "mutating queries cannot execute against options.at historical snapshots",
+            ))
+        }
+    }
+}
+
 fn parse_snapshot_option(
     object: &Map<String, JsonValue>,
 ) -> QueryResult<(SnapshotSelector, Option<String>)> {

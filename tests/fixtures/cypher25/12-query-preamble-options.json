@@ -7,7 +7,7 @@
     "version": "2026.08",
     "family": "Query prefix / options"
   },
-  "execution": "planned",
+  "execution": "enabled",
   "query": "PROFILE CYPHER 25 runtime=slotted RETURN 1 AS x",
   "params": {},
   "initial_graph": [],

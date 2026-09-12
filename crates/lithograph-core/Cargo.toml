@@ -11,10 +11,15 @@ path = "src/lib.rs"
 
 [dependencies]
 blake3.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+getrandom.workspace = true
 pest.workspace = true
 pest_derive.workspace = true
+regex.workspace = true
 serde_json.workspace = true
 rusqlite.workspace = true
+unicode-normalization.workspace = true
 
 [lints]
 workspace = true

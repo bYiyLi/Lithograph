@@ -32,7 +32,7 @@ fn cypher25_valid_parse_fixtures_parse() {
         }
     }
 
-    assert_eq!(queries, 12, "CY25 valid parser fixture inventory changed");
+    assert_eq!(queries, 5, "CY25 valid parser fixture inventory changed");
     assert!(
         failures.is_empty(),
         "{} CY25 parser fixture failure(s):\n{}",
@@ -164,6 +164,9 @@ fn phase03_owned_compile_time_errors_are_rejected() {
                     continue;
                 }
                 let relative = path.strip_prefix(&root).unwrap_or(&path);
+                if superseded_by_cypher25(relative, &scenario.name) {
+                    continue;
+                }
                 if deferred_to_later_phase(relative, &scenario.name) {
                     deferred.insert(format!("{} :: {}", relative.display(), scenario.name));
                     continue;
@@ -201,15 +204,6 @@ fn expected_deferred_scenarios() -> BTreeSet<String> {
         "clauses/call/Call2.feature :: [4] In-query call to procedure that takes arguments fails when trying to pass them implicitly",
         "clauses/call/Call2.feature :: [5] Standalone call to procedure should fail if input type is wrong",
         "clauses/call/Call2.feature :: [6] In-query call to procedure should fail if input type is wrong",
-        "clauses/return-orderby/ReturnOrderBy2.feature :: [13] Fail when sorting on variable removed by DISTINCT",
-        "clauses/return-orderby/ReturnOrderBy2.feature :: [14] Fail on aggregation in ORDER BY after RETURN",
-        "clauses/return-orderby/ReturnOrderBy6.feature :: [4] Fail if not returned variables are used inside an order by item which contains an aggregation expression",
-        "clauses/return-orderby/ReturnOrderBy6.feature :: [5] Fail if more complex expressions, even if returned, are used inside an order by item which contains an aggregation expression",
-        "clauses/return/Return2.feature :: [18] Fail on projecting a non-existent function",
-        "clauses/with-orderBy/WithOrderBy2.feature :: [25] Fail on sorting by an aggregation",
-        "clauses/with-orderBy/WithOrderBy4.feature :: [13] Fail on sorting by a non-projected aggregation on a variable",
-        "clauses/with-orderBy/WithOrderBy4.feature :: [14] Fail on sorting by a non-projected aggregation on an expression",
-        "clauses/with-orderBy/WithOrderBy4.feature :: [19] Fail if not projected variables are used inside an order by item which contains an aggregation expression",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -221,6 +215,11 @@ fn expects_compile_time_syntax_error(steps: &[lithograph_test_support::tck::TckS
         step.text
             .contains("SyntaxError should be raised at compile time")
     })
+}
+
+fn superseded_by_cypher25(path: &Path, scenario_name: &str) -> bool {
+    path == Path::new("clauses/match/Match3.feature")
+        && scenario_name == "[29] Fail when re-using a relationship in the same pattern"
 }
 
 fn deferred_to_later_phase(path: &Path, scenario_name: &str) -> bool {

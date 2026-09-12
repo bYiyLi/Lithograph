@@ -7,7 +7,7 @@
     "version": "2026.08",
     "family": "Runtime values"
   },
-  "execution": "planned",
+  "execution": "enabled",
   "query": "RETURN $i AS i, $n AS n, $s AS s, $xs AS xs, $m AS m",
   "params": {
     "i": {"type": "integer", "value": 1},

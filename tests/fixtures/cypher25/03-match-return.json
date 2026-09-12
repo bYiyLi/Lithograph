@@ -7,7 +7,7 @@
     "version": "2026.08",
     "family": "MATCH"
   },
-  "execution": "planned",
+  "execution": "enabled",
   "query": "MATCH (p:Person) RETURN p.name AS name",
   "params": {},
   "initial_graph": ["CREATE (:Person {name: 'Alice'})"],

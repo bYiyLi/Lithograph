@@ -71,7 +71,7 @@ fn match_path_from(
         return Ok(());
     }
     let rel_spec = &context.pattern.relationships[index];
-    for relationship in path_relationship_candidates(context, current, rel_spec)? {
+    for relationship in path_relationship_candidates(context, current, rel_spec, &row)? {
         check_interrupted(context.is_interrupted)?;
         if !relationship_is_usable(context, &row, rel_spec, relationship)? {
             continue;
@@ -126,7 +126,7 @@ fn complete_path(
     relationships: &[RelationshipRecord],
 ) -> BindingRow {
     if let Some(variable) = &pattern.path_variable {
-        row.values.insert(
+        row.insert(
             variable.clone(),
             BindingValue::Path {
                 nodes: nodes.to_vec(),
@@ -141,10 +141,20 @@ fn path_relationship_candidates(
     context: &PathMatchContext<'_, '_>,
     current: i64,
     spec: &RelationshipWriteSpec,
+    row: &BindingRow,
 ) -> QueryResult<Vec<RelationshipRecord>> {
-    let Some(type_id) =
-        storage::find_relationship_type(context.connection, &spec.relationship_type)?
-    else {
+    let names = resolve_write_names(
+        std::slice::from_ref(&spec.relationship_type),
+        context.snapshot,
+        row,
+        context.params,
+    )?;
+    if names.len() != 1 {
+        return Err(QueryError::semantic(
+            "dynamic Relationship Type expression must produce exactly one name",
+        ));
+    }
+    let Some(type_id) = storage::find_relationship_type(context.connection, &names[0])? else {
         return Ok(Vec::new());
     };
     let mut after = 0;
@@ -221,11 +231,20 @@ fn node_candidates(
     }
     let first_label = spec
         .labels
-        .first()
+        .iter()
+        .find_map(|label| match label {
+            WriteName::Static(label) => Some(label),
+            WriteName::Dynamic(_) => None,
+        })
         .map(|label| storage::find_label(connection, label))
         .transpose()?
         .flatten();
-    if !spec.labels.is_empty() && first_label.is_none() {
+    if spec
+        .labels
+        .iter()
+        .any(|label| matches!(label, WriteName::Static(_)))
+        && first_label.is_none()
+    {
         return Ok(Vec::new());
     }
     let mut after = 0;
@@ -299,8 +318,8 @@ fn node_matches(
         return Ok(false);
     }
     let labels = snapshot.labels(id)?;
-    for label in &spec.labels {
-        let Some(label_id) = storage::find_label(connection, label)? else {
+    for label in resolve_write_names(&spec.labels, snapshot, row, params)? {
+        let Some(label_id) = storage::find_label(connection, &label)? else {
             return Ok(false);
         };
         if labels.binary_search(&label_id).is_err() {
@@ -370,8 +389,7 @@ fn bind_node(row: &mut BindingRow, variable: Option<&str>, id: i64) -> QueryResu
             format!("variable {variable} is not a Node"),
         )),
         None => {
-            row.values
-                .insert(variable.to_owned(), BindingValue::Node(id));
+            row.insert(variable.to_owned(), BindingValue::Node(id));
             Ok(())
         }
     }
@@ -383,8 +401,7 @@ fn bind_relationship(
     record: RelationshipRecord,
 ) -> QueryResult<()> {
     if let Some(variable) = variable {
-        row.values
-            .insert(variable.to_owned(), BindingValue::Relationship(record));
+        row.insert(variable.to_owned(), BindingValue::Relationship(record));
     }
     row.used_relationships.insert(record.id);
     Ok(())

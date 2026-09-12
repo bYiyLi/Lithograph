@@ -84,7 +84,7 @@ pub struct PointValue {
 }
 
 impl PointValue {
-    pub fn new(crs: &str, coordinates: Vec<f64>) -> Result<Self, ValueError> {
+    pub fn new(crs: &str, mut coordinates: Vec<f64>) -> Result<Self, ValueError> {
         let (canonical_crs, srid, dimension, geographic) = match crs.to_ascii_lowercase().as_str() {
             "wgs-84" => ("wgs-84", 4_326, 2, true),
             "wgs-84-3d" => ("wgs-84-3d", 4_979, 3, true),
@@ -100,13 +100,13 @@ impl PointValue {
         if coordinates.iter().any(|value| !value.is_finite()) {
             return Err(ValueError::new("Point coordinates must be finite"));
         }
-        if geographic
-            && (!(-180.0..=180.0).contains(&coordinates[0])
-                || !(-90.0..=90.0).contains(&coordinates[1]))
-        {
+        if geographic && !(-90.0..=90.0).contains(&coordinates[1]) {
             return Err(ValueError::new(
-                "WGS-84 longitude/latitude are outside their valid ranges",
+                "WGS-84 latitude is outside its valid range",
             ));
+        }
+        if geographic && !(-180.0..=180.0).contains(&coordinates[0]) {
+            coordinates[0] = (coordinates[0] + 180.0).rem_euclid(360.0) - 180.0;
         }
         Ok(Self {
             crs: canonical_crs.to_owned(),

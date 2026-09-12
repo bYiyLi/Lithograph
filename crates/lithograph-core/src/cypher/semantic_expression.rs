@@ -87,7 +87,7 @@ impl Analyzer<'_> {
 
     pub(super) fn reject_pattern_expressions(&self, node: &AstNode) -> Result<(), FrontendError> {
         let mut patterns = Vec::new();
-        collect_expression_patterns(node, false, &mut patterns);
+        collect_rejected_expression_patterns(node, false, &mut patterns);
         if let Some(pattern) = patterns.first() {
             Err(self.semantic_error(
                 pattern.span,
@@ -115,6 +115,11 @@ impl Analyzer<'_> {
                 return Err(self
                     .semantic_error(function.span, "size() does not accept a pattern expression"));
             }
+            if name == "exists" && !has_direct_pattern_argument(function) {
+                return Err(
+                    self.semantic_error(function.span, "exists() requires a pattern expression")
+                );
+            }
             let Some(variable) = first_argument_variable(function) else {
                 continue;
             };
@@ -126,6 +131,10 @@ impl Analyzer<'_> {
                 "type" => matches!(kind, BindingKind::Relationship | BindingKind::Unknown),
                 "length" => matches!(kind, BindingKind::Path | BindingKind::Unknown),
                 "size" => *kind != BindingKind::Path,
+                "property_exists" => matches!(
+                    kind,
+                    BindingKind::Node | BindingKind::Relationship | BindingKind::Unknown
+                ),
                 "properties" => matches!(
                     kind,
                     BindingKind::Node
@@ -170,6 +179,46 @@ impl Analyzer<'_> {
             }
         }
         Ok(())
+    }
+}
+
+fn collect_rejected_expression_patterns<'a>(
+    node: &'a AstNode,
+    inside_expression: bool,
+    output: &mut Vec<&'a AstNode>,
+) {
+    collect_expression_patterns_inner(node, inside_expression, true, output);
+}
+
+fn collect_expression_patterns_inner<'a>(
+    node: &'a AstNode,
+    inside_expression: bool,
+    allow_exists_pattern: bool,
+    output: &mut Vec<&'a AstNode>,
+) {
+    if matches!(node.kind, AstKind::Subquery(_)) {
+        return;
+    }
+    if allow_exists_pattern
+        && matches!(node.kind, AstKind::Expression(ExpressionKind::FunctionCall))
+        && function_name(node).as_deref() == Some("exists")
+    {
+        return;
+    }
+    if matches!(node.kind, AstKind::Expression(ExpressionKind::List))
+        && node
+            .descendants()
+            .any(|child| child.kind == AstKind::Pattern)
+    {
+        return;
+    }
+    let inside_expression = inside_expression || matches!(node.kind, AstKind::Expression(_));
+    if node.kind == AstKind::Pattern && inside_expression {
+        output.push(node);
+        return;
+    }
+    for child in &node.children {
+        collect_expression_patterns_inner(child, inside_expression, allow_exists_pattern, output);
     }
 }
 
@@ -226,24 +275,7 @@ fn collect_expression_patterns<'a>(
     inside_expression: bool,
     output: &mut Vec<&'a AstNode>,
 ) {
-    if matches!(node.kind, AstKind::Subquery(_)) {
-        return;
-    }
-    if matches!(node.kind, AstKind::Expression(ExpressionKind::List))
-        && node
-            .descendants()
-            .any(|child| child.kind == AstKind::Pattern)
-    {
-        return;
-    }
-    let inside_expression = inside_expression || matches!(node.kind, AstKind::Expression(_));
-    if node.kind == AstKind::Pattern && inside_expression {
-        output.push(node);
-        return;
-    }
-    for child in &node.children {
-        collect_expression_patterns(child, inside_expression, output);
-    }
+    collect_expression_patterns_inner(node, inside_expression, false, output);
 }
 
 fn has_direct_pattern_argument(node: &AstNode) -> bool {

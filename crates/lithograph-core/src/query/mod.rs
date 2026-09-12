@@ -1,11 +1,15 @@
 //! Phase 04 read-query planning and execution.
 
+mod completeness;
 mod error;
 mod expression;
+mod functions;
 mod graph;
 mod mutation;
+mod name_expression;
 mod options;
 mod plan;
+pub(crate) mod registry;
 mod spill;
 mod stats;
 mod stream;

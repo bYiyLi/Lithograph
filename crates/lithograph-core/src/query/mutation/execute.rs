@@ -3,7 +3,10 @@ use super::*;
 mod delete;
 mod delta;
 mod matcher;
+mod program;
 mod value;
+
+pub(crate) use program::execute_program;
 
 use delete::apply_delete;
 use delta::{property_states_equal, staged_snapshot};
@@ -20,6 +23,7 @@ struct MutationContext<'connection, 'query> {
     params: &'query BTreeMap<String, Value>,
     graph_view_selector: &'query GraphViewSelector,
     delta: DeltaBuilder,
+    global_bindings: BindingRow,
 }
 
 impl<'connection, 'query> MutationContext<'connection, 'query> {
@@ -36,6 +40,7 @@ impl<'connection, 'query> MutationContext<'connection, 'query> {
             params,
             graph_view_selector,
             delta: DeltaBuilder::default(),
+            global_bindings: BindingRow::default(),
         })
     }
 
@@ -133,9 +138,10 @@ fn execute_clause(
         }
         WriteClause::Set(items) => execute_set_clause(context, items, rows, is_interrupted),
         WriteClause::Remove(items) => execute_remove_clause(context, items, rows, is_interrupted),
-        WriteClause::Delete { variables, detach } => {
-            execute_delete_clause(context, variables, *detach, rows, is_interrupted)
-        }
+        WriteClause::Delete {
+            expressions,
+            detach,
+        } => execute_delete_clause(context, expressions, *detach, rows, is_interrupted),
         WriteClause::Merge(merge) => execute_merge_clause(context, merge, rows, is_interrupted),
     }
 }
@@ -246,17 +252,34 @@ fn execute_row_mutation_clause(
 
 fn execute_delete_clause(
     context: &mut MutationContext<'_, '_>,
-    variables: &[String],
+    expressions: &[Expr],
     detach: bool,
     rows: Vec<BindingRow>,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<Vec<BindingRow>> {
     let clause_input = context.staged_snapshot()?;
     let graph_view = context.graph_view()?;
+    let variables = (0..expressions.len())
+        .map(|index| format!("__lithograph_delete_{index}"))
+        .collect::<Vec<_>>();
+    let targets = rows
+        .iter()
+        .map(|row| {
+            let mut targets = BindingRow::default();
+            for (variable, expression) in variables.iter().zip(expressions) {
+                let value = expression::evaluate(expression, &clause_input, row, context.params)?;
+                targets.insert(
+                    variable.clone(),
+                    expression::binding_from_value(&clause_input, value)?,
+                );
+            }
+            Ok(targets)
+        })
+        .collect::<QueryResult<Vec<_>>>()?;
     apply_delete(
         context,
-        &rows,
-        variables,
+        &targets,
+        &variables,
         detach,
         &clause_input,
         &graph_view,
@@ -363,7 +386,7 @@ fn create_pattern_part(
         current = next;
     }
     if let Some(variable) = &part.path_variable {
-        row.values.insert(
+        row.insert(
             variable.clone(),
             BindingValue::Path {
                 nodes: node_ids,
@@ -421,10 +444,10 @@ fn create_node(
     let id = storage::allocate_node_id(context.connection)?;
     context.delta.set_node(&context.base, id, true)?;
     touched.nodes.insert(id);
-    add_node_labels(context, id, &spec.labels)?;
+    add_node_labels(context, row, id, &spec.labels)?;
     apply_create_properties(context, row, OwnerKind::Node, id, spec.properties.as_ref())?;
     if let Some(variable) = &spec.variable {
-        row.values.insert(variable.clone(), BindingValue::Node(id));
+        row.insert(variable.clone(), BindingValue::Node(id));
     }
     Ok(id)
 }
@@ -455,11 +478,13 @@ fn apply_create_properties(
 
 fn add_node_labels(
     context: &mut MutationContext<'_, '_>,
+    row: &BindingRow,
     id: i64,
-    labels: &[String],
+    labels: &[WriteName],
 ) -> QueryResult<()> {
-    for label in labels.iter().collect::<BTreeSet<_>>() {
-        let label_id = storage::intern_label(context.connection, label)?;
+    let staged = context.staged_snapshot()?;
+    for label in resolve_write_names(labels, &staged, row, context.params)? {
+        let label_id = storage::intern_label(context.connection, &label)?;
         context.delta.set_label(&context.base, id, label_id, true)?;
     }
     Ok(())
@@ -480,8 +505,20 @@ fn create_relationship(
             "CREATE cannot reuse bound Relationship variable {variable}"
         )));
     }
+    let staged = context.staged_snapshot()?;
+    let relationship_types = resolve_write_names(
+        std::slice::from_ref(&spec.relationship_type),
+        &staged,
+        row,
+        context.params,
+    )?;
+    if relationship_types.len() != 1 {
+        return Err(QueryError::semantic(
+            "dynamic Relationship Type expression must produce exactly one name",
+        ));
+    }
     let id = storage::allocate_relationship_id(context.connection)?;
-    let type_id = storage::intern_relationship_type(context.connection, &spec.relationship_type)?;
+    let type_id = storage::intern_relationship_type(context.connection, &relationship_types[0])?;
     let record = RelationshipRecord {
         id,
         source,
@@ -500,8 +537,7 @@ fn create_relationship(
         spec.properties.as_ref(),
     )?;
     if let Some(variable) = &spec.variable {
-        row.values
-            .insert(variable.clone(), BindingValue::Relationship(record));
+        row.insert(variable.clone(), BindingValue::Relationship(record));
     }
     Ok(record)
 }
@@ -592,17 +628,18 @@ fn set_single_property(
     clause_input: &Snapshot<'_>,
     row: &BindingRow,
     variable: &str,
-    key: &str,
+    key: &WritePropertyKey,
     value: &Expr,
     graph_view: &ResolvedGraphView,
     touched: &mut TouchedElements,
 ) -> QueryResult<()> {
     let (owner_kind, id) = visible_owner(staged, clause_input, row, variable, graph_view)?;
+    let key = resolve_property_key(key, staged, row, context.params)?;
     let value = expression::evaluate(value, staged, row, context.params)?;
     let next = property_from_value(value)?;
     let key_id = match &next {
-        Some(_) => storage::intern_property_key(context.connection, key)?,
-        None => match storage::find_property_key(context.connection, key)? {
+        Some(_) => storage::intern_property_key(context.connection, &key)?,
+        None => match storage::find_property_key(context.connection, &key)? {
             Some(key_id) => key_id,
             None => return Ok(()),
         },
@@ -664,7 +701,7 @@ fn mutate_labels(
     clause_input: &Snapshot<'_>,
     row: &BindingRow,
     variable: &str,
-    labels: &[String],
+    labels: &[WriteName],
     graph_view: &ResolvedGraphView,
     touched: &mut TouchedElements,
     mutation: LabelMutation,
@@ -672,11 +709,11 @@ fn mutate_labels(
     let id = binding_node(row, variable)?;
     require_visible_owner(graph_view, clause_input, staged, row, variable)?;
     let existing = staged.labels(id)?;
-    for label in labels.iter().collect::<BTreeSet<_>>() {
+    for label in resolve_write_names(labels, staged, row, context.params)? {
         let label_id = match mutation {
-            LabelMutation::Add => storage::intern_label(context.connection, label)?,
+            LabelMutation::Add => storage::intern_label(context.connection, &label)?,
             LabelMutation::Remove => {
-                let Some(label_id) = storage::find_label(context.connection, label)? else {
+                let Some(label_id) = storage::find_label(context.connection, &label)? else {
                     continue;
                 };
                 label_id
@@ -759,12 +796,13 @@ fn remove_property(
     clause_input: &Snapshot<'_>,
     row: &BindingRow,
     variable: &str,
-    key: &str,
+    key: &WritePropertyKey,
     graph_view: &ResolvedGraphView,
     touched: &mut TouchedElements,
 ) -> QueryResult<()> {
     let (owner_kind, id) = visible_owner(staged, clause_input, row, variable, graph_view)?;
-    let Some(key_id) = storage::find_property_key(context.connection, key)? else {
+    let key = resolve_property_key(key, staged, row, context.params)?;
+    let Some(key_id) = storage::find_property_key(context.connection, &key)? else {
         return Ok(());
     };
     if staged.property(owner_kind, id, key_id)?.is_some() {
@@ -774,6 +812,29 @@ fn remove_property(
     }
     touched.insert(owner_kind, id);
     Ok(())
+}
+
+fn resolve_property_key(
+    key: &WritePropertyKey,
+    snapshot: &Snapshot<'_>,
+    row: &BindingRow,
+    params: &BTreeMap<String, Value>,
+) -> QueryResult<String> {
+    match key {
+        WritePropertyKey::Static(key) => Ok(key.clone()),
+        WritePropertyKey::Dynamic(expression) => {
+            match expression::evaluate(expression, snapshot, row, params)? {
+                Value::String(key) if !key.is_empty() => Ok(key),
+                Value::String(_) => {
+                    Err(QueryError::semantic("dynamic property key cannot be empty"))
+                }
+                _ => Err(QueryError::new(
+                    QueryErrorKind::Type,
+                    "dynamic property key must evaluate to a non-null String",
+                )),
+            }
+        }
+    }
 }
 
 fn visible_owner(

@@ -7,9 +7,16 @@
     "version": "2025.06",
     "family": "Match mode / parameter naming"
   },
-  "execution": "planned",
+  "execution": "enabled",
   "query": "MATCH REPEATABLE ELEMENTS p = (:Node)-->{1,2}() RETURN $0param AS value",
-  "params": {},
-  "initial_graph": [],
-  "expected": {"kind": "parse", "valid": true}
+  "params": {
+    "0param": {"type": "integer", "value": 7}
+  },
+  "initial_graph": ["CREATE (:Node)-[:R]->(:Node)"],
+  "expected": {
+    "kind": "rows",
+    "columns": ["value"],
+    "ordered": true,
+    "rows": [[{"type": "integer", "value": 7}]]
+  }
 }

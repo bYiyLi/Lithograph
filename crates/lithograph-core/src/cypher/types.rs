@@ -353,6 +353,9 @@ fn infer_arithmetic_operator(
     types: &[CypherType],
     operators: &[String],
 ) -> Option<Result<CypherType, FrontendError>> {
+    if let Some(result) = infer_temporal_arithmetic(types, operators) {
+        return Some(result.map_err(|message| type_error(source, node.span, message)));
+    }
     if operators.iter().any(|operator| operator == "/") {
         return Some(require_numeric(types, node.span, source).map(|()| CypherType::Float));
     }
@@ -371,6 +374,94 @@ fn infer_arithmetic_operator(
         return Some(concat_result_type(types, node.span, source));
     }
     None
+}
+
+fn infer_temporal_arithmetic(
+    types: &[CypherType],
+    operators: &[String],
+) -> Option<Result<CypherType, &'static str>> {
+    if operators.is_empty()
+        || !types
+            .iter()
+            .any(|value| *value == CypherType::Duration || is_temporal_instant(value))
+    {
+        return None;
+    }
+    if types.len() != operators.len() + 1 {
+        return Some(Err("temporal arithmetic expression has an invalid shape"));
+    }
+    let mut result = types[0].clone();
+    for (operator, right) in operators.iter().zip(&types[1..]) {
+        result = match temporal_arithmetic_pair(operator, &result, right) {
+            Some(result) => result,
+            None => return Some(Err("temporal arithmetic operands are incompatible")),
+        };
+    }
+    Some(Ok(result))
+}
+
+fn temporal_arithmetic_pair(
+    operator: &str,
+    left: &CypherType,
+    right: &CypherType,
+) -> Option<CypherType> {
+    if matches!(left, CypherType::Any | CypherType::Null)
+        || matches!(right, CypherType::Any | CypherType::Null)
+    {
+        return Some(CypherType::Any);
+    }
+    match operator {
+        "+" => temporal_add_type(left, right),
+        "-" => temporal_subtract_type(left, right),
+        "*" => temporal_multiply_type(left, right),
+        "/" => temporal_divide_type(left, right),
+        _ => None,
+    }
+}
+
+fn temporal_add_type(left: &CypherType, right: &CypherType) -> Option<CypherType> {
+    if left == &CypherType::Duration && right == &CypherType::Duration {
+        return Some(CypherType::Duration);
+    }
+    if is_temporal_instant(left) && right == &CypherType::Duration {
+        return Some(left.clone());
+    }
+    (left == &CypherType::Duration && is_temporal_instant(right)).then(|| right.clone())
+}
+
+fn temporal_subtract_type(left: &CypherType, right: &CypherType) -> Option<CypherType> {
+    if right != &CypherType::Duration {
+        return None;
+    }
+    if left == &CypherType::Duration {
+        return Some(CypherType::Duration);
+    }
+    is_temporal_instant(left).then(|| left.clone())
+}
+
+fn temporal_multiply_type(left: &CypherType, right: &CypherType) -> Option<CypherType> {
+    ((left == &CypherType::Duration && is_numeric_type(right))
+        || (is_numeric_type(left) && right == &CypherType::Duration))
+        .then_some(CypherType::Duration)
+}
+
+fn temporal_divide_type(left: &CypherType, right: &CypherType) -> Option<CypherType> {
+    (left == &CypherType::Duration && is_numeric_type(right)).then_some(CypherType::Duration)
+}
+
+fn is_temporal_instant(value: &CypherType) -> bool {
+    matches!(
+        value,
+        CypherType::Date
+            | CypherType::LocalTime
+            | CypherType::Time
+            | CypherType::LocalDateTime
+            | CypherType::ZonedDateTime
+    )
+}
+
+fn is_numeric_type(value: &CypherType) -> bool {
+    matches!(value, CypherType::Integer | CypherType::Float)
 }
 
 pub(super) fn require_numeric(

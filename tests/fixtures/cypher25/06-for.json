@@ -7,9 +7,18 @@
     "version": "2026.04",
     "family": "UNWIND / FOR"
   },
-  "execution": "planned",
+  "execution": "enabled",
   "query": "FOR x IN [1, 2, 3] RETURN x",
   "params": {},
   "initial_graph": [],
-  "expected": {"kind": "parse", "valid": true}
+  "expected": {
+    "kind": "rows",
+    "columns": ["x"],
+    "ordered": true,
+    "rows": [
+      [{"type": "integer", "value": 1}],
+      [{"type": "integer", "value": 2}],
+      [{"type": "integer", "value": 3}]
+    ]
+  }
 }

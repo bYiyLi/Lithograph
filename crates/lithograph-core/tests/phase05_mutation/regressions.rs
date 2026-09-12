@@ -206,15 +206,11 @@ fn delete_removes_relationships_from_all_rows_before_deleting_nodes() {
 }
 
 #[test]
-fn unsupported_write_name_expressions_fail_instead_of_becoming_literal_names() {
+fn write_name_expressions_accept_dynamic_names_and_reject_non_concrete_names() {
     let connection = fresh_storage();
     let before = branch_head(&connection, "main").expect("head before unsupported names");
 
-    for query in [
-        "CREATE (:A|B) FINISH",
-        "CREATE ()-[:$('DYNAMIC')]->() FINISH",
-        "CREATE ()-[:!NEGATED]->() FINISH",
-    ] {
+    for query in ["CREATE (:A|B) FINISH", "CREATE ()-[:!NEGATED]->() FINISH"] {
         let error = execute(&connection, query, ExecutionOptions::default())
             .expect_err("unsupported write name expression must be rejected");
         assert_eq!(error.kind, QueryErrorKind::Semantic, "query: {query}");
@@ -232,13 +228,24 @@ fn unsupported_write_name_expressions_fail_instead_of_becoming_literal_names() {
                 .is_none()
         );
     }
-    for relationship_type in ["$('DYNAMIC')", "NEGATED"] {
-        assert!(
-            lithograph_core::storage::find_relationship_type(&connection, relationship_type)
-                .expect("find rejected Relationship Type")
-                .is_none()
-        );
-    }
+    assert!(
+        lithograph_core::storage::find_relationship_type(&connection, "NEGATED")
+            .expect("find rejected Relationship Type")
+            .is_none()
+    );
+
+    let (_, summary) = execute(
+        &connection,
+        "CREATE ()-[:$('DYNAMIC')]->() FINISH",
+        ExecutionOptions::default(),
+    )
+    .expect("dynamic Relationship Type");
+    assert_eq!(summary.counters.relationships_created, 1);
+    assert!(
+        lithograph_core::storage::find_relationship_type(&connection, "DYNAMIC")
+            .expect("find dynamic Relationship Type")
+            .is_some()
+    );
 }
 
 #[test]
@@ -305,34 +312,23 @@ fn unsupported_write_path_modifiers_fail_instead_of_being_ignored() {
 }
 
 #[test]
-fn unsupported_postfix_expressions_fail_instead_of_writing_or_returning_the_base_value() {
+fn postfix_expressions_write_and_return_their_computed_values() {
     let connection = fresh_storage();
-    let before = branch_head(&connection, "main").expect("head before postfix expressions");
-
-    for query in [
-        "CREATE (node:RejectedPostfix) SET node.value = [1,2][0] FINISH",
-        "CREATE (node:RejectedPostfix) SET node.value = [1,2][0..1] FINISH",
-        "CREATE (node:RejectedPostfix) RETURN node:RejectedPostfix",
-        "CREATE (node:RejectedPostfix) RETURN node::NODE",
-    ] {
-        let error = match execute(&connection, query, ExecutionOptions::default()) {
-            Ok(_) => panic!("unsupported postfix expression unexpectedly succeeded: {query}"),
-            Err(error) => error,
-        };
-        assert_eq!(error.kind, QueryErrorKind::Semantic, "query: {query}");
-        assert_eq!(
-            branch_head(&connection, "main").expect("head after rejected postfix expression"),
-            before,
-            "query: {query}"
-        );
-    }
-
+    let (rows, summary) = execute(
+        &connection,
+        "CREATE (node:Postfix) SET node.item = [1,2][0], node.slice = [1,2][0..1] RETURN node.item, node.slice, node:Postfix AS labeled, node::NODE AS typed",
+        ExecutionOptions::default(),
+    )
+    .expect("postfix expressions");
+    assert_eq!(summary.counters.nodes_created, 1);
     assert_eq!(
-        read_rows(
-            &connection,
-            "MATCH (node:RejectedPostfix) RETURN count(node)"
-        ),
-        vec![vec![Value::Integer(0)]]
+        rows,
+        vec![vec![
+            Value::Integer(1),
+            Value::List(vec![Value::Integer(1)]),
+            Value::Boolean(true),
+            Value::Boolean(true),
+        ]]
     );
 }
 
@@ -433,56 +429,72 @@ fn aggregate_write_order_expressions_are_validated_before_commit() {
     assert_eq!(rows, vec![vec![Value::Integer(1)]]);
     assert_eq!(summary.counters.nodes_created, 1);
 
+    let (rows, summary) = execute(
+        &connection,
+        "CREATE (:ValidAggregateFunction) RETURN count(*) AS total ORDER BY toString(1)",
+        ExecutionOptions::default(),
+    )
+    .expect("constant function is a valid aggregate ORDER BY expression");
+    assert_eq!(rows, vec![vec![Value::Integer(1)]]);
+    assert_eq!(summary.counters.nodes_created, 1);
+
     let before = branch_head(&connection, "main").expect("head before invalid aggregate order");
-    for query in [
-        "CREATE (:RejectedAggregateFunction) RETURN count(*) AS total ORDER BY toString(1)",
-        "CREATE (node:RejectedAggregateScope) RETURN count(node) AS total ORDER BY node.missing",
-    ] {
-        let error = execute(&connection, query, ExecutionOptions::default())
-            .expect_err("invalid aggregate ORDER BY must not be skipped for a single result row");
-        assert_eq!(error.kind, QueryErrorKind::Semantic, "query: {query}");
-        assert_eq!(
-            branch_head(&connection, "main").expect("head after invalid aggregate order"),
-            before,
-            "query: {query}"
-        );
-    }
-    for label in ["RejectedAggregateFunction", "RejectedAggregateScope"] {
-        assert_eq!(
-            read_rows(
-                &connection,
-                &format!("MATCH (node:{label}) RETURN count(node)")
-            ),
-            vec![vec![Value::Integer(0)]]
-        );
-    }
+    let query =
+        "CREATE (node:RejectedAggregateScope) RETURN count(node) AS total ORDER BY node.missing";
+    let error = execute(&connection, query, ExecutionOptions::default())
+        .expect_err("ungrouped aggregate ORDER BY must fail before commit");
+    assert_eq!(error.kind, QueryErrorKind::Semantic);
+    assert_eq!(
+        branch_head(&connection, "main").expect("head after invalid aggregate order"),
+        before
+    );
+    assert_eq!(
+        read_rows(
+            &connection,
+            "MATCH (node:RejectedAggregateScope) RETURN count(node)"
+        ),
+        vec![vec![Value::Integer(0)]]
+    );
 }
 
 #[test]
-fn unsupported_write_functions_fail_even_when_the_projection_has_no_rows() {
+fn supported_write_functions_are_validated_even_when_the_projection_has_no_rows() {
     let connection = fresh_storage();
-    let before = branch_head(&connection, "main").expect("head before unsupported functions");
+    let before = branch_head(&connection, "main").expect("head before zero-row write");
+    let (rows, summary) = execute(
+        &connection,
+        "MATCH (:Missing) CREATE (:ZeroRowFunction) RETURN toString(1)",
+        ExecutionOptions::default(),
+    )
+    .expect("supported function in a zero-row write projection");
+    assert!(rows.is_empty());
+    assert_eq!(summary.counters.nodes_created, 0);
+    assert_ne!(
+        branch_head(&connection, "main").expect("head after zero-row mutation intent"),
+        before
+    );
+    assert!(
+        lithograph_core::storage::find_label(&connection, "ZeroRowFunction")
+            .expect("find zero-row label")
+            .is_none()
+    );
 
-    for query in [
-        "MATCH (:Missing) CREATE (:RejectedZeroRowFunction) RETURN toString(1)",
-        "EXPLAIN CREATE (:RejectedExplainFunction) RETURN toString(1)",
-    ] {
-        let error = execute(&connection, query, ExecutionOptions::default())
-            .expect_err("unsupported functions must fail during expression lowering");
-        assert_eq!(error.kind, QueryErrorKind::Semantic, "query: {query}");
-        assert_eq!(
-            branch_head(&connection, "main").expect("head after unsupported function"),
-            before,
-            "query: {query}"
-        );
-    }
-    for label in ["RejectedZeroRowFunction", "RejectedExplainFunction"] {
-        assert!(
-            lithograph_core::storage::find_label(&connection, label)
-                .expect("find rejected function label")
-                .is_none()
-        );
-    }
+    let before_explain = branch_head(&connection, "main").expect("head before EXPLAIN");
+    execute(
+        &connection,
+        "EXPLAIN CREATE (:ExplainFunction) RETURN toString(1)",
+        ExecutionOptions::default(),
+    )
+    .expect("supported function in mutating EXPLAIN");
+    assert_eq!(
+        branch_head(&connection, "main").expect("head after EXPLAIN"),
+        before_explain
+    );
+    assert!(
+        lithograph_core::storage::find_label(&connection, "ExplainFunction")
+            .expect("find EXPLAIN label")
+            .is_none()
+    );
 }
 
 #[test]
@@ -553,7 +565,7 @@ fn set_property_target_must_be_a_direct_or_parenthesized_variable() {
 }
 
 #[test]
-fn write_distinct_and_order_by_use_the_read_result_pipeline_order() {
+fn distinct_order_by_cannot_reintroduce_a_removed_variable_after_write() {
     let connection = fresh_storage();
     execute(
         &connection,
@@ -561,22 +573,35 @@ fn write_distinct_and_order_by_use_the_read_result_pipeline_order() {
         ExecutionOptions::default(),
     )
     .expect("seed duplicate projection groups");
-    let query = "MATCH (node:Group) RETURN DISTINCT node.name AS name ORDER BY node.rank";
-    let read = read_rows(&connection, query);
+    let before = branch_head(&connection, "main").expect("head before invalid ordering");
+    let read_error = execute(
+        &connection,
+        "MATCH (node:Group) RETURN DISTINCT node.name AS name ORDER BY node.rank",
+        ExecutionOptions::default(),
+    )
+    .expect_err("DISTINCT must remove the unprojected node variable");
+    assert_eq!(read_error.kind, QueryErrorKind::Semantic);
 
-    let (write, _) = execute(
+    let write_error = execute(
         &connection,
         "MATCH (node:Group) SET node.touched = true RETURN DISTINCT node.name AS name ORDER BY node.rank",
         ExecutionOptions::default(),
     )
-    .expect("write projection with DISTINCT and ORDER BY");
+    .expect_err("an invalid write projection must fail before committing");
+    assert_eq!(write_error.kind, QueryErrorKind::Semantic);
+    assert_eq!(
+        branch_head(&connection, "main").expect("head after invalid ordering"),
+        before
+    );
 
     assert_eq!(
-        read,
+        read_rows(
+            &connection,
+            "MATCH (node:Group) RETURN DISTINCT node.name AS name ORDER BY name"
+        ),
         vec![
-            vec![Value::String("B".to_owned())],
-            vec![Value::String("A".to_owned())]
+            vec![Value::String("A".to_owned())],
+            vec![Value::String("B".to_owned())]
         ]
     );
-    assert_eq!(write, read);
 }
