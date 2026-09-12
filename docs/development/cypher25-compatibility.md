@@ -63,7 +63,7 @@ Phase 03 已交付 parser/AST/scope/type/value frontend foundation；Phase 04/05
 | Pattern semantics | directions、anonymous elements、label expressions、relationship type expressions | `done` | 04, 06 |
 | Quantified / variable-length patterns | group variables、bounds、predicates、result cardinality | `done` | 06 |
 | Match modes | repeatable/different relationship semantics | `done` | 06 |
-| Path modes | walk/trail/acyclic/simple constraints as Profile specifies | `done` | 06 |
+| Path modes | walk/trail/acyclic constraints as Profile specifies | `done` | 06 |
 | Path selectors / shortest | ANY/ALL shortest、k/group selectors、mix with path modes | `done` | 06 |
 | Runtime values | Boolean/Integer/Float/String/List/Map/Node/Relationship/Path | `done` | 03, 06 |
 | Temporal / Duration | constructors、arithmetic、formatting、timezone/DST semantics | `done` | 03, 06 |

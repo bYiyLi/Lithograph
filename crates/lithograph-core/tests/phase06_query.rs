@@ -616,7 +616,7 @@ fn conversion_type_normalization_and_keyword_string_forms_match_the_profile() {
     assert_eq!(
         rows(
             &connection,
-            "RETURN toBoolean('not a boolean') AS booleanFailure, toInteger('not an integer') AS integerFailure, toFloat('not a float') AS floatFailure, valueType([date('2024-01-01')]) AS dateListType, valueType([1, null]) AS nullableListType, valueType([]) AS emptyListType, valueType(vector([1, 2], 2, FLOAT32 NOT NULL)) AS vectorType, valueType(uuid('550e8400-e29b-41d4-a716-446655440000')) AS uuidType, normalize('\u{FE64}', NFKC) AS normalized, trim(LEADING 'x' FROM 'xxyx') AS leading, trim(TRAILING 'x' FROM 'xxyx') AS trailing, trim(BOTH 'x' FROM 'xxyx') AS both, left('x', null) AS nullLeft, substring('x', null) AS nullSubstring",
+            "RETURN toBoolean('not a boolean') AS booleanFailure, toInteger('not an integer') AS integerFailure, toFloat('not a float') AS floatFailure, valueType([date('2024-01-01')]) AS dateListType, valueType([1, null]) AS nullableListType, valueType([]) AS emptyListType, valueType(vector([1, 2], 2, FLOAT32 NOT NULL)) AS vectorType, valueType(uuid('550e8400-e29b-41d4-a716-446655440000')) AS uuidType, normalize('\u{FE64}', NFKC) AS normalized, trim(LEADING 'x' FROM 'xxyx') AS leading, trim(TRAILING 'x' FROM 'xxyx') AS trailing, trim(BOTH 'x' FROM 'xxyx') AS both",
         ),
         vec![vec![
             Value::Null,
@@ -631,14 +631,16 @@ fn conversion_type_normalization_and_keyword_string_forms_match_the_profile() {
             Value::String("yx".to_owned()),
             Value::String("xxy".to_owned()),
             Value::String("y".to_owned()),
-            Value::Null,
-            Value::Null,
         ]]
     );
     for query in [
         "RETURN toBoolean(1.2)",
         "RETURN left('x', -1)",
+        "RETURN left('x', null)",
+        "RETURN right('x', null)",
         "RETURN substring('x', -1)",
+        "RETURN substring('x', null)",
+        "RETURN substring('x', 0, null)",
         "RETURN string.indexOf('hello', 'l', 1)",
     ] {
         assert!(
@@ -646,6 +648,13 @@ fn conversion_type_normalization_and_keyword_string_forms_match_the_profile() {
             "query must fail: {query}"
         );
     }
+    assert_eq!(
+        rows(
+            &connection,
+            "RETURN left(null, null), right(null, null), substring(null, 0)",
+        ),
+        vec![vec![Value::Null, Value::Null, Value::Null]]
+    );
 }
 
 #[test]
@@ -806,31 +815,33 @@ fn current_graph_registry_drives_call() {
     }
 }
 
-#[test]
-fn show_uses_the_complete_registry_column_contract() {
-    let connection = fresh_storage();
+fn assert_show_function_inventory(connection: &Connection) {
     let functions = rows(
-        &connection,
+        connection,
         "SHOW FUNCTIONS YIELD name, aggregating WHERE aggregating RETURN name ORDER BY name",
     );
     assert!(functions.contains(&vec![Value::String("count".to_owned())]));
     assert!(functions.contains(&vec![Value::String("sum".to_owned())]));
     assert_eq!(
         rows(
-            &connection,
+            connection,
             "SHOW FUNCTIONS YIELD name WHERE name = 'allReduce' RETURN name",
         ),
         vec![vec![Value::String("allReduce".to_owned())]]
     );
     assert_eq!(
         rows(
-            &connection,
-            "SHOW FUNCTIONS YIELD name, category WHERE name IN ['abs', 'all', 'string.join', 'db.nameFromElementId'] RETURN name, category ORDER BY name",
+            connection,
+            "SHOW FUNCTIONS YIELD name, category WHERE name IN ['abs', 'acos', 'all', 'string.join', 'db.nameFromElementId'] RETURN name, category ORDER BY name",
         ),
         vec![
             vec![
                 Value::String("abs".to_owned()),
                 Value::String("Numeric".to_owned()),
+            ],
+            vec![
+                Value::String("acos".to_owned()),
+                Value::String("Trigonometric".to_owned()),
             ],
             vec![
                 Value::String("all".to_owned()),
@@ -846,6 +857,112 @@ fn show_uses_the_complete_registry_column_contract() {
             ],
         ]
     );
+    assert_eq!(
+        rows(
+            connection,
+            "SHOW FUNCTIONS YIELD name, signature WHERE name = 'uuid' RETURN signature",
+        ),
+        vec![
+            vec![Value::String("uuid() :: UUID".to_owned())],
+            vec![Value::String("uuid(name :: STRING) :: UUID".to_owned())],
+            vec![Value::String(
+                "uuid(mostSigBits :: INTEGER, leastSigBits :: INTEGER) :: UUID".to_owned(),
+            )],
+        ]
+    );
+}
+
+fn assert_show_function_metadata(connection: &Connection) {
+    assert_eq!(
+        rows(
+            connection,
+            "SHOW FUNCTIONS YIELD name, signature, returnDescription WHERE name IN ['avg', 'coll.indexOf', 'keys', 'nodes', 'relationships', 'string.join', 'timestamp', 'toIntegerList'] RETURN name, signature, returnDescription ORDER BY name",
+        ),
+        vec![
+            vec![
+                Value::String("avg".to_owned()),
+                Value::String(
+                    "avg(input :: INTEGER | FLOAT | DURATION) :: INTEGER | FLOAT | DURATION"
+                        .to_owned(),
+                ),
+                Value::String("INTEGER | FLOAT | DURATION".to_owned()),
+            ],
+            vec![
+                Value::String("coll.indexOf".to_owned()),
+                Value::String(
+                    "coll.indexOf(list :: LIST<ANY>, value :: ANY) :: INTEGER".to_owned(),
+                ),
+                Value::String("INTEGER".to_owned()),
+            ],
+            vec![
+                Value::String("keys".to_owned()),
+                Value::String(
+                    "keys(input :: NODE | RELATIONSHIP | MAP) :: LIST<STRING>".to_owned(),
+                ),
+                Value::String("LIST<STRING>".to_owned()),
+            ],
+            vec![
+                Value::String("nodes".to_owned()),
+                Value::String("nodes(input :: PATH) :: LIST<NODE>".to_owned()),
+                Value::String("LIST<NODE>".to_owned()),
+            ],
+            vec![
+                Value::String("relationships".to_owned()),
+                Value::String("relationships(input :: PATH) :: LIST<RELATIONSHIP>".to_owned(),),
+                Value::String("LIST<RELATIONSHIP>".to_owned()),
+            ],
+            vec![
+                Value::String("string.join".to_owned()),
+                Value::String(
+                    "string.join(input :: LIST<STRING>, delimiter :: STRING) :: STRING".to_owned(),
+                ),
+                Value::String("STRING".to_owned()),
+            ],
+            vec![
+                Value::String("timestamp".to_owned()),
+                Value::String("timestamp() :: INTEGER".to_owned()),
+                Value::String("INTEGER".to_owned()),
+            ],
+            vec![
+                Value::String("toIntegerList".to_owned()),
+                Value::String(
+                    "toIntegerList(input :: VECTOR | LIST<ANY>) :: LIST<INTEGER>".to_owned(),
+                ),
+                Value::String("LIST<INTEGER>".to_owned()),
+            ],
+        ]
+    );
+    assert!(
+        rows(
+            connection,
+            "SHOW FUNCTIONS YIELD name WHERE name = 'property_exists' RETURN name",
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        rows(
+            connection,
+            "SHOW FUNCTIONS YIELD name, isDeprecated, deprecatedBy WHERE name = 'id' RETURN isDeprecated, deprecatedBy",
+        ),
+        vec![vec![
+            Value::Boolean(true),
+            Value::String("elementId".to_owned()),
+        ]]
+    );
+    assert_eq!(
+        rows(
+            connection,
+            "SHOW FUNCTIONS YIELD name, argumentDescription WHERE name = 'abs' RETURN 'default' IN keys(argumentDescription[0]), argumentDescription[0].default IS NULL",
+        ),
+        vec![vec![Value::Boolean(true), Value::Boolean(true)]]
+    );
+}
+
+#[test]
+fn show_uses_the_complete_registry_column_contract() {
+    let connection = fresh_storage();
+    assert_show_function_inventory(&connection);
+    assert_show_function_metadata(&connection);
 
     let prepared = prepare(
         &connection,
@@ -862,13 +979,6 @@ fn show_uses_the_complete_registry_column_contract() {
     assert!(matches!(&all_columns[0][5], Value::List(_)));
     assert_eq!(all_columns[0][10], Value::Boolean(false));
     assert_eq!(all_columns[0][11], Value::Null);
-    assert_eq!(
-        rows(
-            &connection,
-            "SHOW FUNCTIONS YIELD name, argumentDescription WHERE name = 'abs' RETURN 'default' IN keys(argumentDescription[0])",
-        ),
-        vec![vec![Value::Boolean(false)]]
-    );
     assert_eq!(
         rows(&connection, "SHOW FUNCTION YIELD name WHERE name = 'abs'"),
         vec![vec![Value::String("abs".to_owned())]]

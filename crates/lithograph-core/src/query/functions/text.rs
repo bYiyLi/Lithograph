@@ -84,7 +84,7 @@ fn trim(values: &[Value], side: TrimSide) -> QueryResult<Value> {
 
 fn side(values: &[Value], left: bool) -> QueryResult<Value> {
     require_arity(values, 2, 2)?;
-    if contains_null(values) {
+    if matches!(values[0], Value::Null) {
         return Ok(Value::Null);
     }
     let (Value::String(input), Value::Integer(length)) = (&values[0], &values[1]) else {
@@ -109,7 +109,7 @@ fn side(values: &[Value], left: bool) -> QueryResult<Value> {
 
 fn substring(values: &[Value]) -> QueryResult<Value> {
     require_arity(values, 2, 3)?;
-    if contains_null(values) {
+    if matches!(values[0], Value::Null) {
         return Ok(Value::Null);
     }
     let Value::String(input) = &values[0] else {

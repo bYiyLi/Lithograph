@@ -76,7 +76,7 @@ fn show_registry_rows(clause: &AstNode) -> QueryResult<Vec<BindingRow>> {
             AstKind::ShowTarget(crate::cypher::ShowTargetKind::Functions)
         )
     }) {
-        return Ok(function_registry_rows());
+        return function_registry_rows();
     }
     if clause.descendants().any(|node| {
         matches!(

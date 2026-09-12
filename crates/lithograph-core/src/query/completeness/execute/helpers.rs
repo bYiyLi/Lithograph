@@ -62,14 +62,19 @@ pub(super) fn single_column_rows(
         .collect()
 }
 
-pub(super) fn function_registry_rows() -> Vec<BindingRow> {
+pub(super) fn function_registry_rows() -> QueryResult<Vec<BindingRow>> {
     let mut definitions = crate::query::registry::functions().collect::<Vec<_>>();
     definitions.sort_by_key(|definition| definition.name.to_ascii_lowercase());
     definitions
         .into_iter()
         .map(|definition| {
-            let arguments = definition
-                .arguments()
+            let arguments = definition.arguments().ok_or_else(|| {
+                QueryError::internal(format!(
+                    "registered function {} is missing frozen argument metadata",
+                    definition.display_name()
+                ))
+            })?;
+            let arguments = arguments
                 .into_iter()
                 .map(|argument| {
                     Value::Map(BTreeMap::from([
@@ -78,6 +83,7 @@ pub(super) fn function_registry_rows() -> Vec<BindingRow> {
                             "type".to_owned(),
                             Value::String(argument.value_type.to_owned()),
                         ),
+                        ("default".to_owned(), Value::Null),
                         ("isDeprecated".to_owned(), Value::Boolean(false)),
                         (
                             "description".to_owned(),
@@ -86,26 +92,43 @@ pub(super) fn function_registry_rows() -> Vec<BindingRow> {
                     ]))
                 })
                 .collect();
-            registry_binding([
+            let signature = definition.signature().ok_or_else(|| {
+                QueryError::internal(format!(
+                    "registered function {} is missing frozen signature metadata",
+                    definition.display_name()
+                ))
+            })?;
+            let return_description = definition.return_description().ok_or_else(|| {
+                QueryError::internal(format!(
+                    "registered function {} is missing frozen return metadata",
+                    definition.display_name()
+                ))
+            })?;
+            Ok(registry_binding([
                 ("name", Value::String(definition.display_name().to_owned())),
                 ("category", Value::String(definition.category.to_owned())),
                 (
                     "description",
                     Value::String(definition.description.to_owned()),
                 ),
-                ("signature", Value::String(definition.signature())),
+                ("signature", Value::String(signature)),
                 ("isBuiltIn", Value::Boolean(true)),
                 ("argumentDescription", Value::List(arguments)),
                 (
                     "returnDescription",
-                    Value::String(definition.return_description().to_owned()),
+                    Value::String(return_description.to_owned()),
                 ),
                 ("aggregating", Value::Boolean(definition.aggregating)),
                 ("rolesExecution", Value::Null),
                 ("rolesBoostedExecution", Value::Null),
-                ("isDeprecated", Value::Boolean(false)),
-                ("deprecatedBy", Value::Null),
-            ])
+                ("isDeprecated", Value::Boolean(definition.is_deprecated())),
+                (
+                    "deprecatedBy",
+                    definition
+                        .deprecated_by()
+                        .map_or(Value::Null, |name| Value::String(name.to_owned())),
+                ),
+            ]))
         })
         .collect()
 }
