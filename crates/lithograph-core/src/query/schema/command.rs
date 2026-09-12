@@ -1057,7 +1057,24 @@ fn validate_graph_type_state(state: &SchemaState) -> QueryResult<()> {
 }
 
 fn validate_constraint_state(state: &SchemaState) -> QueryResult<()> {
-    for constraint in state.constraints.values() {
+    let constraints = state.constraints.values().collect::<Vec<_>>();
+    for (position, constraint) in constraints.iter().enumerate() {
+        if let ConstraintDefinitionKind::Type { rule } = &constraint.kind
+            && constraints[..position].iter().any(|existing| {
+                existing.target == constraint.target
+                    && existing.properties == constraint.properties
+                    && matches!(
+                        &existing.kind,
+                        ConstraintDefinitionKind::Type { rule: existing_rule }
+                            if existing_rule != rule
+                    )
+            })
+        {
+            return Err(schema_error(format!(
+                "property type Constraint {} conflicts with another property type Constraint on the same schema",
+                constraint.name
+            )));
+        }
         if constraint.origin.is_some()
             || !matches!(
                 constraint.kind,

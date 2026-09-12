@@ -8,6 +8,7 @@ use crate::storage::{
 };
 
 use super::super::{QueryError, QueryResult};
+use super::equality::property_equality_key;
 
 pub(crate) fn validate_snapshot_against_commit_schema(
     connection: &Connection,
@@ -397,9 +398,18 @@ fn uniqueness_key(
             }
             return Ok(None);
         };
-        key.push(value.canonical_bytes()?);
+        key.push(match property_equality_key(value)? {
+            Some(key) => key,
+            None => non_reflexive_uniqueness_key(element_id),
+        });
     }
     Ok(Some(key))
+}
+
+fn non_reflexive_uniqueness_key(element_id: i64) -> Vec<u8> {
+    let mut key = b"non_reflexive".to_vec();
+    key.extend_from_slice(&element_id.to_le_bytes());
+    key
 }
 
 fn validate_property_rule(

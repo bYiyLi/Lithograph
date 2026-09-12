@@ -868,6 +868,15 @@ fn format_properties(properties: &BTreeMap<String, PropertyRule>) -> String {
 }
 
 fn format_property_rule(rule: &PropertyRule) -> String {
+    if rule.required
+        && let PropertyType::Union { members } = &rule.property_type
+    {
+        return members
+            .iter()
+            .map(|member| format!("{} NOT NULL", format_property_type(member)))
+            .collect::<Vec<_>>()
+            .join(" | ");
+    }
     let mut text = format_property_type(&rule.property_type);
     if rule.required {
         text.push_str(" NOT NULL");
@@ -893,7 +902,7 @@ fn format_property_type(property_type: &PropertyType) -> String {
         PropertyType::Vector {
             coordinate,
             dimension,
-        } => format!("VECTOR<{coordinate}, {dimension}>"),
+        } => format!("VECTOR<{coordinate}>({dimension})"),
         PropertyType::List { element } => {
             format!("LIST<{} NOT NULL>", format_property_type(element))
         }

@@ -1,9 +1,13 @@
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
 use rusqlite::Connection;
 
-use crate::cypher::Value;
-use crate::storage::{HashId, IndexDefinition, IndexTarget, SchemaState, StandardIndexKind};
+use crate::cypher::{Value, VectorCoordinateType};
+use crate::storage::{
+    ConstraintDefinitionKind, HashId, IndexDefinition, IndexTarget, PropertyType, SchemaState,
+    SchemaTarget, StandardIndexKind,
+};
 
 use super::super::QueryResult;
 use super::super::expression::{BinaryOp, Expr, UnaryOp};
@@ -84,7 +88,7 @@ fn choose_node_seek(
     candidates: &[(String, String, StandardIndexPredicate)],
 ) -> Option<StandardIndexSeek> {
     if let Some(seek) = best_property_seek(
-        schema.indexes.values(),
+        schema,
         variable,
         candidates,
         PropertySeekScope::Node(labels),
@@ -104,7 +108,7 @@ fn choose_relationship_seek(
     candidates: &[(String, String, StandardIndexPredicate)],
 ) -> Option<StandardIndexSeek> {
     if let Some(seek) = best_property_seek(
-        schema.indexes.values(),
+        schema,
         variable,
         candidates,
         PropertySeekScope::Relationship(relationship_type),
@@ -123,15 +127,18 @@ enum PropertySeekScope<'a> {
     Relationship(Option<&'a str>),
 }
 
-fn best_property_seek<'a>(
-    indexes: impl Iterator<Item = &'a IndexDefinition>,
+fn best_property_seek(
+    schema: &SchemaState,
     variable: Option<&str>,
     candidates: &[(String, String, StandardIndexPredicate)],
     scope: PropertySeekScope<'_>,
 ) -> Option<StandardIndexSeek> {
-    let mut selected = indexes
+    let mut selected = schema
+        .indexes
+        .values()
         .filter_map(|index| {
             choose_property_seek(
+                schema,
                 index,
                 variable,
                 scoped_index_properties(index, scope)?,
@@ -180,6 +187,7 @@ fn lookup_seek(
 }
 
 fn choose_property_seek(
+    schema: &SchemaState,
     index: &IndexDefinition,
     variable: Option<&str>,
     properties: &[String],
@@ -193,7 +201,7 @@ fn choose_property_seek(
             .filter(|(candidate_variable, candidate_property, predicate)| {
                 candidate_variable == variable
                     && candidate_property == property
-                    && predicate_supported(index.kind, predicate)
+                    && predicate_supported(schema, index, property, predicate)
             })
             .map(|(_, _, predicate)| predicate.clone())
             .min_by_key(predicate_priority)?;
@@ -206,7 +214,7 @@ fn choose_property_seek(
     })
 }
 
-fn index_seek_priority(seek: &StandardIndexSeek) -> (u8, String) {
+fn index_seek_priority(seek: &StandardIndexSeek) -> (u8, Reverse<usize>, String) {
     let predicate = &seek.predicates[0].1;
     let kind = match (seek.kind, predicate) {
         (
@@ -217,7 +225,11 @@ fn index_seek_priority(seek: &StandardIndexSeek) -> (u8, String) {
         (StandardIndexKind::Text, _) => 2,
         (StandardIndexKind::Lookup, _) => 3,
     };
-    (kind, seek.index_name.clone())
+    (
+        kind,
+        Reverse(seek.predicates.len()),
+        seek.index_name.clone(),
+    )
 }
 
 fn predicate_priority(predicate: &StandardIndexPredicate) -> u8 {
@@ -233,38 +245,63 @@ fn predicate_priority(predicate: &StandardIndexPredicate) -> u8 {
     }
 }
 
-fn predicate_supported(kind: StandardIndexKind, predicate: &StandardIndexPredicate) -> bool {
-    match (kind, predicate) {
-        (StandardIndexKind::Range, StandardIndexPredicate::Equal(value)) => range_value(value),
+fn predicate_supported(
+    schema: &SchemaState,
+    index: &IndexDefinition,
+    property: &str,
+    predicate: &StandardIndexPredicate,
+) -> bool {
+    match (index.kind, predicate) {
+        (StandardIndexKind::Range, StandardIndexPredicate::Equal(value)) => {
+            range_equality_value(schema, index, property, value)
+        }
         (StandardIndexKind::Range, StandardIndexPredicate::In(values)) => {
-            !values.is_empty() && values.iter().all(range_value)
+            !values.is_empty()
+                && values
+                    .iter()
+                    .all(|value| range_equality_value(schema, index, property, value))
         }
         (
             StandardIndexKind::Range,
             StandardIndexPredicate::Less(value, _) | StandardIndexPredicate::Greater(value, _),
-        ) => range_order_value(value),
+        ) => {
+            range_order_value(value)
+                && property_type_proves(schema, index, property, |property_type| {
+                    property_type_order_compatible(property_type, value)
+                })
+        }
         (StandardIndexKind::Range, StandardIndexPredicate::IsNotNull) => true,
-        (StandardIndexKind::Range, StandardIndexPredicate::StartsWith(_)) => true,
+        (StandardIndexKind::Range, StandardIndexPredicate::StartsWith(_)) => {
+            property_type_proves(schema, index, property, |property_type| {
+                matches!(property_type, PropertyType::String)
+            })
+        }
         (StandardIndexKind::Point, StandardIndexPredicate::Equal(Value::Point(_))) => true,
         (StandardIndexKind::Point, StandardIndexPredicate::In(values)) => {
             !values.is_empty() && values.iter().all(|value| matches!(value, Value::Point(_)))
         }
-        (StandardIndexKind::Point, StandardIndexPredicate::IsNotNull) => true,
         (StandardIndexKind::Point, StandardIndexPredicate::WithinBBox { lower, upper }) => {
             matches!((lower, upper), (Value::Point(_), Value::Point(_)))
+                && property_type_proves(schema, index, property, |property_type| {
+                    matches!(property_type, PropertyType::Point)
+                })
         }
         (StandardIndexKind::Point, StandardIndexPredicate::Distance { center, radius, .. }) => {
             matches!(center, Value::Point(_))
                 && matches!(radius, Value::Integer(_) | Value::Float(_))
+                && property_type_proves(schema, index, property, |property_type| {
+                    matches!(property_type, PropertyType::Point)
+                })
         }
+        (StandardIndexKind::Text, StandardIndexPredicate::Equal(Value::String(_))) => true,
         (
             StandardIndexKind::Text,
-            StandardIndexPredicate::Equal(Value::String(_))
-            | StandardIndexPredicate::IsNotNull
-            | StandardIndexPredicate::StartsWith(_)
+            StandardIndexPredicate::StartsWith(_)
             | StandardIndexPredicate::EndsWith(_)
             | StandardIndexPredicate::Contains(_),
-        ) => true,
+        ) => property_type_proves(schema, index, property, |property_type| {
+            matches!(property_type, PropertyType::String)
+        }),
         (StandardIndexKind::Text, StandardIndexPredicate::In(values)) => {
             !values.is_empty() && values.iter().all(|value| matches!(value, Value::String(_)))
         }
@@ -272,8 +309,107 @@ fn predicate_supported(kind: StandardIndexKind, predicate: &StandardIndexPredica
     }
 }
 
-fn range_value(value: &Value) -> bool {
-    range_order_value(value) || matches!(value, Value::Duration(_) | Value::Uuid(_))
+fn property_type_proves(
+    schema: &SchemaState,
+    index: &IndexDefinition,
+    property: &str,
+    accepts: impl Fn(&PropertyType) -> bool,
+) -> bool {
+    schema.constraints.values().any(|constraint| {
+        constraint.properties.len() == 1
+            && constraint.properties[0] == property
+            && constraint_target_matches_index(&constraint.target, &index.target)
+            && matches!(
+                &constraint.kind,
+                ConstraintDefinitionKind::Type { rule }
+                    if property_type_all_members_match(&rule.property_type, &accepts)
+            )
+    })
+}
+
+fn constraint_target_matches_index(target: &SchemaTarget, index_target: &IndexTarget) -> bool {
+    matches!(
+        (target, index_target),
+        (
+            SchemaTarget::Node { label: constraint_label },
+            IndexTarget::NodeProperties { label: index_label, .. }
+        ) if constraint_label == index_label
+    ) || matches!(
+        (target, index_target),
+        (
+            SchemaTarget::Relationship {
+                relationship_type: constraint_type,
+            },
+            IndexTarget::RelationshipProperties {
+                relationship_type: index_type,
+                ..
+            }
+        ) if constraint_type == index_type
+    )
+}
+
+fn property_type_all_members_match(
+    property_type: &PropertyType,
+    accepts: &impl Fn(&PropertyType) -> bool,
+) -> bool {
+    match property_type {
+        PropertyType::Union { members } => {
+            !members.is_empty()
+                && members
+                    .iter()
+                    .all(|member| property_type_all_members_match(member, accepts))
+        }
+        property_type => accepts(property_type),
+    }
+}
+
+fn property_type_order_compatible(property_type: &PropertyType, value: &Value) -> bool {
+    match value {
+        Value::Integer(_) | Value::Float(_) => {
+            matches!(property_type, PropertyType::Integer | PropertyType::Float)
+        }
+        Value::Boolean(_) => matches!(property_type, PropertyType::Boolean),
+        Value::String(_) => matches!(property_type, PropertyType::String),
+        Value::Date(_) => matches!(property_type, PropertyType::Date),
+        Value::LocalTime(_) => matches!(property_type, PropertyType::LocalTime),
+        Value::Time(_) => matches!(property_type, PropertyType::ZonedTime),
+        Value::LocalDateTime(_) => matches!(property_type, PropertyType::LocalDateTime),
+        Value::ZonedDateTime(_) => matches!(property_type, PropertyType::ZonedDateTime),
+        _ => false,
+    }
+}
+
+fn range_equality_value(
+    schema: &SchemaState,
+    index: &IndexDefinition,
+    property: &str,
+    value: &Value,
+) -> bool {
+    if !value.is_property_value() {
+        return false;
+    }
+    let Value::Vector(vector) = value else {
+        return true;
+    };
+    property_type_proves(schema, index, property, |property_type| {
+        vector_equality_compatible(property_type, vector.coordinate_type(), vector.dimension())
+    })
+}
+
+fn vector_equality_compatible(
+    property_type: &PropertyType,
+    coordinate_type: VectorCoordinateType,
+    dimension: usize,
+) -> bool {
+    let PropertyType::Vector {
+        coordinate,
+        dimension: constrained_dimension,
+    } = property_type
+    else {
+        return !matches!(property_type, PropertyType::Any);
+    };
+    VectorCoordinateType::parse(coordinate) == Some(coordinate_type)
+        && usize::try_from(*constrained_dimension).ok() == Some(dimension)
 }
 
 fn range_order_value(value: &Value) -> bool {

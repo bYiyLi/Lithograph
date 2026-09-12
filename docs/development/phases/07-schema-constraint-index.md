@@ -73,6 +73,9 @@ Index candidate 可以来自完整 Snapshot 的 derived index，但进入 Cypher
 - [x] time-travel 到旧 Commit 返回旧 Graph Type/index definitions；
 - [x] Branch 上独立 Schema 变化互不污染；
 - [x] lookup/range/text/point planner seek 与 scan result 相同；
+- [x] ordered/String/spatial predicate 在 Property Type 未证明兼容时不会通过 derived index 吞掉 scan 路径本应产生的 `TYPE_ERROR`；有 versioned Property Type proof 时对应 range/text/point seek 仍真实进入具体 index；
+- [x] Vector coordinate type alias 在 Schema 中 canonicalize，runtime constraint validation 与 `SHOW CURRENT GRAPH TYPE` 使用同一 canonical Vector type；
+- [x] Schema DDL 在 Commit/ref 已写入 invocation savepoint、derived index 构建阶段发生 interrupt 时完整 rollback，不留下 Branch move 或半成品 Schema；
 - [x] 同一 Graph View 下 lookup/range/text/point index seek 与 view-aware scan result 相同，hidden index candidate 不泄漏；
 - [x] Graph Type / Constraint / Index DDL 与 `graphView` 同时提交时返回 `INVALID_ARGUMENT`，不产生 Schema Commit；
 - [x] 删除 derived index cache 后查询仍正确并可重建；
@@ -81,7 +84,7 @@ Index candidate 可以来自完整 Snapshot 的 derived index，但进入 Cypher
 
 ## 6. Review
 
-检查 schema 是否被放成 database-global mutable state、Graph View 是否错误投影成 per-view Schema/Constraint、hidden UNIQUE/KEY conflict 是否被绕过、index definition 是否脱离 Commit、constraint validation 是否有 TOCTOU、historical query 是否误用 current index definition。
+检查 schema 是否被放成 database-global mutable state、Graph View 是否错误投影成 per-view Schema/Constraint、hidden UNIQUE/KEY conflict 是否被绕过、KEY/UNIQUE 是否使用完整 Cypher value equality（包括 Integer/Float、复合/List key、NaN 与 Point/Vector signed zero）、同一 schema 上冲突 Property Type Constraint 是否被拒绝、Property Type union 是否 canonical normalization 并保持 frozen nullability contract、`SHOW CURRENT GRAPH TYPE` 是否输出 parser 可重用的 canonical type syntax（包括 Vector）、Range cache 是否覆盖全部 Property Value family 且 exact seek 与 scan 等价、ordered/String/spatial seek 是否只有在目标 Commit 的 Property Type Constraint 足以证明类型兼容时才过滤其它类型、Text/Point typed index 是否在缺少类型保证时错误用于通用 existence predicate、composite Range 是否真的选择复合 index 而不是被单列 index 的通用 `IndexSeek` 断言掩盖、index definition 是否脱离 Commit、constraint validation 是否有 TOCTOU、historical query 是否误用 current index definition。
 
 ## 7. 完成条件
 

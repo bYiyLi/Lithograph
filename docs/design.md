@@ -1234,6 +1234,8 @@ Index definition 是 versioned Schema；physical index content 是 derived cache
 
 Range / Text / Point index 使用 SQLite B-tree-backed derived tables，key 编码保持 Cypher ordering、comparison、collation 与 type semantics。Planner 根据 statistics 选择 seek / scan。
 
+Derived index 不能通过“只缓存可索引类型”改变 Cypher 的错误或 `null` 语义。对跨类型 equality 明确定义为 `false` 的 exact equality / `IN`，Planner 可以直接使用对应 exact seek；对可能因实际属性类型不兼容而返回 `TYPE_ERROR` 的 ordered comparison、String predicate 和 Point spatial predicate，只有目标 Commit 的 versioned Property Type Constraint 能证明该 index property 的所有 present value 都与该 predicate 兼容时，Planner 才能使用会过滤其它类型的 seek。没有足够 Schema proof 时必须 fallback 到正确的 scan/filter 路径。Property Type proof 与 index definition 一样按目标 Commit 解析，不能使用 current-head Schema 或 derived cache 内容替代。
+
 ### 11.5 Full-text
 
 Full-text index 使用 SQLite FTS5 作为 backend。Lithograph 支持的 SQLite runtime 必须启用 FTS5。

@@ -11,6 +11,7 @@ use crate::storage::{
 
 use super::super::super::mutation::property_from_value;
 use super::super::super::{QueryError, QueryResult};
+use super::super::equality::property_equality_key;
 use super::{StandardIndexPredicate, StandardIndexSeek};
 
 const NODE_OWNER_KIND: i64 = 0;
@@ -310,25 +311,14 @@ fn scan_range_predicate_candidates(
 ) -> QueryResult<Option<BTreeSet<i64>>> {
     let candidates = match predicate {
         StandardIndexPredicate::Equal(value) => {
-            let Some(key) = range_order_key(value) else {
-                return Ok(None);
-            };
-            scan_range_order_candidates(
-                snapshot, index_name, owner_kind, ordinal, after, "=", &key,
-            )?
+            scan_exact_candidates(snapshot, index_name, owner_kind, ordinal, value, after)?
         }
         StandardIndexPredicate::In(values) => {
             let mut result = BTreeSet::new();
             for value in values {
-                if let Some(key) = range_order_key(value) {
-                    result.extend(scan_range_order_candidates(
-                        snapshot, index_name, owner_kind, ordinal, after, "=", &key,
-                    )?);
-                } else {
-                    result.extend(scan_exact_candidates(
-                        snapshot, index_name, owner_kind, ordinal, value, after,
-                    )?);
-                }
+                result.extend(scan_exact_candidates(
+                    snapshot, index_name, owner_kind, ordinal, value, after,
+                )?);
             }
             result
         }
@@ -534,12 +524,14 @@ fn scan_exact_candidates(
     let Some(property) = property_from_value(value.clone())? else {
         return Ok(BTreeSet::new());
     };
-    let key = property.canonical_bytes()?;
+    let Some(key) = property_equality_key(&property)? else {
+        return Ok(BTreeSet::new());
+    };
     scan_owner_id_candidates(
         snapshot,
         "SELECT owner_id FROM temp._lithograph_standard_index_cache \
          WHERE snapshot_hash = ?1 AND index_name = ?2 AND owner_kind = ?3 \
-         AND property_ordinal = ?4 AND owner_id > ?5 AND value_blob = ?6 ORDER BY owner_id",
+         AND property_ordinal = ?4 AND owner_id > ?5 AND equality_blob = ?6 ORDER BY owner_id",
         params![
             snapshot.commit().as_bytes().as_slice(),
             index_name,
@@ -945,12 +937,14 @@ fn ensure_cache_tables(connection: &Connection) -> QueryResult<()> {
          CREATE TEMP TABLE IF NOT EXISTS _lithograph_standard_index_cache(\
              snapshot_hash BLOB NOT NULL, index_name TEXT NOT NULL, owner_kind INTEGER NOT NULL,\
              owner_id INTEGER NOT NULL, property_ordinal INTEGER NOT NULL, token_id INTEGER,\
-             value_blob BLOB, text_value TEXT, sort_family INTEGER, sort_number NUMERIC,\
+             value_blob BLOB, equality_blob BLOB, text_value TEXT, sort_family INTEGER, sort_number NUMERIC,\
              sort_a INTEGER, sort_b INTEGER, sort_c INTEGER, sort_text TEXT,\
              point_crs INTEGER, point_x REAL, point_y REAL, point_z REAL,\
              PRIMARY KEY(snapshot_hash, index_name, owner_kind, owner_id, property_ordinal)) WITHOUT ROWID;\
          CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_value \
              ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, value_blob, owner_id);\
+         CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_equality \
+             ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, equality_blob, owner_id);\
          CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_text \
              ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, text_value, owner_id);\
          CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_range_number \
@@ -1119,6 +1113,7 @@ fn insert_cache_value(
     value: storage::PropertyValue,
 ) -> QueryResult<()> {
     let value_blob = value.canonical_bytes()?;
+    let equality_blob = property_equality_key(&value)?;
     let text_value = match &value {
         storage::PropertyValue::String(value) => Some(value.as_str()),
         _ => None,
@@ -1167,9 +1162,9 @@ fn insert_cache_value(
     };
     snapshot.connection_for_query().execute(
         "INSERT OR REPLACE INTO temp._lithograph_standard_index_cache\
-         (snapshot_hash, index_name, owner_kind, owner_id, property_ordinal, token_id, value_blob, text_value,\
+         (snapshot_hash, index_name, owner_kind, owner_id, property_ordinal, token_id, value_blob, equality_blob, text_value,\
           sort_family, sort_number, sort_a, sort_b, sort_c, sort_text, point_crs, point_x, point_y, point_z)\
-         VALUES(?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+         VALUES(?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             snapshot.commit().as_bytes().as_slice(),
             index.name,
@@ -1177,6 +1172,7 @@ fn insert_cache_value(
             owner_id,
             i64::try_from(ordinal).unwrap_or(i64::MAX),
             value_blob,
+            equality_blob,
             text_value,
             sort_family,
             sort_number,
@@ -1198,19 +1194,6 @@ fn cache_value_supported(kind: StandardIndexKind, value: &storage::PropertyValue
         StandardIndexKind::Lookup => false,
         StandardIndexKind::Text => matches!(value, storage::PropertyValue::String(_)),
         StandardIndexKind::Point => matches!(value, storage::PropertyValue::Point(_)),
-        StandardIndexKind::Range => matches!(
-            value,
-            storage::PropertyValue::Boolean(_)
-                | storage::PropertyValue::Integer(_)
-                | storage::PropertyValue::Float(_)
-                | storage::PropertyValue::String(_)
-                | storage::PropertyValue::Date(_)
-                | storage::PropertyValue::LocalTime(_)
-                | storage::PropertyValue::Time { .. }
-                | storage::PropertyValue::LocalDateTime { .. }
-                | storage::PropertyValue::ZonedDateTime(_)
-                | storage::PropertyValue::Duration { .. }
-                | storage::PropertyValue::Uuid(_)
-        ),
+        StandardIndexKind::Range => true,
     }
 }

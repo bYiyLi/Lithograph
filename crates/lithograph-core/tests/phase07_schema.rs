@@ -9,6 +9,9 @@ use lithograph_core::storage::{
 };
 use rusqlite::Connection;
 
+#[path = "phase07_schema/regressions.rs"]
+mod regressions;
+
 fn fresh_storage() -> Connection {
     let connection = Connection::open_in_memory().expect("in-memory SQLite must open");
     connection
@@ -816,6 +819,12 @@ fn standard_index_seeks_match_scans_and_rebuild_after_cache_loss() {
         ExecutionOptions::default(),
     )
     .expect("seed people");
+    execute(
+        &connection,
+        "ALTER CURRENT GRAPH TYPE SET { (:Person => {name :: STRING, age :: INTEGER, location :: POINT}) }",
+        ExecutionOptions::default(),
+    )
+    .expect("property type proof for typed standard indexes");
     let target = Value::Point(PointValue::new("cartesian", vec![1.0, 2.0]).expect("point"));
     let point_params = BTreeMap::from([("target".to_owned(), target)]);
 
@@ -915,13 +924,19 @@ fn assert_basic_standard_index_plans(
     connection: &Connection,
     point_params: &BTreeMap<String, Value>,
 ) {
-    for query in [
-        "EXPLAIN MATCH (n:Person) RETURN n.name",
-        "EXPLAIN MATCH (n:Person) WHERE n.age = 2 RETURN n.name",
-        "EXPLAIN MATCH (n:Person) WHERE n.name STARTS WITH 'Al' RETURN n.name",
+    for (query, expected_index) in [
+        ("EXPLAIN MATCH (n:Person) RETURN n.name", "person_labels"),
+        (
+            "EXPLAIN MATCH (n:Person) WHERE n.age = 2 RETURN n.name",
+            "person_age",
+        ),
+        (
+            "EXPLAIN MATCH (n:Person) WHERE n.name STARTS WITH 'Al' RETURN n.name",
+            "person_name_text",
+        ),
     ] {
         let (rows, _) = execute(connection, query, ExecutionOptions::default()).expect("explain");
-        assert!(matches!(&rows[0][0], Value::String(plan) if plan.contains("IndexSeek")));
+        assert!(matches!(&rows[0][0], Value::String(plan) if plan.contains(expected_index)));
     }
     let (point_plan, _) = execute_params(
         connection,
@@ -930,7 +945,7 @@ fn assert_basic_standard_index_plans(
         ExecutionOptions::default(),
     )
     .expect("point explain");
-    assert!(matches!(&point_plan[0][0], Value::String(plan) if plan.contains("IndexSeek")));
+    assert!(matches!(&point_plan[0][0], Value::String(plan) if plan.contains("person_location")));
 }
 
 #[test]
@@ -942,6 +957,12 @@ fn range_index_preserves_numeric_and_temporal_ordering_semantics() {
         ExecutionOptions::default(),
     )
     .expect("seed range values");
+    execute(
+        &connection,
+        "ALTER CURRENT GRAPH TYPE SET { (:Metric => {value :: INTEGER | FLOAT, text :: STRING}), (:Event => {day :: DATE}) }",
+        ExecutionOptions::default(),
+    )
+    .expect("property type proof for ordered range seeks");
 
     let queries = [
         "MATCH (n:Metric) WHERE n.value = 1 RETURN n.name ORDER BY n.name",
@@ -982,6 +1003,14 @@ fn range_index_preserves_numeric_and_temporal_ordering_semantics() {
             .unwrap_or_else(|error| panic!("DDL {ddl}: {error}"));
     }
 
+    let expected_indexes = [
+        "metric_value",
+        "metric_value",
+        "metric_value",
+        "metric_value",
+        "metric_text",
+        "event_day",
+    ];
     for (index, query) in queries.into_iter().enumerate() {
         let indexed = execute(&connection, query, ExecutionOptions::default())
             .unwrap_or_else(|error| panic!("indexed {query}: {error}"))
@@ -994,7 +1023,7 @@ fn range_index_preserves_numeric_and_temporal_ordering_semantics() {
         )
         .unwrap_or_else(|error| panic!("explain {query}: {error}"));
         assert!(
-            matches!(&plan[0][0], Value::String(value) if value.contains("IndexSeek")),
+            matches!(&plan[0][0], Value::String(value) if value.contains(expected_indexes[index])),
             "{query}: {plan:?}"
         );
     }
@@ -1107,6 +1136,12 @@ fn point_index_spatial_seek_preserves_wgs84_dateline_and_distance_results() {
         ExecutionOptions::default(),
     )
     .expect("seed WGS84 points");
+    execute(
+        &connection,
+        "ALTER CURRENT GRAPH TYPE SET { (:Place => {location :: POINT}) }",
+        ExecutionOptions::default(),
+    )
+    .expect("property type proof for point spatial seek");
     let queries = [
         "MATCH (n:Place) WHERE point.withinBBox(n.location, point({longitude:170.0, latitude:-10.0}), point({longitude:-170.0, latitude:10.0})) RETURN n.name ORDER BY n.name",
         "MATCH (n:Place) WHERE point.distance(n.location, point({longitude:179.5, latitude:0.0})) <= 200000.0 RETURN n.name ORDER BY n.name",
@@ -1146,7 +1181,7 @@ fn point_index_spatial_seek_preserves_wgs84_dateline_and_distance_results() {
         )
         .unwrap_or_else(|error| panic!("explain {query}: {error}"));
         assert!(
-            matches!(&plan[0][0], Value::String(value) if value.contains("IndexSeek")),
+            matches!(&plan[0][0], Value::String(value) if value.contains("place_location")),
             "{query}: {plan:?}"
         );
     }
@@ -1161,6 +1196,12 @@ fn standard_indexes_cover_composite_range_text_spatial_and_relationship_seeks() 
         ExecutionOptions::default(),
     )
     .expect("seed indexed graph");
+    execute(
+        &connection,
+        "ALTER CURRENT GRAPH TYPE SET { (:Person => {name :: STRING, age :: INTEGER, score :: INTEGER, location :: POINT}), ()-[r:ROUTE => {name :: STRING, distance :: INTEGER, location :: POINT}]->() }",
+        ExecutionOptions::default(),
+    )
+    .expect("property type proof for typed and ordered standard indexes");
 
     let queries = [
         "MATCH (n:Person) WHERE n.age >= 2 RETURN n.name ORDER BY n.name",
@@ -1198,6 +1239,18 @@ fn standard_indexes_cover_composite_range_text_spatial_and_relationship_seeks() 
             .unwrap_or_else(|error| panic!("DDL {ddl}: {error}"));
     }
 
+    let expected_indexes = [
+        "person_age",
+        "person_age",
+        "person_age_score",
+        "person_name",
+        "person_location",
+        "person_location",
+        "relationship_lookup",
+        "route_distance",
+        "route_name",
+        "route_location",
+    ];
     for (index, query) in queries.into_iter().enumerate() {
         let rows = execute(&connection, query, ExecutionOptions::default())
             .unwrap_or_else(|error| panic!("indexed {query}: {error}"))
@@ -1210,7 +1263,7 @@ fn standard_indexes_cover_composite_range_text_spatial_and_relationship_seeks() 
         )
         .unwrap_or_else(|error| panic!("explain {query}: {error}"));
         assert!(
-            matches!(&plan[0][0], Value::String(value) if value.contains("IndexSeek")),
+            matches!(&plan[0][0], Value::String(value) if value.contains(expected_indexes[index])),
             "{query}: {plan:?}"
         );
     }

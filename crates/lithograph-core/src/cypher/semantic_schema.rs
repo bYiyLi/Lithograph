@@ -397,7 +397,7 @@ fn validate_missing_type_parameters(
 
 fn validate_property_type_expression(
     expression: &AstNode,
-    allow_any_not_null: bool,
+    allow_top_level_non_null: bool,
     source: &str,
 ) -> Result<(), FrontendError> {
     for term in expression
@@ -405,14 +405,21 @@ fn validate_property_type_expression(
         .iter()
         .filter(|node| node.kind == AstKind::TypeTerm)
     {
-        validate_property_type_term(term, allow_any_not_null, source)?;
+        if !allow_top_level_non_null && term_outer_non_null(term) {
+            return Err(schema_error(
+                source,
+                term.span,
+                "property type constraints do not allow top-level NOT NULL types; use a property existence constraint separately",
+            ));
+        }
+        validate_property_type_term(term, allow_top_level_non_null, source)?;
     }
     Ok(())
 }
 
 fn validate_property_type_term(
     term: &AstNode,
-    allow_any_not_null: bool,
+    allow_top_level_non_null: bool,
     source: &str,
 ) -> Result<(), FrontendError> {
     let Some(type_node) = direct_type_name(term) else {
@@ -426,7 +433,9 @@ fn validate_property_type_term(
     let parameters = direct_type_parameters(term);
     let suffixes = type_list_suffix_count(term);
     match name.as_str() {
-        "ANY" => validate_any_property_type(term, parameters, suffixes, allow_any_not_null, source),
+        "ANY" => {
+            validate_any_property_type(term, parameters, suffixes, allow_top_level_non_null, source)
+        }
         "VECTOR" => validate_vector_property_type(term, type_node, parameters, suffixes, source),
         "LIST" | "ARRAY" => validate_generic_property_list(term, parameters, suffixes, source),
         _ if suffixes > 0 => {
@@ -445,7 +454,7 @@ fn validate_any_property_type(
     term: &AstNode,
     parameters: Option<&AstNode>,
     suffixes: usize,
-    allow_any_not_null: bool,
+    allow_top_level_non_null: bool,
     source: &str,
 ) -> Result<(), FrontendError> {
     if let Some(parameters) = parameters {
@@ -467,9 +476,9 @@ fn validate_any_property_type(
                     "ANY dynamic union is missing its member types",
                 )
             })?;
-        return validate_property_type_expression(nested, false, source);
+        return validate_property_type_expression(nested, allow_top_level_non_null, source);
     }
-    if allow_any_not_null && suffixes == 0 && term_outer_non_null(term) {
+    if allow_top_level_non_null && suffixes == 0 && term_outer_non_null(term) {
         return Ok(());
     }
     Err(schema_error(

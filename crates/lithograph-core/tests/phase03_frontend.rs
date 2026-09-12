@@ -312,6 +312,9 @@ fn vector_and_schema_validation_catches_invalid_forms() {
         "ALTER CURRENT GRAPH TYPE ADD { (p IS Person => {x :: LIST<INTEGER>}) }",
         "ALTER CURRENT GRAPH TYPE ADD { (p IS Person => {x :: LIST<VECTOR<FLOAT32>(3) NOT NULL>}) }",
         "CREATE CONSTRAINT c FOR (n:Person) REQUIRE n.x IS :: ANY NOT NULL",
+        "CREATE CONSTRAINT c FOR (n:Person) REQUIRE n.x IS :: INTEGER NOT NULL",
+        "CREATE CONSTRAINT c FOR (n:Person) REQUIRE n.x IS :: INTEGER NOT NULL | FLOAT NOT NULL",
+        "CREATE CONSTRAINT c FOR (n:Person) REQUIRE n.x IS :: ANY<INTEGER NOT NULL | FLOAT NOT NULL>",
         "CREATE CONSTRAINT c FOR (n:Person) REQUIRE n.x IS :: VECTOR(3)",
         "CREATE CONSTRAINT c FOR (n:Person) REQUIRE n.x IS :: LIST<INTEGER>",
     ] {

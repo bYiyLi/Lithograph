@@ -1,4 +1,5 @@
 mod command;
+mod equality;
 mod execute;
 mod index;
 mod show;

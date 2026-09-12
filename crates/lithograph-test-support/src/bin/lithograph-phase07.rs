@@ -136,6 +136,12 @@ fn check_standard_indexes_and_graph_view(
     scalar_query(
         fixture,
         load,
+        "ALTER CURRENT GRAPH TYPE ALTER { (:Person => :Resident {name :: STRING NOT NULL, age :: INTEGER}) }",
+        "{}",
+    )?;
+    scalar_query(
+        fixture,
+        load,
         "CREATE RANGE INDEX person_age FOR (n:Person) ON (n.age)",
         "{}",
     )?;
