@@ -7,13 +7,14 @@ mod program;
 mod value;
 
 pub(crate) use program::execute_program;
+pub(crate) use value::property_from_value;
 
 use delete::apply_delete;
 use delta::{property_states_equal, staged_snapshot};
 use matcher::match_pattern;
 use value::{
-    binding_node, binding_owner, evaluate_map, project_rows, property_from_value,
-    require_visible_owner, set_property_map, validate_clause_view,
+    binding_node, binding_owner, evaluate_map, project_rows, require_visible_owner,
+    set_property_map, validate_clause_view,
 };
 
 struct MutationContext<'connection, 'query> {
@@ -97,6 +98,11 @@ fn finish_write(
     let counters = context.delta.counters()?;
     let final_snapshot =
         Snapshot::resolve_with_layer(context.connection, context.base_commit, &final_layer)?;
+    crate::query::schema::validate_snapshot_against_commit_schema(
+        context.connection,
+        context.base_commit,
+        &final_snapshot,
+    )?;
     let output = match &prepared.projection {
         Some(projection) => project_rows(&final_snapshot, context.params, rows, projection)?,
         None => Vec::new(),

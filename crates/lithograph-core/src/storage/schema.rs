@@ -98,6 +98,55 @@ pub fn root_commit(connection: &Connection) -> StorageResult<HashId> {
     Ok(root)
 }
 
+/// Returns the immutable Schema object referenced by a Commit.
+pub fn schema_hash_for_commit(connection: &Connection, commit: HashId) -> StorageResult<HashId> {
+    let bytes: Vec<u8> = connection
+        .query_row(
+            "SELECT schema_hash FROM main._lithograph_commits WHERE id = ?1",
+            [commit.as_bytes().as_slice()],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| StorageError::not_found(format!("Commit {}", commit.to_hex())))?;
+    HashId::from_slice(&bytes)
+}
+
+/// Reads one immutable canonical Schema object by content hash.
+pub fn load_schema_blob(connection: &Connection, hash: HashId) -> StorageResult<Vec<u8>> {
+    connection
+        .query_row(
+            "SELECT canonical_blob FROM main._lithograph_schema_objects WHERE hash = ?1",
+            [hash.as_bytes().as_slice()],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| StorageError::not_found(format!("Schema {}", hash.to_hex())))
+}
+
+/// Persists an immutable canonical Schema object and returns its content hash.
+pub fn persist_schema_blob(
+    connection: &Connection,
+    canonical_blob: &[u8],
+) -> StorageResult<HashId> {
+    let schema_hash = hash(canonical_blob);
+    connection.execute(
+        "INSERT OR IGNORE INTO main._lithograph_schema_objects(hash, canonical_blob) VALUES(?1, ?2)",
+        params![schema_hash.as_bytes().as_slice(), canonical_blob],
+    )?;
+    let persisted: Vec<u8> = connection.query_row(
+        "SELECT canonical_blob FROM main._lithograph_schema_objects WHERE hash = ?1",
+        [schema_hash.as_bytes().as_slice()],
+        |row| row.get(0),
+    )?;
+    if persisted != canonical_blob {
+        return Err(StorageError::corrupt(format!(
+            "Schema {} does not match its content-addressed bytes",
+            schema_hash.to_hex()
+        )));
+    }
+    Ok(schema_hash)
+}
+
 fn existing_root_info(connection: &Connection) -> StorageResult<RootInfo> {
     let root = root_commit(connection)?;
     let main: Option<Vec<u8>> = connection

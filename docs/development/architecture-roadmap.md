@@ -73,7 +73,7 @@ Phase 10 Compatibility / Scale / Release Closure
 | Logical / physical planner | 04 | 10 |
 | Row/path executor | 04 | 06 |
 | Mutating operators | 05 | 06 |
-| SQLite transaction -> Commit behavior | 05 | 09 |
+| Transaction -> Commit behavior（auto-commit + Native explicit transaction） | 05 | 09 |
 | Complete clause/expression/function coverage | 06 | 10 |
 | Graph Type / constraints | 07 | 07 |
 | lookup/range/text/point index | 07 | 10 |
@@ -122,6 +122,22 @@ CREATE / SET / DELETE
 ```
 
 第一条 write slice 必须在 Commit history 中可见，并通过 rollback acceptance。
+
+### Explicit transaction vertical slice
+
+```text
+tx_begin(branch, expectedHead)
+ -> pin base under writer ownership
+ -> execute Cypher A against staged state
+ -> execute Cypher B and observe A
+ -> canonicalize base -> final net delta
+ -> one layer
+ -> one commit
+ -> one branch compare-and-move
+ -> commit / abort + reopen history
+```
+
+Phase 09 必须证明多个 execution 只是一个版本写单元，而不是先生成多个 immutable Commit 再隐藏或 squash；失败路径不能留下 intermediate Commit/ref move。Phase 05 的普通单-query auto-commit 与 Phase 08 的 transaction batching 不因此改变。
 
 ### Search vertical slice
 

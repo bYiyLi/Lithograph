@@ -35,6 +35,10 @@ fn cypher25_frozen_grammar_families_parse() {
         "CREATE VECTOR INDEX vec_idx FOR (n:Doc) ON (n.embedding)",
         "CREATE CONSTRAINT person_key FOR (n:Person) REQUIRE n.id IS UNIQUE",
         "SHOW VECTOR INDEXES YIELD name RETURN name",
+        "SHOW ALL INDEX YIELD name RETURN name",
+        "SHOW NODE EXISTENCE CONSTRAINT YIELD type RETURN type",
+        "SHOW REL PROPERTY TYPE CONSTRAINTS YIELD type RETURN type",
+        "CREATE CONSTRAINT rel_key FOR ()-[r:KNOWS]-() REQUIRE r.id IS REL KEY",
         "ALTER CURRENT GRAPH TYPE ADD { (p IS Person => {id :: INTEGER IS UNIQUE}) }",
         "RETURN vector([1,2,3], 3, INTEGER) AS v",
         "RETURN uuid('550e8400-e29b-41d4-a716-446655440000') AS id",
@@ -43,6 +47,29 @@ fn cypher25_frozen_grammar_families_parse() {
     ];
     for query in queries {
         parse(query).unwrap_or_else(|error| panic!("{query}: {error}"));
+    }
+}
+
+#[test]
+fn schema_require_aliases_must_match_their_targets() {
+    for query in [
+        "CREATE CONSTRAINT c FOR (n:Person) REQUIRE n.id IS UNIQUE",
+        "CREATE CONSTRAINT c FOR ()-[r:KNOWS]-() REQUIRE r.id IS RELATIONSHIP KEY",
+        "ALTER CURRENT GRAPH TYPE SET { (p:Person => {id :: INTEGER, tenant :: STRING}) REQUIRE (p.id, p.tenant) IS NODE KEY }",
+        "ALTER CURRENT GRAPH TYPE SET { ()-[r:KNOWS => {id :: INTEGER, tenant :: STRING}]->() REQUIRE (r.id, r.tenant) IS RELATIONSHIP KEY }",
+    ] {
+        validate(query).unwrap_or_else(|error| panic!("{query}: {error}"));
+    }
+
+    for query in [
+        "CREATE CONSTRAINT c FOR (n:Person) REQUIRE m.id IS UNIQUE",
+        "CREATE CONSTRAINT c FOR ()-[r:KNOWS]-() REQUIRE x.id IS RELATIONSHIP KEY",
+        "ALTER CURRENT GRAPH TYPE SET { (p:Person => {id :: INTEGER}) REQUIRE q.id IS NODE KEY }",
+        "ALTER CURRENT GRAPH TYPE SET { ()-[r:KNOWS => {id :: INTEGER}]->() REQUIRE x.id IS RELATIONSHIP KEY }",
+        "ALTER CURRENT GRAPH TYPE SET { (:Person => {id :: INTEGER}) REQUIRE p.id IS NODE KEY }",
+    ] {
+        let error = validate(query).expect_err(query);
+        assert_eq!(error.kind, FrontendErrorKind::Schema, "{query}");
     }
 }
 

@@ -759,11 +759,15 @@ pub(super) fn show_all_columns(clause: &AstNode) -> QueryResult<Vec<String>> {
 
 fn show_columns(clause: &AstNode, all: bool) -> QueryResult<Vec<String>> {
     let target = clause.descendants().find_map(|node| match node.kind {
-        AstKind::ShowTarget(target @ (ShowTargetKind::Functions | ShowTargetKind::Procedures)) => {
-            Some(target)
-        }
+        AstKind::ShowTarget(target) => Some(target),
         _ => None,
     });
+    let as_graph = clause
+        .descendants()
+        .any(|node| node.kind == AstKind::ShowAsGraph);
+    if let Some(columns) = schema_show_columns(target, all, as_graph) {
+        return Ok(columns.iter().map(|column| (*column).to_owned()).collect());
+    }
     let columns: &[&str] = match (target, all) {
         (Some(ShowTargetKind::Functions), false) => &["name", "category", "description"],
         (Some(ShowTargetKind::Procedures), false) => {
@@ -805,6 +809,75 @@ fn show_columns(clause: &AstNode, all: bool) -> QueryResult<Vec<String>> {
         }
     };
     Ok(columns.iter().map(|column| (*column).to_owned()).collect())
+}
+
+fn schema_show_columns(
+    target: Option<ShowTargetKind>,
+    all: bool,
+    as_graph: bool,
+) -> Option<&'static [&'static str]> {
+    match (target, all, as_graph) {
+        (Some(ShowTargetKind::CurrentGraphType), _, true) => Some(&["nodes", "relationships"]),
+        (Some(ShowTargetKind::CurrentGraphType), _, false) => Some(&["specification"]),
+        (Some(ShowTargetKind::Indexes), false, _) => Some(&[
+            "id",
+            "name",
+            "state",
+            "populationPercent",
+            "type",
+            "entityType",
+            "labelsOrTypes",
+            "properties",
+            "indexProvider",
+            "owningConstraint",
+            "lastRead",
+            "readCount",
+        ]),
+        (Some(ShowTargetKind::Indexes), true, _) => Some(&[
+            "id",
+            "name",
+            "state",
+            "populationPercent",
+            "type",
+            "entityType",
+            "labelsOrTypes",
+            "properties",
+            "indexProvider",
+            "owningConstraint",
+            "lastRead",
+            "readCount",
+            "trackedSince",
+            "options",
+            "failureMessage",
+            "createStatement",
+        ]),
+        (Some(ShowTargetKind::Constraints), false, _) => Some(&[
+            "id",
+            "name",
+            "type",
+            "entityType",
+            "labelsOrTypes",
+            "properties",
+            "enforcedLabel",
+            "ownedIndex",
+            "propertyType",
+        ]),
+        (Some(ShowTargetKind::Constraints), true, _) => Some(&[
+            "id",
+            "name",
+            "type",
+            "entityType",
+            "labelsOrTypes",
+            "properties",
+            "enforcedLabel",
+            "classification",
+            "ownedIndex",
+            "propertyType",
+            "options",
+            "createStatement",
+        ]),
+        _ => None,
+    }
 }
 
 fn logical_operators(root: &AstNode) -> Vec<LogicalOperator> {
@@ -990,6 +1063,15 @@ fn physical_operator(operator: &LogicalOperator) -> PhysicalOperator {
             variable: variable.clone(),
             label: label.clone(),
         },
+        LogicalOperator::IndexSeek {
+            variable,
+            index,
+            kind,
+        } => PhysicalOperator::IndexSeek {
+            variable: variable.clone(),
+            index: index.clone(),
+            kind: *kind,
+        },
         LogicalOperator::ExpandAll { from, .. } | LogicalOperator::ExpandInto { from, .. } => {
             PhysicalOperator::AdjacencySeek {
                 from: from.clone(),
@@ -1007,6 +1089,7 @@ fn physical_operator(operator: &LogicalOperator) -> PhysicalOperator {
         LogicalOperator::Optional => PhysicalOperator::Optional,
         LogicalOperator::Cartesian => PhysicalOperator::Cartesian,
         LogicalOperator::Mutation { kind } => PhysicalOperator::Mutation { kind: *kind },
+        LogicalOperator::Schema { kind } => PhysicalOperator::Schema { kind: *kind },
         LogicalOperator::Commit => PhysicalOperator::Commit,
         LogicalOperator::RelationshipScan { variable } => PhysicalOperator::RelationshipScan {
             variable: variable.clone(),

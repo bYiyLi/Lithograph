@@ -1,6 +1,6 @@
 # Phase 08：Search and Data Ingestion
 
-**状态：`planned`**
+**状态：`ready`**
 
 ## 1. 目标
 
@@ -85,6 +85,8 @@ Native API 实现：
 - branch commit coordinator 让内部 concurrent batch 从各自 transaction 的 latest head 开始；
 - query-level Graph View selector 在 outer execution 解析一次并传播到所有 batch；每个 batch pin 自己的 base Commit 后重新计算 visibility，不能复用 outer query 开始时的 element membership；
 - SQL Bridge 的 `TRANSACTION_BOUNDARY_REQUIRED` negative contract。
+
+这里的 transaction batching 是 Cypher 25 `CALL { ... } IN TRANSACTIONS` 语义：每个 mutating batch 都是独立 transaction / Commit boundary。它**不**提供“多个外部 Cypher execution -> 一个 Commit”的 Native explicit transaction；后者属于 Phase 09，并建立在 Phase 05 的 staged write foundation 与 Phase 07/08 已完成的 Schema/Search surface 之上。
 
 ## 5. Acceptance
 

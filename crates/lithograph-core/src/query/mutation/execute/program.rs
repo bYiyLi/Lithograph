@@ -762,6 +762,11 @@ fn finish_program(
     let counters = context.delta.counters()?;
     let final_snapshot =
         Snapshot::resolve_with_layer(context.connection, context.base_commit, &final_layer)?;
+    crate::query::schema::validate_snapshot_against_commit_schema(
+        context.connection,
+        context.base_commit,
+        &final_snapshot,
+    )?;
     let rows = result
         .rows
         .into_iter()

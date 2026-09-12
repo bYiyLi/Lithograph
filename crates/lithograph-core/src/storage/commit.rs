@@ -57,32 +57,57 @@ pub fn commit_layer(
     metadata: &CommitMetadata,
 ) -> StorageResult<HashId> {
     with_savepoint(connection, |connection| {
-        commit_layer_inner(
+        let schema_hash = super::schema::schema_hash_for_commit(connection, expected_head)?;
+        commit_change_inner(
             connection,
             branch,
             expected_head,
             second_parent,
             layer,
+            schema_hash,
             metadata,
         )
     })
 }
 
-fn commit_layer_inner(
+/// Persists a Schema-only Commit with an empty graph Layer and compare-and-moves a Branch.
+pub fn commit_schema(
+    connection: &Connection,
+    branch: &str,
+    expected_head: HashId,
+    schema_hash: HashId,
+    metadata: &CommitMetadata,
+) -> StorageResult<HashId> {
+    with_savepoint(connection, |connection| {
+        require_schema(connection, schema_hash)?;
+        commit_change_inner(
+            connection,
+            branch,
+            expected_head,
+            None,
+            &LayerBuilder::default(),
+            schema_hash,
+            metadata,
+        )
+    })
+}
+
+fn commit_change_inner(
     connection: &Connection,
     branch: &str,
     expected_head: HashId,
     second_parent: Option<HashId>,
     layer: &LayerBuilder,
+    schema_hash: HashId,
     metadata: &CommitMetadata,
 ) -> StorageResult<HashId> {
     if branch_head(connection, branch)? != expected_head {
         return Err(StorageError::BranchHeadMoved);
     }
-    let schema_hash = commit_schema_hash(connection, expected_head)?;
     if let Some(parent) = second_parent {
         require_commit(connection, parent)?;
     }
+    require_schema(connection, schema_hash)?;
     let (layer_id, layer_hash) = persist_layer(connection, layer)?;
     let commit = commit_hash(
         Some(expected_head),
@@ -198,18 +223,6 @@ fn persisted_commit_row(row: &CommitRow<'_>) -> PersistedCommitRow {
     }
 }
 
-fn commit_schema_hash(connection: &Connection, commit: HashId) -> StorageResult<HashId> {
-    let bytes: Vec<u8> = connection
-        .query_row(
-            "SELECT schema_hash FROM main._lithograph_commits WHERE id = ?1",
-            [commit.as_bytes().as_slice()],
-            |row| row.get(0),
-        )
-        .optional()?
-        .ok_or_else(|| StorageError::not_found(format!("Commit {}", commit.to_hex())))?;
-    HashId::from_slice(&bytes)
-}
-
 fn require_commit(connection: &Connection, commit: HashId) -> StorageResult<()> {
     let exists: i64 = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM main._lithograph_commits WHERE id = ?1)",
@@ -222,6 +235,22 @@ fn require_commit(connection: &Connection, commit: HashId) -> StorageResult<()> 
         Err(StorageError::not_found(format!(
             "Commit {}",
             commit.to_hex()
+        )))
+    }
+}
+
+fn require_schema(connection: &Connection, schema_hash: HashId) -> StorageResult<()> {
+    let exists: i64 = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM main._lithograph_schema_objects WHERE hash = ?1)",
+        [schema_hash.as_bytes().as_slice()],
+        |row| row.get(0),
+    )?;
+    if exists == 1 {
+        Ok(())
+    } else {
+        Err(StorageError::not_found(format!(
+            "Schema {}",
+            schema_hash.to_hex()
         )))
     }
 }

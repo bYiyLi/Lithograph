@@ -385,7 +385,7 @@ create_index_clause = {
 index_kind = { KW_LOOKUP | KW_RANGE | KW_TEXT | KW_POINT | KW_FULLTEXT | KW_VECTOR }
 index_name = { symbolic_name }
 if_not_exists = { KW_IF ~ KW_NOT ~ KW_EXISTS }
-index_pattern = { node_pattern | node_pattern ~ relationship_pattern ~ node_pattern }
+index_pattern = { node_pattern ~ relationship_pattern ~ node_pattern | node_pattern }
 index_target = { index_target_each? ~ ("[" ~ expression_list ~ "]" | "(" ~ expression_list ~ ")" | expression) }
 index_target_each = { KW_EACH }
 index_additional_properties = { KW_WITH ~ "[" ~ property_expression ~ ("," ~ property_expression)* ~ "]" }
@@ -397,10 +397,10 @@ create_constraint_clause = {
 }
 constraint_name = { symbolic_name }
 constraint_requirement = { property_type_constraint | constraint_property_or_tuple ~ KW_IS ~ constraint_kind }
-property_type_constraint = { property_expression ~ (KW_IS? ~ "::" | KW_IS ~ KW_TYPED) ~ type_expression }
+property_type_constraint = { constraint_property_or_tuple ~ (KW_IS? ~ "::" | KW_IS ~ KW_TYPED) ~ type_expression }
 constraint_property_or_tuple = { property_expression | "(" ~ property_expression ~ ("," ~ property_expression)* ~ ")" }
 expression_or_tuple = { expression | "(" ~ expression_list ~ ")" }
-constraint_kind = { (KW_NODE | KW_RELATIONSHIP)? ~ (KW_KEY | KW_UNIQUE) | KW_NOT ~ KW_NULL }
+constraint_kind = { (KW_NODE | KW_REL | KW_RELATIONSHIP)? ~ (KW_KEY | KW_UNIQUE) | KW_NOT ~ KW_NULL }
 drop_constraint_clause = { KW_DROP ~ KW_CONSTRAINT ~ constraint_name ~ if_exists? }
 options_clause = { KW_OPTIONS ~ map_literal }
 
@@ -410,10 +410,28 @@ show_clause = {
 show_as_graph = { KW_AS ~ KW_GRAPH }
 show_target = {
       KW_CURRENT ~ KW_GRAPH ~ KW_TYPE
-    | index_kind? ~ KW_INDEXES
-    | KW_CONSTRAINTS
+    | (KW_ALL | index_kind)? ~ (KW_INDEX | KW_INDEXES)
+    | show_constraint_filter? ~ (KW_CONSTRAINT | KW_CONSTRAINTS)
     | (KW_FUNCTION | KW_FUNCTIONS)
     | (KW_PROCEDURE | KW_PROCEDURES)
+}
+show_constraint_filter = {
+      KW_ALL
+    | KW_NODE ~ KW_PROPERTY? ~ (KW_UNIQUE | KW_UNIQUENESS)
+    | (KW_REL | KW_RELATIONSHIP) ~ KW_PROPERTY? ~ (KW_UNIQUE | KW_UNIQUENESS)
+    | KW_PROPERTY? ~ (KW_UNIQUE | KW_UNIQUENESS)
+    | KW_NODE ~ KW_PROPERTY ~ (KW_EXIST | KW_EXISTENCE)
+    | (KW_REL | KW_RELATIONSHIP) ~ KW_PROPERTY ~ (KW_EXIST | KW_EXISTENCE)
+    | KW_PROPERTY ~ (KW_EXIST | KW_EXISTENCE)
+    | KW_NODE ~ (KW_EXIST | KW_EXISTENCE)
+    | (KW_REL | KW_RELATIONSHIP) ~ (KW_EXIST | KW_EXISTENCE)
+    | (KW_EXIST | KW_EXISTENCE)
+    | KW_NODE ~ KW_PROPERTY ~ KW_TYPE
+    | (KW_REL | KW_RELATIONSHIP) ~ KW_PROPERTY ~ KW_TYPE
+    | KW_PROPERTY ~ KW_TYPE
+    | KW_NODE ~ KW_KEY
+    | (KW_REL | KW_RELATIONSHIP) ~ KW_KEY
+    | KW_KEY
 }
 show_yield = { KW_YIELD ~ (yield_all | projection_items) ~ order_by? ~ skip_clause? ~ limit_clause? }
 
@@ -439,9 +457,17 @@ graph_property_map = { "{" ~ graph_property_list? ~ "}" }
 graph_property_list = { graph_property ~ ("," ~ graph_property)* }
 graph_property = { property_key ~ graph_property_type ~ graph_property_constraint? }
 graph_property_type = { (KW_IS? ~ "::" | KW_IS ~ KW_TYPED) ~ type_expression }
-graph_property_constraint = { KW_IS ~ (KW_NODE | KW_RELATIONSHIP)? ~ (KW_KEY | KW_UNIQUE) }
-graph_require = { KW_REQUIRE ~ expression_or_tuple ~ KW_IS ~ (KW_NODE | KW_RELATIONSHIP)? ~ (KW_KEY | KW_UNIQUE) }
-graph_constraint = { KW_CONSTRAINT ~ constraint_name? ~ KW_FOR ~ index_pattern ~ KW_REQUIRE ~ constraint_requirement }
+graph_property_constraint = { KW_IS ~ (KW_NODE | KW_REL | KW_RELATIONSHIP)? ~ (KW_KEY | KW_UNIQUE) }
+graph_require = { KW_REQUIRE ~ expression_or_tuple ~ KW_IS ~ (KW_NODE | KW_REL | KW_RELATIONSHIP)? ~ (KW_KEY | KW_UNIQUE) }
+graph_constraint = { KW_CONSTRAINT ~ (constraint_name ~ graph_constraint_definition? | graph_constraint_definition) }
+graph_constraint_definition = _{ KW_FOR ~ graph_constraint_pattern ~ KW_REQUIRE ~ constraint_requirement }
+graph_constraint_pattern = _{ graph_constraint_relationship_pattern | graph_constraint_node_pattern }
+graph_constraint_node_pattern = {
+    "(" ~ graph_alias? ~ graph_label_marker ~ graph_label ~ graph_implies? ~ ")"
+}
+graph_constraint_relationship_pattern = {
+    "(" ~ ")" ~ "-" ~ "[" ~ graph_alias? ~ graph_label_marker ~ graph_relationship_name ~ graph_implies? ~ "]" ~ "-" ~ right_arrow? ~ "(" ~ ")"
+}
 
 type_expression = { type_term ~ ("|" ~ type_term)* }
 type_term = { type_primary ~ nullability? ~ (type_suffix ~ nullability?)* }
@@ -544,6 +570,8 @@ KW_ELSE = @{ ^"ELSE" ~ !ident_continue }
 KW_END = @{ ^"END" ~ !ident_continue }
 KW_ENDS = @{ ^"ENDS" ~ !ident_continue }
 KW_ERROR = @{ ^"ERROR" ~ !ident_continue }
+KW_EXIST = @{ ^"EXIST" ~ !ident_continue }
+KW_EXISTENCE = @{ ^"EXISTENCE" ~ !ident_continue }
 KW_EXISTS = @{ ^"EXISTS" ~ !ident_continue }
 KW_EXPLAIN = @{ ^"EXPLAIN" ~ !ident_continue }
 KW_FAIL = @{ ^"FAIL" ~ !ident_continue }
@@ -602,6 +630,7 @@ KW_PROCEDURE = @{ ^"PROCEDURE" ~ !ident_continue }
 KW_PROCEDURES = @{ ^"PROCEDURES" ~ !ident_continue }
 KW_PROFILE = @{ ^"PROFILE" ~ !ident_continue }
 KW_RANGE = @{ ^"RANGE" ~ !ident_continue }
+KW_REL = @{ ^"REL" ~ !ident_continue }
 KW_RELATIONSHIP = @{ ^"RELATIONSHIP" ~ !ident_continue }
 KW_RELATIONSHIPS = @{ ^"RELATIONSHIPS" ~ !ident_continue }
 KW_REDUCE = @{ ^"REDUCE" ~ !ident_continue }
@@ -635,6 +664,7 @@ KW_TRAIL = @{ ^"TRAIL" ~ !ident_continue }
 KW_TRUE = @{ ^"TRUE" ~ !ident_continue }
 KW_TYPE = @{ ^"TYPE" ~ !ident_continue }
 KW_TYPED = @{ ^"TYPED" ~ !ident_continue }
+KW_UNIQUENESS = @{ ^"UNIQUENESS" ~ !ident_continue }
 KW_UNION = @{ ^"UNION" ~ !ident_continue }
 KW_UNIQUE = @{ ^"UNIQUE" ~ !ident_continue }
 KW_UNWIND = @{ ^"UNWIND" ~ !ident_continue }

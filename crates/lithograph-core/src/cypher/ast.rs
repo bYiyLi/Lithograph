@@ -162,10 +162,13 @@ pub enum AstKind {
     ConstraintName,
     ExistenceModifier(ExistenceModifierKind),
     ShowTarget(ShowTargetKind),
+    ShowConstraintFilter(ShowConstraintFilterKind),
     ShowAsGraph,
     GraphTypeOperation(GraphTypeOperationKind),
     GraphNodeType,
     GraphRelationshipType,
+    GraphEndpoint,
+    GraphImplies,
     GraphConstraint,
     GraphAlias,
     ComparisonSuffix,
@@ -263,6 +266,26 @@ pub enum ShowTargetKind {
     Constraints,
     Functions,
     Procedures,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShowConstraintFilterKind {
+    All,
+    NodeUnique,
+    RelationshipUnique,
+    Unique,
+    NodePropertyExistence,
+    RelationshipPropertyExistence,
+    PropertyExistence,
+    NodeExistence,
+    RelationshipExistence,
+    Existence,
+    NodePropertyType,
+    RelationshipPropertyType,
+    PropertyType,
+    NodeKey,
+    RelationshipKey,
+    Key,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

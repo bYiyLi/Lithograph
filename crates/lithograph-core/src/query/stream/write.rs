@@ -5,6 +5,13 @@ use super::*;
 
 static NEXT_WRITE_SAVEPOINT: AtomicU64 = AtomicU64::new(1);
 
+struct CursorWriteOutcome {
+    rows: Vec<Vec<Value>>,
+    commit: crate::storage::HashId,
+    counters: QueryCounters,
+    query_type: QueryType,
+}
+
 impl QueryCursor {
     pub(super) fn next_write(
         &mut self,
@@ -36,6 +43,25 @@ impl QueryCursor {
                         &mut self.metrics,
                         is_interrupted,
                     )
+                    .map(|outcome| CursorWriteOutcome {
+                        rows: outcome.rows,
+                        commit: outcome.commit,
+                        counters: query_counters(outcome.counters),
+                        query_type: QueryType::Write,
+                    })
+                } else if let Some(schema) = self.prepared.schema.as_ref() {
+                    super::super::schema::execute_schema(
+                        connection,
+                        schema,
+                        self.prepared.commit,
+                        is_interrupted,
+                    )
+                    .map(|outcome| CursorWriteOutcome {
+                        rows: Vec::new(),
+                        commit: outcome.commit,
+                        counters: schema_query_counters(outcome.counters),
+                        query_type: QueryType::Schema,
+                    })
                 } else if let Some(program) = self.prepared.program.as_ref() {
                     super::super::mutation::execute_program(
                         connection,
@@ -45,6 +71,12 @@ impl QueryCursor {
                         &mut self.metrics,
                         is_interrupted,
                     )
+                    .map(|outcome| CursorWriteOutcome {
+                        rows: outcome.rows,
+                        commit: outcome.commit,
+                        counters: query_counters(outcome.counters),
+                        query_type: QueryType::Write,
+                    })
                 } else {
                     Err(QueryError::internal(
                         "write query is missing its mutation plan",
@@ -68,9 +100,9 @@ impl QueryCursor {
             };
             self.metrics.rows = outcome.rows.len().try_into().unwrap_or(u64::MAX);
             let summary = QuerySummary {
-                query_type: QueryType::Write,
+                query_type: outcome.query_type,
                 commit: format!("commit/{}", outcome.commit.to_hex()),
-                counters: query_counters(outcome.counters),
+                counters: outcome.counters,
                 metrics: self.metrics.clone(),
             };
             self.write_state = WriteState::Active {
@@ -226,6 +258,16 @@ fn query_counters(counters: super::super::mutation::MutationCounters) -> QueryCo
         properties_removed: counters.properties_removed,
         labels_added: counters.labels_added,
         labels_removed: counters.labels_removed,
+        ..QueryCounters::default()
+    }
+}
+
+fn schema_query_counters(counters: super::super::schema::SchemaCounters) -> QueryCounters {
+    QueryCounters {
+        constraints_added: counters.constraints_added,
+        constraints_removed: counters.constraints_removed,
+        indexes_added: counters.indexes_added,
+        indexes_removed: counters.indexes_removed,
         ..QueryCounters::default()
     }
 }

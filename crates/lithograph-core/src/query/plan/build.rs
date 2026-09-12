@@ -56,20 +56,31 @@ fn append_pattern_operator(
     bound: &mut BTreeSet<String>,
     operators: &mut Vec<LogicalOperator>,
 ) {
+    if append_relationship_index_seek(part, bound, operators) {
+        return;
+    }
     let start = part.start.variable.clone();
     if start
         .as_ref()
         .is_none_or(|variable| !bound.contains(variable))
     {
         let variable = start.clone().unwrap_or_else(|| "_anon".to_owned());
-        operators.push(match &part.start.scan_label_name {
-            Some(label) => LogicalOperator::LabelScan {
+        operators.push(if let Some(seek) = &part.start.index_seek {
+            LogicalOperator::IndexSeek {
                 variable: variable.clone(),
-                label: label.clone(),
-            },
-            None => LogicalOperator::NodeScan {
-                variable: variable.clone(),
-            },
+                index: seek.index_name.clone(),
+                kind: seek.kind,
+            }
+        } else {
+            match &part.start.scan_label_name {
+                Some(label) => LogicalOperator::LabelScan {
+                    variable: variable.clone(),
+                    label: label.clone(),
+                },
+                None => LogicalOperator::NodeScan {
+                    variable: variable.clone(),
+                },
+            }
         });
         if part.start.variable.is_some() {
             bound.insert(variable);
@@ -103,6 +114,38 @@ fn append_pattern_operator(
     }
 }
 
+fn append_relationship_index_seek(
+    part: &PatternPart,
+    bound: &mut BTreeSet<String>,
+    operators: &mut Vec<LogicalOperator>,
+) -> bool {
+    let Some(relationship) = &part.relationship else {
+        return false;
+    };
+    let Some(seek) = &relationship.index_seek else {
+        return false;
+    };
+    operators.push(LogicalOperator::IndexSeek {
+        variable: relationship
+            .variable
+            .clone()
+            .unwrap_or_else(|| "_anon_rel".to_owned()),
+        index: seek.index_name.clone(),
+        kind: seek.kind,
+    });
+    for variable in [
+        part.start.variable.as_ref(),
+        relationship.variable.as_ref(),
+        part.end.as_ref().and_then(|end| end.variable.as_ref()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        bound.insert(variable.clone());
+    }
+    true
+}
+
 pub(super) fn build_physical(
     logical: &LogicalPlan,
     matches: &[MatchStep],
@@ -124,6 +167,15 @@ pub(super) fn build_physical(
                     label: label.clone(),
                 })
             }
+            LogicalOperator::IndexSeek {
+                variable,
+                index,
+                kind,
+            } => operators.push(PhysicalOperator::IndexSeek {
+                variable: variable.clone(),
+                index: index.clone(),
+                kind: *kind,
+            }),
             LogicalOperator::ExpandAll { from, .. } | LogicalOperator::ExpandInto { from, .. } => {
                 let relationship = relationships.next();
                 operators.push(PhysicalOperator::AdjacencySeek {
@@ -157,6 +209,9 @@ pub(super) fn build_physical(
             LogicalOperator::Eager => operators.push(PhysicalOperator::Eager),
             LogicalOperator::Mutation { kind } => {
                 operators.push(PhysicalOperator::Mutation { kind: *kind })
+            }
+            LogicalOperator::Schema { kind } => {
+                operators.push(PhysicalOperator::Schema { kind: *kind })
             }
             LogicalOperator::Commit => operators.push(PhysicalOperator::Commit),
             LogicalOperator::TypeSeek { relationship_type } => {

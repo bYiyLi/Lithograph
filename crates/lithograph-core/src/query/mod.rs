@@ -10,6 +10,7 @@ mod name_expression;
 mod options;
 mod plan;
 pub(crate) mod registry;
+mod schema;
 mod spill;
 mod stats;
 mod stream;

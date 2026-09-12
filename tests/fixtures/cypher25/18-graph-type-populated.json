@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "id": "cy25-graph-type-empty-graph",
+  "id": "cy25-graph-type-populated-graph",
   "profile": {
     "id": "CY25-2026.08",
     "source": "https://neo4j.com/docs/cypher-manual/current/schema/graph-types/set-graph-types/",
@@ -10,7 +10,7 @@
   "execution": "enabled",
   "query": "ALTER CURRENT GRAPH TYPE SET { (:Person => {name :: STRING}) }",
   "params": {},
-  "initial_graph": [],
+  "initial_graph": ["CREATE (:Person {name: 'Alice'})"],
   "expected": {
     "kind": "rows",
     "columns": [],

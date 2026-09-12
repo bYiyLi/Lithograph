@@ -100,7 +100,7 @@ fn set_map_property(
     Ok(())
 }
 
-pub(super) fn property_from_value(value: Value) -> QueryResult<Option<PropertyValue>> {
+pub(crate) fn property_from_value(value: Value) -> QueryResult<Option<PropertyValue>> {
     let value = match value {
         Value::Null => return Ok(None),
         Value::Boolean(value) => PropertyValue::Boolean(value),

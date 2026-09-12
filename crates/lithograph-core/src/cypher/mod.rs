@@ -26,10 +26,11 @@ mod value_order;
 
 pub use ast::{
     AstKind, AstNode, ClauseKind, ConditionalBranchKind, ConstraintKind, ExecutionMode,
-    ExistenceModifierKind, ExpressionKind, GraphTypeOperationKind, LiteralKind, MatchModeKind,
-    MergeActionKind, NameExpressionKind, OrderDirectionKind, PathModeKind, PathSelectorKind,
-    QuantifierKind, QueryAst, QueryConnector, QueryOption, QueryOptionValue, SetOperatorKind,
-    SetQuantifierKind, ShowTargetKind, SubqueryKind, TransactionDisjointKind, TransactionErrorKind,
+    ExistenceModifierKind, ExpressionKind, GraphTypeOperationKind, IndexKind, LiteralKind,
+    MatchModeKind, MergeActionKind, NameExpressionKind, OrderDirectionKind, PathModeKind,
+    PathSelectorKind, QuantifierKind, QueryAst, QueryConnector, QueryOption, QueryOptionValue,
+    SetOperatorKind, SetQuantifierKind, ShowConstraintFilterKind, ShowTargetKind, SubqueryKind,
+    TransactionDisjointKind, TransactionErrorKind,
 };
 pub use error::{FrontendError, FrontendErrorKind, Span};
 pub use parser::parse;

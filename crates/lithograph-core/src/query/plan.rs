@@ -6,7 +6,7 @@ use crate::cypher::{
     self, AstKind, AstNode, ClauseKind, ExecutionMode, ExpressionKind, NameExpressionKind,
     OrderDirectionKind, SetQuantifierKind, Value,
 };
-use crate::storage::{self, HashId, LabelId, RelationshipTypeId};
+use crate::storage::{self, HashId, LabelId, RelationshipTypeId, StandardIndexKind};
 
 use super::expression::{Expr, compile_expression, is_count, surface_expressions};
 use super::graph::{ResolvedGraphView, resolve_commit};
@@ -25,6 +25,11 @@ pub enum LogicalOperator {
     LabelScan {
         variable: String,
         label: String,
+    },
+    IndexSeek {
+        variable: String,
+        index: String,
+        kind: StandardIndexKind,
     },
     RelationshipScan {
         variable: Option<String>,
@@ -63,6 +68,9 @@ pub enum LogicalOperator {
     Mutation {
         kind: ClauseKind,
     },
+    Schema {
+        kind: ClauseKind,
+    },
     Commit,
 }
 
@@ -79,6 +87,11 @@ pub enum PhysicalOperator {
     LabelIndexScan {
         variable: String,
         label: String,
+    },
+    IndexSeek {
+        variable: String,
+        index: String,
+        kind: StandardIndexKind,
     },
     RelationshipScan {
         variable: Option<String>,
@@ -107,6 +120,9 @@ pub enum PhysicalOperator {
     Next,
     Eager,
     Mutation {
+        kind: ClauseKind,
+    },
+    Schema {
         kind: ClauseKind,
     },
     Commit,
@@ -142,6 +158,7 @@ pub(crate) struct NodeSpec {
     pub label_names: Vec<String>,
     pub scan_label: Option<LabelId>,
     pub scan_label_name: Option<String>,
+    pub index_seek: Option<super::schema::StandardIndexSeek>,
     pub impossible: bool,
 }
 #[derive(Debug, Clone)]
@@ -150,6 +167,7 @@ pub(crate) struct RelationshipSpec {
     pub type_id: Option<RelationshipTypeId>,
     pub type_name: Option<String>,
     pub direction: Direction,
+    pub index_seek: Option<super::schema::StandardIndexSeek>,
     pub impossible: bool,
 }
 #[derive(Debug, Clone)]
@@ -198,6 +216,7 @@ pub struct PreparedQuery {
     pub(crate) params: BTreeMap<String, Value>,
     pub(crate) mode: ExecutionMode,
     pub(crate) write: Option<super::mutation::PreparedWrite>,
+    pub(crate) schema: Option<super::schema::PreparedSchema>,
     pub(crate) program: Option<super::completeness::PreparedProgram>,
     pub logical: LogicalPlan,
     pub physical: PhysicalPlan,
@@ -229,6 +248,17 @@ pub fn prepare(
         params,
         mode: ast.execution_mode,
     };
+    if let Some(schema) =
+        super::schema::prepare_schema(connection, context.commit, &ast, query, &options)?
+    {
+        return Ok(schema_query(
+            context.commit,
+            context.graph_view,
+            context.params,
+            context.mode,
+            schema,
+        ));
+    }
     if super::completeness::requires_program(&ast.root) {
         let program = super::completeness::prepare_program(&ast, query, &options)?;
         return Ok(program_query(
@@ -276,6 +306,7 @@ fn prepare_write_query(
         params: context.params,
         mode: context.mode,
         write: Some(write),
+        schema: None,
         program: None,
         logical,
         physical,
@@ -301,6 +332,12 @@ fn prepare_read_query(
     let aggregate = validate_aggregation(&projections)?;
     let statistics = planner_statistics(connection, context.commit, &context.graph_view, &matches)?;
     optimize_node_scans(&mut matches, &statistics);
+    super::schema::select_standard_index_seeks(
+        connection,
+        context.commit,
+        &mut matches,
+        &context.params,
+    )?;
     let columns = output_columns(context.mode, &projections);
     let logical = build_logical(
         &matches,
@@ -324,6 +361,7 @@ fn prepare_read_query(
         params: context.params,
         mode: context.mode,
         write: None,
+        schema: None,
         program: None,
         logical,
         physical,
@@ -357,11 +395,52 @@ fn program_query(
         params,
         mode,
         write: None,
+        schema: None,
         logical: program.logical.clone(),
         physical: program.physical.clone(),
         statistics: PlannerStatistics::default(),
         columns,
         program: Some(program),
+    }
+}
+
+fn schema_query(
+    commit: HashId,
+    graph_view: ResolvedGraphView,
+    params: BTreeMap<String, Value>,
+    mode: ExecutionMode,
+    schema: super::schema::PreparedSchema,
+) -> PreparedQuery {
+    let kind = schema.kind;
+    let logical = LogicalPlan {
+        operators: vec![LogicalOperator::Schema { kind }, LogicalOperator::Commit],
+    };
+    let physical = PhysicalPlan {
+        operators: vec![PhysicalOperator::Schema { kind }, PhysicalOperator::Commit],
+    };
+    PreparedQuery {
+        commit,
+        graph_view,
+        matches: Vec::new(),
+        projections: Vec::new(),
+        order: Vec::new(),
+        skip: 0,
+        limit: None,
+        distinct: false,
+        aggregate: false,
+        params,
+        mode,
+        write: None,
+        schema: Some(schema),
+        program: None,
+        logical,
+        physical,
+        statistics: PlannerStatistics::default(),
+        columns: if mode == ExecutionMode::Explain {
+            vec!["plan".to_owned()]
+        } else {
+            Vec::new()
+        },
     }
 }
 
@@ -642,6 +721,7 @@ fn lower_node(connection: &Connection, node: &AstNode) -> QueryResult<NodeSpec> 
         variable,
         scan_label: labels.first().copied(),
         scan_label_name: label_names.first().cloned(),
+        index_seek: None,
         labels,
         label_names,
         impossible,
@@ -703,6 +783,7 @@ fn lower_relationship(connection: &Connection, node: &AstNode) -> QueryResult<Re
         type_id,
         type_name,
         direction,
+        index_seek: None,
         impossible,
     })
 }

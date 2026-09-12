@@ -32,7 +32,7 @@ fn cypher25_valid_parse_fixtures_parse() {
         }
     }
 
-    assert_eq!(queries, 5, "CY25 valid parser fixture inventory changed");
+    assert_eq!(queries, 4, "CY25 valid parser fixture inventory changed");
     assert!(
         failures.is_empty(),
         "{} CY25 parser fixture failure(s):\n{}",

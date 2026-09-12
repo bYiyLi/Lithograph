@@ -1265,8 +1265,45 @@ pub(crate) fn show_projection_clause(yield_node: &AstNode) -> AstNode {
 }
 
 fn show_all_scope(clause: &AstNode) -> Scope {
-    let fields: &[&str] = if show_target(clause) == Some(ShowTargetKind::Procedures) {
-        &[
+    let as_graph = clause
+        .descendants()
+        .any(|node| node.kind == AstKind::ShowAsGraph);
+    let fields: &[&str] = match show_target(clause) {
+        Some(ShowTargetKind::CurrentGraphType) if as_graph => &["nodes", "relationships"],
+        Some(ShowTargetKind::CurrentGraphType) => &["specification"],
+        Some(ShowTargetKind::Indexes) => &[
+            "id",
+            "name",
+            "state",
+            "populationPercent",
+            "type",
+            "entityType",
+            "labelsOrTypes",
+            "properties",
+            "indexProvider",
+            "owningConstraint",
+            "lastRead",
+            "readCount",
+            "trackedSince",
+            "options",
+            "failureMessage",
+            "createStatement",
+        ],
+        Some(ShowTargetKind::Constraints) => &[
+            "id",
+            "name",
+            "type",
+            "entityType",
+            "labelsOrTypes",
+            "properties",
+            "enforcedLabel",
+            "classification",
+            "ownedIndex",
+            "propertyType",
+            "options",
+            "createStatement",
+        ],
+        Some(ShowTargetKind::Procedures) => &[
             "name",
             "description",
             "mode",
@@ -1280,9 +1317,8 @@ fn show_all_scope(clause: &AstNode) -> Scope {
             "isDeprecated",
             "deprecatedBy",
             "option",
-        ]
-    } else {
-        &[
+        ],
+        _ => &[
             "name",
             "category",
             "description",
@@ -1295,7 +1331,7 @@ fn show_all_scope(clause: &AstNode) -> Scope {
             "rolesBoostedExecution",
             "isDeprecated",
             "deprecatedBy",
-        ]
+        ],
     };
     fields
         .iter()
@@ -1305,15 +1341,44 @@ fn show_all_scope(clause: &AstNode) -> Scope {
 
 fn show_default_scope(clause: &AstNode) -> Scope {
     let mut scope = show_all_scope(clause);
-    if show_target(clause) == Some(ShowTargetKind::Procedures) {
-        scope.retain(|name, _| {
+    match show_target(clause) {
+        Some(ShowTargetKind::Indexes) => scope.retain(|name, _| {
+            matches!(
+                name.as_str(),
+                "id" | "name"
+                    | "state"
+                    | "populationPercent"
+                    | "type"
+                    | "entityType"
+                    | "labelsOrTypes"
+                    | "properties"
+                    | "indexProvider"
+                    | "owningConstraint"
+                    | "lastRead"
+                    | "readCount"
+            )
+        }),
+        Some(ShowTargetKind::Constraints) => scope.retain(|name, _| {
+            matches!(
+                name.as_str(),
+                "id" | "name"
+                    | "type"
+                    | "entityType"
+                    | "labelsOrTypes"
+                    | "properties"
+                    | "enforcedLabel"
+                    | "ownedIndex"
+                    | "propertyType"
+            )
+        }),
+        Some(ShowTargetKind::Procedures) => scope.retain(|name, _| {
             matches!(
                 name.as_str(),
                 "name" | "description" | "mode" | "worksOnSystem"
             )
-        });
-    } else {
-        scope.retain(|name, _| matches!(name.as_str(), "name" | "category" | "description"));
+        }),
+        Some(ShowTargetKind::CurrentGraphType) => {}
+        _ => scope.retain(|name, _| matches!(name.as_str(), "name" | "category" | "description")),
     }
     scope
 }

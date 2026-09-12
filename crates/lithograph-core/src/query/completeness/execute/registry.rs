@@ -69,7 +69,11 @@ fn procedure_columns(mut columns: Vec<String>, yield_items: &[(String, String)])
     columns
 }
 
-fn show_registry_rows(clause: &AstNode) -> QueryResult<Vec<BindingRow>> {
+fn show_registry_rows(
+    connection: &Connection,
+    snapshot: &Snapshot<'_>,
+    clause: &AstNode,
+) -> QueryResult<Vec<BindingRow>> {
     if clause.descendants().any(|node| {
         matches!(
             node.kind,
@@ -86,9 +90,7 @@ fn show_registry_rows(clause: &AstNode) -> QueryResult<Vec<BindingRow>> {
     }) {
         return Ok(procedure_registry_rows());
     }
-    Err(QueryError::semantic(
-        "this SHOW surface is owned by a later Phase",
-    ))
+    super::super::super::schema::show_rows(connection, snapshot, clause)
 }
 
 fn default_show_projection(
@@ -278,7 +280,7 @@ impl ReadExecutor<'_, '_> {
         let yield_node = crate::cypher::show_yield_node(clause);
         let mut registry = RowSet {
             columns: all_columns,
-            rows: show_registry_rows(clause)?,
+            rows: show_registry_rows(self.connection, &self.snapshot, clause)?,
         };
         if let Some(yield_node) = yield_node {
             registry = self.execute_projection(

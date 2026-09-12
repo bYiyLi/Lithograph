@@ -7,7 +7,112 @@ pub(super) fn validate_schema_surface(root: &AstNode, source: &str) -> Result<()
     validate_known_types(root, source)?;
     validate_type_expressions(root, source)?;
     validate_property_surfaces(root, source)?;
+    validate_schema_aliases(root, source)?;
     validate_index_surfaces(root, source)
+}
+
+fn validate_schema_aliases(root: &AstNode, source: &str) -> Result<(), FrontendError> {
+    for schema_constraint in root.descendants().filter(|node| {
+        matches!(
+            node.kind,
+            AstKind::Clause(ClauseKind::CreateConstraint) | AstKind::GraphConstraint
+        )
+    }) {
+        let Some(requirement) = schema_constraint
+            .descendants()
+            .find(|node| node.kind == AstKind::ConstraintRequirement)
+        else {
+            continue;
+        };
+        let target_alias = schema_constraint_target_alias(schema_constraint);
+        validate_requirement_alias(requirement, target_alias.as_deref(), source)?;
+    }
+
+    for element in root.descendants().filter(|node| {
+        matches!(
+            node.kind,
+            AstKind::GraphNodeType | AstKind::GraphRelationshipType
+        )
+    }) {
+        let alias = element
+            .children
+            .iter()
+            .find(|child| child.kind == AstKind::GraphAlias)
+            .and_then(|child| child.text.as_deref())
+            .map(unescape_identifier);
+        let property_spans = element
+            .descendants()
+            .filter(|node| node.kind == AstKind::GraphProperty)
+            .map(|node| node.span)
+            .collect::<Vec<_>>();
+        for requirement in element
+            .descendants()
+            .filter(|node| matches!(node.kind, AstKind::ConstraintKind(_)))
+            .filter(|node| {
+                !property_spans
+                    .iter()
+                    .any(|span| span.start <= node.span.start && node.span.end <= span.end)
+            })
+        {
+            validate_requirement_alias(requirement, alias.as_deref(), source)?;
+        }
+    }
+    Ok(())
+}
+
+fn schema_constraint_target_alias(node: &AstNode) -> Option<String> {
+    if let Some(relationship) = node
+        .descendants()
+        .find(|child| child.kind == AstKind::RelationshipPattern)
+    {
+        return relationship
+            .descendants()
+            .find(|child| {
+                matches!(
+                    child.kind,
+                    AstKind::RelationshipVariable | AstKind::GraphAlias
+                )
+            })
+            .and_then(|child| child.text.as_deref())
+            .map(unescape_identifier);
+    }
+    node.descendants()
+        .find(|child| child.kind == AstKind::NodePattern)
+        .and_then(|pattern| {
+            pattern
+                .descendants()
+                .find(|child| matches!(child.kind, AstKind::PatternVariable | AstKind::GraphAlias))
+        })
+        .and_then(|child| child.text.as_deref())
+        .map(unescape_identifier)
+}
+
+fn validate_requirement_alias(
+    requirement: &AstNode,
+    target_alias: Option<&str>,
+    source: &str,
+) -> Result<(), FrontendError> {
+    for variable in requirement
+        .descendants()
+        .filter(|node| node.kind == AstKind::Variable)
+    {
+        let actual = unescape_identifier(variable.text.as_deref().unwrap_or_default());
+        if target_alias != Some(actual.as_str()) {
+            return Err(schema_error(
+                source,
+                variable.span,
+                match target_alias {
+                    Some(expected) => format!(
+                        "schema REQUIRE variable {actual:?} must match target alias {expected:?}"
+                    ),
+                    None => format!(
+                        "schema REQUIRE variable {actual:?} requires a matching target alias"
+                    ),
+                },
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_known_types(root: &AstNode, source: &str) -> Result<(), FrontendError> {

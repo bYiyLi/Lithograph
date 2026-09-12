@@ -11,6 +11,7 @@ mod layer;
 mod layer_read;
 mod property;
 mod schema;
+mod schema_state;
 mod snapshot;
 mod snapshot_labels;
 mod snapshot_properties;
@@ -23,7 +24,7 @@ use std::fmt;
 use rusqlite::Error as SqliteError;
 
 pub use checkpoint::{create_checkpoint, delete_checkpoint};
-pub use commit::{branch_head, commit_exists, commit_layer, create_branch};
+pub use commit::{branch_head, commit_exists, commit_layer, commit_schema, create_branch};
 pub use identity::{
     allocate_node_id, allocate_relationship_id, find_label, find_property_key,
     find_relationship_type, intern_label, intern_property_key, intern_relationship_type,
@@ -31,7 +32,16 @@ pub use identity::{
 };
 pub use integrity::{IntegrityIssue, integrity_check, structural_integrity_issues};
 pub use layer::{LayerBuilder, RelationshipRecord};
-pub use schema::{create_storage_schema, initialize_root, root_commit};
+pub use schema::{
+    create_storage_schema, initialize_root, load_schema_blob, persist_schema_blob, root_commit,
+    schema_hash_for_commit,
+};
+pub use schema_state::{
+    ConstraintDefinition, ConstraintDefinitionKind, GraphNodeType, GraphRelationshipType,
+    IndexDefinition, IndexTarget, PropertyRule, PropertyType, SchemaSlotChange, SchemaState,
+    SchemaTarget, StandardIndexKind, constraint_slot, graph_node_slot, graph_relationship_slot,
+    index_slot,
+};
 pub use snapshot::Snapshot;
 pub use value::{PointValue, PropertyValue, VectorCoordinateType, VectorValue, ZonedDateTimeValue};
 

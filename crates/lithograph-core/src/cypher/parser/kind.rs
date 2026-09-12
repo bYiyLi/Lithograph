@@ -4,8 +4,8 @@ use super::super::ast::{
     AstKind, ClauseKind, ConditionalBranchKind, ConstraintKind, ExistenceModifierKind,
     ExpressionKind, GraphTypeOperationKind, IndexKind, LiteralKind, MatchModeKind, MergeActionKind,
     NameExpressionKind, OrderDirectionKind, PathModeKind, PathSelectorKind, QuantifierKind,
-    QueryConnector, SetOperatorKind, SetQuantifierKind, ShowTargetKind, SubqueryKind,
-    TransactionDisjointKind, TransactionErrorKind,
+    QueryConnector, SetOperatorKind, SetQuantifierKind, ShowConstraintFilterKind, ShowTargetKind,
+    SubqueryKind, TransactionDisjointKind, TransactionErrorKind,
 };
 use super::Rule;
 
@@ -80,8 +80,10 @@ fn pattern_ast_kind(rule: Rule, pair: &Pair<'_, Rule>) -> Option<AstKind> {
         Rule::quantifier => AstKind::Quantifier(quantifier_kind(pair.as_str())),
         Rule::quantifier_lower_bound => AstKind::QuantifierLowerBound,
         Rule::quantifier_upper_bound => AstKind::QuantifierUpperBound,
-        Rule::node_pattern => AstKind::NodePattern,
-        Rule::relationship_pattern => AstKind::RelationshipPattern,
+        Rule::node_pattern | Rule::graph_constraint_node_pattern => AstKind::NodePattern,
+        Rule::relationship_pattern | Rule::graph_constraint_relationship_pattern => {
+            AstKind::RelationshipPattern
+        }
         Rule::left_arrow => AstKind::RelationshipLeftArrow,
         Rule::right_arrow => AstKind::RelationshipRightArrow,
         Rule::relationship_detail => AstKind::RelationshipDetail,
@@ -231,12 +233,17 @@ fn schema_ast_kind(rule: Rule, pair: &Pair<'_, Rule>) -> Option<AstKind> {
         Rule::if_not_exists => AstKind::ExistenceModifier(ExistenceModifierKind::IfNotExists),
         Rule::if_exists => AstKind::ExistenceModifier(ExistenceModifierKind::IfExists),
         Rule::show_target => AstKind::ShowTarget(show_target_kind(pair)),
+        Rule::show_constraint_filter => {
+            AstKind::ShowConstraintFilter(show_constraint_filter_kind(pair))
+        }
         Rule::show_as_graph => AstKind::ShowAsGraph,
         Rule::graph_type_operation => {
             AstKind::GraphTypeOperation(graph_type_operation_kind(pair.as_str()))
         }
         Rule::graph_node_type => AstKind::GraphNodeType,
         Rule::graph_relationship_type => AstKind::GraphRelationshipType,
+        Rule::graph_endpoint => AstKind::GraphEndpoint,
+        Rule::graph_implies => AstKind::GraphImplies,
         Rule::graph_constraint => AstKind::GraphConstraint,
         Rule::graph_alias => AstKind::GraphAlias,
         Rule::graph_property => AstKind::GraphProperty,
@@ -446,13 +453,16 @@ fn transaction_retry_fallback_kind(pair: &Pair<'_, Rule>) -> TransactionErrorKin
 fn constraint_kind(pair: &Pair<'_, Rule>) -> ConstraintKind {
     if direct_has_rule(pair, Rule::KW_NOT) && direct_has_rule(pair, Rule::KW_NULL) {
         ConstraintKind::NotNull
-    } else if direct_has_rule(pair, Rule::KW_RELATIONSHIP) && direct_has_rule(pair, Rule::KW_KEY) {
+    } else if (direct_has_rule(pair, Rule::KW_REL) || direct_has_rule(pair, Rule::KW_RELATIONSHIP))
+        && direct_has_rule(pair, Rule::KW_KEY)
+    {
         ConstraintKind::RelationshipKey
     } else if direct_has_rule(pair, Rule::KW_NODE) && direct_has_rule(pair, Rule::KW_KEY) {
         ConstraintKind::NodeKey
     } else if direct_has_rule(pair, Rule::KW_KEY) {
         ConstraintKind::Key
-    } else if direct_has_rule(pair, Rule::KW_RELATIONSHIP) && direct_has_rule(pair, Rule::KW_UNIQUE)
+    } else if (direct_has_rule(pair, Rule::KW_REL) || direct_has_rule(pair, Rule::KW_RELATIONSHIP))
+        && direct_has_rule(pair, Rule::KW_UNIQUE)
     {
         ConstraintKind::RelationshipUnique
     } else if direct_has_rule(pair, Rule::KW_NODE) && direct_has_rule(pair, Rule::KW_UNIQUE) {
@@ -467,9 +477,11 @@ fn constraint_kind(pair: &Pair<'_, Rule>) -> ConstraintKind {
 fn show_target_kind(pair: &Pair<'_, Rule>) -> ShowTargetKind {
     if direct_has_rule(pair, Rule::KW_CURRENT) {
         ShowTargetKind::CurrentGraphType
-    } else if direct_has_rule(pair, Rule::KW_INDEXES) {
+    } else if direct_has_rule(pair, Rule::KW_INDEX) || direct_has_rule(pair, Rule::KW_INDEXES) {
         ShowTargetKind::Indexes
-    } else if direct_has_rule(pair, Rule::KW_CONSTRAINTS) {
+    } else if direct_has_rule(pair, Rule::KW_CONSTRAINT)
+        || direct_has_rule(pair, Rule::KW_CONSTRAINTS)
+    {
         ShowTargetKind::Constraints
     } else if direct_has_rule(pair, Rule::KW_FUNCTION) || direct_has_rule(pair, Rule::KW_FUNCTIONS)
     {
@@ -480,6 +492,79 @@ fn show_target_kind(pair: &Pair<'_, Rule>) -> ShowTargetKind {
         ShowTargetKind::Procedures
     } else {
         unreachable!("show_target grammar only accepts known targets")
+    }
+}
+
+fn show_constraint_filter_kind(pair: &Pair<'_, Rule>) -> ShowConstraintFilterKind {
+    let entity = show_constraint_entity(pair);
+    if direct_has_rule(pair, Rule::KW_ALL) {
+        ShowConstraintFilterKind::All
+    } else if direct_has_rule(pair, Rule::KW_KEY) {
+        show_key_filter(entity)
+    } else if direct_has_rule(pair, Rule::KW_TYPE) {
+        show_property_type_filter(entity)
+    } else if direct_has_rule(pair, Rule::KW_UNIQUE) || direct_has_rule(pair, Rule::KW_UNIQUENESS) {
+        show_unique_filter(entity)
+    } else if direct_has_rule(pair, Rule::KW_EXIST) || direct_has_rule(pair, Rule::KW_EXISTENCE) {
+        show_existence_filter(entity, direct_has_rule(pair, Rule::KW_PROPERTY))
+    } else {
+        unreachable!("SHOW CONSTRAINTS grammar only accepts known filters")
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ShowConstraintEntity {
+    Any,
+    Node,
+    Relationship,
+}
+
+fn show_constraint_entity(pair: &Pair<'_, Rule>) -> ShowConstraintEntity {
+    if direct_has_rule(pair, Rule::KW_NODE) {
+        ShowConstraintEntity::Node
+    } else if direct_has_rule(pair, Rule::KW_REL) || direct_has_rule(pair, Rule::KW_RELATIONSHIP) {
+        ShowConstraintEntity::Relationship
+    } else {
+        ShowConstraintEntity::Any
+    }
+}
+
+fn show_key_filter(entity: ShowConstraintEntity) -> ShowConstraintFilterKind {
+    match entity {
+        ShowConstraintEntity::Node => ShowConstraintFilterKind::NodeKey,
+        ShowConstraintEntity::Relationship => ShowConstraintFilterKind::RelationshipKey,
+        ShowConstraintEntity::Any => ShowConstraintFilterKind::Key,
+    }
+}
+
+fn show_property_type_filter(entity: ShowConstraintEntity) -> ShowConstraintFilterKind {
+    match entity {
+        ShowConstraintEntity::Node => ShowConstraintFilterKind::NodePropertyType,
+        ShowConstraintEntity::Relationship => ShowConstraintFilterKind::RelationshipPropertyType,
+        ShowConstraintEntity::Any => ShowConstraintFilterKind::PropertyType,
+    }
+}
+
+fn show_unique_filter(entity: ShowConstraintEntity) -> ShowConstraintFilterKind {
+    match entity {
+        ShowConstraintEntity::Node => ShowConstraintFilterKind::NodeUnique,
+        ShowConstraintEntity::Relationship => ShowConstraintFilterKind::RelationshipUnique,
+        ShowConstraintEntity::Any => ShowConstraintFilterKind::Unique,
+    }
+}
+
+fn show_existence_filter(entity: ShowConstraintEntity, property: bool) -> ShowConstraintFilterKind {
+    match (entity, property) {
+        (ShowConstraintEntity::Node, true) => ShowConstraintFilterKind::NodePropertyExistence,
+        (ShowConstraintEntity::Relationship, true) => {
+            ShowConstraintFilterKind::RelationshipPropertyExistence
+        }
+        (ShowConstraintEntity::Any, true) => ShowConstraintFilterKind::PropertyExistence,
+        (ShowConstraintEntity::Node, false) => ShowConstraintFilterKind::NodeExistence,
+        (ShowConstraintEntity::Relationship, false) => {
+            ShowConstraintFilterKind::RelationshipExistence
+        }
+        (ShowConstraintEntity::Any, false) => ShowConstraintFilterKind::Existence,
     }
 }
 

@@ -31,6 +31,7 @@ pub struct QueryMetrics {
 pub enum QueryType {
     Read,
     Write,
+    Schema,
 }
 
 impl QueryType {
@@ -38,6 +39,7 @@ impl QueryType {
         match self {
             Self::Read => "read",
             Self::Write => "write",
+            Self::Schema => "schema",
         }
     }
 }
@@ -304,6 +306,11 @@ struct PartCursor {
     relationship_after: i64,
     relationship_done: bool,
     bound_start_emitted: bool,
+    indexed_relationship_after: i64,
+    indexed_relationship_ids: Vec<i64>,
+    indexed_relationship_index: usize,
+    indexed_relationship_done: bool,
+    indexed_rows: Vec<BindingRow>,
 }
 
 impl PartCursor {
@@ -321,6 +328,11 @@ impl PartCursor {
             relationship_after: 0,
             relationship_done: false,
             bound_start_emitted: false,
+            indexed_relationship_after: 0,
+            indexed_relationship_ids: Vec::new(),
+            indexed_relationship_index: 0,
+            indexed_relationship_done: false,
+            indexed_rows: Vec::new(),
         }
     }
 
@@ -332,6 +344,14 @@ impl PartCursor {
     ) -> QueryResult<Option<BindingRow>> {
         if self.part_is_impossible(graph_view) {
             return Ok(None);
+        }
+        if self
+            .part
+            .relationship
+            .as_ref()
+            .is_some_and(|relationship| relationship.index_seek.is_some())
+        {
+            return self.next_indexed_relationship_row(snapshot, graph_view, metrics);
         }
         if self.part.relationship.is_none() {
             let Some(id) = self.next_start(snapshot, graph_view, metrics)? else {
@@ -348,6 +368,15 @@ impl PartCursor {
                 Vec::new(),
             );
         }
+        self.next_relationship_row(snapshot, graph_view, metrics)
+    }
+
+    fn next_relationship_row(
+        &mut self,
+        snapshot: &Snapshot<'_>,
+        graph_view: &ResolvedGraphView,
+        metrics: &mut QueryMetrics,
+    ) -> QueryResult<Option<BindingRow>> {
         loop {
             if self.relationship_index < self.relationships.len() {
                 let rel = self.relationships[self.relationship_index];
@@ -382,6 +411,134 @@ impl PartCursor {
             self.relationship_after = 0;
             self.relationship_done = false;
         }
+    }
+
+    fn next_indexed_relationship_row(
+        &mut self,
+        snapshot: &Snapshot<'_>,
+        graph_view: &ResolvedGraphView,
+        metrics: &mut QueryMetrics,
+    ) -> QueryResult<Option<BindingRow>> {
+        loop {
+            if let Some(row) = self.indexed_rows.pop() {
+                return Ok(Some(row));
+            }
+            while self.indexed_relationship_index < self.indexed_relationship_ids.len() {
+                let id = self.indexed_relationship_ids[self.indexed_relationship_index];
+                self.indexed_relationship_index += 1;
+                let Some(relationship) = snapshot.relationship(id)? else {
+                    continue;
+                };
+                let Some(spec) = self.part.relationship.as_ref() else {
+                    return Ok(None);
+                };
+                let orientations = match spec.direction {
+                    Direction::Outgoing => vec![(relationship.source, relationship.target)],
+                    Direction::Incoming => vec![(relationship.target, relationship.source)],
+                    Direction::Undirected if relationship.source == relationship.target => {
+                        vec![(relationship.source, relationship.target)]
+                    }
+                    Direction::Undirected => vec![
+                        (relationship.target, relationship.source),
+                        (relationship.source, relationship.target),
+                    ],
+                };
+                for (start, end) in orientations {
+                    if let Some(row) = self.match_indexed_relationship_orientation(
+                        snapshot,
+                        graph_view,
+                        relationship,
+                        start,
+                        end,
+                        metrics,
+                    )? {
+                        self.indexed_rows.push(row);
+                    }
+                }
+                if let Some(row) = self.indexed_rows.pop() {
+                    return Ok(Some(row));
+                }
+            }
+            if self.indexed_relationship_done {
+                return Ok(None);
+            }
+            let Some(spec) = self.part.relationship.as_ref() else {
+                return Ok(None);
+            };
+            let Some(seek) = spec.index_seek.as_ref() else {
+                return Ok(None);
+            };
+            let page = super::schema::scan_relationship_index_after(
+                snapshot,
+                seek,
+                spec.type_id,
+                self.indexed_relationship_after,
+                PIPELINE_BATCH,
+            )?;
+            metrics.db_hits = metrics.db_hits.saturating_add(page.items.len() as u64);
+            self.indexed_relationship_ids = page.items;
+            self.indexed_relationship_index = 0;
+            if let Some(after) = page.next_after {
+                self.indexed_relationship_after = after;
+            } else {
+                self.indexed_relationship_done = true;
+            }
+        }
+    }
+
+    fn match_indexed_relationship_orientation(
+        &self,
+        snapshot: &Snapshot<'_>,
+        graph_view: &ResolvedGraphView,
+        relationship: RelationshipRecord,
+        start: i64,
+        end: i64,
+        metrics: &mut QueryMetrics,
+    ) -> QueryResult<Option<BindingRow>> {
+        let Some(spec) = &self.part.relationship else {
+            return Ok(None);
+        };
+        let Some(end_spec) = &self.part.end else {
+            return Ok(None);
+        };
+        if !graph_view.visible_relationship(snapshot, relationship)? {
+            return Ok(None);
+        }
+        if !node_matches(snapshot, graph_view, &self.part.start, start, metrics)?
+            || !node_matches(snapshot, graph_view, end_spec, end, metrics)?
+        {
+            return Ok(None);
+        }
+        if self.base.used_relationships.contains(&relationship.id)
+            && !relationship_already_bound(&self.base, spec, relationship.id)
+        {
+            return Ok(None);
+        }
+        let Some(row) = bind_node(
+            self.base.clone(),
+            self.part.start.variable.as_deref(),
+            start,
+        )?
+        else {
+            return Ok(None);
+        };
+        let Some(row) = bind_relationship(row, spec, relationship)? else {
+            return Ok(None);
+        };
+        let Some(row) = bind_node(row, end_spec.variable.as_deref(), end)? else {
+            return Ok(None);
+        };
+        let Some(mut row) = bind_path(
+            row,
+            self.part.path_variable.as_deref(),
+            vec![start, end],
+            vec![relationship],
+        )?
+        else {
+            return Ok(None);
+        };
+        row.used_relationships.insert(relationship.id);
+        Ok(Some(row))
     }
 
     fn part_is_impossible(&self, graph_view: &ResolvedGraphView) -> bool {
@@ -437,15 +594,26 @@ impl PartCursor {
             if self.start_done {
                 return Ok(None);
             }
-            let scan_label = self
-                .part
-                .start
-                .scan_label
-                .or_else(|| graph_view.scan_label());
-            let page = if let Some(label) = scan_label {
-                snapshot.scan_label_after(label, self.start_after, PIPELINE_BATCH)?
+            let page = if let Some(seek) = &self.part.start.index_seek
+                && seek.kind != crate::storage::StandardIndexKind::Lookup
+            {
+                super::schema::scan_node_index_after(
+                    snapshot,
+                    seek,
+                    self.start_after,
+                    PIPELINE_BATCH,
+                )?
             } else {
-                snapshot.scan_nodes_after(self.start_after, PIPELINE_BATCH)?
+                let scan_label = self
+                    .part
+                    .start
+                    .scan_label
+                    .or_else(|| graph_view.scan_label());
+                if let Some(label) = scan_label {
+                    snapshot.scan_label_after(label, self.start_after, PIPELINE_BATCH)?
+                } else {
+                    snapshot.scan_nodes_after(self.start_after, PIPELINE_BATCH)?
+                }
             };
             metrics.db_hits = metrics.db_hits.saturating_add(page.items.len() as u64);
             self.start_buffer = page.items;
@@ -663,6 +831,7 @@ impl QueryCursor {
             BarrierState::Pending
         };
         let write_state = if (prepared.write.is_some()
+            || prepared.schema.is_some()
             || prepared
                 .program
                 .as_ref()
@@ -698,6 +867,7 @@ impl QueryCursor {
 
     pub fn is_write(&self) -> bool {
         (self.prepared.write.is_some()
+            || self.prepared.schema.is_some()
             || self
                 .prepared
                 .program

@@ -264,6 +264,7 @@ dependencies = [
  "pest_derive",
  "regex",
  "rusqlite",
+ "serde",
  "serde_json",
  "unicode-normalization",
 ]

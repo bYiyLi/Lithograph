@@ -30,11 +30,11 @@ RETURN person.name, company.name
 
 ## 项目状态
 
-Lithograph 当前已经完成产品与技术设计、开发规范、可执行开发计划，以及 Phase 00–03。Rust workspace、CI、SQLite/test fixture、Cypher compatibility harness、标准 SQLite loadable-extension / Native ABI boundary、version-aware storage，以及 `CY25-2026.08` parser、Lithograph-owned AST、scope/type/value foundation 与真实 `lithograph_validate()` frontend validation surface 已建立并通过对应 Phase 验收。Read planner/executor 尚未实现，目前没有可用于生产的 Release。
+Lithograph 当前已经完成产品与技术设计、开发规范、可执行开发计划，以及 Phase 00–07。现有实现已具备标准 SQLite loadable-extension / Native ABI boundary、version-aware immutable storage、Graph View、Cypher 25 parser/type/value、真实 read planner/executor、mutation/Commit path、versioned Graph Type/Constraint，以及 lookup/range/text/point standard index。Search/LOAD CSV、完整 Version operations（包括 multi-execution -> one Commit 的 Native explicit transaction）和 release hardening 仍由 Phase 08–10 交付。目前没有可用于生产的 Release。
 
 - [技术设计](docs/design.md)
 - [开发计划](docs/development/README.md)
-- 当前开发阶段：Phase 00–03 `done`，Phase 04 `ready`
+- 当前开发阶段：Phase 00–07 `done`，Phase 08 `ready`
 
 ## 许可
 
