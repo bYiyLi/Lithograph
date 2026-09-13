@@ -19,11 +19,18 @@ pub(crate) enum BindingValue {
     Null,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LoadCsvContext {
+    pub(crate) file: Option<String>,
+    pub(crate) line: Option<i64>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct BindingRow {
     pub values: BTreeMap<String, BindingValue>,
     pub used_relationships: BTreeSet<i64>,
     pub order: Vec<String>,
+    pub(crate) load_csv_context: Option<LoadCsvContext>,
 }
 
 impl BindingRow {

@@ -1,6 +1,7 @@
 use super::ast::{AstKind, AstNode, SubqueryKind, TransactionDisjointKind, TransactionErrorKind};
 use super::error::FrontendError;
 use super::semantic::{Analyzer, Scope, unescape_identifier};
+use super::semantic_rule_helpers::statically_negative_integer;
 
 impl Analyzer<'_> {
     pub(super) fn validate_transaction_subclause(
@@ -31,6 +32,7 @@ impl Analyzer<'_> {
         validate_disjoint_concurrency(self, &concurrent, &disjoint)?;
         validate_status_error_mode(self, &errors, &statuses)?;
         self.validate_outer_transaction_expressions(&concurrent, &batches, &errors, outer)?;
+        validate_negative_concurrency_literal(self, &concurrent)?;
         self.validate_disjoint_expression(&disjoint, imported)?;
         Ok(transaction_status_name(&statuses))
     }
@@ -71,6 +73,30 @@ impl Analyzer<'_> {
             "DISJOINT BY expressions cannot contain aggregation",
         )
     }
+}
+
+fn validate_negative_concurrency_literal(
+    analyzer: &Analyzer<'_>,
+    concurrent: &[&AstNode],
+) -> Result<(), FrontendError> {
+    let Some(node) = concurrent.first() else {
+        return Ok(());
+    };
+    let Some(expression) = node.descendants().find(|child| {
+        matches!(
+            child.kind,
+            AstKind::Expression(super::ast::ExpressionKind::Expression)
+        )
+    }) else {
+        return Ok(());
+    };
+    if statically_negative_integer(expression) {
+        return Err(analyzer.semantic_error(
+            expression.span,
+            "negative CONCURRENT TRANSACTIONS concurrency is only valid through a parameter",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_status_error_mode(

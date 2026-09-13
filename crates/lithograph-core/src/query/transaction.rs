@@ -15,18 +15,18 @@ use super::completeness::execute::{
 };
 use super::completeness::{
     PreparedProgram, TransactionProgramOptions, composed_query_parts, executable_query,
-    infer_columns,
+    infer_clause_columns, infer_columns, projection_requires_global_input,
 };
 use super::expression::{self, BindingRow, BindingValue, compile_expression, surface_expressions};
 use super::graph::ResolvedGraphView;
 use super::ingestion::{
-    CompiledLoadCsv, CsvStream, compile_load_csv, csv_binding_row, csv_delimiter,
-    require_csv_string,
+    CompiledLoadCsv, compile_load_csv, evaluate_csv_source, stream_csv_binding_rows,
 };
 use super::mutation::{
     MutationCounters, TransactionBatchOutcome, TransactionMutationContext,
     execute_program_suffix_transaction, execute_transaction_batch,
 };
+use super::spill::{BindingSpill, open_spill_connection};
 use super::{QueryCounters, QueryError, QueryErrorKind, QueryMetrics, QueryResult};
 
 pub(crate) struct TransactionProgramOutcome {
@@ -98,6 +98,7 @@ struct CsvBatchState {
     pending_columns: Vec<String>,
     transaction_rows: Vec<BindingRow>,
     transaction_columns: Vec<String>,
+    source_guards: Vec<tempfile::TempPath>,
     broken: bool,
 }
 
@@ -607,16 +608,7 @@ fn call_output_columns(
     input: &[String],
     source: &str,
 ) -> QueryResult<Vec<String>> {
-    infer_columns(
-        &AstNode {
-            kind: AstKind::SingleQuery,
-            span: clause.span,
-            text: None,
-            children: vec![clause.clone()],
-        },
-        input,
-        source,
-    )
+    infer_clause_columns(clause, input, source)
 }
 
 fn resolve_batch_size(
@@ -893,8 +885,12 @@ fn stream_csv_batches(
     input: RowSet,
 ) -> QueryResult<RowSet> {
     let mut state = initial_csv_batch_state(runtime, pipeline, input.columns)?;
-    for outer in input.rows {
-        stream_csv_outer(runtime, pipeline, &outer, &mut state)?;
+    if csv_prefix_requires_global_input(pipeline) {
+        materialize_global_csv_prefix(runtime, pipeline, &input.rows, &mut state)?;
+    } else {
+        for outer in input.rows {
+            stream_csv_outer(runtime, pipeline, &outer, &mut state)?;
+        }
     }
     finish_pending_csv_batch(runtime, pipeline, &mut state)?;
     execute_single_from(
@@ -926,6 +922,7 @@ fn initial_csv_batch_state(
         pending_columns,
         transaction_rows: Vec::new(),
         transaction_columns,
+        source_guards: Vec::new(),
         broken: false,
     })
 }
@@ -936,39 +933,98 @@ fn stream_csv_outer(
     outer: &BindingRow,
     state: &mut CsvBatchState,
 ) -> QueryResult<()> {
-    let source = require_csv_string(
-        evaluate_at_commit(runtime, &pipeline.csv.source_expression, outer)?,
-        "source",
+    let (source, delimiter) = evaluate_csv_source(&pipeline.csv, |expression| {
+        evaluate_at_commit(runtime, expression, outer)
+    })?;
+    let is_interrupted = runtime.is_interrupted;
+    let guard = stream_csv_binding_rows(
+        &pipeline.csv,
+        outer,
+        &source,
+        delimiter,
+        is_interrupted,
+        |row| {
+            let prefix = execute_read_range(
+                runtime,
+                pipeline.single,
+                pipeline.csv_index + 1,
+                pipeline.transaction_index,
+                RowSet {
+                    columns: row.order.clone(),
+                    rows: vec![row],
+                },
+            )?;
+            append_csv_prefix(runtime, pipeline, state, prefix)
+        },
     )?;
-    let delimiter = pipeline
-        .csv
-        .delimiter_expression
-        .as_ref()
-        .map(|expression| evaluate_at_commit(runtime, expression, outer))
-        .transpose()?
-        .map_or(Ok(','), csv_delimiter)?;
-    let mut stream = CsvStream::open(&source, delimiter, pipeline.csv.with_headers)?;
-    while let Some((value, line)) = stream.next_value()? {
-        check_interrupted(runtime.is_interrupted)?;
-        let row = csv_binding_row(
-            outer,
-            &pipeline.csv.binding,
-            value,
-            stream.file_path(),
-            line,
-        );
-        let prefix = execute_read_range(
+    state.source_guards.extend(guard);
+    Ok(())
+}
+
+fn csv_prefix_requires_global_input(pipeline: &CsvTransactionPipeline<'_>) -> bool {
+    pipeline.single.children[pipeline.csv_index + 1..pipeline.transaction_index]
+        .iter()
+        .any(|clause| {
+            matches!(
+                clause.kind,
+                AstKind::Clause(ClauseKind::With | ClauseKind::Return)
+            ) && projection_requires_global_input(clause)
+        })
+}
+
+fn materialize_global_csv_prefix(
+    runtime: &mut TransactionRuntime<'_>,
+    pipeline: &CsvTransactionPipeline<'_>,
+    outers: &[BindingRow],
+    state: &mut CsvBatchState,
+) -> QueryResult<()> {
+    let spill_connection = open_spill_connection()?;
+    let mut spill = BindingSpill::create(&spill_connection)?;
+    for outer in outers {
+        spill_global_csv_outer(
             runtime,
-            pipeline.single,
-            pipeline.csv_index + 1,
-            pipeline.transaction_index,
-            RowSet {
-                columns: row.order.clone(),
-                rows: vec![row],
-            },
+            pipeline,
+            outer,
+            &spill_connection,
+            &mut spill,
+            state,
         )?;
-        append_csv_prefix(runtime, pipeline, state, prefix)?;
     }
+    let rows = spill.collect(&spill_connection)?;
+    spill.abort(&spill_connection)?;
+    let prefix = execute_read_range(
+        runtime,
+        pipeline.single,
+        pipeline.csv_index + 1,
+        pipeline.transaction_index,
+        RowSet {
+            columns: state.pending_columns.clone(),
+            rows,
+        },
+    )?;
+    append_csv_prefix(runtime, pipeline, state, prefix)
+}
+
+fn spill_global_csv_outer(
+    runtime: &mut TransactionRuntime<'_>,
+    pipeline: &CsvTransactionPipeline<'_>,
+    outer: &BindingRow,
+    spill_connection: &Connection,
+    spill: &mut BindingSpill,
+    state: &mut CsvBatchState,
+) -> QueryResult<()> {
+    let (source, delimiter) = evaluate_csv_source(&pipeline.csv, |expression| {
+        evaluate_at_commit(runtime, expression, outer)
+    })?;
+    let guard = stream_csv_binding_rows(
+        &pipeline.csv,
+        outer,
+        &source,
+        delimiter,
+        runtime.is_interrupted,
+        |row| spill.push(spill_connection, &row),
+    )?;
+    state.source_guards.extend(guard);
     Ok(())
 }
 

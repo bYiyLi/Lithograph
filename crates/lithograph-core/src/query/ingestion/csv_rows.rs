@@ -36,7 +36,7 @@ impl CsvRows {
         let read = self
             .reader
             .read_line(&mut line)
-            .map_err(|error| load_csv_error(format!("LOAD CSV read failed: {error}")))?;
+            .map_err(|error| load_csv_io_error(format!("LOAD CSV read failed: {error}")))?;
         if read == 0 {
             return Ok(None);
         }
@@ -171,4 +171,8 @@ fn consume_record_ending(
 
 fn load_csv_error(message: impl Into<String>) -> QueryError {
     QueryError::new(QueryErrorKind::Resource, message)
+}
+
+fn load_csv_io_error(message: impl Into<String>) -> QueryError {
+    QueryError::io(message)
 }

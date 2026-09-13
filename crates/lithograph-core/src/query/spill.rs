@@ -1,11 +1,14 @@
 use std::cell::RefCell;
 use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::cypher::{self, Value};
+use crate::storage::RelationshipRecord;
 
+use super::expression::{BindingRow, BindingValue, LoadCsvContext};
 use super::{QueryError, QueryErrorKind, QueryResult};
 
 const SORT_RUN_ROWS: usize = 1_024;
@@ -22,6 +25,149 @@ pub(super) struct SpillOutput {
     pub(super) table: String,
     pub(super) after: i64,
     pub(super) total: usize,
+}
+
+#[derive(Debug)]
+pub(super) struct BindingSpill {
+    table: String,
+    sequence: i64,
+}
+
+pub(super) const BINDING_SPILL_BATCH_ROWS: usize = 256;
+
+#[derive(Debug)]
+pub(super) struct SpilledBindings {
+    pub(super) columns: Vec<String>,
+    pub(super) spill: BindingSpill,
+}
+
+impl SpilledBindings {
+    pub(super) fn from_rows(
+        connection: &Connection,
+        columns: Vec<String>,
+        rows: &[BindingRow],
+    ) -> QueryResult<Self> {
+        Ok(Self {
+            columns,
+            spill: BindingSpill::from_rows(connection, rows)?,
+        })
+    }
+
+    pub(super) fn with_spill(columns: Vec<String>, spill: BindingSpill) -> Self {
+        Self { columns, spill }
+    }
+
+    pub(super) fn transform_batches(
+        self,
+        connection: &Connection,
+        columns: Vec<String>,
+        mut transform: impl FnMut(&[String], Vec<BindingRow>, &mut BindingSpill) -> QueryResult<()>,
+    ) -> QueryResult<Self> {
+        let mut output = BindingSpill::create(connection)?;
+        self.spill
+            .for_each_batch(connection, BINDING_SPILL_BATCH_ROWS, |rows| {
+                transform(&self.columns, rows, &mut output)
+            })?;
+        self.spill.abort(connection)?;
+        Ok(Self::with_spill(columns, output))
+    }
+
+    pub(super) fn into_rows(
+        self,
+        connection: &Connection,
+    ) -> QueryResult<(Vec<String>, Vec<BindingRow>)> {
+        let rows = self.spill.collect(connection)?;
+        self.spill.abort(connection)?;
+        Ok((self.columns, rows))
+    }
+}
+
+impl BindingSpill {
+    pub(super) fn create(connection: &Connection) -> QueryResult<Self> {
+        let table = spill_table("bindings");
+        connection.execute_batch(&format!(
+            "CREATE TEMP TABLE temp.{table}(seq INTEGER PRIMARY KEY,row_json TEXT NOT NULL)"
+        ))?;
+        Ok(Self { table, sequence: 0 })
+    }
+
+    pub(super) fn push(&mut self, connection: &Connection, row: &BindingRow) -> QueryResult<()> {
+        let sql = format!(
+            "INSERT INTO temp.{}(seq,row_json) VALUES(?1,?2)",
+            self.table
+        );
+        connection.execute(&sql, params![self.sequence, encode_binding_row(row)?])?;
+        self.sequence = self.sequence.saturating_add(1);
+        Ok(())
+    }
+
+    pub(super) fn from_rows(connection: &Connection, rows: &[BindingRow]) -> QueryResult<Self> {
+        let mut spill = Self::create(connection)?;
+        spill.push_all(connection, rows)?;
+        Ok(spill)
+    }
+
+    pub(super) fn push_all(
+        &mut self,
+        connection: &Connection,
+        rows: &[BindingRow],
+    ) -> QueryResult<()> {
+        for row in rows {
+            self.push(connection, row)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn for_each_batch(
+        &self,
+        connection: &Connection,
+        limit: usize,
+        mut apply: impl FnMut(Vec<BindingRow>) -> QueryResult<()>,
+    ) -> QueryResult<()> {
+        let mut after = -1;
+        loop {
+            let batch = self.read_batch(connection, after, limit)?;
+            if batch.is_empty() {
+                return Ok(());
+            }
+            after = batch.last().map_or(after, |(sequence, _)| *sequence);
+            apply(batch.into_iter().map(|(_, row)| row).collect())?;
+        }
+    }
+
+    pub(super) fn read_batch(
+        &self,
+        connection: &Connection,
+        after: i64,
+        limit: usize,
+    ) -> QueryResult<Vec<(i64, BindingRow)>> {
+        let limit = i64::try_from(limit)
+            .map_err(|_| QueryError::internal("binding spill batch size exceeds INTEGER64"))?;
+        let sql = format!(
+            "SELECT seq,row_json FROM temp.{} WHERE seq > ?1 ORDER BY seq LIMIT ?2",
+            self.table
+        );
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement.query_map(params![after, limit], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.map(|row| {
+            let (seq, encoded) = row?;
+            Ok((seq, decode_binding_row(&encoded)?))
+        })
+        .collect()
+    }
+
+    pub(super) fn collect(&self, connection: &Connection) -> QueryResult<Vec<BindingRow>> {
+        let sql = format!("SELECT row_json FROM temp.{} ORDER BY seq", self.table);
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.map(|row| decode_binding_row(&row?)).collect()
+    }
+
+    pub(super) fn abort(&self, connection: &Connection) -> QueryResult<()> {
+        drop_temp_table(connection, &self.table)
+    }
 }
 
 #[derive(Debug)]
@@ -270,6 +416,201 @@ fn encode_row(row: &[Value]) -> QueryResult<String> {
     let values = row.iter().map(cypher::encode_json).collect::<Vec<_>>();
     serde_json::to_string(&values)
         .map_err(|error| QueryError::internal(format!("failed to encode spill row: {error}")))
+}
+
+fn encode_binding_row(row: &BindingRow) -> QueryResult<String> {
+    use serde_json::{Map, Value as JsonValue, json};
+
+    let values = row
+        .values
+        .iter()
+        .map(|(name, value)| Ok((name.clone(), encode_binding_value(value)?)))
+        .collect::<QueryResult<Map<String, JsonValue>>>()?;
+    let load_csv_context = row.load_csv_context.as_ref().map(|context| {
+        json!({
+            "file": context.file,
+            "line": context.line,
+        })
+    });
+    serde_json::to_string(&json!({
+        "values": values,
+        "usedRelationships": row.used_relationships,
+        "order": row.order,
+        "loadCsvContext": load_csv_context,
+    }))
+    .map_err(|error| QueryError::internal(format!("failed to encode binding spill row: {error}")))
+}
+
+fn encode_binding_value(value: &BindingValue) -> QueryResult<serde_json::Value> {
+    use serde_json::json;
+
+    Ok(match value {
+        BindingValue::Node(id) => json!({"kind":"node","id":id}),
+        BindingValue::Relationship(record) => {
+            json!({"kind":"relationship","record":relationship_json(*record)})
+        }
+        BindingValue::Path {
+            nodes,
+            relationships,
+        } => json!({
+            "kind":"path",
+            "nodes":nodes,
+            "relationships":relationships.iter().copied().map(relationship_json).collect::<Vec<_>>(),
+        }),
+        BindingValue::Scalar(value) => json!({"kind":"scalar","value":cypher::encode_json(value)}),
+        BindingValue::Null => json!({"kind":"null"}),
+    })
+}
+
+fn relationship_json(record: RelationshipRecord) -> serde_json::Value {
+    serde_json::json!([record.id, record.source, record.type_id, record.target])
+}
+
+fn decode_binding_row(text: &str) -> QueryResult<BindingRow> {
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|error| {
+        QueryError::internal(format!("failed to decode binding spill row: {error}"))
+    })?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| QueryError::internal("binding spill row is not a JSON object"))?;
+    let values = object
+        .get("values")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| QueryError::internal("binding spill row has no values object"))?
+        .iter()
+        .map(|(name, value)| Ok((name.clone(), decode_binding_value(value)?)))
+        .collect::<QueryResult<BTreeMap<_, _>>>()?;
+    let used_relationships = json_i64_array(object.get("usedRelationships"), "usedRelationships")?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let order = object
+        .get("order")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| QueryError::internal("binding spill row has no order array"))?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| QueryError::internal("binding spill order entry is not a String"))
+        })
+        .collect::<QueryResult<Vec<_>>>()?;
+    let load_csv_context = decode_load_csv_context(object.get("loadCsvContext"))?;
+    Ok(BindingRow {
+        values,
+        used_relationships,
+        order,
+        load_csv_context,
+    })
+}
+
+fn decode_load_csv_context(
+    value: Option<&serde_json::Value>,
+) -> QueryResult<Option<LoadCsvContext>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let object = value
+        .as_object()
+        .ok_or_else(|| QueryError::internal("binding spill LOAD CSV context is not an object"))?;
+    let file = match object.get("file") {
+        Some(value) if value.is_null() => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .ok_or_else(|| {
+                    QueryError::internal("binding spill LOAD CSV context file is not a String")
+                })?
+                .to_owned(),
+        ),
+        None => {
+            return Err(QueryError::internal(
+                "binding spill LOAD CSV context has no file",
+            ));
+        }
+    };
+    let line = match object.get("line") {
+        Some(value) if value.is_null() => None,
+        Some(value) => Some(value.as_i64().ok_or_else(|| {
+            QueryError::internal("binding spill LOAD CSV context line is not INTEGER64")
+        })?),
+        None => {
+            return Err(QueryError::internal(
+                "binding spill LOAD CSV context has no line",
+            ));
+        }
+    };
+    Ok(Some(LoadCsvContext { file, line }))
+}
+
+fn decode_binding_value(value: &serde_json::Value) -> QueryResult<BindingValue> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| QueryError::internal("binding spill value is not a JSON object"))?;
+    let kind = object
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| QueryError::internal("binding spill value has no kind"))?;
+    match kind {
+        "node" => Ok(BindingValue::Node(json_i64(object.get("id"), "node id")?)),
+        "relationship" => Ok(BindingValue::Relationship(decode_relationship_json(
+            object.get("record"),
+        )?)),
+        "path" => Ok(BindingValue::Path {
+            nodes: json_i64_array(object.get("nodes"), "path nodes")?,
+            relationships: object
+                .get("relationships")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| QueryError::internal("binding spill path has no relationships"))?
+                .iter()
+                .map(|value| decode_relationship_json(Some(value)))
+                .collect::<QueryResult<Vec<_>>>()?,
+        }),
+        "scalar" => object
+            .get("value")
+            .ok_or_else(|| QueryError::internal("binding spill scalar has no value"))
+            .and_then(|value| cypher::decode_json(value).map_err(Into::into))
+            .map(BindingValue::Scalar),
+        "null" => Ok(BindingValue::Null),
+        other => Err(QueryError::internal(format!(
+            "binding spill value has unknown kind {other:?}"
+        ))),
+    }
+}
+
+fn decode_relationship_json(value: Option<&serde_json::Value>) -> QueryResult<RelationshipRecord> {
+    let values = value
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| QueryError::internal("binding spill relationship is not an array"))?;
+    if values.len() != 4 {
+        return Err(QueryError::internal(
+            "binding spill relationship does not have four fields",
+        ));
+    }
+    Ok(RelationshipRecord {
+        id: json_i64(values.first(), "relationship id")?,
+        source: json_i64(values.get(1), "relationship source")?,
+        type_id: json_i64(values.get(2), "relationship type")?,
+        target: json_i64(values.get(3), "relationship target")?,
+    })
+}
+
+fn json_i64(value: Option<&serde_json::Value>, role: &str) -> QueryResult<i64> {
+    value
+        .and_then(serde_json::Value::as_i64)
+        .ok_or_else(|| QueryError::internal(format!("binding spill {role} is not INTEGER64")))
+}
+
+fn json_i64_array(value: Option<&serde_json::Value>, role: &str) -> QueryResult<Vec<i64>> {
+    value
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| QueryError::internal(format!("binding spill {role} is not an array")))?
+        .iter()
+        .map(|value| json_i64(Some(value), role))
+        .collect()
 }
 
 fn decode_row(text: &str) -> QueryResult<Vec<Value>> {

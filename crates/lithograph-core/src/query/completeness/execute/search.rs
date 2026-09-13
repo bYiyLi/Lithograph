@@ -22,15 +22,26 @@ pub(super) fn execute_search_match_row(
     if limit == 0 || query == Value::Null {
         return Ok(optional_search_row(optional, input, columns));
     }
-    let hits = vector_candidates(
-        executor.connection,
-        &executor.snapshot,
-        executor.graph_view,
-        &index,
-        &query,
-        executor.is_interrupted,
-    )?;
-    let selected = select_search_hits(executor, &spec, &input, hits, limit)?;
+    let mut candidate_limit = vector_initial_candidate_limit(&index, limit)?;
+    let selected = loop {
+        let result = vector_candidates(
+            executor.connection,
+            &executor.snapshot,
+            executor.graph_view,
+            &index,
+            &query,
+            candidate_limit,
+            executor.is_interrupted,
+        )?;
+        let exhaustive = result.exhaustive;
+        let selected = select_search_hits(executor, &spec, &input, result.hits, limit)?;
+        if selected.len() >= limit || exhaustive {
+            break selected;
+        }
+        candidate_limit = candidate_limit
+            .saturating_mul(2)
+            .max(candidate_limit.saturating_add(1));
+    };
     let matched = execute_search_patterns(executor, clause, selected)?;
     finish_search_match(executor, matched, predicate, optional, input, columns)
 }
@@ -41,7 +52,7 @@ fn prepare_search(
     search: &AstNode,
     input: &BindingRow,
 ) -> QueryResult<(SearchSpec, IndexDefinition, Value, usize)> {
-    let spec = compile_search_spec(search)?;
+    let mut spec = compile_search_spec(search)?;
     let index = resolve_semantic_index(
         executor.connection,
         &executor.snapshot,
@@ -50,9 +61,118 @@ fn prepare_search(
     )?;
     validate_search_pattern(clause, &spec, &index)?;
     validate_search_expressions(&spec, &index)?;
+    materialize_search_filter_values(executor, &mut spec, input)?;
     let query = executor.evaluate(&spec.query, input)?;
     let limit = search_limit(executor.evaluate(&spec.limit, input)?)?;
     Ok((spec, index, query, limit))
+}
+
+fn materialize_search_filter_values(
+    executor: &mut ReadExecutor<'_, '_>,
+    spec: &mut SearchSpec,
+    input: &BindingRow,
+) -> QueryResult<()> {
+    let Some(filter) = &mut spec.filter else {
+        return Ok(());
+    };
+    materialize_search_filter_value_expression(executor, filter, &spec.variable, input)
+}
+
+fn materialize_search_filter_value_expression(
+    executor: &mut ReadExecutor<'_, '_>,
+    expression: &mut expression::Expr,
+    variable: &str,
+    input: &BindingRow,
+) -> QueryResult<()> {
+    use expression::{BinaryOp, Expr};
+    match expression {
+        Expr::Binary(BinaryOp::And, left, right) => {
+            materialize_search_filter_value_expression(executor, left, variable, input)?;
+            materialize_search_filter_value_expression(executor, right, variable, input)
+        }
+        Expr::Binary(BinaryOp::In, left, right) if search_property(left, variable).is_some() => {
+            let value = executor.evaluate(right, input)?;
+            validate_search_in_value(value.clone())?;
+            **right = Expr::Literal(value);
+            Ok(())
+        }
+        Expr::Binary(
+            BinaryOp::Equal
+            | BinaryOp::Less
+            | BinaryOp::LessEqual
+            | BinaryOp::Greater
+            | BinaryOp::GreaterEqual,
+            left,
+            right,
+        ) => {
+            let value_target = if search_property(left, variable).is_some() {
+                right
+            } else if search_property(right, variable).is_some() {
+                left
+            } else {
+                return Ok(());
+            };
+            let value = executor.evaluate(value_target, input)?;
+            validate_search_comparison_value(value.clone())?;
+            **value_target = Expr::Literal(value);
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_search_comparison_value(value: Value) -> QueryResult<()> {
+    if search_filter_scalar_value(&value) {
+        return Ok(());
+    }
+    Err(QueryError::new(
+        QueryErrorKind::Type,
+        "SEARCH filter comparison value must be a supported scalar filter value",
+    ))
+}
+
+fn validate_search_in_value(value: Value) -> QueryResult<()> {
+    let Value::List(values) = value else {
+        return Err(QueryError::new(
+            QueryErrorKind::Type,
+            "SEARCH filter IN value must be a List",
+        ));
+    };
+    if values
+        .iter()
+        .any(|value| !search_filter_scalar_value(value))
+    {
+        return Err(QueryError::new(
+            QueryErrorKind::Type,
+            "SEARCH filter IN list contains an unsupported value",
+        ));
+    }
+    let unrestricted = values.iter().all(|value| {
+        matches!(
+            value,
+            Value::Null | Value::Integer(_) | Value::Float(_) | Value::String(_)
+        )
+    });
+    if !unrestricted && values.len() > 256 {
+        return Err(QueryError::invalid_argument(
+            "SEARCH filter IN list is limited to 256 values for non-numeric/non-string types",
+        ));
+    }
+    Ok(())
+}
+
+fn search_filter_scalar_value(value: &Value) -> bool {
+    !matches!(
+        value,
+        Value::List(_)
+            | Value::Map(_)
+            | Value::Node(_)
+            | Value::Relationship(_)
+            | Value::Path(_)
+            | Value::Point(_)
+            | Value::Vector(_)
+            | Value::Uuid(_)
+    )
 }
 
 fn validate_search_expressions(spec: &SearchSpec, index: &IndexDefinition) -> QueryResult<()> {
@@ -244,7 +364,7 @@ pub(super) fn validate_search_pattern(
         .filter(|node| {
             matches!(
                 node.kind,
-                AstKind::PatternVariable | AstKind::RelationshipVariable
+                AstKind::PathAssignment | AstKind::PatternVariable | AstKind::RelationshipVariable
             )
         })
         .filter_map(|node| node.text.as_deref())

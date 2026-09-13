@@ -21,6 +21,7 @@ pub enum QueryErrorKind {
     TransactionBoundaryRequired,
     Storage,
     Resource,
+    Io,
     Interrupted,
     Internal,
 }
@@ -75,6 +76,10 @@ impl QueryError {
 
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(QueryErrorKind::Internal, message)
+    }
+
+    pub fn io(message: impl Into<String>) -> Self {
+        Self::new(QueryErrorKind::Io, message)
     }
 
     pub fn interrupted() -> Self {
@@ -141,6 +146,11 @@ impl From<rusqlite::Error> for QueryError {
         let kind = match sqlite_code {
             Some(code) if code == rusqlite::ffi::SQLITE_INTERRUPT => QueryErrorKind::Interrupted,
             Some(
+                rusqlite::ffi::SQLITE_IOERR
+                | rusqlite::ffi::SQLITE_CANTOPEN
+                | rusqlite::ffi::SQLITE_READONLY,
+            ) => QueryErrorKind::Io,
+            Some(
                 rusqlite::ffi::SQLITE_NOMEM
                 | rusqlite::ffi::SQLITE_FULL
                 | rusqlite::ffi::SQLITE_TOOBIG,
@@ -178,6 +188,7 @@ mod tests {
             QueryError::internal("internal").kind,
             QueryErrorKind::Internal
         );
+        assert_eq!(QueryError::io("io").kind, QueryErrorKind::Io);
 
         let value = QueryError::from(ValueError::new("bad value"));
         assert_eq!(value.kind, QueryErrorKind::Type);
@@ -224,6 +235,9 @@ mod tests {
             (rusqlite::ffi::SQLITE_NOMEM, QueryErrorKind::Resource),
             (rusqlite::ffi::SQLITE_FULL, QueryErrorKind::Resource),
             (rusqlite::ffi::SQLITE_TOOBIG, QueryErrorKind::Resource),
+            (rusqlite::ffi::SQLITE_IOERR, QueryErrorKind::Io),
+            (rusqlite::ffi::SQLITE_CANTOPEN, QueryErrorKind::Io),
+            (rusqlite::ffi::SQLITE_READONLY, QueryErrorKind::Io),
             (rusqlite::ffi::SQLITE_BUSY, QueryErrorKind::Storage),
         ] {
             let sqlite = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None);

@@ -11,12 +11,12 @@ use crate::query::completeness::{
     required_query_body,
 };
 use crate::query::expression::{self, BindingRow, BindingValue, binding_value, compile_expression};
-use crate::query::ingestion::{
-    CompiledLoadCsv, CsvStream, compile_load_csv, csv_binding_row, csv_delimiter,
-    require_csv_string,
-};
 
 use super::*;
+
+mod load_csv;
+
+use load_csv::execute_load_csv_tail;
 
 pub(crate) struct TransactionBatchOutcome {
     pub(crate) rows: RowSet,
@@ -468,7 +468,6 @@ fn execute_single_from(
                 program,
                 single,
                 index,
-                clause,
                 rows,
                 metrics,
                 is_interrupted,
@@ -485,95 +484,6 @@ fn execute_single_from(
         )?;
     }
     Ok(rows)
-}
-
-#[allow(
-    clippy::too_many_arguments,
-    reason = "streaming LOAD CSV owns its source while executing the remaining mutation clauses"
-)]
-fn execute_load_csv_tail(
-    context: &mut MutationContext<'_, '_>,
-    program: &PreparedProgram,
-    single: &AstNode,
-    index: usize,
-    clause: &AstNode,
-    input: RowSet,
-    metrics: &mut QueryMetrics,
-    is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<RowSet> {
-    let expected_columns =
-        crate::query::completeness::infer_columns(single, &input.columns, &program.source)?;
-    let spec = compile_load_csv(clause)?;
-    let mut output = Vec::new();
-    for input_row in input.rows {
-        output.extend(execute_mutation_load_csv_input(
-            context,
-            program,
-            single,
-            index,
-            &spec,
-            input_row,
-            metrics,
-            is_interrupted,
-        )?);
-    }
-    Ok(RowSet {
-        columns: expected_columns,
-        rows: output,
-    })
-}
-
-#[allow(
-    clippy::too_many_arguments,
-    reason = "one streaming CSV input row carries the mutation tail execution context explicitly"
-)]
-fn execute_mutation_load_csv_input(
-    context: &mut MutationContext<'_, '_>,
-    program: &PreparedProgram,
-    single: &AstNode,
-    index: usize,
-    spec: &CompiledLoadCsv,
-    input_row: BindingRow,
-    metrics: &mut QueryMetrics,
-    is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<Vec<BindingRow>> {
-    let snapshot = context.staged_snapshot()?;
-    let source = require_csv_string(
-        expression::evaluate(
-            &spec.source_expression,
-            &snapshot,
-            &input_row,
-            context.params,
-        )?,
-        "source",
-    )?;
-    let delimiter = spec
-        .delimiter_expression
-        .as_ref()
-        .map(|expression| expression::evaluate(expression, &snapshot, &input_row, context.params))
-        .transpose()?
-        .map_or(Ok(','), csv_delimiter)?;
-    drop(snapshot);
-    let mut stream = CsvStream::open(&source, delimiter, spec.with_headers)?;
-    let mut output = Vec::new();
-    while let Some((value, line)) = stream.next_value()? {
-        check_interrupted(is_interrupted)?;
-        let row = csv_binding_row(&input_row, &spec.binding, value, stream.file_path(), line);
-        let result = execute_single_from(
-            context,
-            program,
-            single,
-            index + 1,
-            RowSet {
-                columns: row.order.clone(),
-                rows: vec![row],
-            },
-            metrics,
-            is_interrupted,
-        )?;
-        output.extend(result.rows);
-    }
-    Ok(output)
 }
 
 #[allow(
@@ -671,16 +581,7 @@ fn inferred_clause_columns(
     input: &[String],
     source: &str,
 ) -> QueryResult<Vec<String>> {
-    crate::query::completeness::infer_columns(
-        &AstNode {
-            kind: AstKind::SingleQuery,
-            span: clause.span,
-            text: None,
-            children: vec![clause.clone()],
-        },
-        input,
-        source,
-    )
+    crate::query::completeness::infer_clause_columns(clause, input, source)
 }
 
 fn execute_read(
@@ -760,6 +661,11 @@ fn merge_call_result(
                     .cloned()
                     .unwrap_or(BindingValue::Null),
             );
+        }
+        if inner_row.load_csv_context.is_some() {
+            combined
+                .load_csv_context
+                .clone_from(&inner_row.load_csv_context);
         }
         output.push(combined);
     }

@@ -155,7 +155,22 @@ fn check_scalar_load_csv(fixture: &FileDatabaseFixture, load: &str) -> Result<()
     require(
         result["rows"] == serde_json::json!([["Alice"], ["Bob"]]),
         "ordinary SQL Bridge LOAD CSV returned unexpected rows",
-    )
+    )?;
+
+    let missing =
+        "LOAD CSV FROM 'file:///definitely/not/a/lithograph/phase08/missing.csv' AS row RETURN row";
+    let script = format!(
+        "{load}\nSELECT lithograph({}, '{{}}', '{{}}');",
+        sql_literal(missing)
+    );
+    match fixture.execute_script(&script) {
+        Err(FixtureError::Sqlite { stderr, .. }) => require(
+            stderr.contains("IO_ERROR"),
+            "SQL Bridge LOAD CSV I/O failures must use IO_ERROR",
+        ),
+        Err(error) => Err(error.into()),
+        Ok(_) => Err("SQL Bridge unexpectedly accepted a missing LOAD CSV source".into()),
+    }
 }
 
 fn scalar_query(

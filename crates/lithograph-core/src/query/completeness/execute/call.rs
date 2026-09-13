@@ -161,6 +161,11 @@ fn merge_call_result(
                     .unwrap_or(BindingValue::Null),
             );
         }
+        if inner.load_csv_context.is_some() {
+            combined
+                .load_csv_context
+                .clone_from(&inner.load_csv_context);
+        }
         output_rows.push(combined);
     }
 }

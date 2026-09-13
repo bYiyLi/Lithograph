@@ -190,6 +190,7 @@ pub(super) fn map_query_error(error: query::QueryError) -> LithographError {
                 ErrorCategory::TransactionBoundaryRequired
             }
             query::QueryErrorKind::Resource => ErrorCategory::Resource,
+            query::QueryErrorKind::Io => ErrorCategory::Io,
             query::QueryErrorKind::Storage => ErrorCategory::Storage,
             query::QueryErrorKind::Interrupted => ErrorCategory::Resource,
             query::QueryErrorKind::Internal => ErrorCategory::Internal,
@@ -198,6 +199,7 @@ pub(super) fn map_query_error(error: query::QueryError) -> LithographError {
     let sqlite_code = error.sqlite_code.unwrap_or(match error.kind {
         query::QueryErrorKind::Interrupted => ffi::SQLITE_INTERRUPT,
         query::QueryErrorKind::Resource => ffi::SQLITE_TOOBIG,
+        query::QueryErrorKind::Io => ffi::SQLITE_IOERR,
         _ => ffi::SQLITE_ERROR,
     });
     let message = if matches!(error.kind, query::QueryErrorKind::Storage) {

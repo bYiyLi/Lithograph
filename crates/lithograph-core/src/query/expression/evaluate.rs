@@ -896,17 +896,16 @@ fn evaluate_function(
 ) -> QueryResult<Value> {
     let lower = name.to_ascii_lowercase();
     if matches!(lower.as_str(), "file" | "linenumber") && args.is_empty() {
-        let binding = if lower == "file" {
-            "__lithograph_load_csv_file"
-        } else {
-            "__lithograph_load_csv_line"
+        let Some(load_csv) = &context.row.load_csv_context else {
+            return Ok(Value::Null);
         };
-        return match context.row.values.get(binding) {
-            Some(BindingValue::Scalar(value)) => Ok(value.clone()),
-            Some(BindingValue::Null) | None => Ok(Value::Null),
-            Some(_) => Err(QueryError::internal(format!(
-                "LOAD CSV context binding for {name}() has invalid type"
-            ))),
+        return if lower == "file" {
+            Ok(load_csv
+                .file
+                .as_ref()
+                .map_or(Value::Null, |file| Value::String(file.clone())))
+        } else {
+            Ok(load_csv.line.map_or(Value::Null, Value::Integer))
         };
     }
     if lower == "elementid"

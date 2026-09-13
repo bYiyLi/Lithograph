@@ -117,8 +117,9 @@ set -eu
 cargo test --locked -p lithograph-extension --all-features
 
 base_target=${CARGO_TARGET_DIR:-target}
-coverage_target="$base_target/llvm-cov-integration"
-rm -rf "$coverage_target"
+mkdir -p "$base_target"
+coverage_target=$(mktemp -d "$base_target/llvm-cov-integration.XXXXXX")
+trap 'rm -rf "$coverage_target"' EXIT HUP INT TERM
 export CARGO_TARGET_DIR="$coverage_target"
 
 if [ -z "${LITHOGRAPH_SQLITE3:-}" ]; then
@@ -162,6 +163,7 @@ cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase04 -
 cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase05 -- "$extension"
 cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase06 -- "$extension"
 cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase07 -- "$extension"
+cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase08 -- "$extension"
 scripts/native-abi-smoke.sh "$extension"
 
 cargo llvm-cov report \

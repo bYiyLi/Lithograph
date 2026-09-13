@@ -10,12 +10,9 @@ use super::super::expression::{
     self, BindingRow, BindingValue, binding_from_value, binding_value, compile_expression,
 };
 use super::super::graph::ResolvedGraphView;
-use super::super::ingestion::{
-    CompiledLoadCsv, CsvStream, compile_load_csv, csv_binding_row, csv_delimiter,
-    require_csv_string,
-};
 use super::super::semantic_index::{
     SemanticEntity, SemanticHit, resolve_semantic_index, vector_candidates,
+    vector_initial_candidate_limit,
 };
 use super::super::spill::distinct_row_key;
 use super::super::{QueryError, QueryErrorKind, QueryMetrics, QueryResult};
@@ -419,88 +416,41 @@ impl ReadExecutor<'_, '_> {
             };
             self.check_interrupted()?;
             if kind == ClauseKind::LoadCsv {
-                return self.execute_load_csv_tail(single, index, clause, rows);
+                return load_csv::execute_load_csv_tail(self, single, index, rows);
             }
-            rows = match kind {
-                ClauseKind::Match | ClauseKind::OptionalMatch => {
-                    self.execute_match(clause, kind == ClauseKind::OptionalMatch, rows)?
-                }
-                ClauseKind::Filter => self.execute_filter(clause, rows)?,
-                ClauseKind::Let => self.execute_let(clause, rows)?,
-                ClauseKind::Unwind | ClauseKind::For => self.execute_unwind(clause, rows)?,
-                ClauseKind::Call => self.execute_call(clause, rows)?,
-                ClauseKind::Show => self.execute_show(clause, rows)?,
-                ClauseKind::With => {
-                    let projected = self.execute_projection(clause, rows, true)?;
-                    self.restore_global_bindings(projected)
-                }
-                ClauseKind::Return => self.execute_projection(clause, rows, false)?,
-                ClauseKind::Finish => RowSet {
-                    columns: Vec::new(),
-                    rows: Vec::new(),
-                },
-                other => {
-                    return Err(QueryError::semantic(format!(
-                        "Phase 06 read program does not execute {other:?} yet"
-                    )));
-                }
-            };
+            rows = self.execute_single_clause(clause, kind, rows)?;
         }
         Ok(rows)
     }
 
-    fn execute_load_csv_tail(
+    fn execute_single_clause(
         &mut self,
-        single: &AstNode,
-        index: usize,
         clause: &AstNode,
-        input: RowSet,
+        kind: ClauseKind,
+        rows: RowSet,
     ) -> QueryResult<RowSet> {
-        let expected_columns = super::infer_columns(single, &input.columns, self.source)?;
-        let spec = compile_load_csv(clause)?;
-        let mut output = Vec::new();
-        for input_row in input.rows {
-            output.extend(self.execute_load_csv_input(single, index, &spec, input_row)?);
+        match kind {
+            ClauseKind::Match | ClauseKind::OptionalMatch => {
+                self.execute_match(clause, kind == ClauseKind::OptionalMatch, rows)
+            }
+            ClauseKind::Filter => self.execute_filter(clause, rows),
+            ClauseKind::Let => self.execute_let(clause, rows),
+            ClauseKind::Unwind | ClauseKind::For => self.execute_unwind(clause, rows),
+            ClauseKind::Call => self.execute_call(clause, rows),
+            ClauseKind::Show => self.execute_show(clause, rows),
+            ClauseKind::With => {
+                let projected = self.execute_projection(clause, rows, true)?;
+                Ok(self.restore_global_bindings(projected))
+            }
+            ClauseKind::Return => self.execute_projection(clause, rows, false),
+            ClauseKind::Finish => Ok(RowSet {
+                columns: Vec::new(),
+                rows: Vec::new(),
+            }),
+            other => Err(QueryError::semantic(format!(
+                "Phase 06 read program does not execute {other:?} yet"
+            ))),
         }
-        Ok(RowSet {
-            columns: expected_columns,
-            rows: output,
-        })
-    }
-
-    fn execute_load_csv_input(
-        &mut self,
-        single: &AstNode,
-        index: usize,
-        spec: &CompiledLoadCsv,
-        input_row: BindingRow,
-    ) -> QueryResult<Vec<BindingRow>> {
-        let source = require_csv_string(
-            self.evaluate(&spec.source_expression, &input_row)?,
-            "source",
-        )?;
-        let delimiter = spec
-            .delimiter_expression
-            .as_ref()
-            .map(|expression| self.evaluate(expression, &input_row))
-            .transpose()?
-            .map_or(Ok(','), csv_delimiter)?;
-        let mut stream = CsvStream::open(&source, delimiter, spec.with_headers)?;
-        let mut output = Vec::new();
-        while let Some((value, line)) = stream.next_value()? {
-            self.check_interrupted()?;
-            let row = csv_binding_row(&input_row, &spec.binding, value, stream.file_path(), line);
-            let result = self.execute_single_from(
-                single,
-                index + 1,
-                RowSet {
-                    columns: row.order.clone(),
-                    rows: vec![row],
-                },
-            )?;
-            output.extend(result.rows);
-        }
-        Ok(output)
     }
 
     fn execute_match(
@@ -794,6 +744,7 @@ impl ReadExecutor<'_, '_> {
                 } else {
                     BindingRow::default()
                 };
+                preserve_load_csv_context(&source, &mut output);
                 for spec in specs {
                     let value = self.evaluate(&spec.expression, &source)?;
                     output.insert(
@@ -883,6 +834,7 @@ impl ReadExecutor<'_, '_> {
             let representative = group.first().cloned().unwrap_or_default();
             let aliases = self.projection_alias_values(specs, &representative)?;
             let mut output = BindingRow::default();
+            preserve_common_load_csv_context(&group, &mut output);
             for spec in specs {
                 let value = self.evaluate_group_expression(
                     &spec.expression,
@@ -1276,8 +1228,41 @@ impl ReadExecutor<'_, '_> {
     }
 }
 
+fn preserve_load_csv_context(source: &BindingRow, output: &mut BindingRow) {
+    output.load_csv_context.clone_from(&source.load_csv_context);
+}
+
+fn preserve_common_load_csv_context(group: &[BindingRow], output: &mut BindingRow) {
+    let Some(first) = group.first().and_then(|row| row.load_csv_context.as_ref()) else {
+        return;
+    };
+    let file = first.file.as_ref().filter(|value| {
+        group.iter().all(|row| {
+            row.load_csv_context
+                .as_ref()
+                .and_then(|context| context.file.as_ref())
+                == Some(*value)
+        })
+    });
+    let line = first.line.filter(|value| {
+        group.iter().all(|row| {
+            row.load_csv_context
+                .as_ref()
+                .and_then(|context| context.line)
+                == Some(*value)
+        })
+    });
+    if file.is_some() || line.is_some() {
+        output.load_csv_context = Some(crate::query::expression::LoadCsvContext {
+            file: file.cloned(),
+            line,
+        });
+    }
+}
+
 mod call;
 mod helpers;
+mod load_csv;
 mod registry;
 mod search;
 

@@ -1,5 +1,4 @@
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::collections::BTreeSet;
 
 use rusqlite::{Connection, OptionalExtension as _, params_from_iter};
 
@@ -12,6 +11,9 @@ use crate::storage::{
 use super::graph::{self, ResolvedGraphView};
 use super::{QueryError, QueryResult};
 
+mod hnsw;
+use hnsw::{build_vector_cache, query_vector_cache};
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum SemanticEntity {
     Node(i64),
@@ -22,6 +24,11 @@ pub(crate) enum SemanticEntity {
 pub(crate) struct SemanticHit {
     pub(crate) entity: SemanticEntity,
     pub(crate) score: f64,
+}
+
+pub(crate) struct VectorCandidateResult {
+    pub(crate) hits: Vec<SemanticHit>,
+    pub(crate) exhaustive: bool,
 }
 
 struct FullTextCandidate {
@@ -69,17 +76,25 @@ pub(crate) fn vector_candidates(
     graph_view: &ResolvedGraphView,
     index: &IndexDefinition,
     query: &Value,
+    candidate_limit: usize,
     is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<Vec<SemanticHit>> {
+) -> QueryResult<VectorCandidateResult> {
     let query_vector = vector_numbers(query)?;
     let similarity = validate_vector_search_input(index, &query_vector)?;
     let input = VectorSearchInput {
         query: &query_vector,
         similarity,
     };
-    if let Some(mut hits) = query_vector_cache(snapshot, graph_view, index, query)? {
-        sort_semantic_hits(&mut hits);
-        return Ok(hits);
+    if let Some(mut result) = query_vector_cache(
+        snapshot,
+        graph_view,
+        index,
+        query,
+        candidate_limit,
+        is_interrupted,
+    )? {
+        sort_semantic_hits(&mut result.hits);
+        return Ok(result);
     }
     let mut hits = scan_vector_candidates(
         connection,
@@ -90,8 +105,42 @@ pub(crate) fn vector_candidates(
         is_interrupted,
     )?;
     sort_semantic_hits(&mut hits);
-    build_vector_cache(connection, snapshot, index, is_interrupted)?;
-    Ok(hits)
+    build_vector_cache(
+        connection,
+        snapshot,
+        index,
+        query_vector.len(),
+        is_interrupted,
+    )?;
+    Ok(VectorCandidateResult {
+        hits,
+        exhaustive: true,
+    })
+}
+
+pub(crate) fn vector_initial_candidate_limit(
+    index: &IndexDefinition,
+    requested: usize,
+) -> QueryResult<usize> {
+    let Some(IndexConfiguration::Vector {
+        default_search_expansion_factor,
+        ..
+    }) = &index.configuration
+    else {
+        return Err(QueryError::internal(
+            "VECTOR Index is missing its versioned configuration",
+        ));
+    };
+    let expansion = default_search_expansion_factor
+        .parse::<f64>()
+        .map_err(|_| {
+            QueryError::internal("VECTOR Index has an invalid persisted search expansion factor")
+        })?;
+    let expanded = (requested as f64 * expansion).ceil();
+    if !expanded.is_finite() || expanded > usize::MAX as f64 {
+        return Ok(usize::MAX);
+    }
+    Ok(requested.max(expanded as usize).max(1))
 }
 
 fn validate_vector_search_input<'a>(
@@ -864,45 +913,6 @@ fn render_lucene_flat_clauses(clauses: &[(LuceneClauseMode, String)]) -> String 
     rendered
 }
 
-#[derive(Debug, Clone)]
-struct VectorCacheEntry {
-    owner_id: i64,
-    vector: Vec<f32>,
-    neighbors: Vec<i64>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct VectorQueueItem {
-    owner_id: i64,
-    score: f64,
-}
-
-impl PartialEq for VectorQueueItem {
-    fn eq(&self, other: &Self) -> bool {
-        self.owner_id == other.owner_id && self.score.to_bits() == other.score.to_bits()
-    }
-}
-
-impl Eq for VectorQueueItem {}
-
-impl PartialOrd for VectorQueueItem {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for VectorQueueItem {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.score
-            .total_cmp(&other.score)
-            .then_with(|| other.owner_id.cmp(&self.owner_id))
-    }
-}
-
-fn vector_cache_key(snapshot: &Snapshot<'_>, index: &IndexDefinition) -> QueryResult<String> {
-    semantic_cache_digest(snapshot, index, b"LITHOGRAPH_HNSW_CACHE_V1")
-}
-
 fn semantic_cache_digest(
     snapshot: &Snapshot<'_>,
     index: &IndexDefinition,
@@ -916,178 +926,6 @@ fn semantic_cache_digest(
     })?;
     hasher.update(&encoded);
     Ok(hasher.finalize().to_hex().to_string())
-}
-
-fn ensure_vector_cache_tables(connection: &Connection) -> QueryResult<()> {
-    connection.execute_batch(
-        "CREATE TEMP TABLE IF NOT EXISTS _lithograph_vector_cache_meta(\
-             cache_key TEXT PRIMARY KEY, entry_owner_id INTEGER, complete INTEGER NOT NULL\
-         ) WITHOUT ROWID;\
-         CREATE TEMP TABLE IF NOT EXISTS _lithograph_vector_cache(\
-             cache_key TEXT NOT NULL, owner_id INTEGER NOT NULL, vector_json TEXT NOT NULL, neighbors_json TEXT NOT NULL,\
-             PRIMARY KEY(cache_key, owner_id)\
-         ) WITHOUT ROWID;",
-    )?;
-    Ok(())
-}
-
-fn vector_cache_entry_owner(
-    connection: &Connection,
-    cache_key: &str,
-) -> QueryResult<Option<Option<i64>>> {
-    connection
-        .query_row(
-            "SELECT entry_owner_id FROM temp._lithograph_vector_cache_meta WHERE cache_key = ?1 AND complete = 1",
-            [cache_key],
-            |row| row.get::<_, Option<i64>>(0),
-        )
-        .optional()
-        .map_err(Into::into)
-}
-
-fn query_vector_cache(
-    snapshot: &Snapshot<'_>,
-    graph_view: &ResolvedGraphView,
-    index: &IndexDefinition,
-    query: &Value,
-) -> QueryResult<Option<Vec<SemanticHit>>> {
-    let connection = snapshot.connection_for_query();
-    ensure_vector_cache_tables(connection)?;
-    let cache_key = vector_cache_key(snapshot, index)?;
-    let Some(entry_owner_id) = vector_cache_entry_owner(connection, &cache_key)? else {
-        return Ok(None);
-    };
-    let query_vector = vector_numbers(query)?;
-    let entries = load_vector_cache_entries(connection, &cache_key)?
-        .into_iter()
-        .filter(|(_, entry)| entry.vector.len() == query_vector.len())
-        .collect::<BTreeMap<_, _>>();
-    if entries.is_empty() {
-        return Ok(Some(Vec::new()));
-    }
-    let entry_owner_id = entry_owner_id
-        .filter(|owner_id| entries.contains_key(owner_id))
-        .unwrap_or_else(|| entries.keys().next().copied().unwrap_or_default());
-    let similarity = vector_configuration(index)?.1;
-    let ordered = hnsw_traversal(&entries, entry_owner_id, &query_vector, similarity)?;
-    semantic_hits_from_cache(snapshot, graph_view, index, ordered).map(Some)
-}
-
-fn load_vector_cache_entries(
-    connection: &Connection,
-    cache_key: &str,
-) -> QueryResult<BTreeMap<i64, VectorCacheEntry>> {
-    let mut statement = connection.prepare(
-        "SELECT owner_id, vector_json, neighbors_json FROM temp._lithograph_vector_cache \
-         WHERE cache_key = ?1 ORDER BY owner_id",
-    )?;
-    let mut rows = statement.query([cache_key])?;
-    let mut entries = BTreeMap::new();
-    while let Some(row) = rows.next()? {
-        let owner_id = row.get::<_, i64>(0)?;
-        let vector_json = row.get::<_, String>(1)?;
-        let neighbors_json = row.get::<_, String>(2)?;
-        let vector = serde_json::from_str::<Vec<f32>>(&vector_json).map_err(|error| {
-            QueryError::internal(format!("invalid derived HNSW vector cache: {error}"))
-        })?;
-        let neighbors = serde_json::from_str::<Vec<i64>>(&neighbors_json).map_err(|error| {
-            QueryError::internal(format!("invalid derived HNSW neighbor cache: {error}"))
-        })?;
-        entries.insert(
-            owner_id,
-            VectorCacheEntry {
-                owner_id,
-                vector,
-                neighbors,
-            },
-        );
-    }
-    Ok(entries)
-}
-
-fn hnsw_traversal(
-    entries: &BTreeMap<i64, VectorCacheEntry>,
-    entry_owner_id: i64,
-    query: &[f32],
-    similarity: &str,
-) -> QueryResult<Vec<VectorQueueItem>> {
-    let mut visited = BTreeSet::new();
-    let mut ordered = Vec::with_capacity(entries.len());
-    let mut candidates = BinaryHeap::new();
-    if let Some(entry) = entries.get(&entry_owner_id) {
-        candidates.push(VectorQueueItem {
-            owner_id: entry.owner_id,
-            score: vector_similarity_numbers(&entry.vector, query, similarity)?,
-        });
-    }
-    while visited.len() < entries.len() {
-        if candidates.is_empty()
-            && let Some(owner_id) = entries.keys().find(|owner_id| !visited.contains(*owner_id))
-        {
-            let entry = &entries[owner_id];
-            candidates.push(VectorQueueItem {
-                owner_id: *owner_id,
-                score: vector_similarity_numbers(&entry.vector, query, similarity)?,
-            });
-        }
-        let Some(candidate) = candidates.pop() else {
-            break;
-        };
-        if !visited.insert(candidate.owner_id) {
-            continue;
-        }
-        ordered.push(candidate);
-        let entry = &entries[&candidate.owner_id];
-        for neighbor in &entry.neighbors {
-            if visited.contains(neighbor) {
-                continue;
-            }
-            let Some(neighbor_entry) = entries.get(neighbor) else {
-                continue;
-            };
-            candidates.push(VectorQueueItem {
-                owner_id: *neighbor,
-                score: vector_similarity_numbers(&neighbor_entry.vector, query, similarity)?,
-            });
-        }
-    }
-    Ok(ordered)
-}
-
-fn semantic_hits_from_cache(
-    snapshot: &Snapshot<'_>,
-    graph_view: &ResolvedGraphView,
-    index: &IndexDefinition,
-    ordered: Vec<VectorQueueItem>,
-) -> QueryResult<Vec<SemanticHit>> {
-    let mut hits = Vec::new();
-    for item in ordered {
-        let entity = match index.target {
-            IndexTarget::NodeProperties { .. } => {
-                if !graph_view.visible_node(snapshot, item.owner_id)? {
-                    continue;
-                }
-                SemanticEntity::Node(item.owner_id)
-            }
-            IndexTarget::RelationshipProperties { .. } => {
-                let Some(relationship) = snapshot.relationship(item.owner_id)? else {
-                    continue;
-                };
-                if !graph_view.visible_relationship(snapshot, relationship)? {
-                    continue;
-                }
-                SemanticEntity::Relationship(relationship)
-            }
-            IndexTarget::NodeLookup | IndexTarget::RelationshipLookup => {
-                return Err(QueryError::internal("VECTOR Index has a lookup target"));
-            }
-        };
-        hits.push(SemanticHit {
-            entity,
-            score: item.score,
-        });
-    }
-    Ok(hits)
 }
 
 fn vector_numbers(value: &Value) -> QueryResult<Vec<f32>> {
@@ -1191,138 +1029,4 @@ fn vector_similarity_numbers(left: &[f32], right: &[f32], similarity: &str) -> Q
             "unsupported persisted vector similarity {other:?}"
         ))),
     }
-}
-
-fn build_vector_cache(
-    connection: &Connection,
-    snapshot: &Snapshot<'_>,
-    index: &IndexDefinition,
-    is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<()> {
-    ensure_vector_cache_tables(connection)?;
-    let cache_key = vector_cache_key(snapshot, index)?;
-    if vector_cache_entry_owner(connection, &cache_key)?.is_some() {
-        return Ok(());
-    }
-    connection.execute(
-        "DELETE FROM temp._lithograph_vector_cache WHERE cache_key = ?1",
-        [&cache_key],
-    )?;
-    let mut entries = collect_vector_cache_entries(connection, snapshot, index, is_interrupted)?;
-    connect_hnsw_neighbors(index, &mut entries, is_interrupted)?;
-    persist_vector_cache(connection, &cache_key, &entries)
-}
-
-fn collect_vector_cache_entries(
-    connection: &Connection,
-    snapshot: &Snapshot<'_>,
-    index: &IndexDefinition,
-    is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<Vec<VectorCacheEntry>> {
-    let property = index_properties(index)?
-        .first()
-        .ok_or_else(|| QueryError::internal("VECTOR Index is missing its indexed property"))?;
-    let mut entries = Vec::new();
-    for entity in indexed_entities(connection, snapshot, index, None, is_interrupted)? {
-        let value = semantic_property(snapshot, entity, property)?;
-        if let Some(entry) = vector_cache_entry(index, entity_id(entity), value)? {
-            entries.push(entry);
-        }
-    }
-    Ok(entries)
-}
-
-fn vector_cache_entry(
-    index: &IndexDefinition,
-    owner_id: i64,
-    value: Value,
-) -> QueryResult<Option<VectorCacheEntry>> {
-    let Some(vector) = try_vector_numbers(&value)? else {
-        return Ok(None);
-    };
-    if !stored_vector_valid(&vector, index)? {
-        return Ok(None);
-    }
-    Ok(Some(VectorCacheEntry {
-        owner_id,
-        vector,
-        neighbors: Vec::new(),
-    }))
-}
-
-fn connect_hnsw_neighbors(
-    definition: &IndexDefinition,
-    entries: &mut [VectorCacheEntry],
-    is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<()> {
-    let Some(IndexConfiguration::Vector {
-        similarity_function,
-        hnsw_m,
-        ..
-    }) = &definition.configuration
-    else {
-        return Err(QueryError::internal(
-            "VECTOR Index has no HNSW configuration",
-        ));
-    };
-    let maximum = usize::try_from(*hnsw_m).unwrap_or(usize::MAX);
-    for current in 0..entries.len() {
-        if is_interrupted() {
-            return Err(QueryError::interrupted());
-        }
-        let mut candidates = entries
-            .iter()
-            .enumerate()
-            .filter(|(other, entry)| {
-                *other != current && entry.vector.len() == entries[current].vector.len()
-            })
-            .map(|(_, entry)| {
-                Ok((
-                    entry.owner_id,
-                    vector_similarity_numbers(
-                        &entries[current].vector,
-                        &entry.vector,
-                        similarity_function,
-                    )?,
-                ))
-            })
-            .collect::<QueryResult<Vec<_>>>()?;
-        candidates.sort_by(|left, right| {
-            right
-                .1
-                .total_cmp(&left.1)
-                .then_with(|| left.0.cmp(&right.0))
-        });
-        entries[current].neighbors = candidates
-            .into_iter()
-            .take(maximum)
-            .map(|(owner_id, _)| owner_id)
-            .collect();
-    }
-    Ok(())
-}
-
-fn persist_vector_cache(
-    connection: &Connection,
-    cache_key: &str,
-    entries: &[VectorCacheEntry],
-) -> QueryResult<()> {
-    for entry in entries {
-        let vector_json = serde_json::to_string(&entry.vector).map_err(|error| {
-            QueryError::internal(format!("failed to encode HNSW vector: {error}"))
-        })?;
-        let neighbors_json = serde_json::to_string(&entry.neighbors).map_err(|error| {
-            QueryError::internal(format!("failed to encode HNSW neighbors: {error}"))
-        })?;
-        connection.execute(
-            "INSERT INTO temp._lithograph_vector_cache(cache_key, owner_id, vector_json, neighbors_json) VALUES(?1, ?2, ?3, ?4)",
-            rusqlite::params![cache_key, entry.owner_id, vector_json, neighbors_json],
-        )?;
-    }
-    let entry_owner_id = entries.first().map(|entry| entry.owner_id);
-    connection.execute(
-        "INSERT OR REPLACE INTO temp._lithograph_vector_cache_meta(cache_key, entry_owner_id, complete) VALUES(?1, ?2, 1)",
-        rusqlite::params![cache_key, entry_owner_id],
-    )?;
-    Ok(())
 }

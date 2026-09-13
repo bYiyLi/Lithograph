@@ -114,6 +114,21 @@ Native API 实现：
 
 检查 derived index 是否成为 history truth、Full-text/Vector 是否在 limit/top-k 之后才错误过滤 Graph View、HNSW 是否把 approximate behavior 伪装成 deterministic exact order、historical index key 是否遗漏 commit、LOAD CSV 是否泄漏 credential/无限缓冲。
 
-## 7. 完成条件
+Phase-level review 已闭环：
+
+- 普通 `LOAD CSV` mutation/read tail 按 Cypher clause boundary 执行；需要全局输入的 `WITH` / `RETURN` aggregation、`ORDER BY` / `DISTINCT` 等语义先完成必要 materialization，row-local path 继续 streaming/spill。spill round-trip 保留 Node/Relationship/Path binding，不把 graph element 降级成普通标量；
+- HTTP/HTTPS CSV reader 在 source 读完后立即释放网络/文件 handle，只保留临时路径删除 guard，既保证后续 `file()` context 生命周期，又不随 source row 数累积开放 handle；`file()` / `linenumber()` context 使用独立于用户变量命名空间的内部 row context，可穿过保留其语义的 `WITH` 与 scoped `CALL`，嵌套/连续多个 `LOAD CSV` 按“最近实际执行 clause”更新，LOAD CSV 外仍为 `null`，且不会被 `RETURN *` 暴露；
+- `LOAD CSV ... CALL { ... } IN TRANSACTIONS` 在 transaction boundary 前存在 global projection 时，先对完整 CSV clause input 执行该 prefix，再按结果 rows batching；无 global barrier 的路径保持逐行 streaming 与 late CSV failure 的既有 partial-durability 语义；
+- Full-text/Vector/HNSW、historical Snapshot、Graph View visibility、transaction Commit/error contract 与 SQL Bridge/rows fail-closed boundary 在 review regression 中保持不变；
+- repository quality review 将新增 LOAD CSV spill boilerplate 收敛到已有 spill/ingestion 职责，并修复 coverage gate 共享固定 target directory 导致并行 quality run 互删构建目录的竞态；未放宽 file、complexity、duplicate 或 coverage threshold。
+
+## 7. 验证证据
+
+- `phase08_search_ingestion` 27/27；受影响 Phase 05/06 regression 分别 67/67、54/54；
+- `cargo make quality` exit 0：duplicated lines 0.99%；coverage regions 81.78%、functions 84.35%、lines 83.94%；format、strict Clippy、Rustdoc、production/support/Native complexity、hard file budget、unused dependency、advisory/license/source policy 与真实 Phase 01–08 extension coverage probes 全部通过；
+- `scripts/ci.sh` exit 0：SQLite 3.51.0 与最低支持 SQLite 3.45.0 均完成真实 `.load`、Phase 01–08 probes、extension tests、artifact inspection、Native ABI smoke、compatibility harness/inventory 与 openCypher TCK inventory；
+- `phase06_compatibility` 对 18 个 enabled frozen fixtures 使用真实 core executor，结果为 18 passed、0 failed、0 planned；`lithograph-compat inventory` 是 metadata-only inventory，不执行 fixture，因而其 standalone 输出按设计显示为 planned。Phase 10 仍拥有 10M/100M scale、cross-platform release 与最终 PROFILE/error compatibility closure。
+
+## 8. 完成条件
 
 Search、Vector、Full-text、LOAD CSV 与 transaction batching compatibility closure；Phase 09 转 `ready`。

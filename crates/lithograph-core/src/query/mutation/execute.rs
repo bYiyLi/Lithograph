@@ -180,25 +180,57 @@ fn execute_match_clause(
 fn execute_create_clause(
     context: &mut MutationContext<'_, '_>,
     pattern: &[WritePatternPart],
-    mut rows: Vec<BindingRow>,
+    rows: Vec<BindingRow>,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<Vec<BindingRow>> {
-    let clause_input = context.staged_snapshot()?;
-    let graph_view = context.graph_view()?;
-    let mut touched = TouchedElements::default();
+    let mut state = begin_mutation_clause(context)?;
+    let rows = execute_create_clause_batch(context, pattern, rows, &mut state, is_interrupted)?;
+    finish_mutation_clause(context, &state)?;
+    Ok(rows)
+}
+
+struct MutationClauseState<'connection> {
+    clause_input: Snapshot<'connection>,
+    graph_view: ResolvedGraphView,
+    touched: TouchedElements,
+}
+
+fn begin_mutation_clause<'connection>(
+    context: &MutationContext<'connection, '_>,
+) -> QueryResult<MutationClauseState<'connection>> {
+    Ok(MutationClauseState {
+        clause_input: context.staged_snapshot()?,
+        graph_view: context.graph_view()?,
+        touched: TouchedElements::default(),
+    })
+}
+
+fn finish_mutation_clause(
+    context: &MutationContext<'_, '_>,
+    state: &MutationClauseState<'_>,
+) -> QueryResult<()> {
+    context.validate_view(&state.touched)
+}
+
+fn execute_create_clause_batch(
+    context: &mut MutationContext<'_, '_>,
+    pattern: &[WritePatternPart],
+    mut rows: Vec<BindingRow>,
+    state: &mut MutationClauseState<'_>,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<Vec<BindingRow>> {
     for row in &mut rows {
         check_interrupted(is_interrupted)?;
         create_pattern(
             context,
             row,
             pattern,
-            &clause_input,
-            &graph_view,
-            &mut touched,
+            &state.clause_input,
+            &state.graph_view,
+            &mut state.touched,
             is_interrupted,
         )?;
     }
-    context.validate_view(&touched)?;
     Ok(rows)
 }
 
@@ -208,7 +240,10 @@ fn execute_set_clause(
     rows: Vec<BindingRow>,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<Vec<BindingRow>> {
-    execute_row_mutation_clause(context, RowMutation::Set(items), rows, is_interrupted)
+    let mut state = begin_mutation_clause(context)?;
+    let rows = execute_set_clause_batch(context, items, rows, &mut state, is_interrupted)?;
+    finish_mutation_clause(context, &state)?;
+    Ok(rows)
 }
 
 fn execute_remove_clause(
@@ -217,7 +252,10 @@ fn execute_remove_clause(
     rows: Vec<BindingRow>,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<Vec<BindingRow>> {
-    execute_row_mutation_clause(context, RowMutation::Remove(items), rows, is_interrupted)
+    let mut state = begin_mutation_clause(context)?;
+    let rows = execute_remove_clause_batch(context, items, rows, &mut state, is_interrupted)?;
+    finish_mutation_clause(context, &state)?;
+    Ok(rows)
 }
 
 enum RowMutation<'a> {
@@ -225,15 +263,13 @@ enum RowMutation<'a> {
     Remove(&'a [RemoveItem]),
 }
 
-fn execute_row_mutation_clause(
+fn execute_row_mutation_batch(
     context: &mut MutationContext<'_, '_>,
     mutation: RowMutation<'_>,
     rows: Vec<BindingRow>,
+    state: &mut MutationClauseState<'_>,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<Vec<BindingRow>> {
-    let clause_input = context.staged_snapshot()?;
-    let graph_view = context.graph_view()?;
-    let mut touched = TouchedElements::default();
     for row in &rows {
         check_interrupted(is_interrupted)?;
         match mutation {
@@ -241,22 +277,53 @@ fn execute_row_mutation_clause(
                 context,
                 row,
                 items,
-                &clause_input,
-                &graph_view,
-                &mut touched,
+                &state.clause_input,
+                &state.graph_view,
+                &mut state.touched,
             )?,
             RowMutation::Remove(items) => apply_remove_items(
                 context,
                 row,
                 items,
-                &clause_input,
-                &graph_view,
-                &mut touched,
+                &state.clause_input,
+                &state.graph_view,
+                &mut state.touched,
             )?,
         }
     }
-    context.validate_view(&touched)?;
     Ok(rows)
+}
+
+fn execute_set_clause_batch(
+    context: &mut MutationContext<'_, '_>,
+    items: &[SetItem],
+    rows: Vec<BindingRow>,
+    state: &mut MutationClauseState<'_>,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<Vec<BindingRow>> {
+    execute_row_mutation_batch(
+        context,
+        RowMutation::Set(items),
+        rows,
+        state,
+        is_interrupted,
+    )
+}
+
+fn execute_remove_clause_batch(
+    context: &mut MutationContext<'_, '_>,
+    items: &[RemoveItem],
+    rows: Vec<BindingRow>,
+    state: &mut MutationClauseState<'_>,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<Vec<BindingRow>> {
+    execute_row_mutation_batch(
+        context,
+        RowMutation::Remove(items),
+        rows,
+        state,
+        is_interrupted,
+    )
 }
 
 fn execute_delete_clause(
@@ -266,35 +333,49 @@ fn execute_delete_clause(
     rows: Vec<BindingRow>,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<Vec<BindingRow>> {
-    let clause_input = context.staged_snapshot()?;
-    let graph_view = context.graph_view()?;
-    let variables = (0..expressions.len())
-        .map(|index| format!("__lithograph_delete_{index}"))
-        .collect::<Vec<_>>();
-    let targets = rows
-        .iter()
-        .map(|row| {
-            let mut targets = BindingRow::default();
-            for (variable, expression) in variables.iter().zip(expressions) {
-                let value = expression::evaluate(expression, &clause_input, row, context.params)?;
-                targets.insert(
-                    variable.clone(),
-                    expression::binding_from_value(&clause_input, value)?,
-                );
-            }
-            Ok(targets)
-        })
-        .collect::<QueryResult<Vec<_>>>()?;
+    let state = begin_mutation_clause(context)?;
+    let (variables, targets) = evaluate_delete_targets(context, expressions, &rows, &state)?;
     apply_delete(
         context,
         &targets,
         &variables,
         detach,
-        &clause_input,
-        &graph_view,
+        &state.clause_input,
+        &state.graph_view,
         is_interrupted,
     )?;
     Ok(rows)
+}
+
+fn delete_target_variables(expressions: &[Expr]) -> Vec<String> {
+    (0..expressions.len())
+        .map(|index| format!("__lithograph_delete_{index}"))
+        .collect()
+}
+
+fn evaluate_delete_targets(
+    context: &MutationContext<'_, '_>,
+    expressions: &[Expr],
+    rows: &[BindingRow],
+    state: &MutationClauseState<'_>,
+) -> QueryResult<(Vec<String>, Vec<BindingRow>)> {
+    let variables = delete_target_variables(expressions);
+    let targets = rows
+        .iter()
+        .map(|row| {
+            let mut targets = BindingRow::default();
+            for (variable, expression) in variables.iter().zip(expressions) {
+                let value =
+                    expression::evaluate(expression, &state.clause_input, row, context.params)?;
+                targets.insert(
+                    variable.clone(),
+                    expression::binding_from_value(&state.clause_input, value)?,
+                );
+            }
+            Ok(targets)
+        })
+        .collect::<QueryResult<Vec<_>>>()?;
+    Ok((variables, targets))
 }
 
 fn execute_merge_clause(
@@ -303,23 +384,32 @@ fn execute_merge_clause(
     rows: Vec<BindingRow>,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<Vec<BindingRow>> {
-    let clause_input = context.staged_snapshot()?;
-    let clause_graph_view = context.graph_view()?;
+    let mut state = begin_mutation_clause(context)?;
+    let output = execute_merge_clause_batch(context, merge, rows, &mut state, is_interrupted)?;
+    finish_mutation_clause(context, &state)?;
+    Ok(output)
+}
+
+fn execute_merge_clause_batch(
+    context: &mut MutationContext<'_, '_>,
+    merge: &MergePlan,
+    rows: Vec<BindingRow>,
+    state: &mut MutationClauseState<'_>,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<Vec<BindingRow>> {
     let mut output = Vec::with_capacity(rows.len());
-    let mut touched = TouchedElements::default();
     for row in rows {
         check_interrupted(is_interrupted)?;
         output.extend(merge_one(
             context,
             row,
             merge,
-            &clause_input,
-            &clause_graph_view,
-            &mut touched,
+            &state.clause_input,
+            &state.graph_view,
+            &mut state.touched,
             is_interrupted,
         )?);
     }
-    context.validate_view(&touched)?;
     Ok(output)
 }
 
@@ -390,7 +480,15 @@ fn create_pattern_part(
             Direction::Incoming => (next, current),
             Direction::Undirected => unreachable!(),
         };
-        let record = create_relationship(context, row, relationship, source, target, touched)?;
+        let record = create_relationship(
+            context,
+            row,
+            relationship,
+            source,
+            target,
+            clause_input,
+            touched,
+        )?;
         relationships.push(record);
         current = next;
     }
@@ -417,7 +515,7 @@ fn ensure_node(
     if let Some(id) = bound_node(context, row, spec, clause_input, graph_view)? {
         return Ok(id);
     }
-    create_node(context, row, spec, touched)
+    create_node(context, row, spec, clause_input, touched)
 }
 
 fn bound_node(
@@ -448,13 +546,21 @@ fn create_node(
     context: &mut MutationContext<'_, '_>,
     row: &mut BindingRow,
     spec: &NodeWriteSpec,
+    clause_input: &Snapshot<'_>,
     touched: &mut TouchedElements,
 ) -> QueryResult<i64> {
     let id = storage::allocate_node_id(context.connection)?;
     context.delta.set_node(&context.base, id, true)?;
     touched.nodes.insert(id);
-    add_node_labels(context, row, id, &spec.labels)?;
-    apply_create_properties(context, row, OwnerKind::Node, id, spec.properties.as_ref())?;
+    add_node_labels(context, row, id, &spec.labels, clause_input)?;
+    apply_create_properties(
+        context,
+        row,
+        OwnerKind::Node,
+        id,
+        spec.properties.as_ref(),
+        clause_input,
+    )?;
     if let Some(variable) = &spec.variable {
         row.insert(variable.clone(), BindingValue::Node(id));
     }
@@ -467,22 +573,31 @@ fn apply_create_properties(
     owner_kind: OwnerKind,
     owner_id: i64,
     properties: Option<&Expr>,
+    clause_input: &Snapshot<'_>,
 ) -> QueryResult<()> {
     let Some(properties) = properties else {
         return Ok(());
     };
-    let staged = context.staged_snapshot()?;
-    let map = evaluate_map(properties, &staged, row, context.params)?;
-    set_property_map(
-        context.connection,
-        &context.base,
-        &staged,
-        &mut context.delta,
-        owner_kind,
-        owner_id,
-        &map,
-        false,
-    )
+    let map = evaluate_map(properties, clause_input, row, context.params)?;
+    set_new_property_map(context, owner_kind, owner_id, &map)
+}
+
+fn set_new_property_map(
+    context: &mut MutationContext<'_, '_>,
+    owner_kind: OwnerKind,
+    owner_id: i64,
+    map: &BTreeMap<String, Value>,
+) -> QueryResult<()> {
+    for (key, value) in map {
+        let Some(value) = property_from_value(value.clone())? else {
+            continue;
+        };
+        let key_id = storage::intern_property_key(context.connection, key)?;
+        context
+            .delta
+            .set_property(&context.base, owner_kind, owner_id, key_id, Some(value))?;
+    }
+    Ok(())
 }
 
 fn add_node_labels(
@@ -490,9 +605,23 @@ fn add_node_labels(
     row: &BindingRow,
     id: i64,
     labels: &[WriteName],
+    clause_input: &Snapshot<'_>,
 ) -> QueryResult<()> {
-    let staged = context.staged_snapshot()?;
-    for label in resolve_write_names(labels, &staged, row, context.params)? {
+    let resolved = if labels
+        .iter()
+        .all(|label| matches!(label, WriteName::Static(_)))
+    {
+        labels
+            .iter()
+            .filter_map(|label| match label {
+                WriteName::Static(label) => Some(label.clone()),
+                WriteName::Dynamic(_) => None,
+            })
+            .collect()
+    } else {
+        resolve_write_names(labels, clause_input, row, context.params)?
+    };
+    for label in resolved {
         let label_id = storage::intern_label(context.connection, &label)?;
         context.delta.set_label(&context.base, id, label_id, true)?;
     }
@@ -505,6 +634,7 @@ fn create_relationship(
     spec: &RelationshipWriteSpec,
     source: i64,
     target: i64,
+    clause_input: &Snapshot<'_>,
     touched: &mut TouchedElements,
 ) -> QueryResult<RelationshipRecord> {
     if let Some(variable) = &spec.variable
@@ -514,10 +644,9 @@ fn create_relationship(
             "CREATE cannot reuse bound Relationship variable {variable}"
         )));
     }
-    let staged = context.staged_snapshot()?;
     let relationship_types = resolve_write_names(
         std::slice::from_ref(&spec.relationship_type),
-        &staged,
+        clause_input,
         row,
         context.params,
     )?;
@@ -544,6 +673,7 @@ fn create_relationship(
         OwnerKind::Relationship,
         id,
         spec.properties.as_ref(),
+        clause_input,
     )?;
     if let Some(variable) = &spec.variable {
         row.insert(variable.clone(), BindingValue::Relationship(record));

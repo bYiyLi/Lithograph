@@ -83,7 +83,16 @@ fn execute(
     query: &str,
     options: ExecutionOptions,
 ) -> Result<(Vec<Vec<Value>>, QuerySummary), lithograph_core::query::QueryError> {
-    let prepared = prepare(connection, query, BTreeMap::new(), options)?;
+    execute_with_params(connection, query, BTreeMap::new(), options)
+}
+
+fn execute_with_params(
+    connection: &Connection,
+    query: &str,
+    params: BTreeMap<String, Value>,
+    options: ExecutionOptions,
+) -> Result<(Vec<Vec<Value>>, QuerySummary), lithograph_core::query::QueryError> {
+    let prepared = prepare(connection, query, params, options)?;
     let mut cursor = QueryCursor::new(prepared);
     let mut rows = Vec::new();
     loop {
@@ -131,6 +140,15 @@ fn vector_index_searches_nodes_with_score_and_filter() {
     let (cached_rows, _) = execute(&connection, search, ExecutionOptions::default())
         .expect("vector search uses HNSW cache");
     assert_eq!(cached_rows, rows);
+    connection
+        .execute(
+            "UPDATE temp._lithograph_vector_cache SET neighbors_json = 'not-json' WHERE owner_id = (SELECT min(owner_id) FROM temp._lithograph_vector_cache)",
+            [],
+        )
+        .expect("corrupt disposable vector cache");
+    let (recovered_rows, _) = execute(&connection, search, ExecutionOptions::default())
+        .expect("corrupt HNSW cache falls back and rebuilds");
+    assert_eq!(recovered_rows, rows);
     connection
         .execute_batch(
             "DROP TABLE temp._lithograph_vector_cache; DROP TABLE temp._lithograph_vector_cache_meta;",
@@ -485,106 +503,6 @@ fn semantic_index_ddl_show_drop_and_historical_definitions_are_versioned() {
 }
 
 #[test]
-fn load_csv_streams_headers_quotes_and_context_functions() {
-    let connection = fresh_storage();
-    let (path, uri) = csv_fixture(
-        "read",
-        "name,city\nAlice,\"New\nYork\"\nBob,San Francisco\n",
-    );
-    let absolute = fs::canonicalize(&path).expect("canonical CSV fixture path");
-    let query = format!(
-        "LOAD CSV WITH HEADERS FROM '{uri}' AS row RETURN row.name AS name, row.city AS city, file() AS source, linenumber() AS line"
-    );
-    let (rows, _) = execute(&connection, &query, ExecutionOptions::default()).expect("load csv");
-    assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0][0], Value::String("Alice".to_owned()));
-    assert_eq!(rows[0][1], Value::String("New\nYork".to_owned()));
-    assert_eq!(
-        rows[0][2],
-        Value::String(absolute.to_string_lossy().into_owned())
-    );
-    assert_eq!(rows[0][3], Value::Integer(2));
-    assert_eq!(rows[1][3], Value::Integer(3));
-    fs::remove_file(path).expect("remove csv fixture");
-
-    let (outside, _) = execute(
-        &connection,
-        "RETURN file() AS source, linenumber() AS line",
-        ExecutionOptions::default(),
-    )
-    .expect("LOAD CSV context functions outside LOAD CSV");
-    assert_eq!(outside, vec![vec![Value::Null, Value::Null]]);
-
-    let (delimiter_path, delimiter_uri) = csv_fixture("delimiter", "Alice;London\nBob;Paris\n");
-    let delimiter_query = format!(
-        "LOAD CSV FROM '{delimiter_uri}' AS row FIELDTERMINATOR ';' RETURN row[0], row[1], linenumber() ORDER BY row[0]"
-    );
-    let (delimiter_rows, _) = execute(&connection, &delimiter_query, ExecutionOptions::default())
-        .expect("LOAD CSV without headers and with custom delimiter");
-    assert_eq!(
-        delimiter_rows,
-        vec![
-            vec![
-                Value::String("Alice".to_owned()),
-                Value::String("London".to_owned()),
-                Value::Integer(1),
-            ],
-            vec![
-                Value::String("Bob".to_owned()),
-                Value::String("Paris".to_owned()),
-                Value::Integer(2),
-            ],
-        ]
-    );
-    let unicode_delimiter_query = format!(
-        "LOAD CSV FROM '{delimiter_uri}' AS row FIELDTERMINATOR '\\u003B' RETURN row[0], row[1] ORDER BY row[0]"
-    );
-    let (unicode_delimiter_rows, _) = execute(
-        &connection,
-        &unicode_delimiter_query,
-        ExecutionOptions::default(),
-    )
-    .expect("LOAD CSV accepts four-digit Unicode FIELDTERMINATOR escape");
-    assert_eq!(
-        unicode_delimiter_rows,
-        vec![
-            vec![
-                Value::String("Alice".to_owned()),
-                Value::String("London".to_owned()),
-            ],
-            vec![
-                Value::String("Bob".to_owned()),
-                Value::String("Paris".to_owned()),
-            ],
-        ]
-    );
-    fs::remove_file(delimiter_path).expect("remove delimiter CSV fixture");
-
-    let (escape_path, escape_uri) = csv_fixture(
-        "escaped-quotes",
-        "\"1\",\"The \"\"Symbol\"\"\"\n\"2\",\"The \\\"Symbol\\\"\"\n",
-    );
-    let escape_query =
-        format!("LOAD CSV FROM '{escape_uri}' AS row RETURN row[0], row[1] ORDER BY row[0]");
-    let (escaped, _) = execute(&connection, &escape_query, ExecutionOptions::default())
-        .expect("LOAD CSV accepts doubled and backslash-escaped quotes");
-    assert_eq!(
-        escaped,
-        vec![
-            vec![
-                Value::String("1".to_owned()),
-                Value::String("The \"Symbol\"".to_owned()),
-            ],
-            vec![
-                Value::String("2".to_owned()),
-                Value::String("The \"Symbol\"".to_owned()),
-            ],
-        ]
-    );
-    fs::remove_file(escape_path).expect("remove escaped-quote CSV fixture");
-}
-
-#[test]
 fn load_csv_http_and_io_failures_preserve_atomic_rollback() {
     let connection = fresh_storage();
     let (uri, server) = one_shot_http_csv("name\nAlice\nBob\n");
@@ -609,7 +527,10 @@ fn load_csv_http_and_io_failures_preserve_atomic_rollback() {
             "file",
             "file:///definitely/not/a/lithograph/phase08/missing.csv",
         ),
-        ("http", "http://127.0.0.1:1/unreachable.csv"),
+        (
+            "http",
+            "http://127.0.0.1:1/unreachable.csv?token=phase08-secret",
+        ),
         ("https", "https://127.0.0.1:1/unreachable.csv"),
     ] {
         let query = format!(
@@ -617,7 +538,12 @@ fn load_csv_http_and_io_failures_preserve_atomic_rollback() {
         );
         let error = execute(&connection, &query, ExecutionOptions::default())
             .expect_err("I/O failure must abort the ordinary mutation");
-        assert_eq!(error.kind, lithograph_core::query::QueryErrorKind::Resource);
+        assert_eq!(error.kind, lithograph_core::query::QueryErrorKind::Io);
+        assert!(
+            !error.message.contains("phase08-secret"),
+            "LOAD CSV I/O errors must not expose URL credentials/query secrets: {}",
+            error.message
+        );
     }
     let (rows, _) = execute(
         &connection,
@@ -664,6 +590,9 @@ fn load_csv_mutation_streams_large_input_and_malformed_input_rolls_back() {
     assert_eq!(rows, vec![vec![Value::Integer(0)]]);
     fs::remove_file(bad_path).expect("remove malformed csv fixture");
 }
+
+#[path = "phase08_search_ingestion/load_csv_regressions.rs"]
+mod load_csv_regressions;
 
 #[test]
 fn transaction_subquery_commits_once_per_mutating_batch_and_read_only_batches_do_not_commit() {
@@ -888,16 +817,29 @@ fn concurrent_transaction_options_validate_disjoint_and_concurrency_contract() {
     .expect_err("DISJOINT BY without CONCURRENT must be rejected");
     assert_eq!(error.kind, lithograph_core::query::QueryErrorKind::Semantic);
 
-    let error = execute(
-        &connection,
-        "UNWIND [1] AS value CALL (value) { RETURN value AS innerValue } IN 0 CONCURRENT TRANSACTIONS RETURN innerValue",
-        ExecutionOptions::default(),
-    )
-    .expect_err("zero concurrency must be rejected");
+    let zero = "UNWIND [1] AS value CALL (value) { RETURN value AS innerValue } IN 0 CONCURRENT TRANSACTIONS RETURN innerValue";
+    let error = execute(&connection, zero, ExecutionOptions::default())
+        .expect_err("zero concurrency must be rejected");
     assert_eq!(
         error.kind,
         lithograph_core::query::QueryErrorKind::InvalidArgument
     );
+
+    let negative_literal = "UNWIND [1] AS value CALL (value) { RETURN value AS innerValue } IN -1 CONCURRENT TRANSACTIONS RETURN innerValue";
+    let error = execute(&connection, negative_literal, ExecutionOptions::default())
+        .expect_err("negative literal concurrency must be rejected");
+    assert_eq!(error.kind, lithograph_core::query::QueryErrorKind::Semantic);
+
+    let mut params = BTreeMap::new();
+    params.insert("concurrency".to_owned(), Value::Integer(-1));
+    let (rows, _) = execute_with_params(
+        &connection,
+        "UNWIND [1] AS value CALL (value) { RETURN value AS innerValue } IN $concurrency CONCURRENT TRANSACTIONS RETURN innerValue",
+        params,
+        ExecutionOptions::default(),
+    )
+    .expect("negative concurrency parameter must be accepted");
+    assert_eq!(rows, vec![vec![Value::Integer(1)]]);
 }
 
 #[test]
@@ -939,6 +881,28 @@ fn load_csv_in_transactions_streams_batches_and_preserves_prior_commits_on_late_
     .expect("prior csv batches remain durable");
     assert_eq!(count, vec![vec![Value::Integer(2)]]);
     fs::remove_file(bad_path).expect("remove malformed batched csv fixture");
+}
+
+#[test]
+fn load_csv_in_transactions_applies_global_prefix_before_batching() {
+    let connection = fresh_storage();
+    let (path, uri) = csv_fixture("transaction-global-prefix", "value\n1\n2\n");
+    let before = commit_count(&connection);
+    let query = format!(
+        "LOAD CSV WITH HEADERS FROM '{uri}' AS row WITH count(row) AS total CALL (total) {{ CREATE (:CsvGlobalPrefix {{total:total}}) }} IN TRANSACTIONS OF 1 ROWS RETURN total"
+    );
+    let (rows, _) = execute(&connection, &query, ExecutionOptions::default())
+        .expect("LOAD CSV transaction global prefix");
+    assert_eq!(rows, vec![vec![Value::Integer(2)]]);
+    assert_eq!(commit_count(&connection), before + 1);
+    let (stored, _) = execute(
+        &connection,
+        "MATCH (n:CsvGlobalPrefix) RETURN n.total",
+        ExecutionOptions::default(),
+    )
+    .expect("query global-prefix batch result");
+    assert_eq!(stored, vec![vec![Value::Integer(2)]]);
+    fs::remove_file(path).expect("remove transaction-global-prefix CSV fixture");
 }
 
 #[test]
@@ -1193,18 +1157,65 @@ fn vector_search_supports_numeric_lists_and_enforces_search_filter_contract() {
     .expect("null SEARCH query vector in OPTIONAL MATCH");
     assert_eq!(null_optional, vec![vec![Value::Null]]);
 
+    let (zero_limit, _) = execute(
+        &connection,
+        "MATCH (n:ListVector) SEARCH n IN (VECTOR INDEX list_embedding FOR [1.0,0.0] LIMIT 0) RETURN n.name",
+        ExecutionOptions::default(),
+    )
+    .expect("SEARCH LIMIT zero");
+    assert!(zero_limit.is_empty());
+
+    let mut limit_params = BTreeMap::new();
+    limit_params.insert("limit".to_owned(), Value::Integer(1));
+    let (parameter_limit, _) = execute_with_params(
+        &connection,
+        "MATCH (n:ListVector) SEARCH n IN (VECTOR INDEX list_embedding FOR [1.0,0.0] LIMIT $limit) RETURN n.name",
+        limit_params,
+        ExecutionOptions::default(),
+    )
+    .expect("SEARCH LIMIT parameter");
+    assert_eq!(parameter_limit.len(), 1);
+
+    for query in [
+        "MATCH (n:ListVector) SEARCH n IN (VECTOR INDEX list_embedding FOR [1.0,0.0] LIMIT -1) RETURN n",
+        "MATCH (n:ListVector) SEARCH n IN (VECTOR INDEX list_embedding FOR [1.0,0.0] LIMIT 1.0) RETURN n",
+        "MATCH (n:ListVector) SEARCH n IN (VECTOR INDEX list_embedding FOR [1.0,0.0] LIMIT null) RETURN n",
+        "MATCH (n:ListVector) SEARCH n IN (VECTOR INDEX list_embedding FOR [1.0,0.0] LIMIT 2147483648) RETURN n",
+    ] {
+        execute(&connection, query, ExecutionOptions::default())
+            .expect_err("invalid SEARCH LIMIT must fail");
+    }
+
     for query in [
         "MATCH (n:ListVector) SEARCH n IN (VECTOR INDEX list_embedding FOR [1.0,0.0] WHERE n.hidden = 'x' LIMIT 1) RETURN n",
         "MATCH (n:ListVector) SEARCH n IN (VECTOR INDEX list_embedding FOR [1.0,0.0] WHERE n.lang = 'en' OR n.lang = 'fr' LIMIT 1) RETURN n",
         "MATCH (n:ListVector) SEARCH n IN (VECTOR INDEX list_embedding FOR [1.0,0.0] WHERE n.lang > 'a' AND n.lang >= 'b' LIMIT 1) RETURN n",
         "MATCH (n:ListVector) SEARCH n IN (VECTOR INDEX list_embedding FOR [1.0,0.0] WHERE n.lang = 'en' AND n.lang > 'a' LIMIT 1) RETURN n",
+        "MATCH (n:ListVector) SEARCH n IN (VECTOR INDEX list_embedding FOR [1.0,0.0] WHERE n.lang = point({x:1.0,y:2.0}) LIMIT 1) RETURN n",
+        "MATCH (n:ListVector) SEARCH n IN (VECTOR INDEX list_embedding FOR [1.0,0.0] WHERE n.lang = vector([1.0,2.0],2,FLOAT64) LIMIT 1) RETURN n",
+        "MATCH (n:ListVector) SEARCH n IN (VECTOR INDEX list_embedding FOR [1.0,0.0] WHERE n.lang = ['en'] LIMIT 1) RETURN n",
         "MATCH (n:ListVector) SEARCH n IN (VECTOR INDEX list_embedding FOR n.embedding LIMIT 1) RETURN n",
         "MATCH (n:ListVector)-[r]->() SEARCH n IN (VECTOR INDEX list_embedding FOR [1.0,0.0] LIMIT 1) RETURN n",
+        "MATCH p = (n:ListVector) SEARCH n IN (VECTOR INDEX list_embedding FOR [1.0,0.0] LIMIT 1) RETURN n",
         "MATCH (:Other)-[]->(n:ListVector) SEARCH n IN (VECTOR INDEX list_embedding FOR [1.0,0.0] LIMIT 1) RETURN n",
     ] {
         execute(&connection, query, ExecutionOptions::default())
             .expect_err("invalid SEARCH shape/filter must fail");
     }
+
+    let mut params = BTreeMap::new();
+    params.insert(
+        "badFilter".to_owned(),
+        Value::List(vec![Value::String("en".to_owned())]),
+    );
+    let error = execute_with_params(
+        &connection,
+        "MATCH (n:ListVector) SEARCH n IN (VECTOR INDEX list_embedding FOR [1.0,0.0] WHERE n.lang = $badFilter LIMIT 1) RETURN n",
+        params,
+        ExecutionOptions::default(),
+    )
+    .expect_err("runtime SEARCH comparison filter value must enforce the index filter type contract");
+    assert_eq!(error.kind, lithograph_core::query::QueryErrorKind::Type);
 
     let error = execute(
         &connection,

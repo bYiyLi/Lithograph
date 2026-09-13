@@ -130,6 +130,7 @@ pub(super) fn project_bindings(row: &BindingRow, names: &[String]) -> BindingRow
             row.values.get(name).cloned().unwrap_or(BindingValue::Null),
         );
     }
+    projected.load_csv_context.clone_from(&row.load_csv_context);
     projected
 }
 
@@ -410,6 +411,23 @@ fn projection_columns(clause: &AstNode, source: &str) -> QueryResult<Vec<String>
         .into_iter()
         .map(|item| projection_column(item, source))
         .collect()
+}
+
+pub(super) fn infer_clause_columns(
+    clause: &AstNode,
+    input: &[String],
+    source: &str,
+) -> QueryResult<Vec<String>> {
+    infer_columns(
+        &AstNode {
+            kind: AstKind::SingleQuery,
+            span: clause.span,
+            text: None,
+            children: vec![clause.clone()],
+        },
+        input,
+        source,
+    )
 }
 
 pub(super) fn infer_columns(
@@ -1136,27 +1154,11 @@ fn pattern_variable(node: &AstNode, fallback: &str) -> String {
 }
 
 fn append_program_projection_operators(clause: &AstNode, operators: &mut Vec<LogicalOperator>) {
-    let aggregate = clause.descendants().any(|node| {
-        node.kind == AstKind::GroupBy
-            || (node.kind == AstKind::FunctionName
-                && node
-                    .text
-                    .as_deref()
-                    .is_some_and(super::registry::is_aggregating))
-    });
+    let aggregate = projection_has_aggregate(clause);
     if aggregate {
         operators.push(LogicalOperator::Aggregate);
     }
-    let first_item = clause
-        .descendants()
-        .find(|node| node.kind == AstKind::ProjectionItem)
-        .map_or(clause.span.end, |node| node.span.start);
-    if clause.descendants().any(|node| {
-        matches!(
-            node.kind,
-            AstKind::SetQuantifier(crate::cypher::SetQuantifierKind::Distinct)
-        ) && node.span.start < first_item
-    }) {
+    if projection_has_distinct(clause) {
         operators.push(LogicalOperator::Distinct);
     }
     operators.push(LogicalOperator::Project);
@@ -1175,6 +1177,38 @@ fn append_program_projection_operators(clause: &AstNode, operators: &mut Vec<Log
     if clause.descendants().any(|node| node.kind == AstKind::Where) {
         operators.push(LogicalOperator::Filter);
     }
+}
+
+pub(crate) fn projection_requires_global_input(clause: &AstNode) -> bool {
+    projection_has_aggregate(clause)
+        || projection_has_distinct(clause)
+        || clause
+            .descendants()
+            .any(|node| matches!(node.kind, AstKind::OrderBy | AstKind::Skip | AstKind::Limit))
+}
+
+fn projection_has_aggregate(clause: &AstNode) -> bool {
+    clause.descendants().any(|node| {
+        node.kind == AstKind::GroupBy
+            || (node.kind == AstKind::FunctionName
+                && node
+                    .text
+                    .as_deref()
+                    .is_some_and(super::registry::is_aggregating))
+    })
+}
+
+fn projection_has_distinct(clause: &AstNode) -> bool {
+    let first_item = clause
+        .descendants()
+        .find(|node| node.kind == AstKind::ProjectionItem)
+        .map_or(clause.span.end, |node| node.span.start);
+    clause.descendants().any(|node| {
+        matches!(
+            node.kind,
+            AstKind::SetQuantifier(crate::cypher::SetQuantifierKind::Distinct)
+        ) && node.span.start < first_item
+    })
 }
 
 fn physical_operator(operator: &LogicalOperator) -> PhysicalOperator {

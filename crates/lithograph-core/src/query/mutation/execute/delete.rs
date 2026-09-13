@@ -10,6 +10,47 @@ pub(super) fn apply_delete(
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<()> {
     validate_delete_values(rows, variables)?;
+    apply_delete_relationships(
+        context,
+        rows,
+        variables,
+        clause_input,
+        graph_view,
+        is_interrupted,
+    )?;
+    apply_delete_nodes(
+        context,
+        rows,
+        variables,
+        detach,
+        clause_input,
+        graph_view,
+        is_interrupted,
+    )
+}
+
+pub(super) fn validate_delete_values(rows: &[BindingRow], variables: &[String]) -> QueryResult<()> {
+    if rows.iter().any(|row| {
+        variables
+            .iter()
+            .any(|variable| matches!(row.values.get(variable), Some(BindingValue::Scalar(_))))
+    }) {
+        return Err(QueryError::new(
+            QueryErrorKind::Type,
+            "DELETE requires Node, Relationship, Path, or null values",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn apply_delete_relationships(
+    context: &mut MutationContext<'_, '_>,
+    rows: &[BindingRow],
+    variables: &[String],
+    clause_input: &Snapshot<'_>,
+    graph_view: &ResolvedGraphView,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<()> {
     for row in rows {
         for variable in variables {
             check_interrupted(is_interrupted)?;
@@ -22,6 +63,22 @@ pub(super) fn apply_delete(
             )?;
         }
     }
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "DELETE node pass keeps the frozen clause input and detach semantics explicit"
+)]
+pub(super) fn apply_delete_nodes(
+    context: &mut MutationContext<'_, '_>,
+    rows: &[BindingRow],
+    variables: &[String],
+    detach: bool,
+    clause_input: &Snapshot<'_>,
+    graph_view: &ResolvedGraphView,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<()> {
     for row in rows {
         for variable in variables {
             check_interrupted(is_interrupted)?;
@@ -34,20 +91,6 @@ pub(super) fn apply_delete(
                 is_interrupted,
             )?;
         }
-    }
-    Ok(())
-}
-
-fn validate_delete_values(rows: &[BindingRow], variables: &[String]) -> QueryResult<()> {
-    if rows.iter().any(|row| {
-        variables
-            .iter()
-            .any(|variable| matches!(row.values.get(variable), Some(BindingValue::Scalar(_))))
-    }) {
-        return Err(QueryError::new(
-            QueryErrorKind::Type,
-            "DELETE requires Node, Relationship, Path, or null values",
-        ));
     }
     Ok(())
 }
