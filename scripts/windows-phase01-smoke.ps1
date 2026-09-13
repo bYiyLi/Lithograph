@@ -138,6 +138,10 @@ foreach ($symbol in @(
     "sqlite3_lithograph_init",
     "lithograph_v1_execute",
     "lithograph_v1_validate",
+    "lithograph_v1_tx_begin",
+    "lithograph_v1_tx_execute",
+    "lithograph_v1_tx_commit",
+    "lithograph_v1_tx_abort",
     "lithograph_v1_free"
 )) {
     if ($exports -notmatch [regex]::Escape($symbol)) {

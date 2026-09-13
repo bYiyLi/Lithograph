@@ -1066,7 +1066,7 @@ static void check_native_same_connection_serialization(
     }
     require(pthread_mutex_unlock(&context.mutex) == 0, "failed to release Native commit-start mutex");
 
-    usleep(100000);
+    sqlite3_sleep(100);
     require(pthread_mutex_lock(&context.mutex) == 0, "failed to inspect concurrent Native commit state");
     require(!context.commit_finished, "concurrent tx_commit crossed an in-flight same-connection tx_execute boundary");
     context.release_callback = 1;
@@ -1390,8 +1390,9 @@ static void check_native_explicit_transaction_view_and_clocks(
         "first transaction clock query failed"
     );
     char transaction_first[4096];
-    require(strlen(callback_row_json) < sizeof(transaction_first), "transaction clock row is too large");
-    strcpy(transaction_first, callback_row_json);
+    size_t transaction_first_len = strlen(callback_row_json);
+    require(transaction_first_len < sizeof(transaction_first), "transaction clock row is too large");
+    memcpy(transaction_first, callback_row_json, transaction_first_len + 1);
 
     const char *statement_clock = "RETURN datetime.statement()";
     reset_callback_capture();
@@ -1400,8 +1401,9 @@ static void check_native_explicit_transaction_view_and_clocks(
         "first statement clock query failed"
     );
     char statement_first[4096];
-    require(strlen(callback_row_json) < sizeof(statement_first), "statement clock row is too large");
-    strcpy(statement_first, callback_row_json);
+    size_t statement_first_len = strlen(callback_row_json);
+    require(statement_first_len < sizeof(statement_first), "statement clock row is too large");
+    memcpy(statement_first, callback_row_json, statement_first_len + 1);
     sqlite3_sleep(20);
 
     reset_callback_capture();
