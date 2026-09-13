@@ -184,8 +184,8 @@ fn check_initialized_json(
     )?;
     require_equal(
         &version["storageFormat"]["current"].as_i64(),
-        &Some(1),
-        "version must report storage format 1",
+        &Some(2),
+        "version must report current storage format 2",
     )?;
     let root = first["root"]
         .as_str()
@@ -478,7 +478,7 @@ fn check_format_boundaries(load: &str) -> Result<(), Box<dyn Error>> {
     let fixture = FileDatabaseFixture::new(0x0106)?;
     fixture.execute_script(&format!("{load}\nSELECT lithograph_init();"))?;
     fixture.execute_script(
-        "UPDATE _lithograph_meta SET storage_format = 2 WHERE id = 1;\
+        "UPDATE _lithograph_meta SET storage_format = 3 WHERE id = 1;\
          CREATE TABLE main._lithograph_future(v INTEGER);",
     )?;
 
@@ -486,7 +486,7 @@ fn check_format_boundaries(load: &str) -> Result<(), Box<dyn Error>> {
     let version = parse_json(&version, "version on newer format")?;
     require_equal(
         &version["storageFormat"]["current"].as_i64(),
-        &Some(2),
+        &Some(3),
         "version must remain readable on a newer format with unknown future schema objects",
     )?;
     assert_sqlite_error(

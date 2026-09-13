@@ -4,12 +4,14 @@ use rusqlite::Connection;
 
 use crate::cypher::{
     self, AstKind, AstNode, ClauseKind, ExecutionMode, ExpressionKind, NameExpressionKind,
-    OrderDirectionKind, SetQuantifierKind, Value,
+    OrderDirectionKind, QueryAst, SetQuantifierKind, Value,
 };
 use crate::storage::{self, HashId, LabelId, RelationshipTypeId, StandardIndexKind};
 
+use super::completeness::PreparedProgram;
 use super::expression::{Expr, compile_expression, is_count, surface_expressions};
 use super::graph::{ResolvedGraphView, resolve_commit};
+use super::schema::PreparedSchema;
 use super::stats::PlannerStatistics;
 use super::{ExecutionOptions, QueryError, QueryResult};
 
@@ -209,6 +211,7 @@ pub(crate) struct ProjectionPlan {
 #[derive(Debug, Clone)]
 pub struct PreparedQuery {
     pub(crate) commit: HashId,
+    pub(crate) candidate: Option<super::version::CandidateContext>,
     pub(crate) graph_view: ResolvedGraphView,
     pub(crate) matches: Vec<MatchStep>,
     pub(crate) projections: Vec<Projection>,
@@ -247,6 +250,7 @@ impl PreparedQuery {
 
 struct PrepareContext {
     commit: HashId,
+    candidate: Option<super::version::CandidateContext>,
     graph_view: ResolvedGraphView,
     params: BTreeMap<String, Value>,
     mode: ExecutionMode,
@@ -261,41 +265,113 @@ pub fn prepare(
     let ast = cypher::parse(query)?;
     cypher::analyze(&ast, query)?;
     validate_parameters(&ast.root, &params)?;
-    let commit = resolve_commit(connection, &options.snapshot)?;
-    let graph_view = ResolvedGraphView::resolve(connection, &options.graph_view)?;
-    let context = PrepareContext {
-        commit,
-        graph_view,
-        params,
-        mode: ast.execution_mode,
-    };
+    let context = prepare_context(connection, &ast, params, &options)?;
     if let Some(schema) =
         super::schema::prepare_schema(connection, context.commit, &ast, query, &options)?
     {
-        return Ok(schema_query(
-            context.commit,
-            context.graph_view,
-            context.params,
-            context.mode,
-            schema,
-        ));
+        return prepare_schema_query(context, schema);
     }
     if super::completeness::requires_program(&ast.root) {
-        let program = super::completeness::prepare_program(&ast, query, &options)?;
-        return Ok(program_query(
-            context.commit,
-            context.graph_view,
-            context.params,
-            context.mode,
-            program,
-        ));
+        let program = super::completeness::prepare_program(connection, &ast, query, &options)?;
+        return prepare_program_query(context, program);
     }
     reject_query_composition(&ast.root)?;
     let single = single_query(&ast.root)?;
     if contains_mutation(single) {
+        reject_candidate_write(&context)?;
         return prepare_write_query(connection, single, query, &options, context);
     }
     prepare_read_query(connection, single, query, context)
+}
+
+fn prepare_context(
+    connection: &Connection,
+    ast: &QueryAst,
+    params: BTreeMap<String, Value>,
+    options: &ExecutionOptions,
+) -> QueryResult<PrepareContext> {
+    let candidate = options
+        .merge_session
+        .as_ref()
+        .map(|selector| super::version::resolve_candidate_context(connection, selector))
+        .transpose()?;
+    let commit = match candidate.as_ref() {
+        Some(candidate) => candidate.base_commit,
+        None => resolve_commit(connection, &options.snapshot)?,
+    };
+    let graph_view = ResolvedGraphView::resolve(connection, &options.graph_view)?;
+    Ok(PrepareContext {
+        commit,
+        candidate,
+        graph_view,
+        params,
+        mode: ast.execution_mode,
+    })
+}
+
+fn prepare_schema_query(
+    context: PrepareContext,
+    schema: PreparedSchema,
+) -> QueryResult<PreparedQuery> {
+    reject_candidate_write(&context)?;
+    Ok(schema_query(
+        context.commit,
+        context.candidate,
+        context.graph_view,
+        context.params,
+        context.mode,
+        schema,
+    ))
+}
+
+fn prepare_program_query(
+    context: PrepareContext,
+    program: PreparedProgram,
+) -> QueryResult<PreparedQuery> {
+    validate_candidate_program(&context, &program)?;
+    Ok(program_query(
+        context.commit,
+        context.candidate,
+        context.graph_view,
+        context.params,
+        context.mode,
+        program,
+    ))
+}
+
+fn reject_candidate_write(context: &PrepareContext) -> QueryResult<()> {
+    if context.candidate.is_some() {
+        return Err(QueryError::read_only_snapshot(
+            "Merge Session candidate context is read-only",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_candidate_program(
+    context: &PrepareContext,
+    program: &PreparedProgram,
+) -> QueryResult<()> {
+    if context.candidate.is_none() {
+        return Ok(());
+    }
+    let owns_transaction = program.version_operation
+        || program.transaction_options.is_some()
+        || program
+            .root
+            .descendants()
+            .any(|node| node.kind == AstKind::Clause(ClauseKind::LoadCsv));
+    if owns_transaction {
+        return Err(QueryError::transaction_boundary_required(
+            "Merge Session candidate context cannot execute Version Procedures, external I/O, or transaction-owning Cypher",
+        ));
+    }
+    if program.writes {
+        return Err(QueryError::read_only_snapshot(
+            "Merge Session candidate context is read-only",
+        ));
+    }
+    Ok(())
 }
 
 fn prepare_write_query(
@@ -316,6 +392,7 @@ fn prepare_write_query(
     let physical = build_physical(&logical, &write.matches_for_explain, false);
     Ok(PreparedQuery {
         commit: context.commit,
+        candidate: context.candidate,
         graph_view: context.graph_view,
         matches: Vec::new(),
         projections: Vec::new(),
@@ -351,11 +428,21 @@ fn prepare_read_query(
         distinct,
     } = lower_projection(return_clause, query, &context.params)?;
     let aggregate = validate_aggregation(&projections)?;
-    let statistics = planner_statistics(connection, context.commit, &context.graph_view, &matches)?;
+    let statistics = planner_statistics(
+        connection,
+        context.commit,
+        context.candidate.as_ref(),
+        &context.graph_view,
+        &matches,
+    )?;
     optimize_node_scans(&mut matches, &statistics);
     super::schema::select_standard_index_seeks(
         connection,
         context.commit,
+        context
+            .candidate
+            .as_ref()
+            .map(|candidate| &candidate.schema),
         &mut matches,
         &context.params,
     )?;
@@ -371,6 +458,7 @@ fn prepare_read_query(
     let physical = build_physical(&logical, &matches, !order.is_empty());
     Ok(PreparedQuery {
         commit: context.commit,
+        candidate: context.candidate,
         graph_view: context.graph_view,
         matches,
         projections,
@@ -393,6 +481,7 @@ fn prepare_read_query(
 
 fn program_query(
     commit: HashId,
+    candidate: Option<super::version::CandidateContext>,
     graph_view: ResolvedGraphView,
     params: BTreeMap<String, Value>,
     mode: ExecutionMode,
@@ -403,30 +492,18 @@ fn program_query(
     } else {
         program.columns.clone()
     };
-    PreparedQuery {
-        commit,
-        graph_view,
-        matches: Vec::new(),
-        projections: Vec::new(),
-        order: Vec::new(),
-        skip: 0,
-        limit: None,
-        distinct: false,
-        aggregate: false,
-        params,
-        mode,
-        write: None,
-        schema: None,
-        logical: program.logical.clone(),
-        physical: program.physical.clone(),
-        statistics: PlannerStatistics::default(),
-        columns,
-        program: Some(program),
-    }
+    let logical = program.logical.clone();
+    let physical = program.physical.clone();
+    let mut prepared = empty_prepared_query(
+        commit, candidate, graph_view, params, mode, logical, physical, columns,
+    );
+    prepared.program = Some(program);
+    prepared
 }
 
 fn schema_query(
     commit: HashId,
+    candidate: Option<super::version::CandidateContext>,
     graph_view: ResolvedGraphView,
     params: BTreeMap<String, Value>,
     mode: ExecutionMode,
@@ -439,8 +516,35 @@ fn schema_query(
     let physical = PhysicalPlan {
         operators: vec![PhysicalOperator::Schema { kind }, PhysicalOperator::Commit],
     };
+    let columns = if mode == ExecutionMode::Explain {
+        vec!["plan".to_owned()]
+    } else {
+        Vec::new()
+    };
+    let mut prepared = empty_prepared_query(
+        commit, candidate, graph_view, params, mode, logical, physical, columns,
+    );
+    prepared.schema = Some(schema);
+    prepared
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "PreparedQuery construction keeps its owned execution context explicit"
+)]
+fn empty_prepared_query(
+    commit: HashId,
+    candidate: Option<super::version::CandidateContext>,
+    graph_view: ResolvedGraphView,
+    params: BTreeMap<String, Value>,
+    mode: ExecutionMode,
+    logical: LogicalPlan,
+    physical: PhysicalPlan,
+    columns: Vec<String>,
+) -> PreparedQuery {
     PreparedQuery {
         commit,
+        candidate,
         graph_view,
         matches: Vec::new(),
         projections: Vec::new(),
@@ -452,16 +556,12 @@ fn schema_query(
         params,
         mode,
         write: None,
-        schema: Some(schema),
+        schema: None,
         program: None,
         logical,
         physical,
         statistics: PlannerStatistics::default(),
-        columns: if mode == ExecutionMode::Explain {
-            vec!["plan".to_owned()]
-        } else {
-            Vec::new()
-        },
+        columns,
     }
 }
 
@@ -580,13 +680,14 @@ fn validate_aggregation(projections: &[Projection]) -> QueryResult<bool> {
 fn planner_statistics(
     connection: &Connection,
     commit: HashId,
+    candidate: Option<&super::version::CandidateContext>,
     graph_view: &ResolvedGraphView,
     matches: &[MatchStep],
 ) -> QueryResult<PlannerStatistics> {
     if matches.is_empty() || graph_view.is_empty() {
         Ok(PlannerStatistics::default())
     } else {
-        collect_statistics(connection, commit, matches)
+        collect_statistics(connection, commit, candidate, matches)
     }
 }
 
@@ -1010,6 +1111,7 @@ fn constant_usize(
 fn collect_statistics(
     connection: &Connection,
     commit: HashId,
+    candidate: Option<&super::version::CandidateContext>,
     matches: &[MatchStep],
 ) -> QueryResult<PlannerStatistics> {
     let mut labels = BTreeSet::new();
@@ -1029,7 +1131,15 @@ fn collect_statistics(
             }
         }
     }
-    let snapshot = storage::Snapshot::resolve(connection, commit)?;
+    let snapshot = match candidate {
+        Some(candidate) => storage::Snapshot::resolve_with_layer_and_schema(
+            connection,
+            commit,
+            &candidate.layer,
+            candidate.schema.clone(),
+        )?,
+        None => storage::Snapshot::resolve(connection, commit)?,
+    };
     PlannerStatistics::collect(
         &snapshot,
         &labels,

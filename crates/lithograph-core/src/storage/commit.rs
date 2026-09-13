@@ -71,6 +71,30 @@ pub fn commit_layer(
 }
 
 /// Persists a Schema-only Commit with an empty graph Layer and compare-and-moves a Branch.
+/// Persists a canonical graph Layer and explicit Schema object, optionally with a second parent.
+pub fn commit_layer_with_schema(
+    connection: &Connection,
+    branch: &str,
+    expected_head: HashId,
+    second_parent: Option<HashId>,
+    layer: &LayerBuilder,
+    schema_hash: HashId,
+    metadata: &CommitMetadata,
+) -> StorageResult<HashId> {
+    with_savepoint(connection, |connection| {
+        require_schema(connection, schema_hash)?;
+        commit_change_inner(
+            connection,
+            branch,
+            expected_head,
+            second_parent,
+            layer,
+            schema_hash,
+            metadata,
+        )
+    })
+}
+
 pub fn commit_schema(
     connection: &Connection,
     branch: &str,
@@ -110,6 +134,7 @@ fn commit_change_inner(
     require_schema(connection, schema_hash)?;
     let (layer_id, layer_hash) = persist_layer(connection, layer)?;
     let commit = commit_hash(
+        super::STORAGE_FORMAT,
         Some(expected_head),
         second_parent,
         layer_hash,

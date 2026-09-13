@@ -23,6 +23,17 @@ fn check_branch_refs(
     connection: &Connection,
     issues: &mut Vec<IntegrityIssue>,
 ) -> StorageResult<()> {
+    check_required_main(connection, issues)?;
+    check_named_branches(connection, issues)?;
+    check_tags(connection, issues)?;
+    check_merge_session_refs(connection, issues)?;
+    check_version_sidecar_refs(connection, issues)
+}
+
+fn check_required_main(
+    connection: &Connection,
+    issues: &mut Vec<IntegrityIssue>,
+) -> StorageResult<()> {
     let main_exists: i64 = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM main._lithograph_branches WHERE name = 'main')",
         [],
@@ -34,14 +45,122 @@ fn check_branch_refs(
             "initialized storage is missing the required main branch",
         ));
     }
-    let mut statement = connection.prepare(
-        "SELECT b.name FROM main._lithograph_branches b LEFT JOIN main._lithograph_commits c ON c.id = b.commit_id WHERE c.id IS NULL ORDER BY b.name",
-    )?;
-    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    Ok(())
+}
+
+fn check_named_branches(
+    connection: &Connection,
+    issues: &mut Vec<IntegrityIssue>,
+) -> StorageResult<()> {
+    check_named_ref_rows(
+        connection,
+        issues,
+        "SELECT b.name, c.id IS NULL FROM main._lithograph_branches b LEFT JOIN main._lithograph_commits c ON c.id = b.commit_id ORDER BY b.name",
+        NamedRefIntegrity {
+            kind: "branch",
+            invalid_code: "refs.invalid_branch_name",
+            dangling_code: "refs.dangling_branch",
+        },
+    )
+}
+
+fn check_tags(connection: &Connection, issues: &mut Vec<IntegrityIssue>) -> StorageResult<()> {
+    check_named_ref_rows(
+        connection,
+        issues,
+        "SELECT t.name, c.id IS NULL FROM main._lithograph_tags t LEFT JOIN main._lithograph_commits c ON c.id = t.commit_id ORDER BY t.name",
+        NamedRefIntegrity {
+            kind: "tag",
+            invalid_code: "refs.invalid_tag_name",
+            dangling_code: "refs.dangling_tag",
+        },
+    )
+}
+
+struct NamedRefIntegrity<'a> {
+    kind: &'a str,
+    invalid_code: &'a str,
+    dangling_code: &'a str,
+}
+
+fn check_named_ref_rows(
+    connection: &Connection,
+    issues: &mut Vec<IntegrityIssue>,
+    sql: &str,
+    spec: NamedRefIntegrity<'_>,
+) -> StorageResult<()> {
+    let mut statement = connection.prepare(sql)?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
+    })?;
     for row in rows {
+        let (name, dangling) = row?;
+        if super::validate_ref_name(&name).is_err() {
+            issues.push(IntegrityIssue::new(
+                spec.invalid_code,
+                format!("{} {name:?} has an invalid ref name", spec.kind),
+            ));
+        }
+        if dangling {
+            issues.push(IntegrityIssue::new(
+                spec.dangling_code,
+                format!("{} {name:?} points to a missing Commit", spec.kind),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_merge_session_refs(
+    connection: &Connection,
+    issues: &mut Vec<IntegrityIssue>,
+) -> StorageResult<()> {
+    let mut statement = connection.prepare(
+        "SELECT s.id, co.id IS NULL, ct.id IS NULL FROM main._lithograph_merge_sessions s LEFT JOIN main._lithograph_commits co ON co.id = s.ours_commit LEFT JOIN main._lithograph_commits ct ON ct.id = s.theirs_commit ORDER BY s.id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, bool>(1)?,
+            row.get::<_, bool>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (session, missing_ours, missing_theirs) = row?;
+        if missing_ours || missing_theirs {
+            issues.push(IntegrityIssue::new(
+                "refs.dangling_merge_session",
+                format!("Merge Session {session:?} points to a missing pinned Commit"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_version_sidecar_refs(
+    connection: &Connection,
+    issues: &mut Vec<IntegrityIssue>,
+) -> StorageResult<()> {
+    let orphan_resolutions: i64 = connection.query_row(
+        "SELECT count(*) FROM main._lithograph_merge_resolutions r LEFT JOIN main._lithograph_merge_sessions s ON s.id = r.session_id WHERE s.id IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    if orphan_resolutions > 0 {
         issues.push(IntegrityIssue::new(
-            "refs.dangling_branch",
-            format!("branch {:?} points to a missing Commit", row?),
+            "refs.orphan_merge_resolution",
+            format!("found {orphan_resolutions} Merge Session resolution row(s) without a Session"),
+        ));
+    }
+    let dangling_commit_data: i64 = connection.query_row(
+        "SELECT count(*) FROM main._lithograph_commit_data d LEFT JOIN main._lithograph_commits c ON c.id = d.commit_id WHERE c.id IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    if dangling_commit_data > 0 {
+        issues.push(IntegrityIssue::new(
+            "refs.dangling_commit_data",
+            format!("found {dangling_commit_data} Commit Data row(s) for missing Commits"),
         ));
     }
     Ok(())

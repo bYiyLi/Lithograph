@@ -89,7 +89,10 @@ pub(crate) fn resolve_commit(
     selector: &SnapshotSelector,
 ) -> QueryResult<HashId> {
     match selector {
-        SnapshotSelector::Current => resolve_branch(connection, "main"),
+        SnapshotSelector::Current => {
+            let branch = storage::active_branch(connection)?;
+            resolve_branch(connection, &branch)
+        }
         SnapshotSelector::Branch(name) => resolve_branch(connection, name),
         SnapshotSelector::Commit(value) => {
             let commit = HashId::from_hex(value).map_err(|_| {
@@ -106,10 +109,16 @@ pub(crate) fn resolve_commit(
             }
             Ok(commit)
         }
-        SnapshotSelector::Tag(name) => Err(QueryError::new(
-            QueryErrorKind::TagNotFound,
-            format!("Tag tag/{name} was not found"),
-        )),
+        SnapshotSelector::Tag(name) => {
+            match storage::resolve_version_descriptor(connection, &format!("tag/{name}")) {
+                Ok(commit) => Ok(commit),
+                Err(storage::StorageError::NotFound(_)) => Err(QueryError::new(
+                    QueryErrorKind::TagNotFound,
+                    format!("Tag tag/{name} was not found"),
+                )),
+                Err(error) => Err(error.into()),
+            }
+        }
     }
 }
 

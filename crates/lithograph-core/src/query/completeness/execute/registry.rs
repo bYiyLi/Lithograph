@@ -43,13 +43,26 @@ fn validate_procedure_arguments(
             && node.span.start >= name_node.span.end
             && node.span.start < yield_start
     });
+    let count = arguments.map_or(0, |arguments| surface_expressions(arguments).len());
     if is_fulltext_procedure(name) {
-        let count = arguments.map_or(0, |arguments| surface_expressions(arguments).len());
         if (2..=3).contains(&count) {
             return Ok(());
         }
         return Err(QueryError::semantic(format!(
             "procedure {name} expects 2 or 3 arguments"
+        )));
+    }
+    if let Some((minimum, maximum)) = version_argument_range(name) {
+        if (minimum..=maximum).contains(&count) {
+            return Ok(());
+        }
+        return Err(QueryError::semantic(format!(
+            "procedure {name} expects {}",
+            if minimum == maximum {
+                minimum.to_string()
+            } else {
+                format!("between {minimum} and {maximum}")
+            }
         )));
     }
     if arguments.is_some() {
@@ -66,6 +79,34 @@ fn is_fulltext_procedure(name: &str) -> bool {
         name.to_ascii_lowercase().as_str(),
         "db.index.fulltext.querynodes" | "db.index.fulltext.queryrelationships"
     )
+}
+
+fn version_argument_range(name: &str) -> Option<(usize, usize)> {
+    Some(match name.to_ascii_lowercase().as_str() {
+        "lithograph.branch.create" => (1, 2),
+        "lithograph.branch.checkout" | "lithograph.branch.delete" => (1, 1),
+        "lithograph.branch.list" | "lithograph.tag.list" | "lithograph.gc" => (0, 0),
+        "lithograph.commit.get"
+        | "lithograph.commit.data.clear"
+        | "lithograph.tag.delete"
+        | "lithograph.patch.apply"
+        | "lithograph.merge.get"
+        | "lithograph.squash"
+        | "lithograph.reset" => (1, 1),
+        "lithograph.commit.create" => (0, 1),
+        "lithograph.commit.data.set"
+        | "lithograph.tag.create"
+        | "lithograph.tag.move"
+        | "lithograph.diff"
+        | "lithograph.merge.finalize"
+        | "lithograph.merge.abort" => (2, 2),
+        "lithograph.log" => (0, 3),
+        "lithograph.merge.start" | "lithograph.rebase" | "lithograph.revert" => (1, 2),
+        "lithograph.merge.list" => (0, 2),
+        "lithograph.merge.conflicts" => (1, 3),
+        "lithograph.merge.resolve" => (3, 3),
+        _ => return None,
+    })
 }
 
 fn resolved_yield_items(clause: &AstNode, outputs: &[&str]) -> Vec<(String, String)> {
@@ -194,6 +235,19 @@ fn take_nonnegative_option(
         .map_err(|_| QueryError::semantic(format!("full-text option {key} cannot be negative")))
 }
 
+fn procedure_argument_expressions(clause: &AstNode) -> QueryResult<Vec<expression::Expr>> {
+    let Some(arguments) = clause
+        .descendants()
+        .find(|node| node.kind == AstKind::ArgumentList)
+    else {
+        return Ok(Vec::new());
+    };
+    surface_expressions(arguments)
+        .into_iter()
+        .map(compile_expression)
+        .collect()
+}
+
 fn fulltext_argument_expressions(
     clause: &AstNode,
     name: &str,
@@ -215,6 +269,9 @@ impl ReadExecutor<'_, '_> {
         input: RowSet,
     ) -> QueryResult<RowSet> {
         let (name, procedure) = resolve_procedure_call(clause)?;
+        if super::super::super::registry::is_version_procedure(name) {
+            return self.execute_version_procedure(clause, input, name, procedure);
+        }
         if is_fulltext_procedure(name) {
             return self.execute_fulltext_procedure(clause, input, name, procedure);
         }
@@ -222,6 +279,46 @@ impl ReadExecutor<'_, '_> {
         let yield_items = resolved_yield_items(clause, procedure.outputs);
         let columns = procedure_columns(input.columns.clone(), &yield_items);
         let rows = self.join_procedure_rows(input.rows, &procedure_rows, &yield_items, name)?;
+        let rows = self.filter_yield_rows(clause, rows)?;
+        Ok(RowSet { columns, rows })
+    }
+
+    fn execute_version_procedure(
+        &mut self,
+        clause: &AstNode,
+        input: RowSet,
+        name: &str,
+        procedure: super::super::super::registry::ProcedureDefinition,
+    ) -> QueryResult<RowSet> {
+        let expressions = procedure_argument_expressions(clause)?;
+        let yield_items = resolved_yield_items(clause, procedure.outputs);
+        let columns = procedure_columns(input.columns.clone(), &yield_items);
+        let options = self.options.ok_or_else(|| {
+            QueryError::invalid_argument(
+                "Version Procedures cannot execute inside a graph-mutation clause program",
+            )
+        })?;
+        let mut rows = Vec::new();
+        for input_row in input.rows {
+            let args = expressions
+                .iter()
+                .map(|expression| self.evaluate(expression, &input_row))
+                .collect::<QueryResult<Vec<_>>>()?;
+            let procedure_rows = super::super::super::version::execute_procedure(
+                self.connection,
+                name,
+                args,
+                options,
+            )?;
+            for procedure_row in procedure_rows {
+                rows.push(self.join_procedure_row(
+                    &input_row,
+                    &procedure_row,
+                    &yield_items,
+                    name,
+                )?);
+            }
+        }
         let rows = self.filter_yield_rows(clause, rows)?;
         Ok(RowSet { columns, rows })
     }

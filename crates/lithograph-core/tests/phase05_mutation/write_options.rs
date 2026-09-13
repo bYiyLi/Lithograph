@@ -24,7 +24,7 @@ fn write_options_target_the_selected_branch_and_persist_commit_metadata() {
         branch_head(&connection, "main").expect("unchanged main"),
         main
     );
-    assert_eq!(summary.commit, format!("commit/{}", branch.to_hex()));
+    assert_eq!(summary.commit, Some(format!("commit/{}", branch.to_hex())));
     let metadata: (Option<String>, Option<String>) = connection
         .query_row(
             "SELECT author, message FROM main._lithograph_commits WHERE id = ?1",

@@ -4,8 +4,8 @@ use rusqlite::{Connection, OptionalExtension as _, params_from_iter};
 
 use crate::cypher::{Value, VectorValues};
 use crate::storage::{
-    self, IndexConfiguration, IndexDefinition, IndexTarget, RelationshipRecord, SchemaState,
-    Snapshot, StandardIndexKind,
+    self, IndexConfiguration, IndexDefinition, IndexTarget, RelationshipRecord, Snapshot,
+    StandardIndexKind,
 };
 
 use super::graph::{self, ResolvedGraphView};
@@ -50,12 +50,12 @@ pub(crate) struct FullTextQueryInput<'a> {
 }
 
 pub(crate) fn resolve_semantic_index(
-    connection: &Connection,
+    _connection: &Connection,
     snapshot: &Snapshot<'_>,
     name: &str,
     expected: StandardIndexKind,
 ) -> QueryResult<IndexDefinition> {
-    let schema = SchemaState::load(connection, snapshot.commit())?;
+    let schema = snapshot.schema_state()?;
     let index = schema
         .indexes
         .get(name)
@@ -920,7 +920,7 @@ fn semantic_cache_digest(
 ) -> QueryResult<String> {
     let mut hasher = blake3::Hasher::new();
     hasher.update(namespace);
-    hasher.update(snapshot.commit().as_bytes());
+    hasher.update(snapshot.cache_identity().as_bytes());
     let encoded = serde_json::to_vec(index).map_err(|error| {
         QueryError::internal(format!("failed to encode Index definition: {error}"))
     })?;

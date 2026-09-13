@@ -51,10 +51,18 @@ pub(crate) enum StandardIndexPredicate {
 pub(crate) fn select_standard_index_seeks(
     connection: &Connection,
     commit: HashId,
+    schema_override: Option<&SchemaState>,
     matches: &mut [MatchStep],
     params: &BTreeMap<String, Value>,
 ) -> QueryResult<()> {
-    let schema = SchemaState::load(connection, commit)?;
+    let loaded_schema;
+    let schema = match schema_override {
+        Some(schema) => schema,
+        None => {
+            loaded_schema = SchemaState::load(connection, commit)?;
+            &loaded_schema
+        }
+    };
     for step in matches {
         let candidates = step
             .predicate
@@ -63,14 +71,14 @@ pub(crate) fn select_standard_index_seeks(
             .unwrap_or_default();
         for part in &mut step.parts {
             part.start.index_seek = choose_node_seek(
-                &schema,
+                schema,
                 part.start.variable.as_deref(),
                 &part.start.label_names,
                 &candidates,
             );
             if let Some(relationship) = part.relationship.as_mut() {
                 relationship.index_seek = choose_relationship_seek(
-                    &schema,
+                    schema,
                     relationship.variable.as_deref(),
                     relationship.type_name.as_deref(),
                     &candidates,

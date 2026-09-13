@@ -201,11 +201,11 @@ fn check_commit_rows(
         if commit.parent1_null && commit.parent2_null {
             root_count += 1;
         }
-        if commit.format_version != STORAGE_FORMAT {
+        if !(1..=STORAGE_FORMAT).contains(&commit.format_version) {
             issues.push(IntegrityIssue::new(
                 "history.commit_format",
                 format!(
-                    "Commit {} uses storage format {} instead of {}",
+                    "Commit {} uses unsupported storage format {}; supported Commit formats are 1..={}",
                     commit.id.to_hex(),
                     commit.format_version,
                     STORAGE_FORMAT
@@ -277,7 +277,7 @@ fn check_commit_hash(
     layers: &BTreeMap<i64, HashId>,
     issues: &mut Vec<IntegrityIssue>,
 ) {
-    if commit.format_version != STORAGE_FORMAT {
+    if !(1..=STORAGE_FORMAT).contains(&commit.format_version) {
         return;
     }
     if (!commit.parent1_null && commit.parent1.is_none())
@@ -292,6 +292,7 @@ fn check_commit_hash(
         return;
     };
     let actual = commit_hash(
+        commit.format_version,
         commit.parent1,
         commit.parent2,
         layer_hash,

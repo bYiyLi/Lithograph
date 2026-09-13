@@ -73,7 +73,7 @@ Phase 03 已交付 parser/AST/scope/type/value frontend foundation；Phase 04/05
 | String interpolation | `s"...{expr}..."` / `S"..."` semantics | `done` | 03, 06 |
 | Built-in functions | complete current-graph function inventory from frozen Manual | `done` | 06, 08 |
 | Aggregating functions | complete frozen Manual inventory and null/group semantics | `done` | 06 |
-| Procedure CALL | built-in current-graph procedures、YIELD、scope/result contract | `partial` | 06–09 |
+| Procedure CALL | built-in current-graph procedures、Lithograph Version Procedures、YIELD、scope/result contract | `done` | 06–09 |
 | Graph Type | SET/EXTEND/ALTER/SHOW/DROP element semantics、open schema | `done` | 07 |
 | Constraints | key/unique/existence/type and Profile-defined forms | `done` | 07 |
 | Lookup index | DDL、SHOW、planner integration | `done` | 07 |
@@ -115,7 +115,7 @@ Phase 05 的 67 个 targeted scenarios 覆盖真实 parser -> planner -> executo
 
 Phase 06 的 54 个 targeted scenarios 覆盖统一 row/scope 执行模型下的 WITH/LET、UNWIND/FOR、UNION/WHEN/NEXT、CALL 与 expression subquery、implicit/explicit grouping、完整 aggregate inventory、advanced/quantified path、Match/Path Mode、selector/shortest、current-query function inventory、current-graph procedures/SHOW、dynamic name/property mutation、FOREACH、NODETACH/DETACH、Graph View composition、temporal clock/IANA DST、numeric overflow/NaN、Unicode、UUID、VECTOR、Point 与 string interpolation；Point regression 额外锁定输入 null propagation、`crs`/`srid` 与坐标/第三维别名冲突、CRS/维度相关 component access、direct inequality 的 `null` 结果、geographic antimeridian bounding box 与 WGS-84 3D average-height distance。Phase 04/05 regression 26/26 与 67/67 同时通过。
 
-统一 registry 已关闭未知 function 静默执行，并支撑当前 query functions、aggregates、`db.labels` / `db.propertyKeys` / `db.relationshipTypes` 与 `SHOW FUNCTIONS` / `SHOW PROCEDURES`。Phase 08 已补齐 LOAD CSV 上下文函数 `file()` / `linenumber()`，因此 frozen current-graph Built-in function inventory 与 SHOW current-graph surfaces 现已闭合；Procedure CALL 仍因 Phase 09 Version Procedure 未实现而保持 `partial`。
+统一 registry 已关闭未知 function 静默执行，并支撑当前 query functions、aggregates、`db.labels` / `db.propertyKeys` / `db.relationshipTypes` 与 `SHOW FUNCTIONS` / `SHOW PROCEDURES`。Phase 08 已补齐 LOAD CSV 上下文函数 `file()` / `linenumber()`；Phase 09 进一步注册并执行 Branch/Tag/Commit/Log/Diff/Patch/Merge/Rebase/Squash/Reset/Revert/GC Version Procedures，因此 frozen built-in Procedure CALL / YIELD / scope-result surface 已闭合。Phase 10 仍负责最终 applicable TCK、PROFILE/error 与 release-scale compatibility closure。
 
 ### Phase 07 Schema/standard-index execution evidence
 
@@ -132,6 +132,12 @@ Phase 08 的 27 个 targeted scenarios 覆盖 Full-text Node/Relationship DDL/qu
 Full-text/Vector definition 与 derived cache 都按目标 Commit 解析，DROP 后 historical Snapshot 仍可 rebuild/query；HNSW cache 删除或缺失不会改变结果语义。Native C ABI smoke 证明 transaction-owning query 仅在 autocommit Native path 执行、每个 mutating batch 形成独立 Commit，并在 caller-owned transaction 内返回 `TRANSACTION_BOUNDARY_REQUIRED`；Phase 08 real-extension probe 同时验证 Full-text/SEARCH、SQL Bridge transaction boundary、`lithograph_rows` fail-closed external-I/O/transaction contract 与 scalar `LOAD CSV`。
 
 当前 18 个 CY25 frozen fixtures 均为 enabled execution；`phase06_compatibility` 的真实 core executor 结果为 18 passed、0 failed、0 planned。`lithograph-compat inventory` 仅生成 metadata inventory、不执行 fixture，因此 standalone inventory report 按设计显示为 planned，不能与 execution report 混读。Phase 08 不宣称完成 Phase 10 的 100% applicable TCK/error/release-scale closure；10M/100M scale、cross-platform release 与最终 PROFILE/error compatibility 仍由 Phase 10 验收。
+
+### Phase 09 version-procedure execution evidence
+
+Phase 09 的 37 个 targeted version scenarios 覆盖 Branch/Tag/Commit Data/explicit Commit、bounded DAG log、Diff/Patch、Patch provenance/slot-shape atomic validation、typed before/after shape、Relationship Patch round-trip、同名 Index definition replacement 的单一 `SetIndex` logical slot、durable Merge Session、criss-cross virtual base、same-value auto-merge、delete-vs-modify、Relationship endpoint dependency、Schema/Constraint conflict、dormant resolution、candidate inspection、revision/head CAS、WAL concurrent resolve、Rebase shared three-way/derived conflict、criss-cross first-parent replay boundary、resolution validation 与 completed-replay rollback、Squash/Reset/Revert/GC，以及 Merge Commit mainline/rebase flatten。真实 extension probe 另覆盖 format `1 -> 2` migration、migration failure rollback 与 Merge Session restart/adapters；Native C ABI smoke 覆盖 SQLite connection-client-data scoped explicit transaction、staged Schema/Constraint visibility、LOAD CSV / transaction-owning query rejection、per-execution option boundary 与 fail-closed cleanup。`SHOW PROCEDURES` inventory 已包含 Version Procedures。
+
+这些证据关闭 Phase 09 自己拥有的 Procedure CALL implementation surface；Phase 10 仍负责 100% applicable TCK、PROFILE/error taxonomy、SQL Bridge/Native parity、scale/recovery/cross-platform release gate。
 
 ## 5. 2025.06+ Cypher 25 Delta Inventory
 

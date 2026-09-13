@@ -41,6 +41,20 @@ impl AdapterExecution {
         self.cursor.has_external_io()
     }
 
+    pub(super) fn has_version_operation(&self) -> bool {
+        self.cursor.has_version_operation()
+    }
+
+    pub(super) fn set_transaction_time_micros(&mut self, micros: i64) -> LithographResult<()> {
+        self.cursor
+            .set_transaction_time_micros(micros)
+            .map_err(map_query_error)
+    }
+
+    pub(super) fn suppress_summary_commit(&mut self) {
+        self.cursor.suppress_summary_commit();
+    }
+
     pub(super) fn next_batch(
         &mut self,
         connection: &Connection,
@@ -147,11 +161,15 @@ pub(super) fn summary_json(summary: &query::QuerySummary) -> Value {
     json!({
         "queryType": summary.query_type.as_str(),
         "commit": summary.commit,
+        "mergeSession": summary.merge_session.as_ref().map(|session| json!({
+            "id": session.id,
+            "revision": session.revision,
+        })),
         "counters": counters_json(&summary.counters),
     })
 }
 
-fn counters_json(counters: &query::QueryCounters) -> Value {
+pub(super) fn counters_json(counters: &query::QueryCounters) -> Value {
     json!({
         "nodesCreated": counters.nodes_created,
         "nodesDeleted": counters.nodes_deleted,
@@ -184,6 +202,9 @@ pub(super) fn map_query_error(error: query::QueryError) -> LithographError {
             query::QueryErrorKind::TagNotFound => ErrorCategory::TagNotFound,
             query::QueryErrorKind::GraphViewViolation => ErrorCategory::GraphViewViolation,
             query::QueryErrorKind::BranchHeadMoved => ErrorCategory::BranchHeadMoved,
+            query::QueryErrorKind::MergeSessionNotFound => ErrorCategory::MergeSessionNotFound,
+            query::QueryErrorKind::MergeSessionChanged => ErrorCategory::MergeSessionChanged,
+            query::QueryErrorKind::MergeConflict => ErrorCategory::MergeConflict,
             query::QueryErrorKind::ReadOnlyAdapter => ErrorCategory::ReadOnlyAdapter,
             query::QueryErrorKind::ReadOnlySnapshot => ErrorCategory::ReadOnlySnapshot,
             query::QueryErrorKind::TransactionBoundaryRequired => {

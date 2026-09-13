@@ -1,4 +1,6 @@
 use super::{QueryError, QueryResult};
+use crate::storage;
+use rusqlite::Connection;
 use serde_json::{Map, Value as JsonValue};
 use std::collections::BTreeSet;
 
@@ -8,6 +10,12 @@ pub enum SnapshotSelector {
     Branch(String),
     Commit(String),
     Tag(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeSessionSelector {
+    pub id: String,
+    pub revision: i64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -25,18 +33,24 @@ impl GraphViewSelector {
 pub struct ExecutionOptions {
     pub snapshot: SnapshotSelector,
     pub graph_view: GraphViewSelector,
+    pub merge_session: Option<MergeSessionSelector>,
     pub(crate) write_branch: Option<String>,
     pub(crate) author: Option<String>,
     pub(crate) message: Option<String>,
+    pub(crate) author_present: bool,
+    pub(crate) message_present: bool,
 }
 impl Default for ExecutionOptions {
     fn default() -> Self {
         Self {
             snapshot: SnapshotSelector::Current,
             graph_view: GraphViewSelector::default(),
-            write_branch: Some("main".to_owned()),
+            merge_session: None,
+            write_branch: None,
             author: None,
             message: None,
+            author_present: false,
+            message_present: false,
         }
     }
 }
@@ -55,21 +69,36 @@ impl ExecutionOptions {
         let message = optional_nullable_string(object, "message")?;
         let (snapshot, write_branch) = parse_snapshot_option(object)?;
         let graph_view = parse_graph_view_option(object)?;
+        let merge_session = parse_merge_session(object)?;
+        if merge_session.is_some()
+            && (object.contains_key("branch")
+                || object.contains_key("at")
+                || object.contains_key("author")
+                || object.contains_key("message"))
+        {
+            return Err(QueryError::invalid_argument(
+                "options.mergeSession is mutually exclusive with branch, at, author, and message",
+            ));
+        }
         Ok(Self {
             snapshot,
             graph_view,
+            merge_session,
             write_branch,
             author,
             message,
+            author_present: object.contains_key("author"),
+            message_present: object.contains_key("message"),
         })
     }
 }
 
-pub(super) fn writable_branch(options: &ExecutionOptions) -> QueryResult<String> {
+pub(super) fn writable_branch(
+    connection: &Connection,
+    options: &ExecutionOptions,
+) -> QueryResult<String> {
     match &options.snapshot {
-        SnapshotSelector::Current => options.write_branch.clone().ok_or_else(|| {
-            QueryError::internal("current execution options are missing a writable Branch")
-        }),
+        SnapshotSelector::Current => storage::active_branch(connection).map_err(Into::into),
         SnapshotSelector::Branch(snapshot_branch) => match options.write_branch.as_ref() {
             Some(write_branch) if write_branch == snapshot_branch => Ok(write_branch.clone()),
             Some(_) => Err(QueryError::invalid_argument(
@@ -102,7 +131,7 @@ fn parse_snapshot_option(
     } else if let Some(at) = at {
         (parse_at(&at)?, None)
     } else {
-        (SnapshotSelector::Current, Some("main".to_owned()))
+        (SnapshotSelector::Current, None)
     };
     Ok((snapshot, write_branch))
 }
@@ -115,6 +144,42 @@ fn parse_graph_view_option(object: &Map<String, JsonValue>) -> QueryResult<Graph
             "options.graphView must be an object when present",
         )),
     }
+}
+
+fn parse_merge_session(
+    object: &Map<String, JsonValue>,
+) -> QueryResult<Option<MergeSessionSelector>> {
+    let Some(value) = object.get("mergeSession") else {
+        return Ok(None);
+    };
+    let map = value
+        .as_object()
+        .ok_or_else(|| QueryError::invalid_argument("options.mergeSession must be an object"))?;
+    for key in map.keys() {
+        if !matches!(key.as_str(), "id" | "revision") {
+            return Err(QueryError::invalid_argument(format!(
+                "unknown options.mergeSession member {key}"
+            )));
+        }
+    }
+    let id = map
+        .get("id")
+        .and_then(JsonValue::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            QueryError::invalid_argument("options.mergeSession.id must be a non-empty string")
+        })?;
+    let revision = map
+        .get("revision")
+        .and_then(JsonValue::as_i64)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            QueryError::invalid_argument("options.mergeSession.revision must be a positive integer")
+        })?;
+    Ok(Some(MergeSessionSelector {
+        id: id.to_owned(),
+        revision,
+    }))
 }
 
 fn optional_nullable_string(
@@ -134,7 +199,7 @@ fn validate_top_level_keys(object: &Map<String, JsonValue>) -> QueryResult<()> {
     for key in object.keys() {
         if !matches!(
             key.as_str(),
-            "branch" | "at" | "author" | "message" | "graphView"
+            "branch" | "at" | "author" | "message" | "graphView" | "mergeSession"
         ) {
             return Err(QueryError::invalid_argument(format!(
                 "unknown execution option {key}"

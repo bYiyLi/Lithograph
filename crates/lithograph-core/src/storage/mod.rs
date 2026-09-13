@@ -1,4 +1,4 @@
-//! Immutable version-aware graph storage for storage format 1.
+//! Immutable version-aware graph storage for storage format 2.
 
 mod checkpoint;
 mod commit;
@@ -18,13 +18,17 @@ mod snapshot_properties;
 mod snapshot_scan;
 mod snapshot_stream;
 mod value;
+mod version;
 
 use std::fmt;
 
 use rusqlite::Error as SqliteError;
 
 pub use checkpoint::{create_checkpoint, delete_checkpoint};
-pub use commit::{branch_head, commit_exists, commit_layer, commit_schema, create_branch};
+pub use commit::{
+    branch_head, commit_exists, commit_layer, commit_layer_with_schema, commit_schema,
+    create_branch,
+};
 pub use identity::{
     allocate_node_id, allocate_relationship_id, find_label, find_property_key,
     find_relationship_type, intern_label, intern_property_key, intern_relationship_type,
@@ -33,8 +37,8 @@ pub use identity::{
 pub use integrity::{IntegrityIssue, integrity_check, structural_integrity_issues};
 pub use layer::{LayerBuilder, RelationshipRecord};
 pub use schema::{
-    create_storage_schema, initialize_root, load_schema_blob, persist_schema_blob, root_commit,
-    schema_hash_for_commit,
+    create_format2_schema, create_storage_schema, initialize_root, load_schema_blob,
+    persist_schema_blob, root_commit, schema_hash_for_commit,
 };
 pub use schema_state::{
     ConstraintDefinition, ConstraintDefinitionKind, GraphNodeType, GraphRelationshipType,
@@ -44,9 +48,21 @@ pub use schema_state::{
 };
 pub use snapshot::Snapshot;
 pub use value::{PointValue, PropertyValue, VectorCoordinateType, VectorValue, ZonedDateTimeValue};
+pub use version::{
+    AllocationState, CommitRecord, GcCounters, MergeSessionRecord, NamedRef, SnapshotState,
+    active_branch, best_common_ancestors, capture_allocation_state, clear_commit_data,
+    collect_garbage, commit_data, create_branch_ref, create_empty_commit, create_merge_session,
+    create_tag, delete_branch_ref, delete_merge_session, delete_tag, discard_uncommitted_chain,
+    initialize_connection_state, is_ancestor, layer_between, list_branches,
+    list_merge_sessions_after, list_tags, load_commit, load_merge_resolutions, load_merge_session,
+    load_snapshot_state, merge_session_roots, move_branch_ref, move_tag, reachable_child_count,
+    reachable_commits, resolve_version_descriptor, restore_allocation_state,
+    reverse_topological_log, set_active_branch, set_commit_data, update_merge_resolutions,
+    validate_ref_name,
+};
 
 /// Current immutable storage format.
-pub const STORAGE_FORMAT: i64 = 1;
+pub const STORAGE_FORMAT: i64 = 2;
 
 /// Positive database-wide node identifier.
 pub type NodeId = i64;

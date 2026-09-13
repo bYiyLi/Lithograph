@@ -10,6 +10,7 @@ use super::super::expression::{
     self, BindingRow, BindingValue, binding_from_value, binding_value, compile_expression,
 };
 use super::super::graph::ResolvedGraphView;
+use super::super::options::ExecutionOptions;
 use super::super::semantic_index::{
     SemanticEntity, SemanticHit, resolve_semantic_index, vector_candidates,
     vector_initial_candidate_limit,
@@ -225,6 +226,7 @@ struct ReadExecutor<'connection, 'query> {
     metrics: &'query mut QueryMetrics,
     is_interrupted: &'query dyn Fn() -> bool,
     global_bindings: BindingRow,
+    options: Option<&'query ExecutionOptions>,
 }
 
 struct GroupingPlan {
@@ -242,15 +244,36 @@ pub(super) fn execute_read(
     metrics: &mut QueryMetrics,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<Vec<Vec<Value>>> {
+    execute_read_snapshot(
+        connection,
+        program,
+        Snapshot::resolve(connection, commit)?,
+        graph_view,
+        params,
+        metrics,
+        is_interrupted,
+    )
+}
+
+pub(super) fn execute_read_snapshot(
+    connection: &Connection,
+    program: &PreparedProgram,
+    snapshot: Snapshot<'_>,
+    graph_view: &ResolvedGraphView,
+    params: &BTreeMap<String, Value>,
+    metrics: &mut QueryMetrics,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<Vec<Vec<Value>>> {
     let mut executor = ReadExecutor {
         connection,
-        snapshot: Snapshot::resolve(connection, commit)?,
+        snapshot,
         graph_view,
         params,
         source: &program.source,
         metrics,
         is_interrupted,
         global_bindings: BindingRow::default(),
+        options: Some(&program.options),
     };
     let result = executor.execute_query_body(&program.root, RowSet::seed())?;
     validate_executed_columns(&program.columns, &result.columns)?;
@@ -296,6 +319,7 @@ pub(crate) fn execute_read_clause<'connection>(
         metrics,
         is_interrupted,
         global_bindings: BindingRow::default(),
+        options: None,
     };
     executor.execute_single(
         &AstNode {

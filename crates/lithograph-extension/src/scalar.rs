@@ -63,6 +63,7 @@ unsafe extern "C" fn scalar_init(
     // this callback invocation.
     unsafe {
         run_scalar(context, argc, argv, |_args, connection| {
+            require_no_explicit_transaction(connection)?;
             with_savepoint(connection, initialize).map(|value| value.to_string())
         });
     }
@@ -77,6 +78,7 @@ unsafe extern "C" fn scalar_execute(
     // this callback invocation.
     unsafe {
         run_scalar(context, argc, argv, |args, connection| {
+            require_no_explicit_transaction(connection)?;
             let (query, params, options) = execution_args(args)?;
             validate_query_ready(connection, &query)?;
             execution::scalar_result(connection, &query, &params, &options)
@@ -93,6 +95,7 @@ unsafe extern "C" fn scalar_validate(
     // this callback invocation.
     unsafe {
         run_scalar(context, argc, argv, |args, connection| {
+            require_no_explicit_transaction(connection)?;
             let query = args.text(0, "query must be TEXT")?;
             validate_query_ready(connection, &query)?;
             validate_cypher(&query).map(|value| value.to_string())
@@ -121,6 +124,7 @@ unsafe extern "C" fn scalar_integrity_check(
     // SAFETY: SQLite owns `context` and supplies `argc` entries in `argv`.
     unsafe {
         run_scalar(context, argc, argv, |_args, connection| {
+            require_no_explicit_transaction(connection)?;
             metadata_integrity_json(connection).map(|value| value.to_string())
         });
     }

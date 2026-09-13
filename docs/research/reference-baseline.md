@@ -11,6 +11,8 @@
 - <https://www.sqlite.org/loadext.html>
 - <https://www.sqlite.org/vtab.html>
 - <https://www.sqlite.org/appfunc.html>
+- <https://www.sqlite.org/c3ref/get_clientdata.html>
+- <https://www.sqlite.org/releaselog/3_44_0.html>
 
 观察：
 
@@ -18,6 +20,7 @@
 - eponymous-only virtual table 可以作为 table-valued function；
 - loadable extension 不会替换 stock SQLite parser，因此不能仅靠 `.load` 为 SQLite 增加新的顶层 Cypher grammar；
 - SQLite application-defined function callback 可以调用其它 SQLite interfaces，但不能关闭 connection，也不能 finalize/reset 当前正在执行它的 statement；Lithograph 因此仍用真实 integration test 验证同 connection SQL Bridge recursion 与 mutation boundary；
+- `sqlite3_get_clientdata()` / `sqlite3_set_clientdata()` 从 SQLite 3.44.0 起提供 connection-owned wrapper state 与 close-time destructor；Lithograph 的 3.45.0+ baseline 因此可以用它保存 Native explicit transaction state，而不需要 process-global mutable transaction registry；
 - 这决定 Lithograph 使用 SQL function / table-valued function 作为 raw SQLite bridge，同时在同一个 shared library 中提供 Native C ABI。
 
 ## 2. GraphQLite
@@ -88,11 +91,15 @@ Lithograph 不复制 TerminusDB 的 RDF/triple/document schema 或 WOQL query mo
 来源：
 
 - <https://git-scm.com/docs/git-merge>
+- <https://git-scm.com/docs/git-merge-base>
+- <https://git-scm.com/docs/git-rebase>
 - <https://git-scm.com/docs/gitfaq>
 
 观察：
 
 - 常规 branch merge 使用 merge-base + two heads 的 three-way merge；
+- 一对 Commit 可能存在多个同等 best merge bases；Git merge strategy 会为 merge 合成 common-ancestor tree，而不能假设任取一个 best base 与完整 merge 等价；
+- rebase 的核心是确定当前 Branch 上需要移植的 Commit 集合，再按顺序逐个 replay 到新的 base tip；因此 replay-range boundary 与一次 two-head merge 的 virtual merge base 是不同问题；
 - merge commit 可以记录两个 parent；
 - ref 与 immutable commit history 分离，使 branch reset 和历史保留成为自然操作。
 

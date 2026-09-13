@@ -4,6 +4,13 @@ use super::encoding::{hash, i64_bytes, optional_bytes, optional_string, record};
 use super::layer::{LayerBuilder, persist_layer};
 use super::{CommitMetadata, HashId, RootInfo, STORAGE_FORMAT, StorageError, StorageResult};
 
+const FORMAT2_SCHEMA_STATEMENTS: &[&str] = &[
+    "CREATE TABLE main._lithograph_commit_data(commit_id BLOB NOT NULL CHECK(length(commit_id) = 32), data_json TEXT NOT NULL, PRIMARY KEY(commit_id)) WITHOUT ROWID",
+    "CREATE TABLE main._lithograph_tags(name TEXT NOT NULL, commit_id BLOB NOT NULL CHECK(length(commit_id) = 32), PRIMARY KEY(name)) WITHOUT ROWID",
+    "CREATE TABLE main._lithograph_merge_sessions(id TEXT NOT NULL, target_branch TEXT NOT NULL, ours_commit BLOB NOT NULL CHECK(length(ours_commit) = 32), theirs_commit BLOB NOT NULL CHECK(length(theirs_commit) = 32), revision INTEGER NOT NULL CHECK(revision > 0), created_at INTEGER NOT NULL, PRIMARY KEY(id)) WITHOUT ROWID",
+    "CREATE TABLE main._lithograph_merge_resolutions(session_id TEXT NOT NULL, conflict_id BLOB NOT NULL CHECK(length(conflict_id) = 32), resolution_json TEXT NOT NULL, PRIMARY KEY(session_id, conflict_id)) WITHOUT ROWID",
+];
+
 pub(crate) const STORAGE_SCHEMA_STATEMENTS: &[&str] = &[
     "CREATE TABLE main._lithograph_sequences(kind INTEGER PRIMARY KEY CHECK(kind BETWEEN 1 AND 6), next_id INTEGER NOT NULL CHECK(next_id > 0))",
     "CREATE TABLE main._lithograph_labels(id INTEGER PRIMARY KEY CHECK(id > 0), name TEXT NOT NULL)",
@@ -33,6 +40,10 @@ pub(crate) const STORAGE_SCHEMA_STATEMENTS: &[&str] = &[
     "CREATE INDEX main._lithograph_cp_rel_out ON _lithograph_cp_relationships(commit_id, source_id, type_id, target_id, relationship_id)",
     "CREATE INDEX main._lithograph_cp_rel_in ON _lithograph_cp_relationships(commit_id, target_id, type_id, source_id, relationship_id)",
     "CREATE TABLE main._lithograph_cp_properties(commit_id BLOB NOT NULL CHECK(length(commit_id) = 32), owner_kind INTEGER NOT NULL CHECK(owner_kind IN (1, 2)), owner_id INTEGER NOT NULL CHECK(owner_id > 0), key_id INTEGER NOT NULL CHECK(key_id > 0), type_tag INTEGER NOT NULL CHECK(type_tag BETWEEN 1 AND 14), int_value INTEGER NULL, real_value REAL NULL, text_value TEXT NULL, blob_value BLOB NULL, aux_value BLOB NULL, PRIMARY KEY(commit_id, owner_kind, owner_id, key_id)) WITHOUT ROWID",
+    FORMAT2_SCHEMA_STATEMENTS[0],
+    FORMAT2_SCHEMA_STATEMENTS[1],
+    FORMAT2_SCHEMA_STATEMENTS[2],
+    FORMAT2_SCHEMA_STATEMENTS[3],
 ];
 
 pub fn create_storage_schema(connection: &Connection) -> StorageResult<()> {
@@ -44,6 +55,14 @@ pub fn create_storage_schema(connection: &Connection) -> StorageResult<()> {
             "INSERT INTO main._lithograph_sequences(kind, next_id) VALUES(?1, 1)",
             [kind],
         )?;
+    }
+    Ok(())
+}
+
+/// Adds only the storage-format-2 sidecar/session tables to a format-1 database.
+pub fn create_format2_schema(connection: &Connection) -> StorageResult<()> {
+    for statement in FORMAT2_SCHEMA_STATEMENTS {
+        connection.execute_batch(statement)?;
     }
     Ok(())
 }
@@ -67,7 +86,14 @@ pub fn initialize_root(connection: &Connection) -> StorageResult<RootInfo> {
     let layer = LayerBuilder::default();
     let (layer_id, layer_hash) = persist_layer(connection, &layer)?;
     let metadata = CommitMetadata::root();
-    let commit = commit_hash(None, None, layer_hash, schema_hash, &metadata);
+    let commit = commit_hash(
+        STORAGE_FORMAT,
+        None,
+        None,
+        layer_hash,
+        schema_hash,
+        &metadata,
+    );
     connection.execute(
         "INSERT INTO main._lithograph_commits(id, format_version, parent1, parent2, layer_id, schema_hash, author, message, committed_at) VALUES(?1, ?2, NULL, NULL, ?3, ?4, NULL, NULL, 0)",
         params![commit.as_bytes().as_slice(), STORAGE_FORMAT, layer_id, schema_hash.as_bytes().as_slice()],
@@ -168,6 +194,7 @@ fn existing_root_info(connection: &Connection) -> StorageResult<RootInfo> {
 }
 
 pub(crate) fn commit_hash(
+    format_version: i64,
     parent1: Option<HashId>,
     parent2: Option<HashId>,
     layer_hash: HashId,
@@ -175,7 +202,7 @@ pub(crate) fn commit_hash(
     metadata: &CommitMetadata,
 ) -> HashId {
     let fields = vec![
-        i64_bytes(STORAGE_FORMAT),
+        i64_bytes(format_version),
         optional_bytes(
             parent1
                 .as_ref()

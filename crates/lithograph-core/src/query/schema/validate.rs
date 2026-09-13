@@ -7,7 +7,7 @@ use crate::storage::{
     HashId, OwnerKind, PropertyRule, PropertyValue, SchemaState, SchemaTarget, Snapshot,
 };
 
-use super::super::{QueryError, QueryResult};
+use super::super::{QueryError, QueryErrorKind, QueryResult};
 use super::equality::property_equality_key;
 
 pub(crate) fn validate_snapshot_against_commit_schema(
@@ -30,6 +30,51 @@ pub(crate) fn validate_snapshot(
         validate_constraint(connection, constraint, snapshot)?;
     }
     Ok(())
+}
+
+pub(crate) fn validation_conflicts(
+    connection: &Connection,
+    schema: &SchemaState,
+    snapshot: &Snapshot<'_>,
+) -> QueryResult<Vec<(String, QueryError)>> {
+    let mut conflicts = Vec::new();
+    for (label, definition) in &schema.graph_nodes {
+        collect_validation_conflict(
+            storage::graph_node_slot(label),
+            validate_graph_node_type(connection, definition, snapshot),
+            &mut conflicts,
+        )?;
+    }
+    for (relationship_type, definition) in &schema.graph_relationships {
+        collect_validation_conflict(
+            storage::graph_relationship_slot(relationship_type),
+            validate_graph_relationship_type(connection, definition, snapshot),
+            &mut conflicts,
+        )?;
+    }
+    for (name, constraint) in &schema.constraints {
+        collect_validation_conflict(
+            storage::constraint_slot(name),
+            validate_constraint(connection, constraint, snapshot),
+            &mut conflicts,
+        )?;
+    }
+    Ok(conflicts)
+}
+
+fn collect_validation_conflict(
+    slot: String,
+    result: QueryResult<()>,
+    conflicts: &mut Vec<(String, QueryError)>,
+) -> QueryResult<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind == QueryErrorKind::Constraint => {
+            conflicts.push((slot, error));
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn validate_graph_node_types(

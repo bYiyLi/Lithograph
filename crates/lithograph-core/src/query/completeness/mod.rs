@@ -18,7 +18,7 @@ use super::{
 pub(crate) mod execute;
 mod path;
 
-use execute::execute_read;
+use execute::{execute_read, execute_read_snapshot};
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedProgram {
@@ -26,6 +26,10 @@ pub(crate) struct PreparedProgram {
     pub(crate) source: String,
     pub(crate) columns: Vec<String>,
     pub(crate) writes: bool,
+    pub(crate) version_operation: bool,
+    pub(crate) version_mutation: bool,
+    pub(crate) checkout_operation: bool,
+    pub(crate) options: ExecutionOptions,
     pub(crate) logical: LogicalPlan,
     pub(crate) physical: PhysicalPlan,
     pub(crate) write_options: Option<ProgramWriteOptions>,
@@ -227,6 +231,7 @@ fn has_aggregating_function(root: &AstNode) -> bool {
 }
 
 pub(crate) fn prepare_program(
+    connection: &Connection,
     ast: &QueryAst,
     source: &str,
     options: &ExecutionOptions,
@@ -241,9 +246,24 @@ pub(crate) fn prepare_program(
     validate_surface_expressions(&ast.root)?;
     let columns = output_columns(&ast.root, source)?;
     let writes = contains_mutation(&ast.root);
-    let write_options = writes.then(|| program_write_options(options)).transpose()?;
+    let version_operation = contains_version_procedure(&ast.root);
+    let version_mutation = contains_version_mutation(&ast.root);
+    let checkout_operation = contains_named_procedure(&ast.root, "lithograph.branch.checkout");
+    if writes && version_operation {
+        return Err(QueryError::invalid_argument(
+            "graph mutation and Version Procedures cannot share one query",
+        ));
+    }
+    if version_operation && !options.graph_view.is_full_graph() {
+        return Err(QueryError::invalid_argument(
+            "Version Procedures cannot execute with options.graphView",
+        ));
+    }
+    let write_options = writes
+        .then(|| program_write_options(connection, options))
+        .transpose()?;
     let transaction_options = transaction_owning
-        .then(|| transaction_program_options(options))
+        .then(|| transaction_program_options(connection, options))
         .transpose()?;
     let logical_operators = logical_operators(&ast.root);
     let physical_operators = logical_operators
@@ -255,6 +275,10 @@ pub(crate) fn prepare_program(
         source: source.to_owned(),
         columns,
         writes,
+        version_operation,
+        version_mutation,
+        checkout_operation,
+        options: options.clone(),
         logical: LogicalPlan {
             operators: logical_operators,
         },
@@ -267,11 +291,12 @@ pub(crate) fn prepare_program(
 }
 
 fn transaction_program_options(
+    connection: &Connection,
     options: &ExecutionOptions,
 ) -> QueryResult<TransactionProgramOptions> {
     Ok(TransactionProgramOptions {
         graph_view: options.graph_view.clone(),
-        branch: writable_branch(options)?,
+        branch: writable_branch(connection, options)?,
         author: options.author.clone(),
         message: options.message.clone(),
     })
@@ -362,10 +387,13 @@ fn validate_transaction_program(root: &AstNode) -> QueryResult<()> {
     Ok(())
 }
 
-fn program_write_options(options: &ExecutionOptions) -> QueryResult<ProgramWriteOptions> {
+fn program_write_options(
+    connection: &Connection,
+    options: &ExecutionOptions,
+) -> QueryResult<ProgramWriteOptions> {
     Ok(ProgramWriteOptions {
         graph_view: options.graph_view.clone(),
-        branch: writable_branch(options)?,
+        branch: writable_branch(connection, options)?,
         author: options.author.clone(),
         message: options.message.clone(),
     })
@@ -381,6 +409,27 @@ fn validate_surface_expressions(root: &AstNode) -> QueryResult<()> {
         compile_expression(expression)?;
     }
     Ok(())
+}
+
+fn contains_named_procedure(root: &AstNode, name: &str) -> bool {
+    root.descendants()
+        .filter(|node| node.kind == AstKind::FunctionName)
+        .filter_map(|node| node.text.as_deref())
+        .any(|value| value.eq_ignore_ascii_case(name))
+}
+
+fn contains_version_procedure(root: &AstNode) -> bool {
+    root.descendants()
+        .filter(|node| node.kind == AstKind::FunctionName)
+        .filter_map(|node| node.text.as_deref())
+        .any(super::registry::is_version_procedure)
+}
+
+fn contains_version_mutation(root: &AstNode) -> bool {
+    root.descendants()
+        .filter(|node| node.kind == AstKind::FunctionName)
+        .filter_map(|node| node.text.as_deref())
+        .any(super::registry::is_version_mutation)
 }
 
 pub(crate) fn contains_mutation(root: &AstNode) -> bool {
@@ -1278,12 +1327,41 @@ fn physical_operator(operator: &LogicalOperator) -> PhysicalOperator {
 
 #[allow(
     clippy::too_many_arguments,
+    reason = "the version-procedure boundary keeps immutable query execution inputs explicit"
+)]
+pub(crate) fn execute_version_program(
+    connection: &Connection,
+    program: &PreparedProgram,
+    commit: HashId,
+    graph_view: &ResolvedGraphView,
+    params: &BTreeMap<String, Value>,
+    metrics: &mut QueryMetrics,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<Vec<Vec<Value>>> {
+    if program.writes || !program.version_mutation {
+        return Err(QueryError::internal(
+            "invalid program reached the Version Procedure executor",
+        ));
+    }
+    execute_read(
+        connection,
+        program,
+        commit,
+        graph_view,
+        params,
+        metrics,
+        is_interrupted,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
     reason = "the program boundary keeps all immutable query execution inputs explicit"
 )]
 pub(crate) fn execute_prepared_read(
     connection: &Connection,
     program: &PreparedProgram,
-    commit: HashId,
+    snapshot: crate::storage::Snapshot<'_>,
     graph_view: &ResolvedGraphView,
     params: &BTreeMap<String, Value>,
     mode: ExecutionMode,
@@ -1298,10 +1376,10 @@ pub(crate) fn execute_prepared_read(
     if mode == ExecutionMode::Explain {
         return Ok(vec![vec![Value::String(program.physical.explain())]]);
     }
-    execute_read(
+    execute_read_snapshot(
         connection,
         program,
-        commit,
+        snapshot,
         graph_view,
         params,
         metrics,

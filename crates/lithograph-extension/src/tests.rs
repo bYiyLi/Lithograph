@@ -29,6 +29,13 @@ fn json_adapter_requires_object_inputs() {
 }
 
 #[test]
+fn sqlite_runtime_version_guard_matches_supported_baseline() {
+    assert!(!sqlite_version_number_supported(3_044_999));
+    assert!(sqlite_version_number_supported(3_045_000));
+    assert!(sqlite_version_number_supported(3_051_000));
+}
+
+#[test]
 fn sqlite_error_mapping_preserves_stable_primary_categories() {
     let cases = [
         (ffi::SQLITE_BUSY, ErrorCategory::Busy),

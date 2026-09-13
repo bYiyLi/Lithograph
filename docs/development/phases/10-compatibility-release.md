@@ -1,6 +1,6 @@
 # Phase 10：Compatibility Closure and Release Hardening
 
-**状态：`planned`**
+**状态：`ready`**
 
 ## 1. 目标
 

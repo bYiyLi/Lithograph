@@ -63,7 +63,7 @@ pub(crate) fn prepare_schema(
             "schema DDL cannot execute with options.graphView",
         ));
     }
-    let branch = writable_branch(options)?;
+    let branch = writable_branch(connection, options)?;
     let clause = clauses[0];
     let AstKind::Clause(kind) = clause.kind else {
         return Err(QueryError::internal(

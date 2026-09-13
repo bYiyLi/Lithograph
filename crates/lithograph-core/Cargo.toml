@@ -24,5 +24,8 @@ tempfile.workspace = true
 unicode-normalization.workspace = true
 ureq.workspace = true
 
+[dev-dependencies]
+rusqlite = { workspace = true, features = ["hooks"] }
+
 [lints]
 workspace = true

@@ -16,11 +16,11 @@ use super::super::expression::{BindingRow, BindingValue};
 use super::super::{QueryError, QueryResult};
 
 pub(crate) fn show_rows(
-    connection: &Connection,
+    _connection: &Connection,
     snapshot: &Snapshot<'_>,
     clause: &AstNode,
 ) -> QueryResult<Vec<BindingRow>> {
-    let schema = SchemaState::load(connection, snapshot.commit())?;
+    let schema = snapshot.schema_state()?;
     let target = clause
         .descendants()
         .find_map(|node| match node.kind {

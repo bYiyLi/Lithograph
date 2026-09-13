@@ -105,7 +105,7 @@ fn create_commits_once_and_is_immediately_queryable() {
 
     assert_ne!(before, after);
     assert_eq!(summary.query_type, QueryType::Write);
-    assert_eq!(summary.commit, format!("commit/{}", after.to_hex()));
+    assert_eq!(summary.commit, Some(format!("commit/{}", after.to_hex())));
     assert_eq!(summary.counters.nodes_created, 1);
     assert_eq!(summary.counters.labels_added, 1);
     assert_eq!(summary.counters.properties_set, 2);
@@ -140,7 +140,7 @@ fn insert_uses_the_versioned_write_path() {
     let after = branch_head(&connection, "main").expect("head after");
 
     assert_ne!(before, after);
-    assert_eq!(summary.commit, format!("commit/{}", after.to_hex()));
+    assert_eq!(summary.commit, Some(format!("commit/{}", after.to_hex())));
     assert_eq!(summary.counters.nodes_created, 1);
     assert_eq!(rows, vec![vec![Value::String("Inserted".to_owned())]]);
 }

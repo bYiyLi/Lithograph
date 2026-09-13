@@ -139,7 +139,7 @@ fn ensure_planned_index_cache(
     snapshot: &Snapshot<'_>,
     seek: &StandardIndexSeek,
 ) -> QueryResult<()> {
-    let schema = SchemaState::load(snapshot.connection_for_query(), snapshot.commit())?;
+    let schema = snapshot.schema_state()?;
     let index = schema.indexes.get(&seek.index_name).ok_or_else(|| {
         QueryError::internal(format!(
             "planned Index {} is not present in the active Schema",
@@ -166,7 +166,7 @@ fn scan_relationship_lookup_after(
     )?;
     let rows = statement.query_map(
         params![
-            snapshot.commit().as_bytes().as_slice(),
+            snapshot.cache_identity().as_bytes().as_slice(),
             seek.index_name,
             RELATIONSHIP_OWNER_KIND,
             type_id,
@@ -376,7 +376,7 @@ fn scan_scalar_range_candidates(
         snapshot,
         &sql,
         params![
-            snapshot.commit().as_bytes().as_slice(),
+            snapshot.cache_identity().as_bytes().as_slice(),
             index_name,
             owner_kind,
             ordinal,
@@ -430,7 +430,7 @@ fn scan_range_order_candidates(
                 snapshot,
                 &sql,
                 params![
-                    snapshot.commit().as_bytes().as_slice(),
+                    snapshot.cache_identity().as_bytes().as_slice(),
                     index_name,
                     owner_kind,
                     ordinal,
@@ -463,7 +463,7 @@ fn scan_range_prefix_candidates(
          AND sort_text >= ?7 AND (?8 IS NULL OR sort_text < ?8) \
          AND substr(sort_text, 1, length(?7)) = ?7 ORDER BY owner_id",
         params![
-            snapshot.commit().as_bytes().as_slice(),
+            snapshot.cache_identity().as_bytes().as_slice(),
             index_name,
             owner_kind,
             i64::try_from(ordinal).unwrap_or(i64::MAX),
@@ -504,7 +504,7 @@ fn scan_all_property_candidates(
          WHERE snapshot_hash = ?1 AND index_name = ?2 AND owner_kind = ?3 \
          AND property_ordinal = ?4 AND owner_id > ?5 ORDER BY owner_id",
         params![
-            snapshot.commit().as_bytes().as_slice(),
+            snapshot.cache_identity().as_bytes().as_slice(),
             index_name,
             owner_kind,
             i64::try_from(ordinal).unwrap_or(i64::MAX),
@@ -533,7 +533,7 @@ fn scan_exact_candidates(
          WHERE snapshot_hash = ?1 AND index_name = ?2 AND owner_kind = ?3 \
          AND property_ordinal = ?4 AND owner_id > ?5 AND equality_blob = ?6 ORDER BY owner_id",
         params![
-            snapshot.commit().as_bytes().as_slice(),
+            snapshot.cache_identity().as_bytes().as_slice(),
             index_name,
             owner_kind,
             i64::try_from(ordinal).unwrap_or(i64::MAX),
@@ -562,7 +562,7 @@ fn scan_text_candidates(
         snapshot,
         &sql,
         params![
-            snapshot.commit().as_bytes().as_slice(),
+            snapshot.cache_identity().as_bytes().as_slice(),
             index_name,
             owner_kind,
             i64::try_from(ordinal).unwrap_or(i64::MAX),
@@ -612,7 +612,7 @@ fn scan_point_bbox_candidates(
         snapshot,
         &sql,
         params![
-            snapshot.commit().as_bytes().as_slice(),
+            snapshot.cache_identity().as_bytes().as_slice(),
             index_name,
             owner_kind,
             i64::try_from(ordinal).unwrap_or(i64::MAX),
@@ -657,7 +657,7 @@ fn scan_point_distance_candidates(
     let z_lower = coordinates.get(2).map(|value| *value - radius);
     let z_upper = coordinates.get(2).map(|value| *value + radius);
     let mut parameters = vec![
-        SqlValue::Blob(snapshot.commit().as_bytes().to_vec()),
+        SqlValue::Blob(snapshot.cache_identity().as_bytes().to_vec()),
         SqlValue::Text(index_name.to_owned()),
         SqlValue::Integer(owner_kind),
         SqlValue::Integer(i64::try_from(ordinal).unwrap_or(i64::MAX)),
@@ -751,7 +751,7 @@ fn scan_filtered_candidates(
         snapshot,
         sql,
         params![
-            snapshot.commit().as_bytes().as_slice(),
+            snapshot.cache_identity().as_bytes().as_slice(),
             index_name,
             owner_kind,
             i64::try_from(ordinal).unwrap_or(i64::MAX),
@@ -913,7 +913,7 @@ fn ensure_index_cache(snapshot: &Snapshot<'_>, index: &IndexDefinition) -> Query
     let exists: i64 = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM temp._lithograph_standard_index_cache_meta \
          WHERE snapshot_hash = ?1 AND index_name = ?2 AND complete = 1)",
-        params![snapshot.commit().as_bytes().as_slice(), index.name],
+        params![snapshot.cache_identity().as_bytes().as_slice(), index.name],
         |row| row.get(0),
     )?;
     if exists == 1 {
@@ -922,13 +922,13 @@ fn ensure_index_cache(snapshot: &Snapshot<'_>, index: &IndexDefinition) -> Query
     connection.execute(
         "DELETE FROM temp._lithograph_standard_index_cache \
          WHERE snapshot_hash = ?1 AND index_name = ?2",
-        params![snapshot.commit().as_bytes().as_slice(), index.name],
+        params![snapshot.cache_identity().as_bytes().as_slice(), index.name],
     )?;
     build_index_cache(snapshot, index)?;
     connection.execute(
         "INSERT OR REPLACE INTO temp._lithograph_standard_index_cache_meta \
          (snapshot_hash, index_name, complete) VALUES(?1, ?2, 1)",
-        params![snapshot.commit().as_bytes().as_slice(), index.name],
+        params![snapshot.cache_identity().as_bytes().as_slice(), index.name],
     )?;
     Ok(())
 }
@@ -996,7 +996,7 @@ fn build_relationship_lookup_cache(
              (snapshot_hash, index_name, owner_kind, owner_id, property_ordinal, token_id, value_blob, text_value)\
              VALUES(?1, ?2, ?3, ?4, 0, ?5, NULL, NULL)",
             params![
-                snapshot.commit().as_bytes().as_slice(),
+                snapshot.cache_identity().as_bytes().as_slice(),
                 index.name,
                 RELATIONSHIP_OWNER_KIND,
                 relationship.id,
@@ -1170,7 +1170,7 @@ fn insert_cache_value(
           sort_family, sort_number, sort_a, sort_b, sort_c, sort_text, point_crs, point_x, point_y, point_z)\
          VALUES(?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
-            snapshot.commit().as_bytes().as_slice(),
+            snapshot.cache_identity().as_bytes().as_slice(),
             index.name,
             owner_kind,
             owner_id,

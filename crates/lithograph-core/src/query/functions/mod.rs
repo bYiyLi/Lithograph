@@ -15,7 +15,7 @@ mod temporal;
 mod text;
 mod typed;
 
-pub(crate) use instant::install_statement_time;
+pub(crate) use instant::{install_statement_time, install_transaction_time};
 
 pub(super) fn evaluate(name: &str, values: &[Value]) -> Option<QueryResult<Value>> {
     let name = name.to_ascii_lowercase();

@@ -1,6 +1,5 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::Connection;
 
@@ -22,7 +21,7 @@ use super::plan::{
     append_pattern_operators, lower_match, lower_projection,
 };
 use super::stream::{QueryMetrics, materialize_match_step};
-use super::{QueryError, QueryErrorKind, QueryResult};
+use super::{QueryError, QueryErrorKind, QueryResult, now_micros};
 use crate::cypher::unescape_identifier;
 
 const SCAN_BATCH: usize = 256;
@@ -191,14 +190,6 @@ fn check_interrupted(is_interrupted: &dyn Fn() -> bool) -> QueryResult<()> {
     }
 }
 
-fn now_micros() -> QueryResult<i64> {
-    let elapsed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| QueryError::internal("system clock is before the Unix epoch"))?;
-    i64::try_from(elapsed.as_micros())
-        .map_err(|_| QueryError::internal("system clock exceeds supported commit timestamp range"))
-}
-
 pub(crate) fn prepare_write(
     connection: &Connection,
     single: &AstNode,
@@ -206,7 +197,7 @@ pub(crate) fn prepare_write(
     params: &BTreeMap<String, Value>,
     options: &ExecutionOptions,
 ) -> QueryResult<PreparedWrite> {
-    let branch = writable_branch(options)?;
+    let branch = writable_branch(connection, options)?;
     let mut clauses = Vec::new();
     let mut projection = None;
     let mut logical = Vec::new();

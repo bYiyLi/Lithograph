@@ -222,6 +222,7 @@ impl RowsCursor<'_> {
         let connection = unsafe { Connection::from_handle(self.db) }.map_err(|error| {
             map_sqlite_error(error, "failed to access the SQLite connection").to_sqlite_error()
         })?;
+        require_no_explicit_transaction(&connection).map_err(|error| error.to_sqlite_error())?;
         if let Some(mut previous) = self.execution.take() {
             previous
                 .cancel(&connection)

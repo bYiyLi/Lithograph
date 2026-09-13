@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 
 use crate::cypher::{ExecutionMode, Value};
-use crate::storage::{RelationshipRecord, Snapshot};
+use crate::storage::{HashId, RelationshipRecord, Snapshot};
 
 use super::completeness::PreparedProgram;
 use super::expression::{self, BindingRow, BindingValue};
@@ -33,6 +33,8 @@ pub enum QueryType {
     Read,
     Write,
     Schema,
+    Version,
+    Mixed,
 }
 
 impl QueryType {
@@ -41,6 +43,8 @@ impl QueryType {
             Self::Read => "read",
             Self::Write => "write",
             Self::Schema => "schema",
+            Self::Version => "version",
+            Self::Mixed => "mixed",
         }
     }
 }
@@ -64,9 +68,32 @@ pub struct QueryCounters {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuerySummary {
     pub query_type: QueryType,
-    pub commit: String,
+    pub commit: Option<String>,
+    pub merge_session: Option<MergeSessionSummary>,
     pub counters: QueryCounters,
     pub metrics: QueryMetrics,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeSessionSummary {
+    pub id: String,
+    pub revision: i64,
+}
+
+fn committed_summary(
+    query_type: QueryType,
+    commit: HashId,
+    counters: QueryCounters,
+    metrics: &QueryMetrics,
+    suppress_commit: bool,
+) -> QuerySummary {
+    QuerySummary {
+        query_type,
+        commit: (!suppress_commit).then(|| format!("commit/{}", commit.to_hex())),
+        merge_session: None,
+        counters,
+        metrics: metrics.clone(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -83,6 +110,8 @@ pub struct QueryCursor {
     metrics: QueryMetrics,
     started: Instant,
     statement_time: DateTime<Utc>,
+    transaction_time: DateTime<Utc>,
+    suppress_summary_commit: bool,
     skipped: usize,
     emitted: usize,
     explain_emitted: bool,
@@ -835,6 +864,21 @@ fn prepared_program<'a>(
         .ok_or_else(|| QueryError::internal(missing_message))
 }
 
+fn prepared_snapshot<'connection>(
+    connection: &'connection Connection,
+    prepared: &PreparedQuery,
+) -> QueryResult<Snapshot<'connection>> {
+    match prepared.candidate.as_ref() {
+        Some(candidate) => Ok(Snapshot::resolve_with_layer_and_schema(
+            connection,
+            prepared.commit,
+            &candidate.layer,
+            candidate.schema.clone(),
+        )?),
+        None => Ok(Snapshot::resolve(connection, prepared.commit)?),
+    }
+}
+
 impl QueryCursor {
     pub fn new(prepared: PreparedQuery) -> Self {
         let transaction_boundary = prepared.requires_transaction_boundary();
@@ -849,19 +893,22 @@ impl QueryCursor {
                 || prepared
                     .program
                     .as_ref()
-                    .is_some_and(|program| program.writes))
+                    .is_some_and(|program| program.writes || program.version_mutation))
             && prepared.mode != ExecutionMode::Explain
         {
             WriteState::Pending
         } else {
             WriteState::None
         };
+        let statement_time = Utc::now();
         Self {
             pipeline: MatchPipeline::new(prepared.matches.clone()),
             prepared,
             metrics: QueryMetrics::default(),
             started: Instant::now(),
-            statement_time: Utc::now(),
+            statement_time,
+            transaction_time: statement_time,
+            suppress_summary_commit: false,
             skipped: 0,
             emitted: 0,
             explain_emitted: false,
@@ -887,7 +934,7 @@ impl QueryCursor {
                 .prepared
                 .program
                 .as_ref()
-                .is_some_and(|program| program.writes))
+                .is_some_and(|program| program.writes || program.version_mutation))
             && self.prepared.mode != ExecutionMode::Explain
     }
 
@@ -897,6 +944,25 @@ impl QueryCursor {
 
     pub fn has_external_io(&self) -> bool {
         self.prepared.has_external_io()
+    }
+
+    pub fn has_version_operation(&self) -> bool {
+        self.prepared
+            .program
+            .as_ref()
+            .is_some_and(|program| program.version_operation)
+    }
+
+    pub fn set_transaction_time_micros(&mut self, micros: i64) -> QueryResult<()> {
+        let seconds = micros.div_euclid(1_000_000);
+        let micros = micros.rem_euclid(1_000_000) as u32;
+        self.transaction_time = DateTime::<Utc>::from_timestamp(seconds, micros * 1_000)
+            .ok_or_else(|| QueryError::invalid_argument("transaction timestamp is out of range"))?;
+        Ok(())
+    }
+
+    pub fn suppress_summary_commit(&mut self) {
+        self.suppress_summary_commit = true;
     }
 
     pub fn next_batch(
@@ -914,6 +980,7 @@ impl QueryCursor {
         is_interrupted: &dyn Fn() -> bool,
     ) -> QueryResult<QueryBatch> {
         let _statement_clock = super::functions::install_statement_time(self.statement_time);
+        let _transaction_clock = super::functions::install_transaction_time(self.transaction_time);
         if self.finished {
             return Ok(QueryBatch {
                 rows: Vec::new(),
@@ -938,7 +1005,7 @@ impl QueryCursor {
         if self.prepared.program.is_some() {
             return self.next_program_read(connection, max_rows, is_interrupted);
         }
-        let snapshot = Snapshot::resolve(connection, self.prepared.commit)?;
+        let snapshot = prepared_snapshot(connection, &self.prepared)?;
         if self.prepared.aggregate {
             return self.next_aggregate(&snapshot, is_interrupted);
         }
@@ -968,11 +1035,12 @@ impl QueryCursor {
         is_interrupted: &dyn Fn() -> bool,
     ) -> QueryResult<QueryBatch> {
         if self.program_rows.is_none() {
+            let snapshot = prepared_snapshot(connection, &self.prepared)?;
             let program = prepared_program(&self.prepared, "Phase 06 program is missing")?;
             let rows = super::completeness::execute_prepared_read(
                 connection,
                 program,
-                self.prepared.commit,
+                snapshot,
                 &self.prepared.graph_view,
                 &self.prepared.params,
                 self.prepared.mode,
@@ -1011,16 +1079,17 @@ impl QueryCursor {
                 is_interrupted,
             )?;
             self.metrics.rows = outcome.rows.len().try_into().unwrap_or(u64::MAX);
-            self.transaction_summary = Some(QuerySummary {
-                query_type: if program.writes {
+            self.transaction_summary = Some(committed_summary(
+                if program.writes {
                     QueryType::Write
                 } else {
                     QueryType::Read
                 },
-                commit: format!("commit/{}", outcome.commit.to_hex()),
-                counters: outcome.counters,
-                metrics: self.metrics.clone(),
-            });
+                outcome.commit,
+                outcome.counters,
+                &self.metrics,
+                self.suppress_summary_commit,
+            ));
             self.program_rows = Some(outcome.rows);
         }
         let (batch_rows, done) =
@@ -1282,8 +1351,30 @@ impl QueryCursor {
 
     fn read_summary(&self) -> QuerySummary {
         QuerySummary {
-            query_type: QueryType::Read,
-            commit: format!("commit/{}", self.prepared.commit.to_hex()),
+            query_type: if self
+                .prepared
+                .program
+                .as_ref()
+                .is_some_and(|program| program.version_operation)
+            {
+                QueryType::Version
+            } else {
+                QueryType::Read
+            },
+            commit: if self.prepared.candidate.is_some() {
+                None
+            } else {
+                (!self.suppress_summary_commit)
+                    .then(|| format!("commit/{}", self.prepared.commit.to_hex()))
+            },
+            merge_session: self
+                .prepared
+                .candidate
+                .as_ref()
+                .map(|candidate| MergeSessionSummary {
+                    id: candidate.session_id.clone(),
+                    revision: candidate.revision,
+                }),
             counters: QueryCounters::default(),
             metrics: self.metrics.clone(),
         }

@@ -9,7 +9,7 @@ use super::layer::{DeltaOp, PropertyDelta, RelationshipDelta, RelationshipRecord
 use super::property::PropertyColumns;
 use super::{
     HashId, LabelId, NodeId, OwnerKind, PropertyKeyId, PropertyValue, RelationshipId,
-    RelationshipTypeId, StorageError, StorageResult,
+    RelationshipTypeId, SchemaState, StorageError, StorageResult,
 };
 
 #[derive(Default)]
@@ -32,8 +32,10 @@ pub(super) struct Overlay {
 pub struct Snapshot<'connection> {
     pub(super) connection: &'connection Connection,
     pub(super) commit: HashId,
+    pub(super) cache_identity: HashId,
     pub(super) checkpoint: Option<HashId>,
     pub(super) overlay: Overlay,
+    pub(super) schema_override: Option<SchemaState>,
 }
 
 impl<'connection> Snapshot<'connection> {
@@ -53,6 +55,24 @@ impl<'connection> Snapshot<'connection> {
     ) -> StorageResult<Self> {
         let mut snapshot = Self::resolve(connection, commit)?;
         snapshot.overlay.apply(layer.clone());
+        Ok(snapshot)
+    }
+
+    pub(crate) fn resolve_with_layer_and_schema(
+        connection: &'connection Connection,
+        commit: HashId,
+        layer: &super::layer::LayerBuilder,
+        schema: SchemaState,
+    ) -> StorageResult<Self> {
+        let mut snapshot = Self::resolve(connection, commit)?;
+        snapshot.overlay.apply(layer.clone());
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"LITHOGRAPH_QUERY_LOCAL_SNAPSHOT_V1");
+        hasher.update(commit.as_bytes());
+        hasher.update(layer.content_hash()?.as_bytes());
+        hasher.update(&schema.canonical_blob()?);
+        snapshot.cache_identity = HashId::from_bytes(*hasher.finalize().as_bytes());
+        snapshot.schema_override = Some(schema);
         Ok(snapshot)
     }
 
@@ -76,14 +96,27 @@ impl<'connection> Snapshot<'connection> {
         Ok(Self {
             connection,
             commit,
+            cache_identity: commit,
             checkpoint,
             overlay,
+            schema_override: None,
         })
     }
 
     /// Commit pinned by this snapshot.
     pub fn commit(&self) -> HashId {
         self.commit
+    }
+
+    pub(crate) fn cache_identity(&self) -> HashId {
+        self.cache_identity
+    }
+
+    pub(crate) fn schema_state(&self) -> StorageResult<SchemaState> {
+        match &self.schema_override {
+            Some(schema) => Ok(schema.clone()),
+            None => SchemaState::load(self.connection, self.commit),
+        }
     }
 
     pub(crate) fn connection_for_query(&self) -> &'connection Connection {

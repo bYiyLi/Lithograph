@@ -517,6 +517,8 @@ Executor 在 batch/operator boundary 与长路径/搜索循环中检查 SQLite i
 
 Active Branch、Native explicit transaction state、temporary query options、prepared-plan/cache handle、current error/cancellation state 全部属于单个 `sqlite3*` connection 或单个 query。禁止使用 process-global mutable query/branch/parser/transaction state。跨线程使用同一 `sqlite3*` 是否允许完全遵循 host SQLite threading mode；Lithograph 不为一个不允许并发使用的 connection 增加第二套线程安全保证。
 
+Native C ABI 在已完成 Lithograph registration 的 connection 上，使用 host SQLite 的 `sqlite3_db_mutex()` 覆盖一次 ABI invocation 的 connection-state check、client-data access、query/transaction execution 与 error cleanup。SQLite serialized mode 下该 mutex 是 recursive，因此同一个 `sqlite3*` 的 Native 调用与 SQLite 自身 connection 操作按同一 serialization boundary 排序；multi-thread / single-thread mode 如果 host 不提供同 connection serialization，Lithograph 不另建独立 mutex 去扩大 SQLite 自己的线程安全承诺。`sqlite3_get_clientdata()` / `sqlite3_set_clientdata()` 只负责 state ownership/lifetime，不单独承担 invocation serialization。
+
 ### 7.7 Graph View Execution Boundary
 
 Graph View 是 Lithograph Execution API 的 query-local visibility / mutation boundary。它解决调用方需要在同一个 versioned Property Graph 内把不同逻辑数据空间交给完整 Cypher 执行、又不能依赖 query rewrite 或 result post-filter 的问题。
@@ -1053,6 +1055,7 @@ RemoveProperty
 SetSchema
 CreateIndex
 DropIndex
+SetIndex
 ```
 
 Patch 是一个 map：
@@ -1067,7 +1070,7 @@ Patch 是一个 map：
 }
 ```
 
-每个 operation 都包含 `op`、stable logical slot，以及该 operation 所需的 typed `before` / `after`。`patch.apply` 只接受 `databaseId` 与当前 database 相同的 patch；跨 database patch/import 不属于当前合同。`from/to` 用于 provenance，不要求 active Branch 当前 head 等于 `from`，真正 applicability 由所有 `before` conditions 决定。
+每个 operation 都包含 `op`、stable logical slot，以及该 operation 所需的 typed `before` / `after`。一个 canonical Patch 对同一 logical slot **最多包含一个 operation**；duplicate slot 属于非法 Patch 并在应用任何 operation 前返回 `INVALID_ARGUMENT`。这样全部 `before` conditions 都解释为对输入 Snapshot 的并列前置条件，而不是依赖 Patch 内 operation 顺序形成第二套 imperative mutation language。Index 从一个定义替换为同名的另一个定义时使用单一 `SetIndex`，不能编码成同一 `index/<name>` slot 上的 `DropIndex` + `CreateIndex` 顺序对。`patch.apply` 只接受 `databaseId` 与当前 database 相同的 patch；跨 database patch/import 不属于当前合同。`from/to` 用于 provenance，不要求 active Branch 当前 head 等于 `from`，真正 applicability 由所有 `before` conditions 决定。
 
 每个 operation 使用稳定 `elementId`、label/type/property name 和 before/after value 表示。`DETACH DELETE` 产生显式 Relationship deletions 与 Node deletion，因此 patch 可独立验证和重放。
 
@@ -1161,8 +1164,8 @@ Session 自身是持久 operational state：connection/process crash 后可以�
 `rebase(onto)` 使用 Git-style commit replay，但以结构化 graph patch 为单位：
 
 1. pin active Branch head 为 `oldHead`，pin `onto` Commit；
-2. 使用 10.5 的 merge-base algorithm 得到 base；
-3. 取 base（exclusive）到 `oldHead` 的 **first-parent** Commit sequence，按旧到新顺序 replay；
+2. 沿 `oldHead` 的 **first-parent chain** 向历史方向查找，选择离 `oldHead` 最近且同时是 `onto` ancestor 的 Commit 作为 **replay boundary**；这一定义与本节 first-parent replay 模型绑定，不从多个 criss-cross best merge bases 中按 Commit ID 任取一个；
+3. 取 replay boundary（exclusive）到 `oldHead` 的 first-parent Commit sequence，按旧到新顺序 replay；
 4. 对每个旧 Commit `C`，使用 `diff(parent1(C), C)` 作为该 Commit 的 intent；在当前 replay head 上以 `parent1(C)` / current replay head / `C` 做 logical-slot three-way application；
 5. 无冲突时创建一个新的 single-parent Commit，保留旧 Commit 的 `author` / `message`，使用新的 `committed_at`；旧 Commit 如果是 Merge Commit，其 second-parent topology 默认被 flatten，replay 的是它相对 first parent 的实际 graph/schema change；
 6. 全部旧 Commit replay 成功后才把 active Branch 原子移动到最后一个新 Commit。
@@ -1170,6 +1173,10 @@ Session 自身是持久 operational state：connection/process crash 后可以�
 整个 rebase 在一个 SQLite transaction 内 staged。任何 replay conflict、constraint violation、resource failure 或目标 Branch stale-head 都 rollback **全部新 Commit** 并保持 Branch 不变，不产生半完成 rebase。
 
 Rebase conflict 使用与 merge 相同的 logical slot 和 `base/ours/theirs` shape，并额外包含 `sourceCommit`。`options.resolutions` 使用相同 conflictId resolution format。没有需要 replay 的 Commit 时返回 `status = up_to_date`；成功重写时 `status = rebased`，`rewritten` 按旧到新顺序返回 `{from,to}` pairs。
+
+Rebase conflictId 必须在 **相同 `onto`、相同待 replay source sequence、相同前序 resolution 选择** 下跨整个 operation retry 保持稳定。它不能依赖本次尝试中新建 rewritten Commit 的 ID 或 `committed_at`，因为 conflict rollback 会删除这些临时 Commit，而下一次调用按本节规则使用新的 `committed_at`。对每个 source Commit `C`，Rebase 因此使用 `parent1(C)` 的 stable base identity、当前 replay state 的 canonical logical-state identity、`C` 的 immutable Commit identity、slot 与 `base/ours/theirs` canonical values 生成 deterministic conflictId。当前 replay state identity 只描述 graph / Schema / Index logical slots，不包含 rewritten Commit metadata；前序 resolution 真正改变 replay state 时，后续 conflictId 可以相应改变。这样调用方可以跨多次 `rebase(..., {resolutions:[...]})` 逐步解决位于多个 source Commit 的 conflict，同时不会把旧 resolution 静默套到不同 candidate state。
+
+10.5 的 best-common-ancestor / virtual-base 规则仍定义 **Merge** 的三方 base。Rebase 的 replay boundary 解决的是“active Branch 哪些 first-parent Commit 属于待重放序列”这一不同问题；在存在多个 best merge bases 的 criss-cross DAG 中，必须由 active first-parent chain 决定该边界，不能让 hash/Commit-ID 排序偶然改变 rebase 是否可执行。每个待重放 Commit 的冲突判定仍复用 10.5 的 logical-slot、dependency 与 post-merge Constraint validation 规则。
 
 Rebase 不自动把旧 Commit Data 复制到 rewritten Commit，也不移动任何 Tag。旧 Commit Data 继续绑定旧 Commit；调用方可以根据 `rewritten` mapping 自行决定是否复制/重建 annotation。Lithograph 不猜测任意业务 JSON 在新 base 上是否仍然成立。
 

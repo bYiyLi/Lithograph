@@ -12,7 +12,9 @@ pub(crate) use index::{
     select_standard_index_seeks,
 };
 pub(crate) use show::show_rows;
-pub(crate) use validate::validate_snapshot_against_commit_schema;
+pub(crate) use validate::{
+    validate_snapshot, validate_snapshot_against_commit_schema, validation_conflicts,
+};
 
 pub(crate) fn standard_index_kind_name(kind: crate::storage::StandardIndexKind) -> &'static str {
     match kind {

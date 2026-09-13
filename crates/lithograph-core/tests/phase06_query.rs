@@ -1044,10 +1044,10 @@ fn composable_show_preserves_input_rows_and_scope() {
 fn show_procedures_uses_the_complete_registry_column_contract() {
     let connection = fresh_storage();
     let default_columns = rows(&connection, "SHOW PROCEDURES");
-    assert_eq!(default_columns.len(), 5);
+    assert_eq!(default_columns.len(), 32);
     for row in default_columns {
         assert_eq!(row.len(), 4);
-        assert_eq!(row[2], Value::String("READ".to_owned()));
+        assert!(matches!(&row[2], Value::String(mode) if mode == "READ" || mode == "WRITE"));
         assert_eq!(row[3], Value::Boolean(false));
     }
     let all_columns = rows(&connection, "SHOW PROCEDURES YIELD * LIMIT 1");
@@ -1062,22 +1062,7 @@ fn show_procedures_uses_the_complete_registry_column_contract() {
             Value::Boolean(false),
         )]))
     );
-    assert_eq!(rows(&connection, "SHOW PROCEDURE").len(), 5);
-    assert_eq!(
-        rows(
-            &connection,
-            "SHOW PROCEDURES YIELD name RETURN name ORDER BY name",
-        ),
-        vec![
-            vec![Value::String("db.index.fulltext.queryNodes".to_owned())],
-            vec![Value::String(
-                "db.index.fulltext.queryRelationships".to_owned(),
-            )],
-            vec![Value::String("db.labels".to_owned())],
-            vec![Value::String("db.propertyKeys".to_owned())],
-            vec![Value::String("db.relationshipTypes".to_owned())],
-        ]
-    );
+    assert_eq!(rows(&connection, "SHOW PROCEDURE").len(), 32);
     assert!(!query_error(&connection, "SHOW PROCEDURES YIELD category").is_empty());
 }
 

@@ -21,6 +21,7 @@ use normalize::{
 
 thread_local! {
     static STATEMENT_TIME: RefCell<Option<DateTime<Utc>>> = const { RefCell::new(None) };
+    static TRANSACTION_TIME: RefCell<Option<DateTime<Utc>>> = const { RefCell::new(None) };
 }
 
 pub(crate) struct StatementClockGuard(Option<DateTime<Utc>>);
@@ -37,31 +38,61 @@ pub(crate) fn install_statement_time(value: DateTime<Utc>) -> StatementClockGuar
     StatementClockGuard(previous)
 }
 
+pub(crate) struct TransactionClockGuard(Option<DateTime<Utc>>);
+
+impl Drop for TransactionClockGuard {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        TRANSACTION_TIME.with(|clock| *clock.borrow_mut() = previous);
+    }
+}
+
+pub(crate) fn install_transaction_time(value: DateTime<Utc>) -> TransactionClockGuard {
+    let previous = TRANSACTION_TIME.with(|clock| clock.borrow_mut().replace(value));
+    TransactionClockGuard(previous)
+}
+
 fn statement_time() -> DateTime<Utc> {
     STATEMENT_TIME
         .with(|clock| *clock.borrow())
         .unwrap_or_else(Utc::now)
 }
 
+fn transaction_time() -> DateTime<Utc> {
+    TRANSACTION_TIME
+        .with(|clock| *clock.borrow())
+        .unwrap_or_else(statement_time)
+}
+
+fn with_transaction_clock<T>(operation: impl FnOnce() -> T) -> T {
+    let _guard = install_statement_time(transaction_time());
+    operation()
+}
+
 pub(super) fn evaluate(name: &str, values: &[Value]) -> Option<QueryResult<Value>> {
     let result = match name {
         "date" => date(values, false, false),
         "date.realtime" => date(values, true, true),
-        "date.statement" | "date.transaction" => date(values, false, true),
+        "date.statement" => date(values, false, true),
+        "date.transaction" => with_transaction_clock(|| date(values, false, true)),
         "localtime" | "local_time" => local_time(values, false, false),
         "localtime.realtime" => local_time(values, true, true),
-        "localtime.statement" | "localtime.transaction" => local_time(values, false, true),
+        "localtime.statement" => local_time(values, false, true),
+        "localtime.transaction" => with_transaction_clock(|| local_time(values, false, true)),
         "time" | "zoned_time" => time(values, false, false),
         "time.realtime" => time(values, true, true),
-        "time.statement" | "time.transaction" => time(values, false, true),
+        "time.statement" => time(values, false, true),
+        "time.transaction" => with_transaction_clock(|| time(values, false, true)),
         "localdatetime" | "local_datetime" => local_datetime(values, false, false),
         "localdatetime.realtime" => local_datetime(values, true, true),
-        "localdatetime.statement" | "localdatetime.transaction" => {
-            local_datetime(values, false, true)
+        "localdatetime.statement" => local_datetime(values, false, true),
+        "localdatetime.transaction" => {
+            with_transaction_clock(|| local_datetime(values, false, true))
         }
         "datetime" | "zoned_datetime" => zoned_datetime(values, false, false),
         "datetime.realtime" => zoned_datetime(values, true, true),
-        "datetime.statement" | "datetime.transaction" => zoned_datetime(values, false, true),
+        "datetime.statement" => zoned_datetime(values, false, true),
+        "datetime.transaction" => with_transaction_clock(|| zoned_datetime(values, false, true)),
         "timestamp" => timestamp(values),
         _ => return None,
     };

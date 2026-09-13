@@ -36,8 +36,9 @@ use serde_json::{Value, json};
 
 const ABI_VERSION: u32 = 1;
 const STORAGE_FORMAT_MIN: i64 = 1;
-const STORAGE_FORMAT_MAX: i64 = 1;
-const STORAGE_FORMAT_CURRENT: i64 = 1;
+const STORAGE_FORMAT_MAX: i64 = 2;
+const STORAGE_FORMAT_CURRENT: i64 = 2;
+const SQLITE_MIN_VERSION_NUMBER: c_int = 3_045_000;
 const META_TABLE: &str = "_lithograph_meta";
 const INTERNAL_PREFIX: &str = "_lithograph_";
 const MAGIC: &str = "lithograph-format-v1";
@@ -45,18 +46,44 @@ const ROWS_MODULE_NAME: &CStr = c"lithograph_rows";
 
 static NEXT_SAVEPOINT: AtomicU64 = AtomicU64::new(1);
 static REGISTERED_CONNECTIONS: OnceLock<Mutex<HashMap<usize, usize>>> = OnceLock::new();
+const EXPLICIT_TRANSACTION_CLIENTDATA_KEY: &CStr = c"lithograph.explicit-transaction.v1";
 
 type SqliteIsInterrupted = unsafe extern "C" fn(*mut ffi::sqlite3) -> c_int;
+type SqliteGetClientdata = unsafe extern "C" fn(*mut ffi::sqlite3, *const c_char) -> *mut c_void;
+type SqliteSetClientdata = unsafe extern "C" fn(
+    *mut ffi::sqlite3,
+    *const c_char,
+    *mut c_void,
+    Option<unsafe extern "C" fn(*mut c_void)>,
+) -> c_int;
 
 // sqlite3_api_routines is append-only. sqlite3_is_interrupted was appended in
 // SQLite 3.41.0 at zero-based table slot 266. Lithograph requires
 // SQLite >= 3.45, so every supported loadable-extension host provides it even
 // though libsqlite3-sys's conservative default bindings stop at an older slot.
 const SQLITE_API_IS_INTERRUPTED_SLOT: usize = 266;
+const SQLITE_API_GET_CLIENTDATA_SLOT: usize = 268;
+const SQLITE_API_SET_CLIENTDATA_SLOT: usize = 269;
 static SQLITE_IS_INTERRUPTED: OnceLock<SqliteIsInterrupted> = OnceLock::new();
+static SQLITE_GET_CLIENTDATA: OnceLock<SqliteGetClientdata> = OnceLock::new();
+static SQLITE_SET_CLIENTDATA: OnceLock<SqliteSetClientdata> = OnceLock::new();
 
 struct ConnectionRegistration {
     handle: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ExplicitTransactionState {
+    branch: String,
+    base_commit: storage::HashId,
+    author: Option<String>,
+    message: Option<String>,
+    started_at_micros: i64,
+    mutated: bool,
+}
+
+struct ExplicitTransactionSlot {
+    state: Option<ExplicitTransactionState>,
 }
 
 impl ConnectionRegistration {
@@ -89,6 +116,99 @@ fn registered_connections() -> &'static Mutex<HashMap<usize, usize>> {
     REGISTERED_CONNECTIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn explicit_transaction_state(handle: *mut ffi::sqlite3) -> Option<ExplicitTransactionState> {
+    if handle.is_null() {
+        return None;
+    }
+    let slot = host_get_clientdata(handle, EXPLICIT_TRANSACTION_CLIENTDATA_KEY)
+        .cast::<ExplicitTransactionSlot>();
+    if slot.is_null() {
+        return None;
+    }
+    // SAFETY: this key is only populated with `ExplicitTransactionSlot` below.
+    unsafe { (*slot).state.clone() }
+}
+
+unsafe extern "C" fn destroy_explicit_transaction_slot(pointer: *mut c_void) {
+    if pointer.is_null() {
+        return;
+    }
+    // SAFETY: SQLite invokes this destructor exactly once for the Box pointer
+    // registered by `store_explicit_transaction_state`.
+    drop(unsafe { Box::from_raw(pointer.cast::<ExplicitTransactionSlot>()) });
+}
+
+fn store_explicit_transaction_state(
+    handle: *mut ffi::sqlite3,
+    state: ExplicitTransactionState,
+) -> LithographResult<()> {
+    let slot = host_get_clientdata(handle, EXPLICIT_TRANSACTION_CLIENTDATA_KEY)
+        .cast::<ExplicitTransactionSlot>();
+    if !slot.is_null() {
+        // SAFETY: this key is only populated with `ExplicitTransactionSlot`.
+        unsafe { (*slot).state = Some(state) };
+        return Ok(());
+    }
+    let slot = Box::into_raw(Box::new(ExplicitTransactionSlot { state: Some(state) }));
+    let code = host_set_clientdata(
+        handle,
+        EXPLICIT_TRANSACTION_CLIENTDATA_KEY,
+        slot.cast::<c_void>(),
+        Some(destroy_explicit_transaction_slot),
+    );
+    if code == ffi::SQLITE_OK {
+        Ok(())
+    } else {
+        Err(map_sqlite_error(
+            SqliteError::SqliteFailure(ffi::Error::new(code), None),
+            "failed to attach explicit transaction state to SQLite connection",
+        ))
+    }
+}
+
+fn update_explicit_transaction_state(
+    handle: *mut ffi::sqlite3,
+    update: impl FnOnce(&mut ExplicitTransactionState) -> LithographResult<()>,
+) -> LithographResult<()> {
+    let slot = host_get_clientdata(handle, EXPLICIT_TRANSACTION_CLIENTDATA_KEY)
+        .cast::<ExplicitTransactionSlot>();
+    if slot.is_null() {
+        return Err(LithographError::internal(
+            "explicit transaction state disappeared during execution",
+        ));
+    }
+    // SAFETY: this key is only populated with `ExplicitTransactionSlot`.
+    let state = unsafe { (*slot).state.as_mut() }.ok_or_else(|| {
+        LithographError::internal("explicit transaction state disappeared during execution")
+    })?;
+    update(state)
+}
+
+fn clear_explicit_transaction_state(handle: *mut ffi::sqlite3) {
+    if handle.is_null() {
+        return;
+    }
+    let slot = host_get_clientdata(handle, EXPLICIT_TRANSACTION_CLIENTDATA_KEY)
+        .cast::<ExplicitTransactionSlot>();
+    if !slot.is_null() {
+        // SAFETY: this key is only populated with `ExplicitTransactionSlot`.
+        unsafe { (*slot).state = None };
+    }
+}
+
+fn require_no_explicit_transaction(connection: &Connection) -> LithographResult<()> {
+    // SAFETY: `connection` is live for this call.
+    let handle = unsafe { connection.handle() };
+    if explicit_transaction_state(handle).is_some() {
+        return Err(LithographError::new(
+            ErrorCategory::TransactionBoundaryRequired,
+            "an explicit Lithograph transaction is active on this connection",
+            ffi::SQLITE_ERROR,
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ErrorCategory {
     Parse,
@@ -103,6 +223,9 @@ enum ErrorCategory {
     TagNotFound,
     GraphViewViolation,
     BranchHeadMoved,
+    MergeSessionNotFound,
+    MergeSessionChanged,
+    MergeConflict,
     ReadOnlyAdapter,
     ReadOnlySnapshot,
     TransactionBoundaryRequired,
@@ -129,6 +252,9 @@ impl ErrorCategory {
             Self::TagNotFound => "TAG_NOT_FOUND",
             Self::GraphViewViolation => "GRAPH_VIEW_VIOLATION",
             Self::BranchHeadMoved => "BRANCH_HEAD_MOVED",
+            Self::MergeSessionNotFound => "MERGE_SESSION_NOT_FOUND",
+            Self::MergeSessionChanged => "MERGE_SESSION_CHANGED",
+            Self::MergeConflict => "MERGE_CONFLICT",
             Self::ReadOnlyAdapter => "READ_ONLY_ADAPTER",
             Self::ReadOnlySnapshot => "READ_ONLY_SNAPSHOT",
             Self::TransactionBoundaryRequired => "TRANSACTION_BOUNDARY_REQUIRED",
@@ -231,11 +357,14 @@ pub unsafe extern "C" fn sqlite3_lithograph_init(
     // SAFETY: SQLite is the only caller of this entry point and supplies all
     // pointers according to the loadable-extension ABI documented above.
     match catch_unwind(AssertUnwindSafe(|| {
+        if !host_sqlite_version_supported(p_api) {
+            return ffi::SQLITE_ERROR;
+        }
         // SAFETY: SQLite owns `db`, `pz_err_msg`, and `p_api` for this init
         // call and requires extensions to initialize their API thunk table
         // before invoking SQLite services.
         let code = unsafe { Connection::extension_init2(db, pz_err_msg, p_api, extension_init) };
-        if code == ffi::SQLITE_OK && !capture_is_interrupted_api(p_api) {
+        if code == ffi::SQLITE_OK && !capture_required_host_apis(p_api) {
             return ffi::SQLITE_ERROR;
         }
         code
@@ -245,8 +374,31 @@ pub unsafe extern "C" fn sqlite3_lithograph_init(
     }
 }
 
-fn capture_is_interrupted_api(p_api: *mut ffi::sqlite3_api_routines) -> bool {
-    if SQLITE_IS_INTERRUPTED.get().is_some() {
+fn host_sqlite_version_supported(p_api: *mut ffi::sqlite3_api_routines) -> bool {
+    host_sqlite_version_number(p_api).is_some_and(sqlite_version_number_supported)
+}
+
+fn sqlite_version_number_supported(version: c_int) -> bool {
+    version >= SQLITE_MIN_VERSION_NUMBER
+}
+
+fn host_sqlite_version_number(p_api: *mut ffi::sqlite3_api_routines) -> Option<c_int> {
+    if p_api.is_null() {
+        return None;
+    }
+    // SAFETY: `libversion_number` is part of the original extension API table
+    // prefix and is therefore readable before touching any newer append-only
+    // slots. This guard prevents out-of-bounds access on unsupported hosts.
+    let function = unsafe { (*p_api).libversion_number }?;
+    // SAFETY: the function pointer comes from the live host API table.
+    Some(unsafe { function() })
+}
+
+fn capture_required_host_apis(p_api: *mut ffi::sqlite3_api_routines) -> bool {
+    if SQLITE_IS_INTERRUPTED.get().is_some()
+        && SQLITE_GET_CLIENTDATA.get().is_some()
+        && SQLITE_SET_CLIENTDATA.get().is_some()
+    {
         return true;
     }
     if p_api.is_null() {
@@ -257,19 +409,35 @@ fn capture_is_interrupted_api(p_api: *mut ffi::sqlite3_api_routines) -> bool {
     // append-only array of function pointers. The host allocation is larger
     // than the conservative Rust binding type when loading on SQLite >= 3.41.
     let slots = p_api.cast::<*const c_void>();
-    // SAFETY: supported hosts are SQLite >= 3.45, whose API table contains
-    // zero-based slot 266 (`sqlite3_is_interrupted`).
-    let slot = unsafe { slots.add(SQLITE_API_IS_INTERRUPTED_SLOT) };
-    // SAFETY: `slot` points inside the live host-owned sqlite3_api_routines
-    // table passed to this extension initialization call.
-    let raw = unsafe { slot.read() };
-    if raw.is_null() {
+    // SAFETY: supported hosts are SQLite >= 3.45, whose append-only API table
+    // contains slots 266 (`is_interrupted`) and 268/269 (client data).
+    let interrupted_slot = unsafe { slots.add(SQLITE_API_IS_INTERRUPTED_SLOT) };
+    // SAFETY: the slot points inside the live host-owned API table.
+    let interrupted = unsafe { interrupted_slot.read() };
+    // SAFETY: same host-owned API table and minimum SQLite version as above.
+    let get_clientdata_slot = unsafe { slots.add(SQLITE_API_GET_CLIENTDATA_SLOT) };
+    // SAFETY: the slot points inside the live host-owned API table.
+    let get_clientdata = unsafe { get_clientdata_slot.read() };
+    // SAFETY: same host-owned API table and minimum SQLite version as above.
+    let set_clientdata_slot = unsafe { slots.add(SQLITE_API_SET_CLIENTDATA_SLOT) };
+    // SAFETY: the slot points inside the live host-owned API table.
+    let set_clientdata = unsafe { set_clientdata_slot.read() };
+    if interrupted.is_null() || get_clientdata.is_null() || set_clientdata.is_null() {
         return false;
     }
-    // SAFETY: SQLite documents slot 266 as
-    // `int (*is_interrupted)(sqlite3*)` from 3.41 onward.
-    let function = unsafe { std::mem::transmute::<*const c_void, SqliteIsInterrupted>(raw) };
-    let _ = SQLITE_IS_INTERRUPTED.set(function);
+    // SAFETY: SQLite documents these append-only slots with the signatures
+    // represented by the aliases above.
+    let interrupted =
+        unsafe { std::mem::transmute::<*const c_void, SqliteIsInterrupted>(interrupted) };
+    // SAFETY: see the API-slot contract above.
+    let get_clientdata =
+        unsafe { std::mem::transmute::<*const c_void, SqliteGetClientdata>(get_clientdata) };
+    // SAFETY: see the API-slot contract above.
+    let set_clientdata =
+        unsafe { std::mem::transmute::<*const c_void, SqliteSetClientdata>(set_clientdata) };
+    let _ = SQLITE_IS_INTERRUPTED.set(interrupted);
+    let _ = SQLITE_GET_CLIENTDATA.set(get_clientdata);
+    let _ = SQLITE_SET_CLIENTDATA.set(set_clientdata);
     true
 }
 
@@ -282,7 +450,32 @@ fn host_is_interrupted(db: *mut ffi::sqlite3) -> bool {
     unsafe { function(db) != 0 }
 }
 
+fn host_get_clientdata(db: *mut ffi::sqlite3, key: &CStr) -> *mut c_void {
+    let Some(function) = SQLITE_GET_CLIENTDATA.get() else {
+        return ptr::null_mut();
+    };
+    // SAFETY: the function pointer comes from the host API table, `db` is a
+    // live SQLite connection, and `key` is NUL-terminated for the call.
+    unsafe { function(db, key.as_ptr()) }
+}
+
+fn host_set_clientdata(
+    db: *mut ffi::sqlite3,
+    key: &CStr,
+    data: *mut c_void,
+    destructor: Option<unsafe extern "C" fn(*mut c_void)>,
+) -> c_int {
+    let Some(function) = SQLITE_SET_CLIENTDATA.get() else {
+        return ffi::SQLITE_MISUSE;
+    };
+    // SAFETY: the function pointer comes from the host API table; SQLite owns
+    // the client-data lifecycle after a successful registration.
+    unsafe { function(db, key.as_ptr(), data, destructor) }
+}
+
 fn extension_init(db: Connection) -> SqliteResult<bool> {
+    storage::initialize_connection_state(&db)
+        .map_err(|error| rusqlite::Error::ModuleError(error.to_string()))?;
     register_scalar_functions(&db)?;
 
     const ROWS_MODULE: Module<'static, RowsTab> = Module::eponymous_only_module();
@@ -303,9 +496,13 @@ fn initialize(connection: &Connection) -> LithographResult<Value> {
     }
 }
 
-fn initialize_existing(connection: &Connection, metadata: Metadata) -> LithographResult<Value> {
+fn initialize_existing(connection: &Connection, mut metadata: Metadata) -> LithographResult<Value> {
     ensure_supported_format(&metadata)?;
-    migrate_phase01_bootstrap(connection)?;
+    let bootstrapped = migrate_phase01_bootstrap(connection)?;
+    if metadata.storage_format == 1 {
+        migrate_storage_format_1_to_2(connection, bootstrapped)?;
+        metadata.storage_format = 2;
+    }
     ensure_current_metadata_integrity(connection)?;
     let root = storage::root_commit(connection)
         .map_err(|error| map_storage_error(error, "failed to resolve Root Commit"))?;
@@ -314,9 +511,9 @@ fn initialize_existing(connection: &Connection, metadata: Metadata) -> Lithograp
     Ok(init_json(&metadata, root))
 }
 
-fn migrate_phase01_bootstrap(connection: &Connection) -> LithographResult<()> {
+fn migrate_phase01_bootstrap(connection: &Connection) -> LithographResult<bool> {
     if !is_phase01_metadata_bootstrap(connection)? {
-        return Ok(());
+        return Ok(false);
     }
     storage::create_storage_schema(connection).map_err(|error| {
         map_storage_error(error, "failed to migrate Phase 01 storage bootstrap")
@@ -324,7 +521,34 @@ fn migrate_phase01_bootstrap(connection: &Connection) -> LithographResult<()> {
     storage::initialize_root(connection).map_err(|error| {
         map_storage_error(error, "failed to initialize Root Commit during migration")
     })?;
-    Ok(())
+    Ok(true)
+}
+
+fn migrate_storage_format_1_to_2(
+    connection: &Connection,
+    sidecars_already_created: bool,
+) -> LithographResult<()> {
+    with_savepoint(connection, |connection| {
+        if !sidecars_already_created {
+            storage::create_format2_schema(connection).map_err(|error| {
+                map_storage_error(error, "failed to create storage-format-2 schema")
+            })?;
+        }
+        let changed = connection
+            .execute(
+                "UPDATE main._lithograph_meta SET storage_format = 2 WHERE id = 1 AND storage_format = 1",
+                [],
+            )
+            .map_err(|error| {
+                map_sqlite_error(error, "failed to advance Lithograph storage format")
+            })?;
+        if changed != 1 {
+            return Err(LithographError::storage(
+                "storage-format-1 migration lost the metadata compare-and-swap",
+            ));
+        }
+        Ok(())
+    })
 }
 
 fn initialize_fresh(connection: &Connection) -> LithographResult<Value> {
@@ -675,7 +899,8 @@ use metadata_integrity::{
 use native::input_utf8;
 pub use native::{
     LithographEventCallbackV1, LithographEventKindV1, lithograph_v1_execute, lithograph_v1_free,
-    lithograph_v1_validate,
+    lithograph_v1_tx_abort, lithograph_v1_tx_begin, lithograph_v1_tx_commit,
+    lithograph_v1_tx_execute, lithograph_v1_validate,
 };
 use rows::RowsTab;
 use scalar::register_scalar_functions;

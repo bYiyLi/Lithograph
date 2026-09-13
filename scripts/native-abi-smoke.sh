@@ -13,9 +13,16 @@ output="${CARGO_TARGET_DIR:-target}/phase01/native-abi-smoke"
 mkdir -p "$(dirname -- "$output")"
 
 dynamic_loader_lib=""
-if [ "$(uname -s)" = "Linux" ]; then
-  dynamic_loader_lib="-ldl"
-fi
+thread_lib=""
+case "$(uname -s)" in
+  Darwin)
+    thread_lib="-pthread"
+    ;;
+  Linux)
+    dynamic_loader_lib="-ldl"
+    thread_lib="-pthread"
+    ;;
+esac
 
 ${CC:-cc} \
   -std=c11 \
@@ -24,7 +31,7 @@ ${CC:-cc} \
   -I"$sqlite_prefix/include" \
   -L"$sqlite_prefix/lib" \
   tests/native_abi_smoke.c \
-  -lsqlite3 $dynamic_loader_lib \
+  -lsqlite3 $dynamic_loader_lib $thread_lib \
   -o "$output"
 
 "$output" "$extension"

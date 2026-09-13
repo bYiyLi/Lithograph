@@ -42,6 +42,38 @@ int lithograph_v1_validate(
     char **error_json
 );
 
+int lithograph_v1_tx_begin(
+    sqlite3 *db,
+    const char *options_json,
+    size_t options_len,
+    char **result_json,
+    char **error_json
+);
+
+int lithograph_v1_tx_execute(
+    sqlite3 *db,
+    const char *query,
+    size_t query_len,
+    const char *params_json,
+    size_t params_len,
+    const char *options_json,
+    size_t options_len,
+    lithograph_event_callback_v1 callback,
+    void *user_data,
+    char **error_json
+);
+
+int lithograph_v1_tx_commit(
+    sqlite3 *db,
+    char **result_json,
+    char **error_json
+);
+
+int lithograph_v1_tx_abort(
+    sqlite3 *db,
+    char **error_json
+);
+
 void lithograph_v1_free(void *ptr);
 
 #ifdef __cplusplus

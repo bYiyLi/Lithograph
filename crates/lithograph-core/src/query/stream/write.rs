@@ -19,6 +19,18 @@ impl QueryCursor {
         max_rows: usize,
         is_interrupted: &dyn Fn() -> bool,
     ) -> QueryResult<QueryBatch> {
+        if self
+            .prepared
+            .program
+            .as_ref()
+            .is_some_and(|program| program.checkout_operation)
+            && !connection.is_autocommit()
+        {
+            self.finished = true;
+            return Err(QueryError::transaction_boundary_required(
+                "Branch checkout requires SQLite autocommit mode",
+            ));
+        }
         self.start_pending_write(connection, is_interrupted)?;
         self.cancel_interrupted_write(connection, is_interrupted)?;
         self.next_active_write_batch(max_rows)
@@ -29,65 +41,45 @@ impl QueryCursor {
         connection: &Connection,
         is_interrupted: &dyn Fn() -> bool,
     ) -> QueryResult<()> {
-        if matches!(self.write_state, WriteState::Pending) {
+        if !matches!(self.write_state, WriteState::Pending) {
+            return Ok(());
+        }
+        let retry_version_busy = connection.is_autocommit()
+            && self
+                .prepared
+                .program
+                .as_ref()
+                .is_some_and(|program| program.version_mutation && !program.writes);
+        let original_metrics = self.metrics.clone();
+        for attempt in 0..2 {
+            if attempt != 0 {
+                self.metrics = original_metrics.clone();
+            }
             let ordinal = NEXT_WRITE_SAVEPOINT.fetch_add(1, Ordering::Relaxed);
             let savepoint = format!("lithograph_write_{ordinal}");
             connection.execute_batch(&format!("SAVEPOINT {savepoint}"))?;
             let outcome = catch_unwind(AssertUnwindSafe(|| {
-                if let Some(write) = self.prepared.write.as_ref() {
-                    super::super::mutation::execute_write(
-                        connection,
-                        write,
-                        self.prepared.commit,
-                        &self.prepared.params,
-                        &mut self.metrics,
-                        is_interrupted,
-                    )
-                    .map(|outcome| CursorWriteOutcome {
-                        rows: outcome.rows,
-                        commit: outcome.commit,
-                        counters: query_counters(outcome.counters),
-                        query_type: QueryType::Write,
-                    })
-                } else if let Some(schema) = self.prepared.schema.as_ref() {
-                    super::super::schema::execute_schema(
-                        connection,
-                        schema,
-                        self.prepared.commit,
-                        is_interrupted,
-                    )
-                    .map(|outcome| CursorWriteOutcome {
-                        rows: Vec::new(),
-                        commit: outcome.commit,
-                        counters: schema_query_counters(outcome.counters),
-                        query_type: QueryType::Schema,
-                    })
-                } else if let Some(program) = self.prepared.program.as_ref() {
-                    super::super::mutation::execute_program(
-                        connection,
-                        program,
-                        self.prepared.commit,
-                        &self.prepared.params,
-                        &mut self.metrics,
-                        is_interrupted,
-                    )
-                    .map(|outcome| CursorWriteOutcome {
-                        rows: outcome.rows,
-                        commit: outcome.commit,
-                        counters: query_counters(outcome.counters),
-                        query_type: QueryType::Write,
-                    })
-                } else {
-                    Err(QueryError::internal(
-                        "write query is missing its mutation plan",
-                    ))
-                }
+                self.execute_pending_write(connection, is_interrupted)
             }));
-            let outcome = match outcome {
-                Ok(Ok(outcome)) => outcome,
+            match outcome {
+                Ok(Ok(outcome)) => {
+                    self.install_active_write(savepoint, outcome);
+                    return Ok(());
+                }
                 Ok(Err(error)) => {
+                    if let Err(cleanup) = rollback_write_savepoint(connection, &savepoint) {
+                        self.finished = true;
+                        self.write_state = WriteState::None;
+                        return Err(cleanup);
+                    }
+                    let retry = attempt == 0
+                        && retry_version_busy
+                        && error.sqlite_code == Some(rusqlite::ffi::SQLITE_BUSY)
+                        && !is_interrupted();
+                    if retry {
+                        continue;
+                    }
                     self.finished = true;
-                    rollback_write_savepoint(connection, &savepoint)?;
                     return Err(error);
                 }
                 Err(_) => {
@@ -97,22 +89,95 @@ impl QueryCursor {
                         "panic while executing a Lithograph mutating query",
                     ));
                 }
-            };
-            self.metrics.rows = outcome.rows.len().try_into().unwrap_or(u64::MAX);
-            let summary = QuerySummary {
-                query_type: outcome.query_type,
-                commit: format!("commit/{}", outcome.commit.to_hex()),
-                counters: outcome.counters,
-                metrics: self.metrics.clone(),
-            };
-            self.write_state = WriteState::Active {
-                savepoint,
-                rows: outcome.rows,
-                offset: 0,
-                summary,
-            };
+            }
         }
-        Ok(())
+        Err(QueryError::internal(
+            "Version Procedure optimistic write retry did not terminate",
+        ))
+    }
+
+    fn execute_pending_write(
+        &mut self,
+        connection: &Connection,
+        is_interrupted: &dyn Fn() -> bool,
+    ) -> QueryResult<CursorWriteOutcome> {
+        if let Some(write) = self.prepared.write.as_ref() {
+            return super::super::mutation::execute_write(
+                connection,
+                write,
+                self.prepared.commit,
+                &self.prepared.params,
+                &mut self.metrics,
+                is_interrupted,
+            )
+            .map(write_cursor_outcome);
+        }
+        if let Some(schema) = self.prepared.schema.as_ref() {
+            return super::super::schema::execute_schema(
+                connection,
+                schema,
+                self.prepared.commit,
+                is_interrupted,
+            )
+            .map(|outcome| CursorWriteOutcome {
+                rows: Vec::new(),
+                commit: outcome.commit,
+                counters: schema_query_counters(outcome.counters),
+                query_type: QueryType::Schema,
+            });
+        }
+        let Some(program) = self.prepared.program.as_ref() else {
+            return Err(QueryError::internal(
+                "write query is missing its mutation plan",
+            ));
+        };
+        if program.version_mutation && !program.writes {
+            return super::super::completeness::execute_version_program(
+                connection,
+                program,
+                self.prepared.commit,
+                &self.prepared.graph_view,
+                &self.prepared.params,
+                &mut self.metrics,
+                is_interrupted,
+            )
+            .and_then(|rows| {
+                let branch = crate::storage::active_branch(connection)?;
+                let commit = crate::storage::branch_head(connection, &branch)?;
+                Ok(CursorWriteOutcome {
+                    rows,
+                    commit,
+                    counters: QueryCounters::default(),
+                    query_type: QueryType::Version,
+                })
+            });
+        }
+        super::super::mutation::execute_program(
+            connection,
+            program,
+            self.prepared.commit,
+            &self.prepared.params,
+            &mut self.metrics,
+            is_interrupted,
+        )
+        .map(write_cursor_outcome)
+    }
+
+    fn install_active_write(&mut self, savepoint: String, outcome: CursorWriteOutcome) {
+        self.metrics.rows = outcome.rows.len().try_into().unwrap_or(u64::MAX);
+        let summary = super::committed_summary(
+            outcome.query_type,
+            outcome.commit,
+            outcome.counters,
+            &self.metrics,
+            self.suppress_summary_commit,
+        );
+        self.write_state = WriteState::Active {
+            savepoint,
+            rows: outcome.rows,
+            offset: 0,
+            summary,
+        };
     }
 
     fn cancel_interrupted_write(
@@ -273,6 +338,15 @@ fn query_counters(counters: super::super::mutation::MutationCounters) -> QueryCo
         labels_added: counters.labels_added,
         labels_removed: counters.labels_removed,
         ..QueryCounters::default()
+    }
+}
+
+fn write_cursor_outcome(outcome: super::super::mutation::WriteOutcome) -> CursorWriteOutcome {
+    CursorWriteOutcome {
+        rows: outcome.rows,
+        commit: outcome.commit,
+        counters: query_counters(outcome.counters),
+        query_type: QueryType::Write,
     }
 }
 
