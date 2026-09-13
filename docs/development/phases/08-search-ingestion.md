@@ -1,6 +1,6 @@
 # Phase 08：Search and Data Ingestion
 
-**状态：`ready`**
+**状态：`done`**
 
 ## 1. 目标
 
@@ -90,25 +90,25 @@ Native API 实现：
 
 ## 5. Acceptance
 
-- [ ] Full-text node/relationship query 与 frozen Profile oracle 对齐；
-- [ ] Full-text `skip`/`limit` 在 Graph View visibility 后计算，hidden result 不占用返回名额；
-- [ ] FTS5 cache 删除后可重建且结果一致；
-- [ ] vector property round-trip 保留 coordinate type/dimension；
-- [ ] SEARCH node/relationship/filter/score/limit fixtures 通过；
-- [ ] HNSW 与 exact fallback 在同一 Graph View 下都不返回 hidden element，hidden candidate 不截断可见 top-k；
-- [ ] HNSW result 满足 Profile ANN contract；
-- [ ] cache 缺失时 exact fallback 结果语义正确；
-- [ ] historical commit 的 full-text/vector query 不读取 current-head derived index；
-- [ ] LOAD CSV large streaming fixture 无全文件 materialization；
-- [ ] malformed CSV/network/file failure rollback 正确；
-- [ ] `lithograph_rows` 对 `LOAD CSV` 与 transaction-owning query 返回 `READ_ONLY_ADAPTER`，不触发 filesystem/network/transaction side effect；
-- [ ] Native API transaction batching 产生独立 durable Commits；
-- [ ] successful mutating batch 数与新增 Commit 数一致；read-only batch 不新增 Commit；
-- [ ] Graph View + ordered `IN TRANSACTIONS` 的后续 batch 按 Cypher 语义观察前一成功 batch 已 durable 的可见 graph changes；每个 batch 使用自身 pinned Snapshot 计算 visibility；
-- [ ] Graph View + `IN CONCURRENT TRANSACTIONS` 不复用 outer-query stale membership；每个 batch 的 visibility 与其实际 pinned branch base / coordinator execution state 一致；
-- [ ] internal concurrent batches 不因彼此 branch advance 产生伪 `BRANCH_HEAD_MOVED`，外部并发 writer 仍能触发真实 stale-head error；
-- [ ] SQL Bridge transaction-owning query 返回规定 error；
-- [ ] compatibility matrix Search/Ingestion families 全部 `done`。
+- [x] Full-text node/relationship query 与 frozen Profile oracle 对齐；
+- [x] Full-text `skip`/`limit` 在 Graph View visibility 后计算，hidden result 不占用返回名额；
+- [x] FTS5 cache 删除后可重建且结果一致；
+- [x] vector property round-trip 保留 coordinate type/dimension；
+- [x] SEARCH node/relationship/filter/score/limit fixtures 通过；
+- [x] HNSW 与 exact fallback 在同一 Graph View 下都不返回 hidden element，hidden candidate 不截断可见 top-k；
+- [x] HNSW result 满足 Profile ANN contract；
+- [x] cache 缺失时 exact fallback 结果语义正确；
+- [x] historical commit 的 full-text/vector query 不读取 current-head derived index；
+- [x] LOAD CSV large streaming fixture 无全文件 materialization；
+- [x] malformed CSV/network/file failure rollback 正确；
+- [x] `lithograph_rows` 对 `LOAD CSV` 与 transaction-owning query 返回 `READ_ONLY_ADAPTER`，不触发 filesystem/network/transaction side effect；
+- [x] Native API transaction batching 产生独立 durable Commits；
+- [x] successful mutating batch 数与新增 Commit 数一致；read-only batch 不新增 Commit；
+- [x] Graph View + ordered `IN TRANSACTIONS` 的后续 batch 按 Cypher 语义观察前一成功 batch 已 durable 的可见 graph changes；每个 batch 使用自身 pinned Snapshot 计算 visibility；
+- [x] Graph View + `IN CONCURRENT TRANSACTIONS` 不复用 outer-query stale membership；每个 batch 的 visibility 与其实际 pinned branch base / coordinator execution state 一致；
+- [x] internal concurrent batches 不因彼此 branch advance 产生伪 `BRANCH_HEAD_MOVED`，外部并发 writer 仍能触发真实 stale-head error；
+- [x] SQL Bridge transaction-owning query 返回规定 error；
+- [x] compatibility matrix Search/Ingestion families 全部 `done`。
 
 ## 6. Review
 

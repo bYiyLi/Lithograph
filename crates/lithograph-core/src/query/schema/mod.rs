@@ -13,3 +13,14 @@ pub(crate) use index::{
 };
 pub(crate) use show::show_rows;
 pub(crate) use validate::validate_snapshot_against_commit_schema;
+
+pub(crate) fn standard_index_kind_name(kind: crate::storage::StandardIndexKind) -> &'static str {
+    match kind {
+        crate::storage::StandardIndexKind::Lookup => "LOOKUP",
+        crate::storage::StandardIndexKind::Range => "RANGE",
+        crate::storage::StandardIndexKind::Text => "TEXT",
+        crate::storage::StandardIndexKind::Point => "POINT",
+        crate::storage::StandardIndexKind::FullText => "FULLTEXT",
+        crate::storage::StandardIndexKind::Vector => "VECTOR",
+    }
+}

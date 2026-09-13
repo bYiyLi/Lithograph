@@ -703,6 +703,79 @@ static void check_native_write_cancel(
     sqlite3_finalize(statement);
 }
 
+static void check_native_transaction_batches(
+    execute_fn execute,
+    free_fn lithograph_free,
+    sqlite3 *db
+) {
+    const char *query =
+        "UNWIND [1,2,3] AS value "
+        "CALL (value) { CREATE (:NativeBatch {value:value}) } "
+        "IN TRANSACTIONS OF 2 ROWS FINISH";
+    int64_t before = commit_count(db);
+    char *error_json = NULL;
+    callback_count = 0;
+    int rc = execute(
+        db,
+        query,
+        strlen(query),
+        "{}",
+        2,
+        "{}",
+        2,
+        event_callback,
+        NULL,
+        &error_json
+    );
+    require(rc == SQLITE_OK, "native transaction-owning query must succeed in autocommit mode");
+    require(error_json == NULL, "successful transaction batches must not allocate error_json");
+    require(commit_count(db) == before + 2, "three rows batched by two must create exactly two Commits");
+
+    sqlite3_stmt *statement = NULL;
+    require(
+        sqlite3_prepare_v2(
+            db,
+            "SELECT json_extract(lithograph('MATCH (n:NativeBatch) RETURN count(n)'), '$.rows[0][0]')",
+            -1,
+            &statement,
+            NULL
+        ) == SQLITE_OK,
+        "failed to prepare native batch verification"
+    );
+    require(sqlite3_step(statement) == SQLITE_ROW, "native batch verification returned no row");
+    require(sqlite3_column_int64(statement, 0) == 3, "native batch query did not persist all rows");
+    sqlite3_finalize(statement);
+
+    char *sqlite_error = NULL;
+    require(
+        sqlite3_exec(db, "BEGIN;", NULL, NULL, &sqlite_error) == SQLITE_OK,
+        sqlite_error == NULL ? "failed to start caller transaction" : sqlite_error
+    );
+    sqlite3_free(sqlite_error);
+    error_json = NULL;
+    rc = execute(
+        db,
+        query,
+        strlen(query),
+        "{}",
+        2,
+        "{}",
+        2,
+        event_callback,
+        NULL,
+        &error_json
+    );
+    require(rc == SQLITE_ERROR, "transaction-owning query inside caller transaction must fail");
+    require_error(error_json, "TRANSACTION_BOUNDARY_REQUIRED");
+    lithograph_free(error_json);
+    sqlite_error = NULL;
+    require(
+        sqlite3_exec(db, "ROLLBACK;", NULL, NULL, &sqlite_error) == SQLITE_OK,
+        sqlite_error == NULL ? "failed to rollback caller transaction" : sqlite_error
+    );
+    sqlite3_free(sqlite_error);
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) {
         fprintf(stderr, "usage: native-abi-smoke <extension-path>\n");
@@ -804,6 +877,7 @@ int main(int argc, char **argv) {
 
     check_native_read_events(execute, lithograph_free, db, query);
     check_native_write_cancel(execute, lithograph_free, db);
+    check_native_transaction_batches(execute, lithograph_free, db);
 
     sqlite3_close(db);
 

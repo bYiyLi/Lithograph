@@ -22,14 +22,14 @@ fn enabled_cypher25_fixtures_execute_against_the_real_engine() {
     let report = CompatibilityReport::from_results("CY25-2026.08", results);
 
     assert_eq!(report.total, 18);
-    assert_eq!(report.passed, 17, "{:#?}", report.results);
-    assert_eq!(report.planned, 1, "{:#?}", report.results);
+    assert_eq!(report.passed, 18, "{:#?}", report.results);
+    assert_eq!(report.planned, 0, "{:#?}", report.results);
     assert_eq!(report.failed, 0, "{:#?}", report.results);
     assert!(
         report
             .results
             .iter()
-            .all(|result| { result.status != FixtureStatus::Planned || result.family == "SEARCH" })
+            .all(|result| result.status == FixtureStatus::Passed)
     );
 }
 

@@ -347,16 +347,16 @@ fn merge_map_set_and_nested_foreach_are_multi_row_and_atomic() {
 }
 
 #[test]
-fn transaction_subqueries_are_rejected_until_their_owning_phase() {
+fn transaction_subqueries_are_classified_for_the_phase08_transaction_executor() {
     let connection = fresh_storage();
-    let error = prepare(
+    let prepared = prepare(
         &connection,
         "UNWIND [1] AS value CALL (value) { CREATE (:Deferred {value: value}) } IN TRANSACTIONS RETURN value",
         BTreeMap::new(),
         ExecutionOptions::default(),
     )
-    .expect_err("Phase 06 must not silently execute transaction modifiers");
-    assert!(error.message.contains("Phase 08 transaction executor"));
+    .expect("Phase 08 owns transaction-subquery execution");
+    assert!(prepared.requires_transaction_boundary());
     assert_eq!(
         rows(&connection, "MATCH (node:Deferred) RETURN count(node)"),
         vec![vec![Value::Integer(0)]]

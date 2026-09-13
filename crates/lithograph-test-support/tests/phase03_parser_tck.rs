@@ -10,20 +10,30 @@ use lithograph_test_support::tck::{TckStepArgument, expand_scenarios, read_featu
 fn cypher25_valid_parse_fixtures_parse() {
     let root = repo_root().join("tests/fixtures/cypher25");
     let fixtures = load_fixture_directory(&root).expect("CY25 fixture inventory should load");
-    let mut queries = 0_usize;
+    let expected_ids = [
+        "cy25-query-preamble-options-parser",
+        "cy25-search-execution",
+        "cy25-uuid-parser",
+        "cy25-vector-parser",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+    let mut observed_ids = BTreeSet::new();
     let mut failures = Vec::new();
 
     for fixture in fixtures {
-        if !matches!(
+        let parser_owned = matches!(
             fixture.expected,
             ExpectedOutcome::Parse {
                 valid: true,
                 error: None
             }
-        ) {
+        ) || fixture.id == "cy25-search-execution";
+        if !parser_owned {
             continue;
         }
-        queries += 1;
+        observed_ids.insert(fixture.id.clone());
         if let Err(error) = parse(&fixture.query) {
             failures.push(format!(
                 "{} @ {}:{}: {}\n{}",
@@ -32,7 +42,10 @@ fn cypher25_valid_parse_fixtures_parse() {
         }
     }
 
-    assert_eq!(queries, 4, "CY25 valid parser fixture inventory changed");
+    assert_eq!(
+        observed_ids, expected_ids,
+        "CY25 parser-owned fixture inventory changed"
+    );
     assert!(
         failures.is_empty(),
         "{} CY25 parser fixture failure(s):\n{}",

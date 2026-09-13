@@ -6,6 +6,7 @@ use rusqlite::Connection;
 use crate::cypher::{ExecutionMode, Value};
 use crate::storage::{RelationshipRecord, Snapshot};
 
+use super::completeness::PreparedProgram;
 use super::expression::{self, BindingRow, BindingValue};
 use super::graph::ResolvedGraphView;
 use super::plan::{Direction, MatchStep, NodeSpec, PatternPart, PreparedQuery, RelationshipSpec};
@@ -91,6 +92,7 @@ pub struct QueryCursor {
     write_state: WriteState,
     program_rows: Option<Vec<Vec<Value>>>,
     program_offset: usize,
+    transaction_summary: Option<QuerySummary>,
     finished: bool,
 }
 
@@ -823,19 +825,31 @@ fn bind_path(
     }
 }
 
+fn prepared_program<'a>(
+    prepared: &'a PreparedQuery,
+    missing_message: &str,
+) -> QueryResult<&'a PreparedProgram> {
+    prepared
+        .program
+        .as_ref()
+        .ok_or_else(|| QueryError::internal(missing_message))
+}
+
 impl QueryCursor {
     pub fn new(prepared: PreparedQuery) -> Self {
+        let transaction_boundary = prepared.requires_transaction_boundary();
         let barrier = if prepared.order.is_empty() && !prepared.distinct {
             BarrierState::Direct
         } else {
             BarrierState::Pending
         };
-        let write_state = if (prepared.write.is_some()
-            || prepared.schema.is_some()
-            || prepared
-                .program
-                .as_ref()
-                .is_some_and(|program| program.writes))
+        let write_state = if !transaction_boundary
+            && (prepared.write.is_some()
+                || prepared.schema.is_some()
+                || prepared
+                    .program
+                    .as_ref()
+                    .is_some_and(|program| program.writes))
             && prepared.mode != ExecutionMode::Explain
         {
             WriteState::Pending
@@ -857,6 +871,7 @@ impl QueryCursor {
             write_state,
             program_rows: None,
             program_offset: 0,
+            transaction_summary: None,
             finished: false,
         }
     }
@@ -874,6 +889,14 @@ impl QueryCursor {
                 .as_ref()
                 .is_some_and(|program| program.writes))
             && self.prepared.mode != ExecutionMode::Explain
+    }
+
+    pub fn requires_transaction_boundary(&self) -> bool {
+        self.prepared.requires_transaction_boundary()
+    }
+
+    pub fn has_external_io(&self) -> bool {
+        self.prepared.has_external_io()
     }
 
     pub fn next_batch(
@@ -905,6 +928,9 @@ impl QueryCursor {
         let max_rows = max_rows.clamp(1, 4_096);
         if self.prepared.mode == ExecutionMode::Explain {
             return self.next_explain();
+        }
+        if self.prepared.requires_transaction_boundary() {
+            return self.next_transaction_program(connection, max_rows, is_interrupted);
         }
         if self.is_write() {
             return self.next_write(connection, max_rows, is_interrupted);
@@ -942,11 +968,7 @@ impl QueryCursor {
         is_interrupted: &dyn Fn() -> bool,
     ) -> QueryResult<QueryBatch> {
         if self.program_rows.is_none() {
-            let program = self
-                .prepared
-                .program
-                .as_ref()
-                .ok_or_else(|| QueryError::internal("Phase 06 program is missing"))?;
+            let program = prepared_program(&self.prepared, "Phase 06 program is missing")?;
             let rows = super::completeness::execute_prepared_read(
                 connection,
                 program,
@@ -960,14 +982,9 @@ impl QueryCursor {
             self.metrics.rows = rows.len().try_into().unwrap_or(u64::MAX);
             self.program_rows = Some(rows);
         }
-        let rows = self
-            .program_rows
-            .as_ref()
-            .ok_or_else(|| QueryError::internal("Phase 06 program rows are missing"))?;
-        let end = self.program_offset.saturating_add(max_rows).min(rows.len());
-        let batch_rows = rows[self.program_offset..end].to_vec();
-        self.program_offset = end;
-        if self.program_offset >= rows.len() {
+        let (batch_rows, done) =
+            self.take_program_rows(max_rows, "Phase 06 program rows are missing")?;
+        if done {
             return self.finish(batch_rows);
         }
         Ok(QueryBatch {
@@ -975,6 +992,66 @@ impl QueryCursor {
             done: false,
             summary: None,
         })
+    }
+
+    fn next_transaction_program(
+        &mut self,
+        connection: &Connection,
+        max_rows: usize,
+        is_interrupted: &dyn Fn() -> bool,
+    ) -> QueryResult<QueryBatch> {
+        if self.program_rows.is_none() {
+            let program = prepared_program(&self.prepared, "transaction program is missing")?;
+            let outcome = super::transaction::execute_transaction_program(
+                connection,
+                program,
+                self.prepared.commit,
+                &self.prepared.params,
+                &mut self.metrics,
+                is_interrupted,
+            )?;
+            self.metrics.rows = outcome.rows.len().try_into().unwrap_or(u64::MAX);
+            self.transaction_summary = Some(QuerySummary {
+                query_type: if program.writes {
+                    QueryType::Write
+                } else {
+                    QueryType::Read
+                },
+                commit: format!("commit/{}", outcome.commit.to_hex()),
+                counters: outcome.counters,
+                metrics: self.metrics.clone(),
+            });
+            self.program_rows = Some(outcome.rows);
+        }
+        let (batch_rows, done) =
+            self.take_program_rows(max_rows, "transaction program rows are missing")?;
+        if done {
+            self.metrics.elapsed_micros =
+                self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+            if let Some(summary) = &mut self.transaction_summary {
+                summary.metrics = self.metrics.clone();
+            }
+        }
+        Ok(QueryBatch {
+            rows: batch_rows,
+            done,
+            summary: done.then(|| self.transaction_summary.clone()).flatten(),
+        })
+    }
+
+    fn take_program_rows(
+        &mut self,
+        max_rows: usize,
+        missing_message: &str,
+    ) -> QueryResult<(Vec<Vec<Value>>, bool)> {
+        let rows = self
+            .program_rows
+            .as_ref()
+            .ok_or_else(|| QueryError::internal(missing_message))?;
+        let end = self.program_offset.saturating_add(max_rows).min(rows.len());
+        let batch_rows = rows[self.program_offset..end].to_vec();
+        self.program_offset = end;
+        Ok((batch_rows, self.program_offset >= rows.len()))
     }
 
     fn next_direct(

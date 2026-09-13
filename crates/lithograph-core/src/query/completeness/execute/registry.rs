@@ -1,4 +1,8 @@
-use crate::storage::{self, OwnerKind, RelationshipRecord};
+use crate::storage::{self, OwnerKind, RelationshipRecord, StandardIndexKind};
+
+use super::super::super::semantic_index::{
+    FullTextQueryInput, SemanticEntity, fulltext_query, resolve_semantic_index,
+};
 
 use super::helpers::{
     cross_join_registry, function_registry_rows, procedure_registry_rows, project_named_columns,
@@ -34,18 +38,34 @@ fn validate_procedure_arguments(
         .map(|node| node.span.start)
         .min()
         .unwrap_or(clause.span.end);
-    let has_arguments = clause.descendants().any(|node| {
+    let arguments = clause.descendants().find(|node| {
         node.kind == AstKind::ArgumentList
             && node.span.start >= name_node.span.end
             && node.span.start < yield_start
     });
-    if has_arguments {
+    if is_fulltext_procedure(name) {
+        let count = arguments.map_or(0, |arguments| surface_expressions(arguments).len());
+        if (2..=3).contains(&count) {
+            return Ok(());
+        }
+        return Err(QueryError::semantic(format!(
+            "procedure {name} expects 2 or 3 arguments"
+        )));
+    }
+    if arguments.is_some() {
         Err(QueryError::semantic(format!(
             "procedure {name} expects no arguments"
         )))
     } else {
         Ok(())
     }
+}
+
+fn is_fulltext_procedure(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "db.index.fulltext.querynodes" | "db.index.fulltext.queryrelationships"
+    )
 }
 
 fn resolved_yield_items(clause: &AstNode, outputs: &[&str]) -> Vec<(String, String)> {
@@ -112,6 +132,82 @@ fn default_show_projection(
     result
 }
 
+#[derive(Default)]
+struct FullTextQueryOptions {
+    skip: usize,
+    limit: Option<usize>,
+    analyzer: Option<String>,
+}
+
+fn require_string_argument(value: Value, procedure: &str, argument: &str) -> QueryResult<String> {
+    match value {
+        Value::String(value) => Ok(value),
+        _ => Err(QueryError::semantic(format!(
+            "procedure {procedure} argument {argument} must be String"
+        ))),
+    }
+}
+
+fn parse_fulltext_options(value: Value) -> QueryResult<FullTextQueryOptions> {
+    let Value::Map(mut options) = value else {
+        return Err(QueryError::semantic(
+            "full-text query options must be a Map",
+        ));
+    };
+    let skip = take_nonnegative_option(&mut options, "skip")?.unwrap_or(0);
+    let limit = take_nonnegative_option(&mut options, "limit")?;
+    let analyzer = match options.remove("analyzer") {
+        None => None,
+        Some(Value::String(value)) => Some(value),
+        Some(_) => {
+            return Err(QueryError::semantic(
+                "full-text option analyzer must be String",
+            ));
+        }
+    };
+    if let Some(key) = options.keys().next() {
+        return Err(QueryError::semantic(format!(
+            "unsupported full-text query option {key:?}"
+        )));
+    }
+    Ok(FullTextQueryOptions {
+        skip,
+        limit,
+        analyzer,
+    })
+}
+
+fn take_nonnegative_option(
+    options: &mut BTreeMap<String, Value>,
+    key: &str,
+) -> QueryResult<Option<usize>> {
+    let Some(value) = options.remove(key) else {
+        return Ok(None);
+    };
+    let Value::Integer(value) = value else {
+        return Err(QueryError::semantic(format!(
+            "full-text option {key} must be Integer"
+        )));
+    };
+    usize::try_from(value)
+        .map(Some)
+        .map_err(|_| QueryError::semantic(format!("full-text option {key} cannot be negative")))
+}
+
+fn fulltext_argument_expressions(
+    clause: &AstNode,
+    name: &str,
+) -> QueryResult<Vec<expression::Expr>> {
+    let arguments = clause
+        .descendants()
+        .find(|node| node.kind == AstKind::ArgumentList)
+        .ok_or_else(|| QueryError::semantic(format!("procedure {name} is missing arguments")))?;
+    surface_expressions(arguments)
+        .into_iter()
+        .map(compile_expression)
+        .collect()
+}
+
 impl ReadExecutor<'_, '_> {
     pub(super) fn execute_procedure(
         &mut self,
@@ -119,12 +215,127 @@ impl ReadExecutor<'_, '_> {
         input: RowSet,
     ) -> QueryResult<RowSet> {
         let (name, procedure) = resolve_procedure_call(clause)?;
+        if is_fulltext_procedure(name) {
+            return self.execute_fulltext_procedure(clause, input, name, procedure);
+        }
         let procedure_rows = self.current_graph_procedure(name)?;
         let yield_items = resolved_yield_items(clause, procedure.outputs);
         let columns = procedure_columns(input.columns.clone(), &yield_items);
         let rows = self.join_procedure_rows(input.rows, &procedure_rows, &yield_items, name)?;
         let rows = self.filter_yield_rows(clause, rows)?;
         Ok(RowSet { columns, rows })
+    }
+
+    fn execute_fulltext_procedure(
+        &mut self,
+        clause: &AstNode,
+        input: RowSet,
+        name: &str,
+        procedure: super::super::super::registry::ProcedureDefinition,
+    ) -> QueryResult<RowSet> {
+        let expressions = fulltext_argument_expressions(clause, name)?;
+        let relationship_query = name.eq_ignore_ascii_case("db.index.fulltext.queryRelationships");
+        let yield_items = resolved_yield_items(clause, procedure.outputs);
+        let columns = procedure_columns(input.columns.clone(), &yield_items);
+        let mut rows = Vec::new();
+        for input_row in input.rows {
+            rows.extend(self.fulltext_rows_for_input(
+                &input_row,
+                &expressions,
+                relationship_query,
+                &yield_items,
+                name,
+            )?);
+        }
+        let rows = self.filter_yield_rows(clause, rows)?;
+        Ok(RowSet { columns, rows })
+    }
+
+    fn fulltext_rows_for_input(
+        &mut self,
+        input_row: &BindingRow,
+        expressions: &[expression::Expr],
+        relationship_query: bool,
+        yield_items: &[(String, String)],
+        name: &str,
+    ) -> QueryResult<Vec<BindingRow>> {
+        let (index_name, query, options) =
+            self.evaluate_fulltext_arguments(input_row, expressions, name)?;
+        let index = resolve_semantic_index(
+            self.connection,
+            &self.snapshot,
+            &index_name,
+            StandardIndexKind::FullText,
+        )?;
+        let hits = fulltext_query(
+            self.connection,
+            &self.snapshot,
+            self.graph_view,
+            &index,
+            &FullTextQueryInput {
+                relationship_query,
+                query: &query,
+                skip: options.skip,
+                limit: options.limit,
+                analyzer: options.analyzer.as_deref(),
+            },
+            self.is_interrupted,
+        )?;
+        hits.into_iter()
+            .map(|hit| {
+                let procedure_row = self.fulltext_procedure_row(hit)?;
+                self.join_procedure_row(input_row, &procedure_row, yield_items, name)
+            })
+            .collect()
+    }
+
+    fn evaluate_fulltext_arguments(
+        &mut self,
+        input_row: &BindingRow,
+        expressions: &[expression::Expr],
+        name: &str,
+    ) -> QueryResult<(String, String, FullTextQueryOptions)> {
+        let index_name = require_string_argument(
+            self.evaluate(&expressions[0], input_row)?,
+            name,
+            "indexName",
+        )?;
+        let query = require_string_argument(
+            self.evaluate(&expressions[1], input_row)?,
+            name,
+            "queryString",
+        )?;
+        let options = expressions
+            .get(2)
+            .map(|options| self.evaluate(options, input_row))
+            .transpose()?
+            .map(parse_fulltext_options)
+            .transpose()?
+            .unwrap_or_default();
+        Ok((index_name, query, options))
+    }
+
+    fn fulltext_procedure_row(&self, hit: SemanticHit) -> QueryResult<BTreeMap<String, Value>> {
+        let (field, value) = match hit.entity {
+            SemanticEntity::Node(node) => (
+                "node",
+                Value::Node(super::super::super::graph::materialize_node(
+                    &self.snapshot,
+                    node,
+                )?),
+            ),
+            SemanticEntity::Relationship(relationship) => (
+                "relationship",
+                Value::Relationship(super::super::super::graph::materialize_relationship(
+                    &self.snapshot,
+                    relationship,
+                )?),
+            ),
+        };
+        Ok(BTreeMap::from([
+            (field.to_owned(), value),
+            ("score".to_owned(), Value::Float(hit.score)),
+        ]))
     }
 
     fn join_procedure_rows(

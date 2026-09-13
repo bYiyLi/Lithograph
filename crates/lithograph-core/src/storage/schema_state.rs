@@ -91,6 +91,8 @@ pub enum StandardIndexKind {
     Range,
     Text,
     Point,
+    FullText,
+    Vector,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +101,29 @@ pub struct IndexDefinition {
     pub kind: StandardIndexKind,
     pub target: IndexTarget,
     pub owning_constraint: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels_or_types: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_properties: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration: Option<IndexConfiguration>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum IndexConfiguration {
+    FullText {
+        analyzer: String,
+        eventually_consistent: bool,
+    },
+    Vector {
+        dimensions: Option<u64>,
+        similarity_function: String,
+        quantization_type: String,
+        default_search_expansion_factor: String,
+        hnsw_m: u64,
+        hnsw_ef_construction: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -361,6 +386,9 @@ impl ConstraintDefinition {
             kind: StandardIndexKind::Range,
             target,
             owning_constraint: Some(self.name.clone()),
+            labels_or_types: Vec::new(),
+            additional_properties: Vec::new(),
+            configuration: None,
         })
     }
 }
@@ -469,6 +497,9 @@ mod tests {
                     properties: vec!["name".to_owned()],
                 },
                 owning_constraint: None,
+                labels_or_types: Vec::new(),
+                additional_properties: Vec::new(),
+                configuration: None,
             },
         );
         assert_eq!(

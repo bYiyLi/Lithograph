@@ -7,8 +7,9 @@ use crate::cypher::{
     ShowTargetKind, Value,
 };
 use crate::storage::{
-    ConstraintDefinition, ConstraintDefinitionKind, IndexDefinition, IndexTarget, PropertyRule,
-    PropertyType, SchemaState, SchemaTarget, Snapshot, StandardIndexKind,
+    ConstraintDefinition, ConstraintDefinitionKind, IndexConfiguration, IndexDefinition,
+    IndexTarget, PropertyRule, PropertyType, SchemaState, SchemaTarget, Snapshot,
+    StandardIndexKind,
 };
 
 use super::super::expression::{BindingRow, BindingValue};
@@ -374,7 +375,12 @@ fn index_rows(schema: &SchemaState, clause: &AstNode) -> QueryResult<Vec<Binding
         if !index_kind_matches(requested_kind, index.kind) {
             continue;
         }
-        let (entity_type, labels_or_types, properties) = index_target_columns(&index.target);
+        let (entity_type, mut labels_or_types, mut properties) =
+            index_target_columns(&index.target);
+        if !index.labels_or_types.is_empty() {
+            labels_or_types = index.labels_or_types.clone();
+        }
+        properties.extend(index.additional_properties.iter().cloned());
         rows.push(binding_map(BTreeMap::from([
             ("id".to_owned(), Value::Integer((ordinal + 1) as i64)),
             ("name".to_owned(), Value::String(index.name.clone())),
@@ -382,7 +388,7 @@ fn index_rows(schema: &SchemaState, clause: &AstNode) -> QueryResult<Vec<Binding
             ("populationPercent".to_owned(), Value::Float(100.0)),
             (
                 "type".to_owned(),
-                Value::String(index_kind_name(index.kind).to_owned()),
+                Value::String(super::standard_index_kind_name(index.kind).to_owned()),
             ),
             (
                 "entityType".to_owned(),
@@ -392,7 +398,7 @@ fn index_rows(schema: &SchemaState, clause: &AstNode) -> QueryResult<Vec<Binding
             ("properties".to_owned(), string_list(properties)),
             (
                 "indexProvider".to_owned(),
-                Value::String("lithograph-standard-1.0".to_owned()),
+                Value::String(index_provider(index.kind).to_owned()),
             ),
             (
                 "owningConstraint".to_owned(),
@@ -404,7 +410,7 @@ fn index_rows(schema: &SchemaState, clause: &AstNode) -> QueryResult<Vec<Binding
             ("lastRead".to_owned(), Value::Null),
             ("readCount".to_owned(), Value::Integer(0)),
             ("trackedSince".to_owned(), Value::Null),
-            ("options".to_owned(), Value::Map(BTreeMap::new())),
+            ("options".to_owned(), index_options(index)?),
             ("failureMessage".to_owned(), Value::String(String::new())),
             (
                 "createStatement".to_owned(),
@@ -921,17 +927,104 @@ fn index_kind_matches(requested: Option<IndexKind>, actual: StandardIndexKind) -
         Some(IndexKind::Range) => actual == StandardIndexKind::Range,
         Some(IndexKind::Text) => actual == StandardIndexKind::Text,
         Some(IndexKind::Point) => actual == StandardIndexKind::Point,
-        Some(IndexKind::FullText | IndexKind::Vector) => false,
+        Some(IndexKind::FullText) => actual == StandardIndexKind::FullText,
+        Some(IndexKind::Vector) => actual == StandardIndexKind::Vector,
     }
 }
 
-fn index_kind_name(kind: StandardIndexKind) -> &'static str {
+fn index_provider(kind: StandardIndexKind) -> &'static str {
     match kind {
-        StandardIndexKind::Lookup => "LOOKUP",
-        StandardIndexKind::Range => "RANGE",
-        StandardIndexKind::Text => "TEXT",
-        StandardIndexKind::Point => "POINT",
+        StandardIndexKind::FullText => "lithograph-fts5-1.0",
+        StandardIndexKind::Vector => "lithograph-hnsw-1.0",
+        _ => "lithograph-standard-1.0",
     }
+}
+
+fn index_options(index: &IndexDefinition) -> QueryResult<Value> {
+    let Some(configuration) = &index.configuration else {
+        return Ok(Value::Map(BTreeMap::new()));
+    };
+    Ok(Value::Map(BTreeMap::from([(
+        "indexConfig".to_owned(),
+        Value::Map(index_configuration_map(configuration)?),
+    )])))
+}
+
+fn index_configuration_map(
+    configuration: &IndexConfiguration,
+) -> QueryResult<BTreeMap<String, Value>> {
+    match configuration {
+        IndexConfiguration::FullText {
+            analyzer,
+            eventually_consistent,
+        } => Ok(BTreeMap::from([
+            (
+                "fulltext.analyzer".to_owned(),
+                Value::String(analyzer.clone()),
+            ),
+            (
+                "fulltext.eventually_consistent".to_owned(),
+                Value::Boolean(*eventually_consistent),
+            ),
+        ])),
+        IndexConfiguration::Vector {
+            dimensions,
+            similarity_function,
+            quantization_type,
+            default_search_expansion_factor,
+            hnsw_m,
+            hnsw_ef_construction,
+        } => vector_configuration_map(
+            *dimensions,
+            similarity_function,
+            quantization_type,
+            default_search_expansion_factor,
+            *hnsw_m,
+            *hnsw_ef_construction,
+        ),
+    }
+}
+
+fn vector_configuration_map(
+    dimensions: Option<u64>,
+    similarity_function: &str,
+    quantization_type: &str,
+    expansion: &str,
+    hnsw_m: u64,
+    hnsw_ef_construction: u64,
+) -> QueryResult<BTreeMap<String, Value>> {
+    let expansion = expansion.parse::<f64>().map_err(|_| {
+        QueryError::internal("VECTOR Index has an invalid persisted search expansion factor")
+    })?;
+    let mut config = BTreeMap::from([
+        (
+            "vector.similarity_function".to_owned(),
+            Value::String(similarity_function.to_owned()),
+        ),
+        (
+            "vector.quantization.type".to_owned(),
+            Value::String(quantization_type.to_owned()),
+        ),
+        (
+            "vector.default_search_expansion_factor".to_owned(),
+            Value::Float(expansion),
+        ),
+        (
+            "vector.hnsw.m".to_owned(),
+            Value::Integer(i64::try_from(hnsw_m).unwrap_or(i64::MAX)),
+        ),
+        (
+            "vector.hnsw.ef_construction".to_owned(),
+            Value::Integer(i64::try_from(hnsw_ef_construction).unwrap_or(i64::MAX)),
+        ),
+    ]);
+    if let Some(dimensions) = dimensions {
+        config.insert(
+            "vector.dimensions".to_owned(),
+            Value::Integer(i64::try_from(dimensions).unwrap_or(i64::MAX)),
+        );
+    }
+    Ok(config)
 }
 
 fn index_target_columns(target: &IndexTarget) -> (&'static str, Vec<String>, Vec<String>) {
@@ -970,7 +1063,7 @@ fn index_create_statement(index: &IndexDefinition) -> String {
         }
         IndexTarget::NodeProperties { label, properties } => format!(
             "CREATE {} INDEX {name} FOR (n:{}) ON ({})",
-            index_kind_name(index.kind),
+            super::standard_index_kind_name(index.kind),
             quote_identifier(label),
             properties
                 .iter()
@@ -983,7 +1076,7 @@ fn index_create_statement(index: &IndexDefinition) -> String {
             properties,
         } => format!(
             "CREATE {} INDEX {name} FOR ()-[r:{}]-() ON ({})",
-            index_kind_name(index.kind),
+            super::standard_index_kind_name(index.kind),
             quote_identifier(relationship_type),
             properties
                 .iter()

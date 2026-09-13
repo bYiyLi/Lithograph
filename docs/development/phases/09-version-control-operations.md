@@ -1,6 +1,6 @@
 # Phase 09：Versioned State Operations
 
-**状态：`planned`**
+**状态：`ready`**
 
 ## 1. 目标
 

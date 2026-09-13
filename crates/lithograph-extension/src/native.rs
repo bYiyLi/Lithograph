@@ -118,7 +118,7 @@ unsafe fn native_execute_impl(
         &inputs.params_json,
         &inputs.options_json,
     )?;
-    if execution.is_write() {
+    if execution.is_write() && !execution.requires_transaction_boundary() {
         return with_savepoint(&connection, |connection| {
             // SAFETY: callback and user_data originate from the active ABI invocation.
             unsafe { emit_execution_events(connection, &mut execution, callback, user_data) }

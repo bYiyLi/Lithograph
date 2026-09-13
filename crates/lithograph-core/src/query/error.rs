@@ -18,6 +18,7 @@ pub enum QueryErrorKind {
     BranchHeadMoved,
     ReadOnlyAdapter,
     ReadOnlySnapshot,
+    TransactionBoundaryRequired,
     Storage,
     Resource,
     Interrupted,
@@ -66,6 +67,10 @@ impl QueryError {
 
     pub fn read_only_snapshot(message: impl Into<String>) -> Self {
         Self::new(QueryErrorKind::ReadOnlySnapshot, message)
+    }
+
+    pub fn transaction_boundary_required(message: impl Into<String>) -> Self {
+        Self::new(QueryErrorKind::TransactionBoundaryRequired, message)
     }
 
     pub fn internal(message: impl Into<String>) -> Self {

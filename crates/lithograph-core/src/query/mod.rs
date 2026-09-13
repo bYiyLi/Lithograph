@@ -5,15 +5,18 @@ mod error;
 mod expression;
 mod functions;
 mod graph;
+mod ingestion;
 mod mutation;
 mod name_expression;
 mod options;
 mod plan;
 pub(crate) mod registry;
 mod schema;
+mod semantic_index;
 mod spill;
 mod stats;
 mod stream;
+mod transaction;
 
 pub use error::{QueryError, QueryErrorKind, QueryResult};
 pub use options::{ExecutionOptions, GraphViewSelector, SnapshotSelector};

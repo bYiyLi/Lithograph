@@ -3,13 +3,20 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use rusqlite::Connection;
 
-use crate::cypher::{AstKind, AstNode, ClauseKind, QueryConnector, Value};
-use crate::storage::{HashId, Snapshot};
+use crate::cypher::{AstKind, AstNode, ClauseKind, ExpressionKind, QueryConnector, Value};
+use crate::storage::{HashId, IndexDefinition, IndexTarget, Snapshot, StandardIndexKind};
 
 use super::super::expression::{
     self, BindingRow, BindingValue, binding_from_value, binding_value, compile_expression,
 };
 use super::super::graph::ResolvedGraphView;
+use super::super::ingestion::{
+    CompiledLoadCsv, CsvStream, compile_load_csv, csv_binding_row, csv_delimiter,
+    require_csv_string,
+};
+use super::super::semantic_index::{
+    SemanticEntity, SemanticHit, resolve_semantic_index, vector_candidates,
+};
 use super::super::spill::distinct_row_key;
 use super::super::{QueryError, QueryErrorKind, QueryMetrics, QueryResult};
 use super::{
@@ -53,6 +60,31 @@ pub(crate) fn conditional_branch_query(
         .ok_or_else(|| QueryError::semantic("conditional branch is missing its query"))
 }
 
+pub(crate) fn select_conditional_branch(
+    query: &AstNode,
+    mut evaluate_when: impl FnMut(&AstNode) -> QueryResult<bool>,
+) -> QueryResult<Option<&AstNode>> {
+    for branch in &query.children {
+        let AstKind::ConditionalBranch(kind) = branch.kind else {
+            continue;
+        };
+        let take = match kind {
+            crate::cypher::ConditionalBranchKind::When => {
+                let expression = surface_expressions(branch)
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| QueryError::semantic("WHEN branch is missing its condition"))?;
+                evaluate_when(expression)?
+            }
+            crate::cypher::ConditionalBranchKind::Else => true,
+        };
+        if take {
+            return Ok(Some(branch));
+        }
+    }
+    Ok(None)
+}
+
 pub(crate) fn validate_executed_columns(expected: &[String], actual: &[String]) -> QueryResult<()> {
     if expected == actual {
         return Ok(());
@@ -92,15 +124,6 @@ fn match_predicate(clause: &AstNode) -> QueryResult<Option<expression::Expr>> {
             compile_expression(predicate)
         })
         .transpose()
-}
-
-fn null_extend_row(mut row: BindingRow, columns: &[String]) -> BindingRow {
-    for column in columns {
-        if !row.values.contains_key(column) {
-            row.insert(column.clone(), BindingValue::Null);
-        }
-    }
-    row
 }
 
 fn compile_projection_specs(body: &AstNode, source: &str) -> QueryResult<Vec<ProjectionSpec>> {
@@ -347,7 +370,10 @@ impl ReadExecutor<'_, '_> {
         let mut output: Option<RowSet> = None;
         for row in input.rows {
             self.check_interrupted()?;
-            let Some(branch) = self.select_conditional_branch(query, &row)? else {
+            let Some(branch) = select_conditional_branch(query, |expression| {
+                expression::predicate(self.evaluate(&compile_expression(expression)?, &row)?)
+            })?
+            else {
                 continue;
             };
             let branch_result = self.execute_conditional_branch(branch, row)?;
@@ -360,35 +386,6 @@ impl ReadExecutor<'_, '_> {
             columns: super::infer_columns(query, &input.columns, self.source)?,
             rows: Vec::new(),
         }))
-    }
-
-    fn select_conditional_branch<'a>(
-        &mut self,
-        query: &'a AstNode,
-        row: &BindingRow,
-    ) -> QueryResult<Option<&'a AstNode>> {
-        for branch in &query.children {
-            let AstKind::ConditionalBranch(kind) = branch.kind else {
-                continue;
-            };
-            let take = match kind {
-                crate::cypher::ConditionalBranchKind::When => {
-                    let expression =
-                        surface_expressions(branch)
-                            .into_iter()
-                            .next()
-                            .ok_or_else(|| {
-                                QueryError::semantic("WHEN branch is missing its condition")
-                            })?;
-                    expression::predicate(self.evaluate(&compile_expression(expression)?, row)?)?
-                }
-                crate::cypher::ConditionalBranchKind::Else => true,
-            };
-            if take {
-                return Ok(Some(branch));
-            }
-        }
-        Ok(None)
     }
 
     fn execute_conditional_branch(
@@ -406,12 +403,24 @@ impl ReadExecutor<'_, '_> {
         }
     }
 
-    fn execute_single(&mut self, single: &AstNode, mut rows: RowSet) -> QueryResult<RowSet> {
-        for clause in &single.children {
+    fn execute_single(&mut self, single: &AstNode, rows: RowSet) -> QueryResult<RowSet> {
+        self.execute_single_from(single, 0, rows)
+    }
+
+    fn execute_single_from(
+        &mut self,
+        single: &AstNode,
+        start: usize,
+        mut rows: RowSet,
+    ) -> QueryResult<RowSet> {
+        for (index, clause) in single.children.iter().enumerate().skip(start) {
             let AstKind::Clause(kind) = clause.kind else {
                 continue;
             };
             self.check_interrupted()?;
+            if kind == ClauseKind::LoadCsv {
+                return self.execute_load_csv_tail(single, index, clause, rows);
+            }
             rows = match kind {
                 ClauseKind::Match | ClauseKind::OptionalMatch => {
                     self.execute_match(clause, kind == ClauseKind::OptionalMatch, rows)?
@@ -438,6 +447,60 @@ impl ReadExecutor<'_, '_> {
             };
         }
         Ok(rows)
+    }
+
+    fn execute_load_csv_tail(
+        &mut self,
+        single: &AstNode,
+        index: usize,
+        clause: &AstNode,
+        input: RowSet,
+    ) -> QueryResult<RowSet> {
+        let expected_columns = super::infer_columns(single, &input.columns, self.source)?;
+        let spec = compile_load_csv(clause)?;
+        let mut output = Vec::new();
+        for input_row in input.rows {
+            output.extend(self.execute_load_csv_input(single, index, &spec, input_row)?);
+        }
+        Ok(RowSet {
+            columns: expected_columns,
+            rows: output,
+        })
+    }
+
+    fn execute_load_csv_input(
+        &mut self,
+        single: &AstNode,
+        index: usize,
+        spec: &CompiledLoadCsv,
+        input_row: BindingRow,
+    ) -> QueryResult<Vec<BindingRow>> {
+        let source = require_csv_string(
+            self.evaluate(&spec.source_expression, &input_row)?,
+            "source",
+        )?;
+        let delimiter = spec
+            .delimiter_expression
+            .as_ref()
+            .map(|expression| self.evaluate(expression, &input_row))
+            .transpose()?
+            .map_or(Ok(','), csv_delimiter)?;
+        let mut stream = CsvStream::open(&source, delimiter, spec.with_headers)?;
+        let mut output = Vec::new();
+        while let Some((value, line)) = stream.next_value()? {
+            self.check_interrupted()?;
+            let row = csv_binding_row(&input_row, &spec.binding, value, stream.file_path(), line);
+            let result = self.execute_single_from(
+                single,
+                index + 1,
+                RowSet {
+                    columns: row.order.clone(),
+                    rows: vec![row],
+                },
+            )?;
+            output.extend(result.rows);
+        }
+        Ok(output)
     }
 
     fn execute_match(
@@ -482,6 +545,13 @@ impl ReadExecutor<'_, '_> {
         predicate: Option<&expression::Expr>,
         input: BindingRow,
     ) -> QueryResult<Vec<BindingRow>> {
+        if let Some(search) = clause
+            .descendants()
+            .find(|node| node.kind == AstKind::Search)
+        {
+            return self
+                .execute_search_match_row(clause, search, optional, columns, predicate, input);
+        }
         let mut matched = super::path::execute_match(
             &self.snapshot,
             self.graph_view,
@@ -498,6 +568,18 @@ impl ReadExecutor<'_, '_> {
             return Ok(vec![null_extend_row(input, columns)]);
         }
         Ok(matched)
+    }
+
+    fn execute_search_match_row(
+        &mut self,
+        clause: &AstNode,
+        search: &AstNode,
+        optional: bool,
+        columns: &[String],
+        predicate: Option<&expression::Expr>,
+        input: BindingRow,
+    ) -> QueryResult<Vec<BindingRow>> {
+        search::execute_search_match_row(self, clause, search, optional, columns, predicate, input)
     }
 
     fn filter_rows(
@@ -1197,11 +1279,12 @@ impl ReadExecutor<'_, '_> {
 mod call;
 mod helpers;
 mod registry;
+mod search;
 
 pub(crate) use helpers::{distinct_bindings, merge_union_rows};
 
 use helpers::{
     ProjectedRow, ProjectionSpec, aggregate_average, aggregate_deviation, aggregate_extreme,
     aggregate_percentile, aggregate_sum, clone_row_set, compare_keys, distinct_projected,
-    expr_contains_aggregate, pagination, pattern_expression_clause, union_rows,
+    expr_contains_aggregate, null_extend_row, pagination, pattern_expression_clause, union_rows,
 };

@@ -123,7 +123,7 @@ transaction_subclause = {
     KW_IN ~ transaction_concurrent? ~ KW_TRANSACTIONS ~ transaction_batch? ~ transaction_disjoint? ~ transaction_tail*
 }
 transaction_concurrent = { (expression ~ KW_CONCURRENT) | KW_CONCURRENT }
-transaction_batch = { KW_OF ~ expression ~ KW_ROWS }
+transaction_batch = { KW_OF ~ expression ~ (KW_ROW | KW_ROWS) }
 transaction_disjoint = {
     KW_DISJOINT ~ KW_BY ~ (transaction_disjoint_none | transaction_disjoint_auto | transaction_disjoint_explicit)
 }
@@ -641,6 +641,7 @@ KW_REQUIRE = @{ ^"REQUIRE" ~ !ident_continue }
 KW_RETRY = @{ ^"RETRY" ~ !ident_continue }
 KW_RETURN = @{ ^"RETURN" ~ !ident_continue }
 KW_ROWS = @{ ^"ROWS" ~ !ident_continue }
+KW_ROW = @{ ^"ROW" ~ !ident_continue }
 KW_SCORE = @{ ^"SCORE" ~ !ident_continue }
 KW_SEARCH = @{ ^"SEARCH" ~ !ident_continue }
 KW_SEC = @{ ^"SEC" ~ !ident_continue }

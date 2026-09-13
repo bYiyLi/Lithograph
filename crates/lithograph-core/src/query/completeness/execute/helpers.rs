@@ -1,5 +1,14 @@
 use super::*;
 
+pub(super) fn null_extend_row(mut row: BindingRow, columns: &[String]) -> BindingRow {
+    for column in columns {
+        if !row.values.contains_key(column) {
+            row.insert(column.clone(), BindingValue::Null);
+        }
+    }
+    row
+}
+
 pub(super) fn pattern_expression_clause(
     pattern: &AstNode,
     assignment: Option<AstNode>,

@@ -6,7 +6,10 @@ mod matcher;
 mod program;
 mod value;
 
-pub(crate) use program::execute_program;
+pub(crate) use program::{
+    TransactionBatchOutcome, TransactionMutationContext, execute_program,
+    execute_program_suffix_transaction, execute_transaction_batch,
+};
 pub(crate) use value::property_from_value;
 
 use delete::apply_delete;

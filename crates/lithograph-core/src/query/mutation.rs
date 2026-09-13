@@ -28,7 +28,11 @@ use crate::cypher::unescape_identifier;
 const SCAN_BATCH: usize = 256;
 
 mod execute;
-pub(crate) use execute::{execute_program, execute_write, property_from_value};
+pub(crate) use execute::{
+    TransactionBatchOutcome, TransactionMutationContext, execute_program,
+    execute_program_suffix_transaction, execute_transaction_batch, execute_write,
+    property_from_value,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedWrite {

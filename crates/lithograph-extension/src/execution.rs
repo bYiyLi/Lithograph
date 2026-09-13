@@ -33,6 +33,14 @@ impl AdapterExecution {
         self.cursor.is_write()
     }
 
+    pub(super) fn requires_transaction_boundary(&self) -> bool {
+        self.cursor.requires_transaction_boundary()
+    }
+
+    pub(super) fn has_external_io(&self) -> bool {
+        self.cursor.has_external_io()
+    }
+
     pub(super) fn next_batch(
         &mut self,
         connection: &Connection,
@@ -75,6 +83,13 @@ pub(super) fn scalar_result(
 ) -> LithographResult<String> {
     let mut execution =
         AdapterExecution::prepare(connection, query_text, params_text, options_text)?;
+    if execution.requires_transaction_boundary() {
+        return Err(execution::map_query_error(
+            query::QueryError::transaction_boundary_required(
+                "SQL Bridge cannot execute CALL subqueries IN TRANSACTIONS; use the Native API",
+            ),
+        ));
+    }
     if execution.is_write() {
         return with_savepoint(connection, |connection| {
             collect_scalar_result(connection, &mut execution)
@@ -171,6 +186,9 @@ pub(super) fn map_query_error(error: query::QueryError) -> LithographError {
             query::QueryErrorKind::BranchHeadMoved => ErrorCategory::BranchHeadMoved,
             query::QueryErrorKind::ReadOnlyAdapter => ErrorCategory::ReadOnlyAdapter,
             query::QueryErrorKind::ReadOnlySnapshot => ErrorCategory::ReadOnlySnapshot,
+            query::QueryErrorKind::TransactionBoundaryRequired => {
+                ErrorCategory::TransactionBoundaryRequired
+            }
             query::QueryErrorKind::Resource => ErrorCategory::Resource,
             query::QueryErrorKind::Storage => ErrorCategory::Storage,
             query::QueryErrorKind::Interrupted => ErrorCategory::Resource,

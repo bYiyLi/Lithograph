@@ -1,15 +1,23 @@
 {
   "schema_version": 1,
-  "id": "cy25-search-parser",
+  "id": "cy25-search-execution",
   "profile": {
     "id": "CY25-2026.08",
     "source": "https://neo4j.com/docs/cypher-manual/current/clauses/search/",
     "version": "2026.06",
     "family": "SEARCH"
   },
-  "execution": "planned",
-  "query": "MATCH (d:Document) SEARCH d IN (VECTOR INDEX documentEmbedding FOR [1.0, 2.0] LIMIT 5) RETURN d",
+  "execution": "enabled",
+  "query": "MATCH (d:Document) SEARCH d IN (VECTOR INDEX documentEmbedding FOR [1.0, 2.0] LIMIT 1) RETURN d.name",
   "params": {},
-  "initial_graph": [],
-  "expected": {"kind": "parse", "valid": true}
+  "initial_graph": [
+    "CREATE (:Document {name:'near', embedding:[1.0,2.0]}), (:Document {name:'far', embedding:[2.0,1.0]})",
+    "CREATE VECTOR INDEX documentEmbedding FOR (d:Document) ON (d.embedding)"
+  ],
+  "expected": {
+    "kind": "rows",
+    "columns": ["d.name"],
+    "ordered": true,
+    "rows": [[{"type":"string","value":"near"}]]
+  }
 }

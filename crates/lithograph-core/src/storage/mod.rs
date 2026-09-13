@@ -38,9 +38,9 @@ pub use schema::{
 };
 pub use schema_state::{
     ConstraintDefinition, ConstraintDefinitionKind, GraphNodeType, GraphRelationshipType,
-    IndexDefinition, IndexTarget, PropertyRule, PropertyType, SchemaSlotChange, SchemaState,
-    SchemaTarget, StandardIndexKind, constraint_slot, graph_node_slot, graph_relationship_slot,
-    index_slot,
+    IndexConfiguration, IndexDefinition, IndexTarget, PropertyRule, PropertyType, SchemaSlotChange,
+    SchemaState, SchemaTarget, StandardIndexKind, constraint_slot, graph_node_slot,
+    graph_relationship_slot, index_slot,
 };
 pub use snapshot::Snapshot;
 pub use value::{PointValue, PropertyValue, VectorCoordinateType, VectorValue, ZonedDateTimeValue};

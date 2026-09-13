@@ -137,6 +137,24 @@ const PROCEDURES: &[ProcedureDefinition] = &[
         admin: false,
         outputs: &["relationshipType"],
     },
+    ProcedureDefinition {
+        name: "db.index.fulltext.queryNodes",
+        description: "Queries one FULLTEXT Node Index in the current graph view.",
+        mode: "READ",
+        works_on_system: false,
+        signature: "db.index.fulltext.queryNodes(indexName :: STRING, queryString :: STRING, options = {} :: MAP) :: (node :: NODE, score :: FLOAT)",
+        admin: false,
+        outputs: &["node", "score"],
+    },
+    ProcedureDefinition {
+        name: "db.index.fulltext.queryRelationships",
+        description: "Queries one FULLTEXT Relationship Index in the current graph view.",
+        mode: "READ",
+        works_on_system: false,
+        signature: "db.index.fulltext.queryRelationships(indexName :: STRING, queryString :: STRING, options = {} :: MAP) :: (relationship :: RELATIONSHIP, score :: FLOAT)",
+        admin: false,
+        outputs: &["relationship", "score"],
+    },
 ];
 
 pub(crate) fn functions() -> impl Iterator<Item = FunctionDefinition> {
@@ -412,7 +430,8 @@ fn aggregate_predicate_numeric_arguments(
     overload: u8,
 ) -> Option<&'static [ArgumentSpec]> {
     match (name, overload) {
-        ("e" | "pi" | "rand" | "randomuuid" | "timestamp", _) | ("uuid", 0) => Some(&[]),
+        ("e" | "file" | "linenumber" | "pi" | "rand" | "randomuuid" | "timestamp", _)
+        | ("uuid", 0) => Some(&[]),
         ("avg" | "sum", _) => Some(&[("input", "INTEGER | FLOAT | DURATION", false)]),
         ("collect" | "collect_list" | "count" | "max" | "min", _) => {
             Some(&[("input", "ANY", false)])
@@ -729,6 +748,7 @@ fn boolean_integer_return_type(name: &str) -> Option<&'static str> {
             | "coll.indexof"
             | "id"
             | "length"
+            | "linenumber"
             | "path_length"
             | "sign"
             | "size"
@@ -801,6 +821,7 @@ fn string_structural_return_type(name: &str) -> Option<&'static str> {
             | "db.namefromelementid"
             | "elementid"
             | "format"
+            | "file"
             | "left"
             | "lower"
             | "ltrim"
@@ -912,6 +933,8 @@ mod tests {
             "any",
             "endnode",
             "exists",
+            "file",
+            "linenumber",
             "none",
             "reduce",
             "single",

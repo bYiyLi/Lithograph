@@ -896,7 +896,11 @@ pub(crate) fn ensure_standard_indexes_for_commit(
         if is_interrupted() {
             return Err(QueryError::interrupted());
         }
-        if !matches!(index.target, IndexTarget::NodeLookup) {
+        if !matches!(
+            index.kind,
+            StandardIndexKind::FullText | StandardIndexKind::Vector
+        ) && !matches!(index.target, IndexTarget::NodeLookup)
+        {
             ensure_index_cache(&snapshot, index)?;
         }
     }
@@ -1191,7 +1195,9 @@ fn insert_cache_value(
 
 fn cache_value_supported(kind: StandardIndexKind, value: &storage::PropertyValue) -> bool {
     match kind {
-        StandardIndexKind::Lookup => false,
+        StandardIndexKind::Lookup | StandardIndexKind::FullText | StandardIndexKind::Vector => {
+            false
+        }
         StandardIndexKind::Text => matches!(value, storage::PropertyValue::String(_)),
         StandardIndexKind::Point => matches!(value, storage::PropertyValue::Point(_)),
         StandardIndexKind::Range => true,

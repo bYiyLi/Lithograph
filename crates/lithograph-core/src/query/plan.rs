@@ -93,6 +93,10 @@ pub enum PhysicalOperator {
         index: String,
         kind: StandardIndexKind,
     },
+    VectorSearch {
+        variable: String,
+        index: String,
+    },
     RelationshipScan {
         variable: Option<String>,
     },
@@ -222,6 +226,23 @@ pub struct PreparedQuery {
     pub physical: PhysicalPlan,
     pub statistics: PlannerStatistics,
     pub columns: Vec<String>,
+}
+
+impl PreparedQuery {
+    pub fn requires_transaction_boundary(&self) -> bool {
+        self.program
+            .as_ref()
+            .is_some_and(|program| program.transaction_options.is_some())
+    }
+
+    pub fn has_external_io(&self) -> bool {
+        self.program.as_ref().is_some_and(|program| {
+            program
+                .root
+                .descendants()
+                .any(|node| node.kind == AstKind::Clause(ClauseKind::LoadCsv))
+        })
+    }
 }
 
 struct PrepareContext {

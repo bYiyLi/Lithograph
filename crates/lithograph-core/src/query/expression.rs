@@ -1286,6 +1286,20 @@ fn parse_string(text: &str) -> QueryResult<String> {
         let escaped = chars
             .next()
             .ok_or_else(|| QueryError::semantic("unterminated String escape"))?;
+        if escaped == 'u' {
+            let mut codepoint = 0_u32;
+            for _ in 0..4 {
+                let digit = chars
+                    .next()
+                    .and_then(|digit| digit.to_digit(16))
+                    .ok_or_else(|| QueryError::semantic("invalid Unicode String escape"))?;
+                codepoint = (codepoint << 4) | digit;
+            }
+            let character = char::from_u32(codepoint)
+                .ok_or_else(|| QueryError::semantic("invalid Unicode String escape"))?;
+            output.push(character);
+            continue;
+        }
         output.push(match escaped {
             'n' => '\n',
             'r' => '\r',

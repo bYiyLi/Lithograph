@@ -14,8 +14,10 @@ use crate::storage::{
 use super::super::options::writable_branch;
 use super::super::{ExecutionOptions, QueryError, QueryErrorKind, QueryResult};
 
+mod index_config;
 mod property_type;
 
+use index_config::parse_index_configuration;
 use property_type::parse_property_rule;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -102,7 +104,7 @@ fn is_schema_ddl(kind: ClauseKind) -> bool {
     )
 }
 
-fn schema_error(message: impl Into<String>) -> QueryError {
+pub(super) fn schema_error(message: impl Into<String>) -> QueryError {
     QueryError::new(QueryErrorKind::Schema, message)
 }
 
@@ -851,6 +853,11 @@ fn validate_constraint_target_kind(kind: ConstraintKind, target: &SchemaTarget) 
 
 fn apply_create_index(state: &mut SchemaState, clause: &AstNode) -> QueryResult<()> {
     let if_not_exists = has_modifier(clause, ExistenceModifierKind::IfNotExists);
+    let index = build_index_definition(clause)?;
+    insert_index_definition(state, index, if_not_exists)
+}
+
+fn build_index_definition(clause: &AstNode) -> QueryResult<IndexDefinition> {
     let kind = clause
         .descendants()
         .find_map(|node| match node.kind {
@@ -858,31 +865,67 @@ fn apply_create_index(state: &mut SchemaState, clause: &AstNode) -> QueryResult<
             _ => None,
         })
         .unwrap_or(IndexKind::Range);
-    let kind = match kind {
-        IndexKind::Lookup => StandardIndexKind::Lookup,
-        IndexKind::Range => StandardIndexKind::Range,
-        IndexKind::Text => StandardIndexKind::Text,
-        IndexKind::Point => StandardIndexKind::Point,
-        IndexKind::FullText | IndexKind::Vector => {
-            return Err(QueryError::semantic(
-                "FULLTEXT and VECTOR indexes are owned by Phase 08",
-            ));
-        }
-    };
+    let kind = standard_index_kind(kind);
     let target = parse_index_target(clause, kind)?;
+    let labels_or_types = semantic_index_metadata(clause, kind)?;
+    let additional_properties = if kind == StandardIndexKind::Vector {
+        index_additional_properties(clause)?
+    } else {
+        Vec::new()
+    };
+    let configuration = parse_index_configuration(clause, kind)?;
     let explicit_name = clause
         .descendants()
         .find(|node| node.kind == AstKind::IndexName)
         .and_then(|node| node.text.as_deref())
         .map(cypher::unescape_identifier);
-    let name =
-        explicit_name.unwrap_or_else(|| automatic_name("index", &format!("{kind:?}|{target:?}")));
-    let index = IndexDefinition {
-        name: name.clone(),
+    let name = explicit_name.unwrap_or_else(|| {
+        automatic_name(
+            "index",
+            &format!(
+                "{kind:?}|{target:?}|{labels_or_types:?}|{additional_properties:?}|{configuration:?}"
+            ),
+        )
+    });
+    Ok(IndexDefinition {
+        name,
         kind,
         target,
         owning_constraint: None,
-    };
+        labels_or_types,
+        additional_properties,
+        configuration,
+    })
+}
+
+fn standard_index_kind(kind: IndexKind) -> StandardIndexKind {
+    match kind {
+        IndexKind::Lookup => StandardIndexKind::Lookup,
+        IndexKind::Range => StandardIndexKind::Range,
+        IndexKind::Text => StandardIndexKind::Text,
+        IndexKind::Point => StandardIndexKind::Point,
+        IndexKind::FullText => StandardIndexKind::FullText,
+        IndexKind::Vector => StandardIndexKind::Vector,
+    }
+}
+
+fn semantic_index_metadata(clause: &AstNode, kind: StandardIndexKind) -> QueryResult<Vec<String>> {
+    if matches!(
+        kind,
+        StandardIndexKind::FullText | StandardIndexKind::Vector
+    ) {
+        semantic_index_labels_or_types(clause)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+fn insert_index_definition(
+    state: &mut SchemaState,
+    index: IndexDefinition,
+    if_not_exists: bool,
+) -> QueryResult<()> {
+    let name = index.name.clone();
     let equivalent = state.indexes.values().find(|existing| {
         existing.owning_constraint.is_none() && same_index_schema(existing, &index)
     });
@@ -955,9 +998,13 @@ fn parse_index_target(clause: &AstNode, kind: StandardIndexKind) -> QueryResult<
             "property Index requires at least one property",
         ));
     }
-    if matches!(kind, StandardIndexKind::Text | StandardIndexKind::Point) && properties.len() != 1 {
+    if matches!(
+        kind,
+        StandardIndexKind::Text | StandardIndexKind::Point | StandardIndexKind::Vector
+    ) && properties.len() != 1
+    {
         return Err(schema_error(
-            "TEXT and POINT indexes require exactly one property",
+            "TEXT, POINT, and VECTOR indexes require exactly one indexed property",
         ));
     }
     if let Some(relationship) = relationship {
@@ -984,6 +1031,69 @@ fn parse_index_target(clause: &AstNode, kind: StandardIndexKind) -> QueryResult<
         .map(cypher::unescape_identifier)
         .ok_or_else(|| schema_error("Node Index requires one Node Label"))?;
     Ok(IndexTarget::NodeProperties { label, properties })
+}
+
+fn semantic_index_labels_or_types(clause: &AstNode) -> QueryResult<Vec<String>> {
+    if let Some(relationship) = clause
+        .descendants()
+        .find(|node| node.kind == AstKind::RelationshipPattern)
+    {
+        let values = relationship
+            .descendants()
+            .filter(|node| node.kind == AstKind::RelationshipTypeName)
+            .filter_map(|node| node.text.as_deref())
+            .map(cypher::unescape_identifier)
+            .collect::<Vec<_>>();
+        if values.is_empty() {
+            return Err(schema_error(
+                "semantic Relationship Index requires at least one Relationship Type",
+            ));
+        }
+        return Ok(values);
+    }
+    let node = clause
+        .descendants()
+        .find(|node| node.kind == AstKind::NodePattern)
+        .ok_or_else(|| schema_error("semantic Node Index is missing its Node pattern"))?;
+    let values = node
+        .descendants()
+        .filter(|node| node.kind == AstKind::LabelName)
+        .filter_map(|node| node.text.as_deref())
+        .map(cypher::unescape_identifier)
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        return Err(schema_error(
+            "semantic Node Index requires at least one Node Label",
+        ));
+    }
+    Ok(values)
+}
+
+fn index_additional_properties(clause: &AstNode) -> QueryResult<Vec<String>> {
+    let Some(additional) = clause
+        .descendants()
+        .find(|node| node.kind == AstKind::IndexAdditionalProperties)
+    else {
+        return Ok(Vec::new());
+    };
+    let properties = property_keys(additional);
+    let indexed = clause
+        .descendants()
+        .find(|node| node.kind == AstKind::IndexTarget)
+        .map(property_keys)
+        .unwrap_or_default();
+    if properties.iter().any(|property| indexed.contains(property)) {
+        return Err(schema_error(
+            "VECTOR Index additional properties cannot include the vector property",
+        ));
+    }
+    let mut unique = std::collections::BTreeSet::new();
+    if properties.iter().any(|property| !unique.insert(property)) {
+        return Err(schema_error(
+            "VECTOR Index additional properties must be unique",
+        ));
+    }
+    Ok(properties)
 }
 
 fn refresh_backing_indexes(state: &mut SchemaState) -> QueryResult<()> {
@@ -1142,7 +1252,7 @@ fn validate_index_definition(state: &SchemaState, index: &IndexDefinition) -> Qu
             )));
         }
         (
-            StandardIndexKind::Text | StandardIndexKind::Point,
+            StandardIndexKind::Text | StandardIndexKind::Point | StandardIndexKind::Vector,
             IndexTarget::NodeProperties { properties, .. }
             | IndexTarget::RelationshipProperties { properties, .. },
         ) if properties.len() != 1 => {
@@ -1152,11 +1262,28 @@ fn validate_index_definition(state: &SchemaState, index: &IndexDefinition) -> Qu
         }
         _ => {}
     }
+    if matches!(
+        index.kind,
+        StandardIndexKind::FullText | StandardIndexKind::Vector
+    ) && index.labels_or_types.is_empty()
+    {
+        return Err(schema_error(format!(
+            "semantic Index {name} requires at least one label or Relationship Type"
+        )));
+    }
+    if index.kind != StandardIndexKind::Vector && !index.additional_properties.is_empty() {
+        return Err(schema_error(format!(
+            "non-VECTOR Index {name} cannot have additional properties"
+        )));
+    }
     Ok(())
 }
 
 fn same_index_schema(left: &IndexDefinition, right: &IndexDefinition) -> bool {
-    left.kind == right.kind && left.target == right.target
+    left.kind == right.kind
+        && left.target == right.target
+        && left.labels_or_types == right.labels_or_types
+        && left.additional_properties == right.additional_properties
 }
 
 fn type_constraint(

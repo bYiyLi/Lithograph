@@ -166,6 +166,16 @@ impl QueryCursor {
     }
 
     pub fn complete(&mut self, connection: &Connection) -> QueryResult<QuerySummary> {
+        if let Some(summary) = self.transaction_summary.clone() {
+            let rows = self.program_rows.as_ref().map_or(0, Vec::len);
+            if self.program_offset < rows {
+                return Err(QueryError::internal(
+                    "transaction query cannot complete before execution reaches a terminal batch",
+                ));
+            }
+            self.finished = true;
+            return Ok(summary);
+        }
         match std::mem::replace(&mut self.write_state, WriteState::None) {
             WriteState::Active {
                 savepoint,
@@ -232,6 +242,10 @@ impl QueryCursor {
     }
 
     pub fn cancel(&mut self, connection: &Connection) -> QueryResult<()> {
+        if self.transaction_summary.is_some() {
+            self.finished = true;
+            return Ok(());
+        }
         if let WriteState::Active { savepoint, .. } = &self.write_state {
             let savepoint = savepoint.clone();
             rollback_write_savepoint(connection, &savepoint)?;

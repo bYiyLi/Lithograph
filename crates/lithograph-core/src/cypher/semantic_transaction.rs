@@ -1,4 +1,4 @@
-use super::ast::{AstKind, AstNode, SubqueryKind, TransactionDisjointKind};
+use super::ast::{AstKind, AstNode, SubqueryKind, TransactionDisjointKind, TransactionErrorKind};
 use super::error::FrontendError;
 use super::semantic::{Analyzer, Scope, unescape_identifier};
 
@@ -29,6 +29,7 @@ impl Analyzer<'_> {
             &statuses,
         )?;
         validate_disjoint_concurrency(self, &concurrent, &disjoint)?;
+        validate_status_error_mode(self, &errors, &statuses)?;
         self.validate_outer_transaction_expressions(&concurrent, &batches, &errors, outer)?;
         self.validate_disjoint_expression(&disjoint, imported)?;
         Ok(transaction_status_name(&statuses))
@@ -70,6 +71,39 @@ impl Analyzer<'_> {
             "DISJOINT BY expressions cannot contain aggregation",
         )
     }
+}
+
+fn validate_status_error_mode(
+    analyzer: &Analyzer<'_>,
+    errors: &[&AstNode],
+    statuses: &[&AstNode],
+) -> Result<(), FrontendError> {
+    let Some(status) = statuses.first() else {
+        return Ok(());
+    };
+    let effective = errors
+        .first()
+        .map_or(TransactionErrorKind::Fail, |error| match error.kind {
+            AstKind::TransactionError(TransactionErrorKind::Retry) => error
+                .descendants()
+                .find_map(|node| match node.kind {
+                    AstKind::TransactionRetryFallback(kind) => Some(kind),
+                    _ => None,
+                })
+                .unwrap_or(TransactionErrorKind::Fail),
+            AstKind::TransactionError(kind) => kind,
+            _ => TransactionErrorKind::Fail,
+        });
+    if matches!(
+        effective,
+        TransactionErrorKind::Continue | TransactionErrorKind::Break
+    ) {
+        return Ok(());
+    }
+    Err(analyzer.semantic_error(
+        status.span,
+        "REPORT STATUS requires ON ERROR CONTINUE or ON ERROR BREAK",
+    ))
 }
 
 fn validate_transaction_duplicates(

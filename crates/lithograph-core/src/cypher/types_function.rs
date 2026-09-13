@@ -21,6 +21,9 @@ pub(super) fn infer_function(node: &AstNode, source: &str) -> Result<CypherType,
     if let Some(value) = infer_structural_function(&name, &arguments, node, source)? {
         return Ok(value);
     }
+    if let Some(value) = infer_load_csv_context_function(&name, &arguments, node, source)? {
+        return Ok(value);
+    }
     if !super::is_builtin_function(&name) {
         return Err(type_error(
             source,
@@ -28,10 +31,19 @@ pub(super) fn infer_function(node: &AstNode, source: &str) -> Result<CypherType,
             format!("unknown current-graph function {name}"),
         ));
     }
-    match name.as_str() {
+    infer_general_function(&name, &arguments, node, source)
+}
+
+fn infer_general_function(
+    name: &str,
+    arguments: &[&AstNode],
+    node: &AstNode,
+    source: &str,
+) -> Result<CypherType, FrontendError> {
+    match name {
         "tostring" => typed_unary_result(
-            &name,
-            &arguments,
+            name,
+            arguments,
             node,
             source,
             &[
@@ -51,8 +63,8 @@ pub(super) fn infer_function(node: &AstNode, source: &str) -> Result<CypherType,
             "toString() input type cannot be converted to String",
         ),
         "tointeger" => typed_unary_result(
-            &name,
-            &arguments,
+            name,
+            arguments,
             node,
             source,
             &[
@@ -65,8 +77,8 @@ pub(super) fn infer_function(node: &AstNode, source: &str) -> Result<CypherType,
             "toInteger() expects a Boolean, String, Integer, or Float",
         ),
         "tofloat" => typed_unary_result(
-            &name,
-            &arguments,
+            name,
+            arguments,
             node,
             source,
             &[CypherType::String, CypherType::Integer, CypherType::Float],
@@ -74,7 +86,7 @@ pub(super) fn infer_function(node: &AstNode, source: &str) -> Result<CypherType,
             "toFloat() expects a String, Integer, or Float",
         ),
         "isnan" => {
-            require_arity(&name, &arguments, 1, node.span, source)?;
+            require_arity(name, arguments, 1, node.span, source)?;
             let types = arguments
                 .iter()
                 .map(|argument| infer_expression(argument, source))
@@ -82,11 +94,11 @@ pub(super) fn infer_function(node: &AstNode, source: &str) -> Result<CypherType,
             require_numeric(&types, node.span, source)?;
             Ok(CypherType::Boolean)
         }
-        "exists" => unary_result(&name, &arguments, node, source, CypherType::Boolean),
+        "exists" => unary_result(name, arguments, node, source, CypherType::Boolean),
         "property_exists" => {
-            require_arity(&name, &arguments, 1, node.span, source)?;
+            require_arity(name, arguments, 1, node.span, source)?;
             require_type(
-                &arguments,
+                arguments,
                 &[CypherType::Node, CypherType::Relationship],
                 node.span,
                 source,
@@ -102,6 +114,23 @@ pub(super) fn infer_function(node: &AstNode, source: &str) -> Result<CypherType,
         }),
         _ => Ok(CypherType::Any),
     }
+}
+
+fn infer_load_csv_context_function(
+    name: &str,
+    arguments: &[&AstNode],
+    node: &AstNode,
+    source: &str,
+) -> Result<Option<CypherType>, FrontendError> {
+    let value = match name {
+        "file" => Some(CypherType::String),
+        "linenumber" => Some(CypherType::Integer),
+        _ => None,
+    };
+    if value.is_some() {
+        require_arity(name, arguments, 0, node.span, source)?;
+    }
+    Ok(value)
 }
 
 fn function_arguments(node: &AstNode) -> Vec<&AstNode> {

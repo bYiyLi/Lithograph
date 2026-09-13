@@ -164,6 +164,113 @@ impl Drop for RowsCursor<'_> {
     }
 }
 
+struct RowsFilterInput {
+    query: String,
+    params: String,
+    options: String,
+}
+
+fn parse_rows_filter_input(idx_num: c_int, args: &Filters<'_>) -> SqliteResult<RowsFilterInput> {
+    let mut index = 0;
+    let query = required_filter_text(idx_num & 1 != 0, args, &mut index, "query")?;
+    let params = optional_filter_text(idx_num & 2 != 0, args, &mut index, "params")?;
+    let options = optional_filter_text(idx_num & 4 != 0, args, &mut index, "options")?;
+    if query.trim().is_empty() {
+        return Err(LithographError::invalid_argument("query must not be empty").to_sqlite_error());
+    }
+    Ok(RowsFilterInput {
+        query,
+        params,
+        options,
+    })
+}
+
+fn required_filter_text(
+    present: bool,
+    args: &Filters<'_>,
+    index: &mut usize,
+    name: &str,
+) -> SqliteResult<String> {
+    if !present {
+        return Err(
+            LithographError::invalid_argument(format!("{name} is required")).to_sqlite_error(),
+        );
+    }
+    let value = args.get::<String>(*index).map_err(|_| {
+        LithographError::invalid_argument(format!("{name} must be TEXT")).to_sqlite_error()
+    })?;
+    *index += 1;
+    Ok(value)
+}
+
+fn optional_filter_text(
+    present: bool,
+    args: &Filters<'_>,
+    index: &mut usize,
+    name: &str,
+) -> SqliteResult<String> {
+    if present {
+        required_filter_text(true, args, index, name)
+    } else {
+        Ok("{}".to_owned())
+    }
+}
+
+impl RowsCursor<'_> {
+    fn apply_rows_filter(&mut self, input: RowsFilterInput) -> SqliteResult<()> {
+        // SAFETY: `self.db` belongs to the live VTab connection for this cursor.
+        let connection = unsafe { Connection::from_handle(self.db) }.map_err(|error| {
+            map_sqlite_error(error, "failed to access the SQLite connection").to_sqlite_error()
+        })?;
+        if let Some(mut previous) = self.execution.take() {
+            previous
+                .cancel(&connection)
+                .map_err(|e| e.to_sqlite_error())?;
+        }
+        let execution = execution::AdapterExecution::prepare(
+            &connection,
+            &input.query,
+            &input.params,
+            &input.options,
+        )
+        .map_err(|e| e.to_sqlite_error())?;
+        validate_rows_execution(&execution)?;
+        self.columns_json = serde_json::to_string(execution.columns()).map_err(|error| {
+            LithographError::internal(format!("failed to encode result columns: {error}"))
+                .to_sqlite_error()
+        })?;
+        self.query = input.query;
+        self.params = input.params;
+        self.options = input.options;
+        self.execution = Some(execution);
+        self.current_row = None;
+        self.pending_rows.clear();
+        self.ordinal = 0;
+        self.execution_done = false;
+        self.advance(&connection).map_err(|e| e.to_sqlite_error())
+    }
+}
+
+fn validate_rows_execution(execution: &execution::AdapterExecution) -> SqliteResult<()> {
+    if execution.requires_transaction_boundary() || execution.has_external_io() {
+        return Err(
+            execution::map_query_error(query::QueryError::read_only_adapter(
+                "lithograph_rows does not execute transaction-owning or external-I/O Cypher",
+            ))
+            .to_sqlite_error(),
+        );
+    }
+    if execution.is_write() {
+        return Err(
+            execution::map_query_error(query::QueryError::read_only_adapter(
+                "lithograph_rows is a read-only adapter and does not execute mutating Cypher",
+            ))
+            .to_sqlite_error(),
+        );
+    }
+    Ok(())
+}
+
 // SAFETY: `RowsCursor` is `repr(C)` and stores `sqlite3_vtab_cursor` first, as
 // required by rusqlite; its raw database handle comes from its owning VTab.
 unsafe impl VTabCursor for RowsCursor<'_> {
@@ -173,74 +280,7 @@ unsafe impl VTabCursor for RowsCursor<'_> {
         _idx_str: Option<&str>,
         args: &Filters<'_>,
     ) -> SqliteResult<()> {
-        catch_sqlite_boundary(|| {
-            let mut index = 0;
-            let query = if idx_num & 1 != 0 {
-                let value = args.get::<String>(index).map_err(|_| {
-                    LithographError::invalid_argument("query must be TEXT").to_sqlite_error()
-                })?;
-                index += 1;
-                value
-            } else {
-                return Err(
-                    LithographError::invalid_argument("query is required").to_sqlite_error()
-                );
-            };
-            let params = if idx_num & 2 != 0 {
-                let value = args.get::<String>(index).map_err(|_| {
-                    LithographError::invalid_argument("params must be JSON TEXT").to_sqlite_error()
-                })?;
-                index += 1;
-                value
-            } else {
-                "{}".to_owned()
-            };
-            let options = if idx_num & 4 != 0 {
-                args.get::<String>(index).map_err(|_| {
-                    LithographError::invalid_argument("options must be JSON TEXT").to_sqlite_error()
-                })?
-            } else {
-                "{}".to_owned()
-            };
-
-            if query.trim().is_empty() {
-                return Err(
-                    LithographError::invalid_argument("query must not be empty").to_sqlite_error()
-                );
-            }
-            // SAFETY: `self.db` was captured from the live VTab connection and
-            // SQLite invokes this cursor only while that connection is valid.
-            let connection = unsafe { Connection::from_handle(self.db) }.map_err(|error| {
-                map_sqlite_error(error, "failed to access the SQLite connection").to_sqlite_error()
-            })?;
-            if let Some(mut previous) = self.execution.take() {
-                previous
-                    .cancel(&connection)
-                    .map_err(|e| e.to_sqlite_error())?;
-            }
-            let execution =
-                execution::AdapterExecution::prepare(&connection, &query, &params, &options)
-                    .map_err(|e| e.to_sqlite_error())?;
-            if execution.is_write() {
-                return Err(execution::map_query_error(query::QueryError::read_only_adapter(
-                    "lithograph_rows is a read-only adapter and does not execute mutating Cypher",
-                ))
-                .to_sqlite_error());
-            }
-            self.columns_json = serde_json::to_string(execution.columns()).map_err(|error| {
-                LithographError::internal(format!("failed to encode result columns: {error}"))
-                    .to_sqlite_error()
-            })?;
-            self.query = query;
-            self.params = params;
-            self.options = options;
-            self.execution = Some(execution);
-            self.current_row = None;
-            self.pending_rows.clear();
-            self.ordinal = 0;
-            self.execution_done = false;
-            self.advance(&connection).map_err(|e| e.to_sqlite_error())
-        })
+        catch_sqlite_boundary(|| self.apply_rows_filter(parse_rows_filter_input(idx_num, args)?))
     }
 
     fn next(&mut self) -> SqliteResult<()> {

@@ -4,15 +4,38 @@ use crate::cypher::{AstKind, AstNode, ClauseKind, QueryConnector, SubqueryKind, 
 use crate::query::completeness::execute::{
     ConditionalBranchQuery, RowSet, conditional_branch_query, distinct_bindings,
     execute_read_clause, merge_union_rows, restore_global_bindings, rows_for_next,
-    validate_executed_columns,
+    select_conditional_branch as select_branch, validate_executed_columns,
 };
 use crate::query::completeness::{
     PreparedProgram, composed_query_parts, executable_query, explicit_imports, project_bindings,
     required_query_body,
 };
 use crate::query::expression::{self, BindingRow, BindingValue, binding_value, compile_expression};
+use crate::query::ingestion::{
+    CompiledLoadCsv, CsvStream, compile_load_csv, csv_binding_row, csv_delimiter,
+    require_csv_string,
+};
 
 use super::*;
+
+pub(crate) struct TransactionBatchOutcome {
+    pub(crate) rows: RowSet,
+    pub(crate) commit: HashId,
+    pub(crate) counters: MutationCounters,
+}
+
+pub(crate) struct TransactionMutationContext<'a> {
+    pub(crate) connection: &'a Connection,
+    pub(crate) program: &'a PreparedProgram,
+    pub(crate) base_commit: HashId,
+    pub(crate) branch: &'a str,
+    pub(crate) graph_view: &'a crate::query::options::GraphViewSelector,
+    pub(crate) author: Option<&'a str>,
+    pub(crate) message: Option<&'a str>,
+    pub(crate) params: &'a BTreeMap<String, Value>,
+    pub(crate) metrics: &'a mut QueryMetrics,
+    pub(crate) is_interrupted: &'a dyn Fn() -> bool,
+}
 
 pub(crate) fn execute_program(
     connection: &Connection,
@@ -36,6 +59,220 @@ pub(crate) fn execute_program(
         is_interrupted,
     )?;
     finish_program(context, program, result, is_interrupted)
+}
+
+pub(crate) fn execute_transaction_batch(
+    context: &mut TransactionMutationContext<'_>,
+    subquery: &AstNode,
+    input: RowSet,
+) -> QueryResult<TransactionBatchOutcome> {
+    execute_owned_sqlite_transaction(
+        context,
+        "CALL subqueries IN TRANSACTIONS require an autocommit Native execution",
+        "transaction batch",
+        |context| execute_transaction_batch_inner(context, subquery, input),
+    )
+}
+
+pub(crate) fn execute_program_suffix_transaction(
+    context: &mut TransactionMutationContext<'_>,
+    single: &AstNode,
+    start: usize,
+    input: RowSet,
+) -> QueryResult<TransactionBatchOutcome> {
+    execute_owned_sqlite_transaction(
+        context,
+        "outer mutation after IN TRANSACTIONS requires Native autocommit execution",
+        "outer suffix",
+        |context| execute_program_suffix_inner(context, single, start, input),
+    )
+}
+
+fn execute_owned_sqlite_transaction(
+    context: &mut TransactionMutationContext<'_>,
+    boundary_message: &str,
+    failure_label: &str,
+    operation: impl FnOnce(&mut TransactionMutationContext<'_>) -> QueryResult<TransactionBatchOutcome>,
+) -> QueryResult<TransactionBatchOutcome> {
+    if !context.connection.is_autocommit() {
+        return Err(QueryError::transaction_boundary_required(boundary_message));
+    }
+    context.connection.execute_batch("BEGIN IMMEDIATE")?;
+    let result = operation(context);
+    match result {
+        Ok(outcome) => {
+            if let Err(error) = context.connection.execute_batch("COMMIT") {
+                let _ = context.connection.execute_batch("ROLLBACK");
+                return Err(error.into());
+            }
+            Ok(outcome)
+        }
+        Err(error) => {
+            let rollback = context.connection.execute_batch("ROLLBACK");
+            if let Err(rollback_error) = rollback {
+                return Err(QueryError::internal(format!(
+                    "{failure_label} failed ({error}); rollback also failed ({rollback_error})"
+                )));
+            }
+            Err(error)
+        }
+    }
+}
+
+fn execute_program_suffix_inner(
+    transaction: &mut TransactionMutationContext<'_>,
+    single: &AstNode,
+    start: usize,
+    input: RowSet,
+) -> QueryResult<TransactionBatchOutcome> {
+    check_interrupted(transaction.is_interrupted)?;
+    let mut context = MutationContext::new(
+        transaction.connection,
+        transaction.base_commit,
+        transaction.params,
+        transaction.graph_view,
+    )?;
+    let rows = execute_single_from(
+        &mut context,
+        transaction.program,
+        single,
+        start,
+        input,
+        transaction.metrics,
+        transaction.is_interrupted,
+    )?;
+    finish_transaction_mutation(transaction, context, rows, true)
+}
+
+fn execute_transaction_batch_inner(
+    transaction: &mut TransactionMutationContext<'_>,
+    subquery: &AstNode,
+    input: RowSet,
+) -> QueryResult<TransactionBatchOutcome> {
+    check_interrupted(transaction.is_interrupted)?;
+    let body = required_query_body(subquery, "CALL subquery is missing its query body")?;
+    let mutated = crate::query::completeness::contains_mutation(body);
+    let mut context = MutationContext::new(
+        transaction.connection,
+        transaction.base_commit,
+        transaction.params,
+        transaction.graph_view,
+    )?;
+    let rows = execute_call_subquery_rows(
+        &mut context,
+        transaction.program,
+        subquery,
+        body,
+        input,
+        transaction.metrics,
+        transaction.is_interrupted,
+    )?;
+    finish_transaction_mutation(transaction, context, rows, mutated)
+}
+
+fn finish_transaction_mutation(
+    transaction: &TransactionMutationContext<'_>,
+    context: MutationContext<'_, '_>,
+    rows: RowSet,
+    commit_mutation: bool,
+) -> QueryResult<TransactionBatchOutcome> {
+    let final_layer = context.delta.layer()?;
+    let counters = context.delta.counters()?;
+    let final_snapshot = Snapshot::resolve_with_layer(
+        transaction.connection,
+        transaction.base_commit,
+        &final_layer,
+    )?;
+    crate::query::schema::validate_snapshot_against_commit_schema(
+        transaction.connection,
+        transaction.base_commit,
+        &final_snapshot,
+    )?;
+    check_interrupted(transaction.is_interrupted)?;
+    let commit = if commit_mutation {
+        let metadata = CommitMetadata {
+            author: transaction.author.map(str::to_owned),
+            message: transaction.message.map(str::to_owned),
+            committed_at: now_micros()?,
+        };
+        storage::commit_layer(
+            transaction.connection,
+            transaction.branch,
+            transaction.base_commit,
+            None,
+            &final_layer,
+            &metadata,
+        )?
+    } else {
+        transaction.base_commit
+    };
+    Ok(TransactionBatchOutcome {
+        rows,
+        commit,
+        counters,
+    })
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "CALL transaction batches reuse ordinary CALL correlation semantics"
+)]
+fn execute_call_subquery_rows(
+    context: &mut MutationContext<'_, '_>,
+    program: &PreparedProgram,
+    subquery: &AstNode,
+    body: &AstNode,
+    input: RowSet,
+    metrics: &mut QueryMetrics,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<RowSet> {
+    let scope = subquery
+        .children
+        .iter()
+        .find(|node| node.kind == AstKind::SubqueryScope);
+    let imports = explicit_imports(scope, &input.columns);
+    let returns_rows = crate::cypher::query_body_returns_columns(body);
+    let mut columns = input.columns.clone();
+    let mut output = Vec::new();
+    for outer in input.rows {
+        check_interrupted(is_interrupted)?;
+        let imported = project_bindings(&outer, &imports);
+        let globals = if scope.is_some() {
+            imported.clone()
+        } else {
+            BindingRow::default()
+        };
+        let previous_globals = std::mem::replace(&mut context.global_bindings, globals);
+        let inner = if scope.is_some() {
+            execute_query_body(
+                context,
+                program,
+                body,
+                RowSet {
+                    columns: imported.order.clone(),
+                    rows: vec![imported],
+                },
+                metrics,
+                is_interrupted,
+            )
+        } else {
+            execute_call_body_with_importing_with(
+                context,
+                program,
+                body,
+                &outer,
+                metrics,
+                is_interrupted,
+            )
+        };
+        context.global_bindings = previous_globals;
+        let inner = inner?;
+        merge_call_result(outer, inner, returns_rows, &mut columns, &mut output);
+    }
+    Ok(RowSet {
+        columns,
+        rows: output,
+    })
 }
 
 fn execute_query_body(
@@ -147,7 +384,18 @@ fn execute_conditional(
     let mut output: Option<RowSet> = None;
     for row in input.rows {
         check_interrupted(is_interrupted)?;
-        let Some(branch) = select_conditional_branch(context, query, &row)? else {
+        let selected = {
+            let snapshot = context.staged_snapshot()?;
+            select_branch(query, |expression| {
+                expression::predicate(expression::evaluate(
+                    &compile_expression(expression)?,
+                    &snapshot,
+                    &row,
+                    context.params,
+                )?)
+            })?
+        };
+        let Some(branch) = selected else {
             continue;
         };
         let branch_result =
@@ -161,35 +409,6 @@ fn execute_conditional(
         columns: crate::query::completeness::infer_columns(query, &input_columns, &program.source)?,
         rows: Vec::new(),
     }))
-}
-
-fn select_conditional_branch<'a>(
-    context: &MutationContext<'_, '_>,
-    query: &'a AstNode,
-    row: &BindingRow,
-) -> QueryResult<Option<&'a AstNode>> {
-    let snapshot = context.staged_snapshot()?;
-    for branch in &query.children {
-        let AstKind::ConditionalBranch(kind) = branch.kind else {
-            continue;
-        };
-        let take = match kind {
-            crate::cypher::ConditionalBranchKind::When => {
-                let expression = first_surface_expression(branch)?;
-                expression::predicate(expression::evaluate(
-                    &compile_expression(expression)?,
-                    &snapshot,
-                    row,
-                    context.params,
-                )?)?
-            }
-            crate::cypher::ConditionalBranchKind::Else => true,
-        };
-        if take {
-            return Ok(Some(branch));
-        }
-    }
-    Ok(None)
 }
 
 fn execute_conditional_branch(
@@ -218,15 +437,43 @@ fn execute_single(
     context: &mut MutationContext<'_, '_>,
     program: &PreparedProgram,
     single: &AstNode,
+    rows: RowSet,
+    metrics: &mut QueryMetrics,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<RowSet> {
+    execute_single_from(context, program, single, 0, rows, metrics, is_interrupted)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "streaming LOAD CSV keeps the mutation context and clause tail explicit"
+)]
+fn execute_single_from(
+    context: &mut MutationContext<'_, '_>,
+    program: &PreparedProgram,
+    single: &AstNode,
+    start: usize,
     mut rows: RowSet,
     metrics: &mut QueryMetrics,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<RowSet> {
-    for clause in &single.children {
+    for (index, clause) in single.children.iter().enumerate().skip(start) {
         let AstKind::Clause(kind) = clause.kind else {
             continue;
         };
         check_interrupted(is_interrupted)?;
+        if kind == ClauseKind::LoadCsv {
+            return execute_load_csv_tail(
+                context,
+                program,
+                single,
+                index,
+                clause,
+                rows,
+                metrics,
+                is_interrupted,
+            );
+        }
         rows = execute_single_clause(
             context,
             program,
@@ -238,6 +485,95 @@ fn execute_single(
         )?;
     }
     Ok(rows)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "streaming LOAD CSV owns its source while executing the remaining mutation clauses"
+)]
+fn execute_load_csv_tail(
+    context: &mut MutationContext<'_, '_>,
+    program: &PreparedProgram,
+    single: &AstNode,
+    index: usize,
+    clause: &AstNode,
+    input: RowSet,
+    metrics: &mut QueryMetrics,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<RowSet> {
+    let expected_columns =
+        crate::query::completeness::infer_columns(single, &input.columns, &program.source)?;
+    let spec = compile_load_csv(clause)?;
+    let mut output = Vec::new();
+    for input_row in input.rows {
+        output.extend(execute_mutation_load_csv_input(
+            context,
+            program,
+            single,
+            index,
+            &spec,
+            input_row,
+            metrics,
+            is_interrupted,
+        )?);
+    }
+    Ok(RowSet {
+        columns: expected_columns,
+        rows: output,
+    })
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one streaming CSV input row carries the mutation tail execution context explicitly"
+)]
+fn execute_mutation_load_csv_input(
+    context: &mut MutationContext<'_, '_>,
+    program: &PreparedProgram,
+    single: &AstNode,
+    index: usize,
+    spec: &CompiledLoadCsv,
+    input_row: BindingRow,
+    metrics: &mut QueryMetrics,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<Vec<BindingRow>> {
+    let snapshot = context.staged_snapshot()?;
+    let source = require_csv_string(
+        expression::evaluate(
+            &spec.source_expression,
+            &snapshot,
+            &input_row,
+            context.params,
+        )?,
+        "source",
+    )?;
+    let delimiter = spec
+        .delimiter_expression
+        .as_ref()
+        .map(|expression| expression::evaluate(expression, &snapshot, &input_row, context.params))
+        .transpose()?
+        .map_or(Ok(','), csv_delimiter)?;
+    drop(snapshot);
+    let mut stream = CsvStream::open(&source, delimiter, spec.with_headers)?;
+    let mut output = Vec::new();
+    while let Some((value, line)) = stream.next_value()? {
+        check_interrupted(is_interrupted)?;
+        let row = csv_binding_row(&input_row, &spec.binding, value, stream.file_path(), line);
+        let result = execute_single_from(
+            context,
+            program,
+            single,
+            index + 1,
+            RowSet {
+                columns: row.order.clone(),
+                rows: vec![row],
+            },
+            metrics,
+            is_interrupted,
+        )?;
+        output.extend(result.rows);
+    }
+    Ok(output)
 }
 
 #[allow(
@@ -386,53 +722,15 @@ fn execute_call(
         return execute_read(context, program, clause, input, metrics, is_interrupted);
     };
     let body = required_query_body(subquery, "CALL subquery is missing its query body")?;
-    let scope = subquery
-        .children
-        .iter()
-        .find(|node| node.kind == AstKind::SubqueryScope);
-    let imports = explicit_imports(scope, &input.columns);
-    let returns_rows = crate::cypher::query_body_returns_columns(body);
-    let mut columns = input.columns.clone();
-    let mut output = Vec::new();
-    for outer in input.rows {
-        check_interrupted(is_interrupted)?;
-        let imported = project_bindings(&outer, &imports);
-        let globals = if scope.is_some() {
-            imported.clone()
-        } else {
-            BindingRow::default()
-        };
-        let previous_globals = std::mem::replace(&mut context.global_bindings, globals);
-        let inner = if scope.is_some() {
-            execute_query_body(
-                context,
-                program,
-                body,
-                RowSet {
-                    columns: imported.order.clone(),
-                    rows: vec![imported],
-                },
-                metrics,
-                is_interrupted,
-            )
-        } else {
-            execute_call_body_with_importing_with(
-                context,
-                program,
-                body,
-                &outer,
-                metrics,
-                is_interrupted,
-            )
-        };
-        context.global_bindings = previous_globals;
-        let inner = inner?;
-        merge_call_result(outer, inner, returns_rows, &mut columns, &mut output);
-    }
-    Ok(RowSet {
-        columns,
-        rows: output,
-    })
+    execute_call_subquery_rows(
+        context,
+        program,
+        subquery,
+        body,
+        input,
+        metrics,
+        is_interrupted,
+    )
 }
 
 fn merge_call_result(

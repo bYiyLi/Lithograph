@@ -171,11 +171,20 @@ pub(super) fn build_physical(
                 variable,
                 index,
                 kind,
-            } => operators.push(PhysicalOperator::IndexSeek {
-                variable: variable.clone(),
-                index: index.clone(),
-                kind: *kind,
-            }),
+            } => {
+                if *kind == StandardIndexKind::Vector {
+                    operators.push(PhysicalOperator::VectorSearch {
+                        variable: variable.clone(),
+                        index: index.clone(),
+                    });
+                } else {
+                    operators.push(PhysicalOperator::IndexSeek {
+                        variable: variable.clone(),
+                        index: index.clone(),
+                        kind: *kind,
+                    });
+                }
+            }
             LogicalOperator::ExpandAll { from, .. } | LogicalOperator::ExpandInto { from, .. } => {
                 let relationship = relationships.next();
                 operators.push(PhysicalOperator::AdjacencySeek {

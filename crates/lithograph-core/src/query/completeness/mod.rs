@@ -29,10 +29,19 @@ pub(crate) struct PreparedProgram {
     pub(crate) logical: LogicalPlan,
     pub(crate) physical: PhysicalPlan,
     pub(crate) write_options: Option<ProgramWriteOptions>,
+    pub(crate) transaction_options: Option<TransactionProgramOptions>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct ProgramWriteOptions {
+    pub(crate) graph_view: GraphViewSelector,
+    pub(crate) branch: String,
+    pub(crate) author: Option<String>,
+    pub(crate) message: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TransactionProgramOptions {
     pub(crate) graph_view: GraphViewSelector,
     pub(crate) branch: String,
     pub(crate) author: Option<String>,
@@ -126,7 +135,7 @@ pub(super) fn project_bindings(row: &BindingRow, names: &[String]) -> BindingRow
 
 pub(crate) fn requires_program(root: &AstNode) -> bool {
     root.descendants().any(|node| match node.kind {
-        AstKind::ConditionalQuery | AstKind::Connector(_) => true,
+        AstKind::ConditionalQuery | AstKind::Connector(_) | AstKind::Search => true,
         AstKind::Subquery(
             crate::cypher::SubqueryKind::Exists
             | crate::cypher::SubqueryKind::Count
@@ -139,6 +148,7 @@ pub(crate) fn requires_program(root: &AstNode) -> bool {
             | ClauseKind::For
             | ClauseKind::Filter
             | ClauseKind::Call
+            | ClauseKind::LoadCsv
             | ClauseKind::Show
             | ClauseKind::Foreach,
         ) => true,
@@ -220,19 +230,20 @@ pub(crate) fn prepare_program(
     source: &str,
     options: &ExecutionOptions,
 ) -> QueryResult<PreparedProgram> {
-    if ast
+    let transaction_owning = ast
         .root
         .descendants()
-        .any(|node| node.kind == AstKind::TransactionSubclause)
-    {
-        return Err(QueryError::semantic(
-            "CALL subqueries IN TRANSACTIONS require the Phase 08 transaction executor",
-        ));
+        .any(|node| node.kind == AstKind::TransactionSubclause);
+    if transaction_owning {
+        validate_transaction_program(&ast.root)?;
     }
     validate_surface_expressions(&ast.root)?;
     let columns = output_columns(&ast.root, source)?;
     let writes = contains_mutation(&ast.root);
     let write_options = writes.then(|| program_write_options(options)).transpose()?;
+    let transaction_options = transaction_owning
+        .then(|| transaction_program_options(options))
+        .transpose()?;
     let logical_operators = logical_operators(&ast.root);
     let physical_operators = logical_operators
         .iter()
@@ -250,7 +261,104 @@ pub(crate) fn prepare_program(
             operators: physical_operators,
         },
         write_options,
+        transaction_options,
     })
+}
+
+fn transaction_program_options(
+    options: &ExecutionOptions,
+) -> QueryResult<TransactionProgramOptions> {
+    Ok(TransactionProgramOptions {
+        graph_view: options.graph_view.clone(),
+        branch: writable_branch(options)?,
+        author: options.author.clone(),
+        message: options.message.clone(),
+    })
+}
+
+fn validate_transaction_program(root: &AstNode) -> QueryResult<()> {
+    for composed in root
+        .descendants()
+        .filter(|node| node.kind == AstKind::ComposedQuery)
+    {
+        let has_union = composed.children.iter().any(|child| {
+            matches!(
+                child.kind,
+                AstKind::Connector(
+                    QueryConnector::Union
+                        | QueryConnector::UnionAll
+                        | QueryConnector::UnionDistinct
+                )
+            )
+        });
+        if has_union
+            && composed
+                .descendants()
+                .any(|node| node.kind == AstKind::TransactionSubclause)
+        {
+            return Err(QueryError::semantic(
+                "CALL subqueries IN TRANSACTIONS are not supported inside UNION",
+            ));
+        }
+    }
+
+    for subquery in root.descendants().filter(|node| {
+        node.kind == AstKind::Subquery(crate::cypher::SubqueryKind::Call)
+            && node
+                .children
+                .iter()
+                .any(|child| child.kind == AstKind::TransactionSubclause)
+    }) {
+        if let Some(body) = subquery
+            .children
+            .iter()
+            .find(|child| child.kind == AstKind::QueryBody)
+            && body
+                .descendants()
+                .any(|node| node.kind == AstKind::TransactionSubclause)
+        {
+            return Err(QueryError::semantic(
+                "nested CALL subqueries IN TRANSACTIONS are not supported",
+            ));
+        }
+    }
+
+    for single in root
+        .descendants()
+        .filter(|node| node.kind == AstKind::SingleQuery)
+    {
+        let mut saw_write = false;
+        for clause in single
+            .children
+            .iter()
+            .filter(|node| matches!(node.kind, AstKind::Clause(_)))
+        {
+            if clause.kind == AstKind::Clause(ClauseKind::Call)
+                && clause
+                    .descendants()
+                    .any(|node| node.kind == AstKind::TransactionSubclause)
+                && saw_write
+            {
+                return Err(QueryError::semantic(
+                    "CALL subqueries IN TRANSACTIONS cannot follow an outer write clause",
+                ));
+            }
+            saw_write |= matches!(
+                clause.kind,
+                AstKind::Clause(
+                    ClauseKind::Create
+                        | ClauseKind::Insert
+                        | ClauseKind::Merge
+                        | ClauseKind::Set
+                        | ClauseKind::Remove
+                        | ClauseKind::Delete
+                        | ClauseKind::DetachDelete
+                        | ClauseKind::Foreach
+                )
+            );
+        }
+    }
+    Ok(())
 }
 
 fn program_write_options(options: &ExecutionOptions) -> QueryResult<ProgramWriteOptions> {
@@ -274,7 +382,7 @@ fn validate_surface_expressions(root: &AstNode) -> QueryResult<()> {
     Ok(())
 }
 
-fn contains_mutation(root: &AstNode) -> bool {
+pub(crate) fn contains_mutation(root: &AstNode) -> bool {
     root.descendants().any(|node| {
         matches!(
             node.kind,
@@ -441,6 +549,9 @@ fn infer_single_columns(
             ClauseKind::Let | ClauseKind::Unwind | ClauseKind::For => {
                 append_named_kind(&mut columns, clause, AstKind::BindingVariable);
             }
+            ClauseKind::LoadCsv => {
+                append_named_kind(&mut columns, clause, AstKind::LoadCsvBinding);
+            }
             ClauseKind::With | ClauseKind::Return => {
                 columns = infer_projection_columns(clause, &columns, source)?;
             }
@@ -453,7 +564,6 @@ fn infer_single_columns(
             | ClauseKind::Delete
             | ClauseKind::DetachDelete
             | ClauseKind::Foreach
-            | ClauseKind::LoadCsv
             | ClauseKind::CreateIndex
             | ClauseKind::DropIndex
             | ClauseKind::CreateConstraint
@@ -958,6 +1068,28 @@ fn append_program_match_operators(clause: &AstNode, operators: &mut Vec<LogicalO
     if clause.kind == AstKind::Clause(ClauseKind::OptionalMatch) {
         operators.push(LogicalOperator::Optional);
     }
+    if let Some(search) = clause
+        .descendants()
+        .find(|node| node.kind == AstKind::Search)
+    {
+        let variable = search
+            .descendants()
+            .find(|node| node.kind == AstKind::Variable)
+            .and_then(|node| node.text.as_deref())
+            .map(crate::cypher::unescape_identifier)
+            .unwrap_or_else(|| "_search".to_owned());
+        let index = search
+            .descendants()
+            .find(|node| node.kind == AstKind::IndexName)
+            .and_then(|node| node.text.as_deref())
+            .map(crate::cypher::unescape_identifier)
+            .unwrap_or_else(|| "_vector_index".to_owned());
+        operators.push(LogicalOperator::IndexSeek {
+            variable,
+            index,
+            kind: crate::storage::StandardIndexKind::Vector,
+        });
+    }
     for part in clause
         .descendants()
         .filter(|node| node.kind == AstKind::PatternPart)
@@ -1062,6 +1194,14 @@ fn physical_operator(operator: &LogicalOperator) -> PhysicalOperator {
         LogicalOperator::LabelScan { variable, label } => PhysicalOperator::LabelIndexScan {
             variable: variable.clone(),
             label: label.clone(),
+        },
+        LogicalOperator::IndexSeek {
+            variable,
+            index,
+            kind,
+        } if *kind == crate::storage::StandardIndexKind::Vector => PhysicalOperator::VectorSearch {
+            variable: variable.clone(),
+            index: index.clone(),
         },
         LogicalOperator::IndexSeek {
             variable,
