@@ -15,6 +15,11 @@ mod patch;
 
 pub(crate) type ProcedureRow = BTreeMap<String, Value>;
 
+pub(crate) struct ProcedureOutcome {
+    pub(crate) rows: Vec<ProcedureRow>,
+    pub(crate) summary_commit: HashId,
+}
+
 #[derive(Debug)]
 struct LogTraversal {
     start: HashId,
@@ -127,15 +132,17 @@ pub(crate) fn execute_procedure(
     name: &str,
     args: Vec<Value>,
     options: &ExecutionOptions,
-) -> QueryResult<Vec<ProcedureRow>> {
+    pinned_commit: HashId,
+) -> QueryResult<ProcedureOutcome> {
     validate_options(name, options)?;
-    match name.to_ascii_lowercase().as_str() {
-        "lithograph.branch.create" => branch_create(connection, args),
+    let normalized = name.to_ascii_lowercase();
+    let rows = match normalized.as_str() {
+        "lithograph.branch.create" => branch_create(connection, args, pinned_commit),
         "lithograph.branch.checkout" => branch_checkout(connection, args),
         "lithograph.branch.list" => branch_list(connection),
         "lithograph.branch.delete" => branch_delete(connection, args),
         "lithograph.commit.get" => commit_get(connection, args),
-        "lithograph.commit.create" => commit_create(connection, args, options),
+        "lithograph.commit.create" => commit_create(connection, args, options, pinned_commit),
         "lithograph.commit.data.set" => commit_data_set(connection, args),
         "lithograph.commit.data.clear" => commit_data_clear(connection, args),
         "lithograph.tag.create" => tag_create(connection, args),
@@ -144,21 +151,84 @@ pub(crate) fn execute_procedure(
         "lithograph.tag.delete" => tag_delete(connection, args),
         "lithograph.log" => log(connection, args),
         "lithograph.diff" => patch::diff(connection, args),
-        "lithograph.patch.apply" => patch::apply(connection, args, options),
-        "lithograph.merge.start" => merge::start(connection, args, options),
+        "lithograph.patch.apply" => patch::apply(connection, args, options, pinned_commit),
+        "lithograph.merge.start" => merge::start(connection, args, options, pinned_commit),
         "lithograph.merge.get" => merge::get(connection, args),
         "lithograph.merge.list" => merge::list(connection, args),
         "lithograph.merge.conflicts" => merge::conflicts(connection, args),
         "lithograph.merge.resolve" => merge::resolve(connection, args),
         "lithograph.merge.finalize" => merge::finalize(connection, args, options),
         "lithograph.merge.abort" => merge::abort(connection, args),
-        "lithograph.rebase" => operations::rebase(connection, args, options),
-        "lithograph.squash" => operations::squash(connection, args, options),
-        "lithograph.reset" => operations::reset(connection, args, options),
-        "lithograph.revert" => operations::revert(connection, args, options),
+        "lithograph.rebase" => operations::rebase(connection, args, options, pinned_commit),
+        "lithograph.squash" => operations::squash(connection, args, options, pinned_commit),
+        "lithograph.reset" => operations::reset(connection, args, options, pinned_commit),
+        "lithograph.revert" => operations::revert(connection, args, options, pinned_commit),
         "lithograph.gc" => operations::gc(connection),
         _ => Err(QueryError::internal(format!(
             "Version Procedure {name} is registered but not implemented"
+        ))),
+    }?;
+    let summary_commit = if super::registry::is_version_mutation(normalized.as_str()) {
+        procedure_summary_commit(connection, normalized.as_str(), &rows)?
+    } else {
+        pinned_commit
+    };
+    Ok(ProcedureOutcome {
+        rows,
+        summary_commit,
+    })
+}
+
+fn procedure_summary_commit(
+    connection: &Connection,
+    name: &str,
+    rows: &[ProcedureRow],
+) -> QueryResult<HashId> {
+    let result_field = match name {
+        "lithograph.commit.create"
+        | "lithograph.patch.apply"
+        | "lithograph.squash"
+        | "lithograph.revert" => Some("commit"),
+        "lithograph.merge.finalize" if procedure_status(rows)? == "merged" => Some("commit"),
+        "lithograph.rebase" if procedure_status(rows)? == "rebased" => Some("commit"),
+        _ => None,
+    };
+    if let Some(field) = result_field {
+        if let Some(commit) = procedure_commit_field(rows, field)? {
+            return Ok(commit);
+        }
+        return Err(QueryError::internal(format!(
+            "Version Procedure {name} did not return its observable Commit"
+        )));
+    }
+    active_head(connection)
+}
+
+fn procedure_status(rows: &[ProcedureRow]) -> QueryResult<&str> {
+    match rows.last().and_then(|row| row.get("status")) {
+        Some(Value::String(status)) => Ok(status),
+        _ => Err(QueryError::internal(
+            "Version Procedure result is missing status",
+        )),
+    }
+}
+
+fn procedure_commit_field(rows: &[ProcedureRow], field: &str) -> QueryResult<Option<HashId>> {
+    let value = rows.last().and_then(|row| row.get(field)).ok_or_else(|| {
+        QueryError::internal(format!("Version Procedure result is missing {field}"))
+    })?;
+    match value {
+        Value::Null => Ok(None),
+        Value::String(descriptor) => {
+            let id = descriptor.strip_prefix("commit/").ok_or_else(|| {
+                QueryError::internal(format!("Version Procedure returned invalid {field}"))
+            })?;
+            HashId::from_hex(id).map(Some).map_err(|_| {
+                QueryError::internal(format!("Version Procedure returned invalid {field}"))
+            })
+        }
+        _ => Err(QueryError::internal(format!(
+            "Version Procedure returned non-Commit {field}"
         ))),
     }
 }
@@ -210,11 +280,16 @@ fn validate_options(name: &str, options: &ExecutionOptions) -> QueryResult<()> {
     Ok(())
 }
 
-fn branch_create(connection: &Connection, args: Vec<Value>) -> QueryResult<Vec<ProcedureRow>> {
+fn branch_create(
+    connection: &Connection,
+    args: Vec<Value>,
+    pinned_commit: HashId,
+) -> QueryResult<Vec<ProcedureRow>> {
     let name = string_arg(&args, 0, "name")?;
+    validate_ref_input(name)?;
     let from = match args.get(1) {
         Some(value) => resolve_descriptor(connection, value, "from")?,
-        None => active_head(connection)?,
+        None => pinned_commit,
     };
     storage::create_branch_ref(connection, name, from).map_err(map_ref_write_error)?;
     Ok(vec![row([
@@ -225,6 +300,7 @@ fn branch_create(connection: &Connection, args: Vec<Value>) -> QueryResult<Vec<P
 
 fn branch_checkout(connection: &Connection, args: Vec<Value>) -> QueryResult<Vec<ProcedureRow>> {
     let name = string_arg(&args, 0, "name")?;
+    validate_ref_input(name)?;
     let commit = storage::set_active_branch(connection, name).map_err(|error| match error {
         storage::StorageError::NotFound(_) => branch_not_found(name),
         error => error.into(),
@@ -251,8 +327,19 @@ fn branch_list(connection: &Connection) -> QueryResult<Vec<ProcedureRow>> {
 
 fn branch_delete(connection: &Connection, args: Vec<Value>) -> QueryResult<Vec<ProcedureRow>> {
     let name = string_arg(&args, 0, "name")?;
+    validate_ref_input(name)?;
+    if name == "main" {
+        return Err(QueryError::invalid_argument(
+            "the main Branch cannot be deleted",
+        ));
+    }
+    if storage::active_branch(connection)? == name {
+        return Err(QueryError::invalid_argument(
+            "the active Branch cannot be deleted",
+        ));
+    }
     let previous = storage::delete_branch_ref(connection, name)
-        .map_err(map_ref_write_error)?
+        .map_err(QueryError::from)?
         .ok_or_else(|| branch_not_found(name))?;
     Ok(vec![row([
         ("name", Value::String(name.to_owned())),
@@ -262,6 +349,7 @@ fn branch_delete(connection: &Connection, args: Vec<Value>) -> QueryResult<Vec<P
 
 fn tag_create(connection: &Connection, args: Vec<Value>) -> QueryResult<Vec<ProcedureRow>> {
     let name = string_arg(&args, 0, "name")?;
+    validate_ref_input(name)?;
     let target = resolve_descriptor_at(connection, &args, 1, "target")?;
     storage::create_tag(connection, name, target).map_err(map_ref_write_error)?;
     Ok(vec![row([
@@ -284,9 +372,9 @@ fn tag_list(connection: &Connection) -> QueryResult<Vec<ProcedureRow>> {
 
 fn tag_move(connection: &Connection, args: Vec<Value>) -> QueryResult<Vec<ProcedureRow>> {
     let name = string_arg(&args, 0, "name")?;
+    validate_ref_input(name)?;
     let target = resolve_descriptor_at(connection, &args, 1, "target")?;
-    let previous =
-        storage::move_tag(connection, name, target)?.ok_or_else(|| tag_not_found(name))?;
+    let previous = existing_tag_result(storage::move_tag(connection, name, target), name)?;
     Ok(vec![row([
         ("name", Value::String(name.to_owned())),
         ("previousCommit", commit_value(previous)),
@@ -296,11 +384,21 @@ fn tag_move(connection: &Connection, args: Vec<Value>) -> QueryResult<Vec<Proced
 
 fn tag_delete(connection: &Connection, args: Vec<Value>) -> QueryResult<Vec<ProcedureRow>> {
     let name = string_arg(&args, 0, "name")?;
-    let previous = storage::delete_tag(connection, name)?.ok_or_else(|| tag_not_found(name))?;
+    validate_ref_input(name)?;
+    let previous = existing_tag_result(storage::delete_tag(connection, name), name)?;
     Ok(vec![row([
         ("name", Value::String(name.to_owned())),
         ("previousCommit", commit_value(previous)),
     ])])
+}
+
+fn existing_tag_result(
+    result: Result<Option<HashId>, storage::StorageError>,
+    name: &str,
+) -> QueryResult<HashId> {
+    result
+        .map_err(QueryError::from)?
+        .ok_or_else(|| tag_not_found(name))
 }
 
 fn commit_get(connection: &Connection, args: Vec<Value>) -> QueryResult<Vec<ProcedureRow>> {
@@ -334,18 +432,17 @@ fn commit_create(
     connection: &Connection,
     args: Vec<Value>,
     options: &ExecutionOptions,
+    pinned_commit: HashId,
 ) -> QueryResult<Vec<ProcedureRow>> {
     let branch = target_branch(connection, options)?;
-    let head = storage::branch_head(connection, &branch).map_err(|error| match error {
-        storage::StorageError::NotFound(_) => branch_not_found(&branch),
-        error => error.into(),
-    })?;
+    ensure_target_branch_head(connection, &branch, pinned_commit)?;
     let metadata = CommitMetadata {
         author: options.author.clone(),
         message: options.message.clone(),
         committed_at: now_micros()?,
     };
-    let commit = storage::create_empty_commit(connection, &branch, head, &metadata)?;
+    let commit = storage::create_empty_commit(connection, &branch, pinned_commit, &metadata)
+        .map_err(|error| map_target_branch_error(error, &branch))?;
     if let Some(data) = args.first() {
         let data = value_to_json(data)?;
         storage::set_commit_data(
@@ -512,6 +609,15 @@ fn target_branch(connection: &Connection, options: &ExecutionOptions) -> QueryRe
     super::options::writable_branch(connection, options)
 }
 
+pub(crate) fn current_operation_commit(
+    connection: &Connection,
+    options: &ExecutionOptions,
+) -> QueryResult<HashId> {
+    let branch = target_branch(connection, options)?;
+    storage::branch_head(connection, &branch)
+        .map_err(|error| map_target_branch_error(error, &branch))
+}
+
 fn active_head(connection: &Connection) -> QueryResult<HashId> {
     let branch = storage::active_branch(connection)?;
     storage::branch_head(connection, &branch).map_err(|error| match error {
@@ -534,11 +640,39 @@ fn resolve_descriptor_at(
 
 fn resolve_descriptor(connection: &Connection, value: &Value, role: &str) -> QueryResult<HashId> {
     let descriptor = string_value(value, role)?;
+    let (kind, name) = descriptor.split_once('/').ok_or_else(|| {
+        QueryError::invalid_argument(format!(
+            "{role} must use branch/<name>, tag/<name>, or commit/<id>"
+        ))
+    })?;
+    match kind {
+        "branch" | "tag" => {
+            storage::validate_ref_name(name).map_err(map_ref_input_error)?;
+        }
+        "commit"
+            if name.len() == 64
+                && !name.contains('/')
+                && name.bytes().all(|byte| byte.is_ascii_hexdigit()) => {}
+        "commit" => {
+            return Err(QueryError::invalid_argument(format!(
+                "{role} commit descriptor must contain a 64-character hexadecimal id"
+            )));
+        }
+        _ => {
+            return Err(QueryError::invalid_argument(format!(
+                "{role} must use branch/<name>, tag/<name>, or commit/<id>"
+            )));
+        }
+    }
     storage::resolve_version_descriptor(connection, descriptor).map_err(|error| {
-        match descriptor.split_once('/').map(|value| value.0) {
-            Some("branch") => branch_not_found(descriptor.trim_start_matches("branch/")),
-            Some("tag") => tag_not_found(descriptor.trim_start_matches("tag/")),
-            _ => map_version_error(error),
+        match (kind, error) {
+            ("branch", storage::StorageError::NotFound(_)) => branch_not_found(name),
+            ("tag", storage::StorageError::NotFound(_)) => tag_not_found(name),
+            (_, storage::StorageError::NotFound(message)) => QueryError::new(
+                QueryErrorKind::VersionNotFound,
+                format!("Version was not found: {message}"),
+            ),
+            (_, error) => error.into(),
         }
     })
 }
@@ -565,6 +699,16 @@ fn map_ref_write_error(error: storage::StorageError) -> QueryError {
         {
             QueryError::invalid_argument("ref already exists or violates a uniqueness constraint")
         }
+        error => error.into(),
+    }
+}
+
+fn validate_ref_input(name: &str) -> QueryResult<()> {
+    storage::validate_ref_name(name).map_err(map_ref_input_error)
+}
+
+fn map_ref_input_error(error: storage::StorageError) -> QueryError {
+    match error {
         storage::StorageError::Corrupt(message) => QueryError::invalid_argument(message),
         error => error.into(),
     }
@@ -576,6 +720,41 @@ fn map_version_error(error: storage::StorageError) -> QueryError {
             QueryErrorKind::VersionNotFound,
             format!("Version was not found: {message}"),
         ),
+        error => error.into(),
+    }
+}
+
+fn ensure_target_branch_head(
+    connection: &Connection,
+    branch: &str,
+    expected: HashId,
+) -> QueryResult<()> {
+    match storage::branch_head(connection, branch) {
+        Ok(actual) if actual == expected => Ok(()),
+        Ok(_) => Err(QueryError::new(
+            QueryErrorKind::BranchHeadMoved,
+            "branch head moved during Version operation",
+        )),
+        Err(error) => Err(map_target_branch_error(error, branch)),
+    }
+}
+
+fn move_target_branch(
+    connection: &Connection,
+    branch: &str,
+    expected: HashId,
+    target: HashId,
+) -> QueryResult<HashId> {
+    match storage::move_branch_ref(connection, branch, Some(expected), target) {
+        Ok(Some(previous)) => Ok(previous),
+        Ok(None) => Err(branch_not_found(branch)),
+        Err(error) => Err(map_target_branch_error(error, branch)),
+    }
+}
+
+fn map_target_branch_error(error: storage::StorageError, branch: &str) -> QueryError {
+    match error {
+        storage::StorageError::NotFound(_) => branch_not_found(branch),
         error => error.into(),
     }
 }

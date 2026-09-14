@@ -324,24 +324,85 @@ fn commit_data_and_ref_boundaries_follow_version_contract() {
     );
     assert_eq!(get, vec![vec![Value::Boolean(false), Value::Null]]);
 
+    assert_invalid_ref_and_descriptor_boundaries(&connection);
+    assert_checkout_transaction_boundary(&connection);
+}
+
+fn assert_invalid_ref_and_descriptor_boundaries(connection: &Connection) {
     let invalid = execute(
-        &connection,
+        connection,
         "CALL lithograph.branch.create('bad//name') YIELD name RETURN name",
         ExecutionOptions::default(),
     )
     .expect_err("invalid Branch name");
     assert_eq!(invalid.kind, QueryErrorKind::InvalidArgument);
+    for (query, label) in [
+        (
+            "CALL lithograph.branch.checkout('bad//name') YIELD name RETURN name",
+            "checkout invalid Branch name",
+        ),
+        (
+            "CALL lithograph.tag.move('bad//name', 'branch/main') YIELD name RETURN name",
+            "move invalid Tag name",
+        ),
+        (
+            "CALL lithograph.tag.delete('bad//name') YIELD name RETURN name",
+            "delete invalid Tag name",
+        ),
+    ] {
+        let invalid = execute(connection, query, ExecutionOptions::default()).unwrap_err();
+        assert_eq!(invalid.kind, QueryErrorKind::InvalidArgument, "{label}");
+    }
+    for (query, query_options, label) in [
+        (
+            "CALL lithograph.commit.get('not-a-descriptor') YIELD commit RETURN commit",
+            ExecutionOptions::default(),
+            "malformed descriptor kind",
+        ),
+        (
+            "CALL lithograph.commit.get('commit/not-hex') YIELD commit RETURN commit",
+            ExecutionOptions::default(),
+            "malformed Commit descriptor",
+        ),
+        (
+            "CALL lithograph.commit.get('branch/bad//name') YIELD commit RETURN commit",
+            ExecutionOptions::default(),
+            "malformed Branch descriptor",
+        ),
+        (
+            "RETURN 1",
+            options(r#"{"at":"commit/not-hex"}"#),
+            "malformed options.at Commit selector",
+        ),
+        (
+            "RETURN 1",
+            options(r#"{"at":"branch/bad//name"}"#),
+            "malformed options.at Branch selector",
+        ),
+    ] {
+        let invalid = execute(connection, query, query_options).unwrap_err();
+        assert_eq!(invalid.kind, QueryErrorKind::InvalidArgument, "{label}");
+    }
+    let missing_commit = format!(
+        "CALL lithograph.commit.get('commit/{}') YIELD commit RETURN commit",
+        "0".repeat(64)
+    );
+    let missing = execute(connection, &missing_commit, ExecutionOptions::default())
+        .expect_err("well-formed missing Commit must stay VERSION_NOT_FOUND");
+    assert_eq!(missing.kind, QueryErrorKind::VersionNotFound);
     let main_delete = execute(
-        &connection,
+        connection,
         "CALL lithograph.branch.delete('main') YIELD name RETURN name",
         ExecutionOptions::default(),
     )
     .expect_err("main cannot be deleted");
     assert_eq!(main_delete.kind, QueryErrorKind::InvalidArgument);
+}
 
+fn assert_checkout_transaction_boundary(connection: &Connection) {
     connection.execute_batch("BEGIN").expect("outer begin");
     let checkout = execute(
-        &connection,
+        connection,
         "CALL lithograph.branch.checkout('feature') YIELD name RETURN name",
         ExecutionOptions::default(),
     )
@@ -1179,97 +1240,6 @@ fn squash_preserves_snapshot_metadata_and_old_history() {
     assert!(commit_exists(&connection, old_head).expect("old head exists"));
 }
 
-#[test]
-fn reset_revert_and_gc_respect_tag_roots() {
-    let connection = fresh_storage();
-    execute(
-        &connection,
-        "CREATE (:N {v:0}) FINISH",
-        ExecutionOptions::default(),
-    )
-    .expect("base");
-    let base = branch_head(&connection, "main").expect("base");
-    execute(
-        &connection,
-        "MATCH (n:N) SET n.v=1 FINISH",
-        ExecutionOptions::default(),
-    )
-    .expect("v1");
-    let one = branch_head(&connection, "main").expect("one");
-    execute(
-        &connection,
-        "MATCH (n:N) SET n.v=2 FINISH",
-        ExecutionOptions::default(),
-    )
-    .expect("v2");
-    let old_head = branch_head(&connection, "main").expect("old head");
-    call(
-        &connection,
-        &format!(
-            "CALL lithograph.commit.data.set('{}', {{gc:'sidecar'}}) YIELD commit RETURN commit",
-            descriptor(old_head)
-        ),
-    );
-    call(
-        &connection,
-        &format!(
-            "CALL lithograph.reset('{}') YIELD to RETURN to",
-            descriptor(one)
-        ),
-    );
-    assert_eq!(branch_head(&connection, "main").expect("reset head"), one);
-    let reverted = call(
-        &connection,
-        &format!(
-            "CALL lithograph.revert('{}') YIELD commit RETURN commit",
-            descriptor(one)
-        ),
-    );
-    let reverted_id = HashId::from_hex(&string(&reverted[0][0])[7..]).expect("reverted id");
-    assert_eq!(
-        snapshot(&connection, reverted_id),
-        snapshot(&connection, base)
-    );
-
-    call(
-        &connection,
-        &format!(
-            "CALL lithograph.tag.create('protect', '{}') YIELD name RETURN name",
-            descriptor(old_head)
-        ),
-    );
-    call(
-        &connection,
-        "CALL lithograph.gc() YIELD commits RETURN commits",
-    );
-    assert!(commit_exists(&connection, old_head).expect("tag-protected history"));
-    let protected_data: i64 = connection
-        .query_row(
-            "SELECT count(*) FROM main._lithograph_commit_data WHERE commit_id=?1",
-            [old_head.as_bytes().as_slice()],
-            |row| row.get(0),
-        )
-        .expect("tag-protected Commit Data");
-    assert_eq!(protected_data, 1);
-    call(
-        &connection,
-        "CALL lithograph.tag.delete('protect') YIELD name RETURN name",
-    );
-    call(
-        &connection,
-        "CALL lithograph.gc() YIELD commits RETURN commits",
-    );
-    assert!(!commit_exists(&connection, old_head).expect("unreachable history collected"));
-    let collected_data: i64 = connection
-        .query_row(
-            "SELECT count(*) FROM main._lithograph_commit_data WHERE commit_id=?1",
-            [old_head.as_bytes().as_slice()],
-            |row| row.get(0),
-        )
-        .expect("collected Commit Data");
-    assert_eq!(collected_data, 0);
-}
-
 #[path = "phase09_version/lifecycle.rs"]
 mod lifecycle;
 
@@ -1278,3 +1248,9 @@ mod merge_semantics;
 
 #[path = "phase09_version/concurrency.rs"]
 mod concurrency;
+
+#[path = "phase09_version/gc.rs"]
+mod gc;
+
+#[path = "phase09_version/summary.rs"]
+mod summary;

@@ -95,6 +95,11 @@ pub(crate) fn resolve_commit(
         }
         SnapshotSelector::Branch(name) => resolve_branch(connection, name),
         SnapshotSelector::Commit(value) => {
+            if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(QueryError::invalid_argument(
+                    "options.at Commit selector must contain a 64-character hexadecimal id",
+                ));
+            }
             let commit = HashId::from_hex(value).map_err(|_| {
                 QueryError::new(
                     QueryErrorKind::VersionNotFound,
@@ -110,6 +115,7 @@ pub(crate) fn resolve_commit(
             Ok(commit)
         }
         SnapshotSelector::Tag(name) => {
+            validate_ref_selector(name)?;
             match storage::resolve_version_descriptor(connection, &format!("tag/{name}")) {
                 Ok(commit) => Ok(commit),
                 Err(storage::StorageError::NotFound(_)) => Err(QueryError::new(
@@ -123,6 +129,7 @@ pub(crate) fn resolve_commit(
 }
 
 fn resolve_branch(connection: &Connection, name: &str) -> QueryResult<HashId> {
+    validate_ref_selector(name)?;
     match storage::branch_head(connection, name) {
         Ok(commit) => Ok(commit),
         Err(storage::StorageError::NotFound(_)) => Err(QueryError::new(
@@ -131,6 +138,13 @@ fn resolve_branch(connection: &Connection, name: &str) -> QueryResult<HashId> {
         )),
         Err(error) => Err(error.into()),
     }
+}
+
+fn validate_ref_selector(name: &str) -> QueryResult<()> {
+    storage::validate_ref_name(name).map_err(|error| match error {
+        storage::StorageError::Corrupt(message) => QueryError::invalid_argument(message),
+        error => error.into(),
+    })
 }
 
 pub(crate) fn materialize_node(snapshot: &Snapshot<'_>, node_id: i64) -> QueryResult<NodeValue> {
@@ -142,13 +156,7 @@ pub(crate) fn materialize_node(snapshot: &Snapshot<'_>, node_id: i64) -> QueryRe
             })?;
         labels.push(name);
     }
-    let mut properties = BTreeMap::new();
-    for (key_id, value) in snapshot.properties(OwnerKind::Node, node_id)? {
-        let name = storage::property_key_name(snapshot_connection(snapshot), key_id)?.ok_or_else(
-            || QueryError::internal(format!("Property dictionary id {key_id} is missing")),
-        )?;
-        properties.insert(name, property_value(value)?);
-    }
+    let properties = materialize_properties(snapshot, OwnerKind::Node, node_id)?;
     Ok(NodeValue {
         element_id: format!("n:{node_id}"),
         labels,
@@ -168,13 +176,7 @@ pub(crate) fn materialize_relationship(
                     relationship.type_id
                 ))
             })?;
-    let mut properties = BTreeMap::new();
-    for (key_id, value) in snapshot.properties(OwnerKind::Relationship, relationship.id)? {
-        let name = storage::property_key_name(snapshot_connection(snapshot), key_id)?.ok_or_else(
-            || QueryError::internal(format!("Property dictionary id {key_id} is missing")),
-        )?;
-        properties.insert(name, property_value(value)?);
-    }
+    let properties = materialize_properties(snapshot, OwnerKind::Relationship, relationship.id)?;
     Ok(RelationshipValue {
         element_id: format!("r:{}", relationship.id),
         relationship_type,
@@ -189,14 +191,7 @@ pub(crate) fn node_property(
     node_id: i64,
     key: &str,
 ) -> QueryResult<Value> {
-    let Some(key_id) = storage::find_property_key(snapshot_connection(snapshot), key)? else {
-        return Ok(Value::Null);
-    };
-    snapshot
-        .property(OwnerKind::Node, node_id, key_id)?
-        .map(property_value)
-        .transpose()
-        .map(|v| v.unwrap_or(Value::Null))
+    element_property(snapshot, OwnerKind::Node, node_id, key)
 }
 
 pub(crate) fn relationship_property(
@@ -204,11 +199,35 @@ pub(crate) fn relationship_property(
     id: i64,
     key: &str,
 ) -> QueryResult<Value> {
+    element_property(snapshot, OwnerKind::Relationship, id, key)
+}
+
+fn materialize_properties(
+    snapshot: &Snapshot<'_>,
+    owner_kind: OwnerKind,
+    owner_id: i64,
+) -> QueryResult<BTreeMap<String, Value>> {
+    let mut properties = BTreeMap::new();
+    for (key_id, value) in snapshot.properties(owner_kind, owner_id)? {
+        let name = storage::property_key_name(snapshot_connection(snapshot), key_id)?.ok_or_else(
+            || QueryError::internal(format!("Property dictionary id {key_id} is missing")),
+        )?;
+        properties.insert(name, property_value(value)?);
+    }
+    Ok(properties)
+}
+
+fn element_property(
+    snapshot: &Snapshot<'_>,
+    owner_kind: OwnerKind,
+    owner_id: i64,
+    key: &str,
+) -> QueryResult<Value> {
     let Some(key_id) = storage::find_property_key(snapshot_connection(snapshot), key)? else {
         return Ok(Value::Null);
     };
     snapshot
-        .property(OwnerKind::Relationship, id, key_id)?
+        .property(owner_kind, owner_id, key_id)?
         .map(property_value)
         .transpose()
         .map(|v| v.unwrap_or(Value::Null))

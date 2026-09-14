@@ -18,6 +18,25 @@ fn error_json_has_stable_shape() {
 }
 
 #[test]
+fn summary_json_exposes_execution_metrics_on_shared_adapter_surface() {
+    let summary = query::QuerySummary {
+        query_type: query::QueryType::Read,
+        commit: Some("commit/probe".to_owned()),
+        merge_session: None,
+        counters: query::QueryCounters::default(),
+        metrics: query::QueryMetrics {
+            rows: 3,
+            db_hits: 7,
+            elapsed_micros: 11,
+        },
+    };
+    let value = execution::summary_json(&summary);
+    assert_eq!(value["metrics"]["rows"], 3);
+    assert_eq!(value["metrics"]["dbHits"], 7);
+    assert_eq!(value["metrics"]["elapsedMicros"], 11);
+}
+
+#[test]
 fn json_adapter_requires_object_inputs() {
     assert!(validate_json_object("{}", "params").is_ok());
     assert_eq!(
@@ -56,6 +75,22 @@ fn sqlite_error_mapping_preserves_stable_primary_categories() {
 
 #[test]
 fn query_error_mapping_preserves_busy_and_io_categories() {
+    for (kind, code) in [
+        (query::QueryErrorKind::Busy, ffi::SQLITE_BUSY),
+        (query::QueryErrorKind::Busy, ffi::SQLITE_LOCKED),
+    ] {
+        let query_error = query::QueryError {
+            kind,
+            message: "probe".to_owned(),
+            line: None,
+            column: None,
+            sqlite_code: Some(code),
+        };
+        let mapped = execution::map_query_error(query_error);
+        assert_eq!(mapped.category, ErrorCategory::Busy);
+        assert_eq!(mapped.message, "query storage operation is busy");
+        assert_eq!(mapped.sqlite_code, code);
+    }
     for (code, expected) in [
         (ffi::SQLITE_BUSY, ErrorCategory::Busy),
         (ffi::SQLITE_LOCKED, ErrorCategory::Busy),

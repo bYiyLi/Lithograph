@@ -1283,7 +1283,12 @@ SQL Bridge 的完整 envelope：
   "summary": {
     "queryType": "read",
     "commit": "commit/...",
-    "counters": {}
+    "counters": {},
+    "metrics": {
+      "rows": 1,
+      "dbHits": 3,
+      "elapsedMicros": 42
+    }
   }
 }
 ```
@@ -1306,6 +1311,8 @@ indexesRemoved
 ```
 
 没有发生的 counter 返回 `0`，不因 query 类型省略 key。
+
+`summary.metrics` 在 SQL Bridge scalar result 与 Native `SUMMARY` event 使用同一 shape，固定包含 `rows`、`dbHits`、`elapsedMicros`。普通 execution 也返回该字段；`PROFILE` 在不改变 query rows/value semantics 的前提下使用同一基础计量，并在 release compatibility surface 上继续提供 operator runtime profile。`EXPLAIN` 不执行 graph/storage operator，因此除计划输出自身的 row accounting 外不得伪造 storage hits。
 
 Lithograph JSON v1 的 value encoding：
 

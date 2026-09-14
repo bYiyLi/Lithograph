@@ -1,7 +1,8 @@
 #![forbid(unsafe_code)]
 
 use lithograph_core::storage::{
-    HashId, branch_head, create_storage_schema, initialize_root, load_snapshot_state,
+    CommitMetadata, HashId, LayerBuilder, allocate_node_id, branch_head, commit_layer,
+    create_storage_schema, initialize_root, load_snapshot_state,
 };
 use lithograph_test_support::sqlite::{FileDatabaseFixture, FixtureError, extension_load_command};
 use rusqlite::{Connection, params};
@@ -70,7 +71,23 @@ fn check_format1_migration(load: &str) -> Result<(), Box<dyn Error>> {
         branch_head(&before, "main")? == old_root,
         "format-1 fixture must point main at the frozen format-1 Root Commit",
     )?;
-    let old_snapshot = load_snapshot_state(&before, old_root)?;
+    let root_snapshot = load_snapshot_state(&before, old_root)?;
+    let node = allocate_node_id(&before)?;
+    let mut layer = LayerBuilder::default();
+    layer.add_node(node)?;
+    let old_head = commit_layer(
+        &before,
+        "main",
+        old_root,
+        None,
+        &layer,
+        &CommitMetadata {
+            author: Some("phase10-migration".to_owned()),
+            message: Some("preserve format-1 history".to_owned()),
+            committed_at: 1,
+        },
+    )?;
+    let head_snapshot = load_snapshot_state(&before, old_head)?;
     drop(before);
 
     let output = fixture.execute_script(&format!("{load}\nSELECT lithograph_init();"))?;
@@ -83,22 +100,43 @@ fn check_format1_migration(load: &str) -> Result<(), Box<dyn Error>> {
         init["root"] == FORMAT1_ROOT,
         "migration must preserve the existing Root Commit id",
     )?;
-    verify_format2_state(fixture.path(), old_root, &old_snapshot)
+    verify_format2_state(
+        fixture.path(),
+        old_root,
+        old_head,
+        &root_snapshot,
+        &head_snapshot,
+    )
 }
 
 fn verify_format2_state(
     path: &std::path::Path,
     old_root: HashId,
-    old_snapshot: &lithograph_core::storage::SnapshotState,
+    old_head: HashId,
+    root_snapshot: &lithograph_core::storage::SnapshotState,
+    head_snapshot: &lithograph_core::storage::SnapshotState,
 ) -> Result<(), Box<dyn Error>> {
     let after = Connection::open(path)?;
     require(
-        branch_head(&after, "main")? == old_root,
+        branch_head(&after, "main")? == old_head,
         "migration must preserve the main Branch head",
     )?;
     require(
-        load_snapshot_state(&after, old_root)? == *old_snapshot,
-        "migration must preserve the existing Snapshot",
+        load_snapshot_state(&after, old_root)? == *root_snapshot,
+        "migration must preserve the existing Root Snapshot",
+    )?;
+    require(
+        load_snapshot_state(&after, old_head)? == *head_snapshot,
+        "migration must preserve the existing descendant Snapshot",
+    )?;
+    let parent: Vec<u8> = after.query_row(
+        "SELECT parent1 FROM main._lithograph_commits WHERE id=?1",
+        [old_head.as_bytes().as_slice()],
+        |row| row.get(0),
+    )?;
+    require(
+        parent == old_root.as_bytes().as_slice(),
+        "migration must preserve the existing Commit DAG edge",
     )?;
     let format: i64 = after.query_row(
         "SELECT storage_format FROM main._lithograph_meta WHERE id=1",

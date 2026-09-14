@@ -8,7 +8,10 @@ use crate::storage::{
     SchemaState, Snapshot,
 };
 
-use super::{ProcedureRow, commit_value, now_micros, resolve_descriptor_at, row, target_branch};
+use super::{
+    ProcedureRow, commit_value, ensure_target_branch_head, map_target_branch_error, now_micros,
+    resolve_descriptor_at, row, target_branch,
+};
 use crate::query::mutation::property_from_value;
 use crate::query::options::ExecutionOptions;
 use crate::query::{QueryError, QueryErrorKind, QueryResult};
@@ -24,17 +27,18 @@ pub(super) fn apply(
     connection: &Connection,
     args: Vec<Value>,
     options: &ExecutionOptions,
+    pinned_head: HashId,
 ) -> QueryResult<Vec<ProcedureRow>> {
     let patch = args
         .first()
         .ok_or_else(|| QueryError::invalid_argument("missing patch"))?;
     let branch = target_branch(connection, options)?;
-    let head = storage::branch_head(connection, &branch).map_err(QueryError::from)?;
-    let mut state = storage::load_snapshot_state(connection, head)?;
+    ensure_target_branch_head(connection, &branch, pinned_head)?;
+    let mut state = storage::load_snapshot_state(connection, pinned_head)?;
     apply_patch_to_state(connection, &mut state, patch)?;
-    let base = storage::load_snapshot_state(connection, head)?;
+    let base = storage::load_snapshot_state(connection, pinned_head)?;
     let layer = storage::layer_between(&base, &state)?;
-    validate_candidate(connection, head, &layer, &state.schema)?;
+    validate_candidate(connection, pinned_head, &layer, &state.schema)?;
     let schema_hash = state.schema.persist(connection)?;
     let metadata = CommitMetadata {
         author: options.author.clone(),
@@ -44,12 +48,13 @@ pub(super) fn apply(
     let commit = storage::commit_layer_with_schema(
         connection,
         &branch,
-        head,
+        pinned_head,
         None,
         &layer,
         schema_hash,
         &metadata,
-    )?;
+    )
+    .map_err(|error| map_target_branch_error(error, &branch))?;
     Ok(vec![row([("commit", commit_value(commit))])])
 }
 
@@ -297,7 +302,7 @@ fn apply_operation(
     let operation = require_map(value, "patch operation")?;
     let op = require_string(operation.get("op"), "operation.op")?;
     match op {
-        "AddNode" | "DeleteNode" => apply_node_operation(state, operation, op)?,
+        "AddNode" | "DeleteNode" => apply_node_operation(connection, state, operation, op)?,
         "AddLabel" | "RemoveLabel" => apply_label_operation(connection, state, operation, op)?,
         "AddRelationship" | "DeleteRelationship" => {
             apply_relationship_operation(connection, state, operation, op)?;
@@ -317,6 +322,7 @@ fn apply_operation(
 }
 
 fn apply_node_operation(
+    connection: &Connection,
     state: &mut storage::SnapshotState,
     operation: &BTreeMap<String, Value>,
     op: &str,
@@ -338,6 +344,11 @@ fn apply_node_operation(
         return before_mismatch(operation);
     }
     if op == "AddNode" {
+        if !storage::node_id_is_allocated(connection, id)? {
+            return Err(QueryError::invalid_argument(format!(
+                "patch NodeId {id} was not allocated by this database"
+            )));
+        }
         state.nodes.insert(id);
     } else {
         state.nodes.remove(&id);
@@ -391,18 +402,53 @@ fn apply_relationship_operation(
     let id = relationship_id(operation)?;
     require_operation_slot(operation, &format!("relationship/{id}"))?;
     if op == "AddRelationship" {
-        if operation.get("before") != Some(&Value::Null) {
-            return Err(QueryError::invalid_argument(
-                "AddRelationship before must be null",
-            ));
-        }
-        if state.relationships.contains_key(&id) {
-            return before_mismatch(operation);
-        }
-        let record = relationship_record(connection, id, operation.get("after"))?;
-        state.relationships.insert(id, record);
+        return apply_add_relationship(connection, state, operation, id);
+    }
+    apply_delete_relationship(connection, state, operation, id)
+}
+
+fn apply_add_relationship(
+    connection: &Connection,
+    state: &mut storage::SnapshotState,
+    operation: &BTreeMap<String, Value>,
+    id: i64,
+) -> QueryResult<()> {
+    if operation.get("before") != Some(&Value::Null) {
+        return Err(QueryError::invalid_argument(
+            "AddRelationship before must be null",
+        ));
+    }
+    if state.relationships.contains_key(&id) {
+        return before_mismatch(operation);
+    }
+    let record = relationship_record(connection, id, operation.get("after"))?;
+    validate_allocated_relationship_identity(connection, id, record)?;
+    state.relationships.insert(id, record);
+    Ok(())
+}
+
+fn validate_allocated_relationship_identity(
+    connection: &Connection,
+    id: i64,
+    record: RelationshipRecord,
+) -> QueryResult<()> {
+    let allocated = storage::relationship_id_is_allocated(connection, id)?
+        && storage::node_id_is_allocated(connection, record.source)?
+        && storage::node_id_is_allocated(connection, record.target)?;
+    if allocated {
         return Ok(());
     }
+    Err(QueryError::invalid_argument(
+        "patch Relationship identity references an id that was not allocated by this database",
+    ))
+}
+
+fn apply_delete_relationship(
+    connection: &Connection,
+    state: &mut storage::SnapshotState,
+    operation: &BTreeMap<String, Value>,
+    id: i64,
+) -> QueryResult<()> {
     let expected = relationship_record(connection, id, operation.get("before"))?;
     if operation.get("after") != Some(&Value::Null) {
         return Err(QueryError::invalid_argument(

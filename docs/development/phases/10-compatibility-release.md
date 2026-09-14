@@ -1,6 +1,6 @@
 # Phase 10：Compatibility Closure and Release Hardening
 
-**状态：`ready`**
+**状态：`in_progress`**
 
 ## 1. 目标
 
@@ -141,6 +141,17 @@ Review：
 - compatibility final report；
 - release build/install usage docs；
 - Phase 状态与 acceptance evidence。
+
+## 4.1 Current Implementation / Evidence
+
+Phase 10 已开始 hardening，但尚未达到 release closure：
+
+- `phase10_hardening` 使用 deterministic generated/property fixtures 覆盖 parser fail-closed、recursive Lithograph JSON value round-trip、Layer canonicalization/hash permutation、`layer_between` replay equivalence、public diff/patch forward+inverse algebra，以及 checkpoint materialization 与 Snapshot equivalence；当前 **6/6** 通过。
+- `phase10_compatibility` 新增 release-level compatibility regression：mutating / Version Procedure `EXPLAIN` 完成 validation+planning 但不产生 graph/ref side effect；`PROFILE` 与普通 execution 返回相同 rows 并记录 rows/dbHits/time foundation；SQL Bridge scalar summary 与 Native `SUMMARY` event 通过共享 serializer 暴露相同 `metrics.rows/dbHits/elapsedMicros`，补齐已有 Core metrics 在 public adapter boundary 被丢弃的问题；parse/semantic/type error 保留 source position，constraint error 保持稳定分类，SQLite `BUSY/LOCKED` 在 Core public taxonomy 与 Extension adapter 都稳定映射为 `BUSY` 并保留 primary SQLite code；当前 core compatibility **3/3**，extension summary-shape regression 已覆盖 aggregate metrics。`PROFILE` 的 per-operator runtime counters 与最终 oracle/TCK closure 仍未完成，因此 compatibility rows 不提前标 `done`。
+- `phase10_recovery` 已覆盖同一 writer transaction 在未 Commit 时 close/reopen 必须回到合法 pre-state，Commit 后 close/reopen 必须保留 Commit/ref、Commit Data、Tag、checkpoint 并保持 integrity clean，以及 uncommitted Commit Data clear + Tag move/create/delete 组合在 teardown/reopen 后完整恢复 pre-state；本轮进一步加入真实 subprocess death + WAL recovery 边界：writer 在 SQLite COMMIT 前直接结束进程时，reopen 必须恢复 Branch/history/Tag/allocator pre-state；COMMIT 成功后立即结束进程时，reopen 必须保留 Commit/ref、Commit Data、Tag、checkpoint 并保持 integrity clean。当前 test binary **6/6** 通过（其中 1 个 test 是仅供父测试调用的 crash subprocess harness）。
+- 既有 real-extension format `1 -> 2` probe 已扩展为有 descendant history 的 format-1 fixture：migration 前后 frozen Root Commit、descendant Commit ID、两级 Snapshot 与 parent DAG edge 均保持不变，同时继续覆盖 migration failure rollback；Native/real-load matrix 仍覆盖 SQLite 3.45.0 minimum / 3.51.0 current runtime 与 Phase 09 restart/session/transaction behavior。这些 evidence 会继续扩展为 Phase 10 release migration/fault matrix，而不是复制第二套迁移实现。
+- repository-wide `cargo make quality` 与 canonical `scripts/ci.sh` 在当前 Phase 10 worktree 上均通过；当前 coverage lines/functions/regions 为 **83.91% / 83.65% / 81.72%**。
+- 尚未关闭的 Phase 10 scope 包括 `CY25-2026.08` / applicable TCK compatibility closure（尤其 PROFILE per-operator counters、EXPLAIN/error oracle 与 SQL Bridge/Native parity 的最终 release matrix）、完整 crash fault matrix、release migration matrix、10M/100M scale gate、cross-platform artifact matrix、final architecture/security review 与 documentation/release closure。因此本 Phase 保持 `in_progress`，以下 Release Acceptance 不提前勾选。
 
 ## 5. Release Acceptance
 

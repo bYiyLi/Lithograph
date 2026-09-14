@@ -227,6 +227,8 @@ struct ReadExecutor<'connection, 'query> {
     is_interrupted: &'query dyn Fn() -> bool,
     global_bindings: BindingRow,
     options: Option<&'query ExecutionOptions>,
+    version_mutated: bool,
+    version_summary_commit: Option<HashId>,
 }
 
 struct GroupingPlan {
@@ -235,7 +237,7 @@ struct GroupingPlan {
     has_group_by: bool,
 }
 
-pub(super) fn execute_read(
+pub(super) fn execute_read_with_version_summary(
     connection: &Connection,
     program: &PreparedProgram,
     commit: HashId,
@@ -243,8 +245,8 @@ pub(super) fn execute_read(
     params: &BTreeMap<String, Value>,
     metrics: &mut QueryMetrics,
     is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<Vec<Vec<Value>>> {
-    execute_read_snapshot(
+) -> QueryResult<(Vec<Vec<Value>>, Option<HashId>)> {
+    execute_read_snapshot_with_version_summary(
         connection,
         program,
         Snapshot::resolve(connection, commit)?,
@@ -253,6 +255,36 @@ pub(super) fn execute_read(
         metrics,
         is_interrupted,
     )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the version-procedure boundary keeps immutable query execution inputs explicit"
+)]
+pub(crate) fn execute_version_program(
+    connection: &Connection,
+    program: &PreparedProgram,
+    commit: HashId,
+    graph_view: &ResolvedGraphView,
+    params: &BTreeMap<String, Value>,
+    metrics: &mut QueryMetrics,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<(Vec<Vec<Value>>, HashId)> {
+    if program.writes || !program.version_mutation {
+        return Err(QueryError::internal(
+            "invalid program reached the Version Procedure executor",
+        ));
+    }
+    let (rows, summary_commit) = execute_read_with_version_summary(
+        connection,
+        program,
+        commit,
+        graph_view,
+        params,
+        metrics,
+        is_interrupted,
+    )?;
+    Ok((rows, summary_commit.unwrap_or(commit)))
 }
 
 pub(super) fn execute_read_snapshot(
@@ -264,6 +296,27 @@ pub(super) fn execute_read_snapshot(
     metrics: &mut QueryMetrics,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<Vec<Vec<Value>>> {
+    execute_read_snapshot_with_version_summary(
+        connection,
+        program,
+        snapshot,
+        graph_view,
+        params,
+        metrics,
+        is_interrupted,
+    )
+    .map(|(rows, _)| rows)
+}
+
+fn execute_read_snapshot_with_version_summary(
+    connection: &Connection,
+    program: &PreparedProgram,
+    snapshot: Snapshot<'_>,
+    graph_view: &ResolvedGraphView,
+    params: &BTreeMap<String, Value>,
+    metrics: &mut QueryMetrics,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<(Vec<Vec<Value>>, Option<HashId>)> {
     let mut executor = ReadExecutor {
         connection,
         snapshot,
@@ -274,10 +327,12 @@ pub(super) fn execute_read_snapshot(
         is_interrupted,
         global_bindings: BindingRow::default(),
         options: Some(&program.options),
+        version_mutated: false,
+        version_summary_commit: None,
     };
     let result = executor.execute_query_body(&program.root, RowSet::seed())?;
     validate_executed_columns(&program.columns, &result.columns)?;
-    result
+    let rows = result
         .rows
         .into_iter()
         .map(|row| {
@@ -292,7 +347,8 @@ pub(super) fn execute_read_snapshot(
                 })
                 .collect::<QueryResult<Vec<_>>>()
         })
-        .collect()
+        .collect::<QueryResult<Vec<_>>>()?;
+    Ok((rows, executor.version_summary_commit))
 }
 
 #[allow(
@@ -320,6 +376,8 @@ pub(crate) fn execute_read_clause<'connection>(
         is_interrupted,
         global_bindings: BindingRow::default(),
         options: None,
+        version_mutated: false,
+        version_summary_commit: None,
     };
     executor.execute_single(
         &AstNode {

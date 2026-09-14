@@ -21,6 +21,19 @@ pub fn allocate_relationship_id(connection: &Connection) -> StorageResult<Relati
     allocate_id(connection, RELATIONSHIP_SEQUENCE)
 }
 
+/// Returns whether a NodeId has already been allocated by this database.
+pub fn node_id_is_allocated(connection: &Connection, id: NodeId) -> StorageResult<bool> {
+    id_is_allocated(connection, NODE_SEQUENCE, id)
+}
+
+/// Returns whether a RelationshipId has already been allocated by this database.
+pub fn relationship_id_is_allocated(
+    connection: &Connection,
+    id: RelationshipId,
+) -> StorageResult<bool> {
+    id_is_allocated(connection, RELATIONSHIP_SEQUENCE, id)
+}
+
 /// Returns the append-only dictionary id for a label name.
 pub fn intern_label(connection: &Connection, name: &str) -> StorageResult<LabelId> {
     intern_name(connection, "_lithograph_labels", LABEL_SEQUENCE, name)
@@ -118,6 +131,15 @@ fn allocate_id(connection: &Connection, kind: i64) -> StorageResult<i64> {
         )));
     }
     Ok(current)
+}
+
+fn id_is_allocated(connection: &Connection, kind: i64, id: i64) -> StorageResult<bool> {
+    let next_id: i64 = connection.query_row(
+        "SELECT next_id FROM main._lithograph_sequences WHERE kind = ?1",
+        [kind],
+        |row| row.get(0),
+    )?;
+    Ok(id > 0 && id < next_id)
 }
 
 fn intern_name(

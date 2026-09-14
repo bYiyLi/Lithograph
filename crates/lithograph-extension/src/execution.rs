@@ -166,6 +166,15 @@ pub(super) fn summary_json(summary: &query::QuerySummary) -> Value {
             "revision": session.revision,
         })),
         "counters": counters_json(&summary.counters),
+        "metrics": metrics_json(&summary.metrics),
+    })
+}
+
+fn metrics_json(metrics: &query::QueryMetrics) -> Value {
+    json!({
+        "rows": metrics.rows,
+        "dbHits": metrics.db_hits,
+        "elapsedMicros": metrics.elapsed_micros,
     })
 }
 
@@ -210,6 +219,7 @@ pub(super) fn map_query_error(error: query::QueryError) -> LithographError {
             query::QueryErrorKind::TransactionBoundaryRequired => {
                 ErrorCategory::TransactionBoundaryRequired
             }
+            query::QueryErrorKind::Busy => ErrorCategory::Busy,
             query::QueryErrorKind::Resource => ErrorCategory::Resource,
             query::QueryErrorKind::Io => ErrorCategory::Io,
             query::QueryErrorKind::Storage => ErrorCategory::Storage,
@@ -219,14 +229,15 @@ pub(super) fn map_query_error(error: query::QueryError) -> LithographError {
     };
     let sqlite_code = error.sqlite_code.unwrap_or(match error.kind {
         query::QueryErrorKind::Interrupted => ffi::SQLITE_INTERRUPT,
+        query::QueryErrorKind::Busy => ffi::SQLITE_BUSY,
         query::QueryErrorKind::Resource => ffi::SQLITE_TOOBIG,
         query::QueryErrorKind::Io => ffi::SQLITE_IOERR,
         _ => ffi::SQLITE_ERROR,
     });
-    let message = if matches!(error.kind, query::QueryErrorKind::Storage) {
-        "query storage operation failed".to_owned()
-    } else {
-        error.message
+    let message = match error.kind {
+        query::QueryErrorKind::Storage => "query storage operation failed".to_owned(),
+        query::QueryErrorKind::Busy => "query storage operation is busy".to_owned(),
+        _ => error.message,
     };
     let mut mapped = LithographError::new(category, message, sqlite_code);
     mapped.line = error.line.map(u64::from);

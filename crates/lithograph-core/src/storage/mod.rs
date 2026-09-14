@@ -32,7 +32,8 @@ pub use commit::{
 pub use identity::{
     allocate_node_id, allocate_relationship_id, find_label, find_property_key,
     find_relationship_type, intern_label, intern_property_key, intern_relationship_type,
-    label_name, property_key_name, relationship_type_name,
+    label_name, node_id_is_allocated, property_key_name, relationship_id_is_allocated,
+    relationship_type_name,
 };
 pub use integrity::{IntegrityIssue, integrity_check, structural_integrity_issues};
 pub use layer::{LayerBuilder, RelationshipRecord};

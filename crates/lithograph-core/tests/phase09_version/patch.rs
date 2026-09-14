@@ -170,6 +170,44 @@ fn assert_malformed_patch_rejected(connection: &Connection, base: HashId, patch:
     reverse.insert("before".to_owned(), Value::Boolean(true));
     operations.push(Value::Map(reverse));
     assert_patch_rejected_atomically(connection, base, Value::Map(duplicate_slot));
+
+    let database_id: String = connection
+        .query_row(
+            "SELECT database_id FROM main._lithograph_meta WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("database id");
+    let next_node_id: i64 = connection
+        .query_row(
+            "SELECT next_id FROM main._lithograph_sequences WHERE kind = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("next NodeId");
+    let unallocated_identity = Value::Map(BTreeMap::from([
+        ("format".to_owned(), Value::Integer(1)),
+        ("databaseId".to_owned(), Value::String(database_id)),
+        ("from".to_owned(), Value::String(descriptor(base))),
+        ("to".to_owned(), Value::String(descriptor(base))),
+        (
+            "operations".to_owned(),
+            Value::List(vec![Value::Map(BTreeMap::from([
+                ("op".to_owned(), Value::String("AddNode".to_owned())),
+                (
+                    "slot".to_owned(),
+                    Value::String(format!("node/{next_node_id}")),
+                ),
+                (
+                    "elementId".to_owned(),
+                    Value::String(format!("n:{next_node_id}")),
+                ),
+                ("before".to_owned(), Value::Null),
+                ("after".to_owned(), Value::Boolean(true)),
+            ]))]),
+        ),
+    ]));
+    assert_patch_rejected_atomically(connection, base, unallocated_identity);
 }
 
 fn assert_patch_rejected_atomically(connection: &Connection, base: HashId, patch: Value) {

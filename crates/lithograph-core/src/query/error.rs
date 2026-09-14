@@ -22,6 +22,7 @@ pub enum QueryErrorKind {
     ReadOnlyAdapter,
     ReadOnlySnapshot,
     TransactionBoundaryRequired,
+    Busy,
     Storage,
     Resource,
     Io,
@@ -148,6 +149,7 @@ impl From<rusqlite::Error> for QueryError {
         };
         let kind = match sqlite_code {
             Some(code) if code == rusqlite::ffi::SQLITE_INTERRUPT => QueryErrorKind::Interrupted,
+            Some(rusqlite::ffi::SQLITE_BUSY | rusqlite::ffi::SQLITE_LOCKED) => QueryErrorKind::Busy,
             Some(
                 rusqlite::ffi::SQLITE_IOERR
                 | rusqlite::ffi::SQLITE_CANTOPEN
@@ -241,7 +243,8 @@ mod tests {
             (rusqlite::ffi::SQLITE_IOERR, QueryErrorKind::Io),
             (rusqlite::ffi::SQLITE_CANTOPEN, QueryErrorKind::Io),
             (rusqlite::ffi::SQLITE_READONLY, QueryErrorKind::Io),
-            (rusqlite::ffi::SQLITE_BUSY, QueryErrorKind::Storage),
+            (rusqlite::ffi::SQLITE_BUSY, QueryErrorKind::Busy),
+            (rusqlite::ffi::SQLITE_LOCKED, QueryErrorKind::Busy),
         ] {
             let sqlite = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None);
             let mapped = QueryError::from(StorageError::Sqlite(sqlite));

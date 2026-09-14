@@ -298,19 +298,30 @@ impl ReadExecutor<'_, '_> {
                 "Version Procedures cannot execute inside a graph-mutation clause program",
             )
         })?;
+        let mutation = super::super::super::registry::is_version_mutation(name);
         let mut rows = Vec::new();
         for input_row in input.rows {
+            let pinned_commit = if self.version_mutated {
+                super::super::super::version::current_operation_commit(self.connection, options)?
+            } else {
+                self.snapshot.commit()
+            };
             let args = expressions
                 .iter()
                 .map(|expression| self.evaluate(expression, &input_row))
                 .collect::<QueryResult<Vec<_>>>()?;
-            let procedure_rows = super::super::super::version::execute_procedure(
+            let outcome = super::super::super::version::execute_procedure(
                 self.connection,
                 name,
                 args,
                 options,
+                pinned_commit,
             )?;
-            for procedure_row in procedure_rows {
+            if mutation {
+                self.version_mutated = true;
+                self.version_summary_commit = Some(outcome.summary_commit);
+            }
+            for procedure_row in outcome.rows {
                 rows.push(self.join_procedure_row(
                     &input_row,
                     &procedure_row,

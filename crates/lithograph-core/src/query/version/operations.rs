@@ -6,8 +6,9 @@ use crate::cypher::Value;
 use crate::storage::{self, CommitMetadata, HashId};
 
 use super::{
-    ProcedureRow, commit_value, now_micros, resolve_descriptor, resolve_descriptor_at, row,
-    string_arg, target_branch,
+    ProcedureRow, commit_value, ensure_target_branch_head, map_target_branch_error,
+    move_target_branch, now_micros, resolve_descriptor, resolve_descriptor_at, row, string_arg,
+    target_branch,
 };
 use crate::query::options::ExecutionOptions;
 use crate::query::{QueryError, QueryErrorKind, QueryResult};
@@ -16,10 +17,12 @@ pub(super) fn squash(
     connection: &Connection,
     args: Vec<Value>,
     options: &ExecutionOptions,
+    pinned_head: HashId,
 ) -> QueryResult<Vec<ProcedureRow>> {
     let since = resolve_descriptor_at(connection, &args, 0, "since")?;
     let branch = target_branch(connection, options)?;
-    let head = storage::branch_head(connection, &branch)?;
+    let head = pinned_head;
+    ensure_target_branch_head(connection, &branch, head)?;
     if since == head {
         return Err(QueryError::invalid_argument(
             "squash since must be older than HEAD",
@@ -36,21 +39,8 @@ pub(super) fn squash(
     super::patch::validate_candidate(connection, since, &layer, &target.schema)?;
 
     // Move inside the enclosing savepoint, then install the one replacement Commit.
-    storage::move_branch_ref(connection, &branch, Some(head), since)?;
-    let schema_hash = target.schema.persist(connection)?;
-    let commit = storage::commit_layer_with_schema(
-        connection,
-        &branch,
-        since,
-        None,
-        &layer,
-        schema_hash,
-        &CommitMetadata {
-            author: options.author.clone(),
-            message: options.message.clone(),
-            committed_at: now_micros()?,
-        },
-    )?;
+    move_target_branch(connection, &branch, head, since)?;
+    let commit = commit_rewritten_snapshot(connection, &branch, since, &layer, &target, options)?;
     Ok(vec![row([
         ("from", commit_value(since)),
         ("previousHead", commit_value(head)),
@@ -62,11 +52,13 @@ pub(super) fn reset(
     connection: &Connection,
     args: Vec<Value>,
     options: &ExecutionOptions,
+    pinned_head: HashId,
 ) -> QueryResult<Vec<ProcedureRow>> {
     let target = resolve_descriptor_at(connection, &args, 0, "target")?;
     let branch = target_branch(connection, options)?;
-    let previous = storage::branch_head(connection, &branch)?;
-    storage::move_branch_ref(connection, &branch, Some(previous), target)?;
+    let previous = pinned_head;
+    ensure_target_branch_head(connection, &branch, previous)?;
+    move_target_branch(connection, &branch, previous, target)?;
     Ok(vec![row([
         ("from", commit_value(previous)),
         ("to", commit_value(target)),
@@ -77,10 +69,11 @@ pub(super) fn revert(
     connection: &Connection,
     args: Vec<Value>,
     options: &ExecutionOptions,
+    pinned_head: HashId,
 ) -> QueryResult<Vec<ProcedureRow>> {
     let (commit, parent) = revert_target(connection, &args)?;
     let inverse = super::patch::diff_commits(connection, commit, parent)?;
-    let new_commit = apply_revert_patch(connection, &inverse, options)?;
+    let new_commit = apply_revert_patch(connection, &inverse, options, pinned_head)?;
     Ok(vec![row([("commit", commit_value(new_commit))])])
 }
 
@@ -115,61 +108,74 @@ fn apply_revert_patch(
     connection: &Connection,
     inverse: &Value,
     options: &ExecutionOptions,
+    pinned_head: HashId,
 ) -> QueryResult<HashId> {
     let branch = target_branch(connection, options)?;
-    let head = storage::branch_head(connection, &branch)?;
+    let head = pinned_head;
+    ensure_target_branch_head(connection, &branch, head)?;
     let base = storage::load_snapshot_state(connection, head)?;
     let mut target = base.clone();
     super::patch::apply_patch_to_state(connection, &mut target, inverse)?;
     let layer = storage::layer_between(&base, &target)?;
     super::patch::validate_candidate(connection, head, &layer, &target.schema)?;
+    commit_rewritten_snapshot(connection, &branch, head, &layer, &target, options)
+}
+
+fn commit_rewritten_snapshot(
+    connection: &Connection,
+    branch: &str,
+    parent: HashId,
+    layer: &storage::LayerBuilder,
+    target: &storage::SnapshotState,
+    options: &ExecutionOptions,
+) -> QueryResult<HashId> {
     let schema_hash = target.schema.persist(connection)?;
-    let new_commit = storage::commit_layer_with_schema(
+    storage::commit_layer_with_schema(
         connection,
-        &branch,
-        head,
+        branch,
+        parent,
         None,
-        &layer,
+        layer,
         schema_hash,
         &CommitMetadata {
             author: options.author.clone(),
             message: options.message.clone(),
             committed_at: now_micros()?,
         },
-    )?;
-    Ok(new_commit)
+    )
+    .map_err(|error| map_target_branch_error(error, branch))
 }
 
 pub(super) fn rebase(
     connection: &Connection,
     args: Vec<Value>,
     options: &ExecutionOptions,
+    pinned_head: HashId,
 ) -> QueryResult<Vec<ProcedureRow>> {
     let onto = resolve_descriptor_at(connection, &args, 0, "onto")?;
     let supplied_resolutions = rebase_resolutions(args.get(1))?;
     let branch = target_branch(connection, options)?;
-    let old_head = storage::branch_head(connection, &branch)?;
+    let old_head = pinned_head;
+    ensure_target_branch_head(connection, &branch, old_head)?;
     if storage::is_ancestor(connection, old_head, onto)? {
-        ensure_rebase_resolutions_known(&supplied_resolutions, &BTreeSet::new())?;
-        storage::move_branch_ref(connection, &branch, Some(old_head), onto)?;
-        return Ok(rebase_result(
-            "up_to_date",
-            Some(onto),
-            Vec::new(),
-            Vec::new(),
-        ));
+        return finish_up_to_date_rebase(
+            connection,
+            &branch,
+            old_head,
+            onto,
+            &supplied_resolutions,
+        );
     }
     let base = first_parent_rebase_base(connection, old_head, onto)?;
     let sequence = first_parent_sequence(connection, base, old_head)?;
     if sequence.is_empty() {
-        ensure_rebase_resolutions_known(&supplied_resolutions, &BTreeSet::new())?;
-        storage::move_branch_ref(connection, &branch, Some(old_head), onto)?;
-        return Ok(rebase_result(
-            "up_to_date",
-            Some(onto),
-            Vec::new(),
-            Vec::new(),
-        ));
+        return finish_up_to_date_rebase(
+            connection,
+            &branch,
+            old_head,
+            onto,
+            &supplied_resolutions,
+        );
     }
     execute_rebase_sequence(
         connection,
@@ -179,6 +185,23 @@ pub(super) fn rebase(
         sequence,
         &supplied_resolutions,
     )
+}
+
+fn finish_up_to_date_rebase(
+    connection: &Connection,
+    branch: &str,
+    old_head: HashId,
+    onto: HashId,
+    supplied_resolutions: &BTreeMap<HashId, Value>,
+) -> QueryResult<Vec<ProcedureRow>> {
+    ensure_rebase_resolutions_known(supplied_resolutions, &BTreeSet::new())?;
+    move_target_branch(connection, branch, old_head, onto)?;
+    Ok(rebase_result(
+        "up_to_date",
+        Some(onto),
+        Vec::new(),
+        Vec::new(),
+    ))
 }
 
 fn first_parent_rebase_base(
@@ -211,7 +234,7 @@ fn execute_rebase_sequence(
     supplied_resolutions: &BTreeMap<HashId, Value>,
 ) -> QueryResult<Vec<ProcedureRow>> {
     connection.execute_batch("SAVEPOINT lithograph_rebase")?;
-    storage::move_branch_ref(connection, branch, Some(old_head), onto)?;
+    move_target_branch(connection, branch, old_head, onto)?;
     let mut replay_head = onto;
     let mut rewritten = Vec::new();
     let mut seen_conflicts = BTreeSet::new();

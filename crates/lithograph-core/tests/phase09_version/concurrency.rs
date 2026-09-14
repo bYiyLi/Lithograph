@@ -40,6 +40,110 @@ fn open_file_storage(path: &std::path::Path) -> Connection {
 }
 
 #[test]
+fn version_mutation_keeps_query_start_branch_head_pinned() {
+    let directory = tempdir().expect("temp directory");
+    let path = directory.path().join("version-pin.db");
+    let connection = create_file_storage(&path);
+    execute(
+        &connection,
+        "CREATE (:Bulk {v:0}) FINISH",
+        ExecutionOptions::default(),
+    )
+    .expect("base state");
+    let base = branch_head(&connection, "main").expect("base head");
+    call(
+        &connection,
+        &format!(
+            "CALL lithograph.branch.create('patch-source', '{}') YIELD name RETURN name",
+            descriptor(base)
+        ),
+    );
+    execute(
+        &connection,
+        "MATCH (n:Bulk) SET n.v=1 FINISH",
+        options(r#"{"branch":"patch-source"}"#),
+    )
+    .expect("source change");
+    let source = branch_head(&connection, "patch-source").expect("source head");
+    let patch = call(
+        &connection,
+        &format!(
+            "CALL lithograph.diff('{}', '{}') YIELD patch RETURN patch",
+            descriptor(base),
+            descriptor(source)
+        ),
+    )[0][0]
+        .clone();
+    let mut params = BTreeMap::new();
+    params.insert("patch".to_owned(), patch);
+    let prepared = prepare(
+        &connection,
+        "CALL lithograph.patch.apply($patch) YIELD commit RETURN commit",
+        params,
+        ExecutionOptions::default(),
+    )
+    .expect("prepare patch against base HEAD");
+
+    let writer = open_file_storage(&path);
+    execute(
+        &writer,
+        "CREATE (:Concurrent) FINISH",
+        ExecutionOptions::default(),
+    )
+    .expect("concurrent main write");
+    let moved_head = branch_head(&writer, "main").expect("moved main head");
+    assert_ne!(moved_head, base);
+
+    let mut cursor = QueryCursor::new(prepared);
+    let error = cursor
+        .next_batch(&connection, 64)
+        .expect_err("prepared Version mutation must not silently repin moved Branch");
+    assert_eq!(error.kind, QueryErrorKind::BranchHeadMoved);
+    assert_eq!(
+        branch_head(&connection, "main").expect("main stays at concurrent head"),
+        moved_head
+    );
+}
+
+#[test]
+fn version_mutation_reports_deleted_pinned_target_branch() {
+    let directory = tempdir().expect("temp directory");
+    let path = directory.path().join("deleted-target.db");
+    let connection = create_file_storage(&path);
+    let main = branch_head(&connection, "main").expect("main head");
+    call(
+        &connection,
+        &format!(
+            "CALL lithograph.branch.create('stale-target', '{}') YIELD name RETURN name",
+            descriptor(main)
+        ),
+    );
+    call(
+        &connection,
+        "CALL lithograph.branch.checkout('stale-target') YIELD name RETURN name",
+    );
+    let prepared = prepare(
+        &connection,
+        "CALL lithograph.reset('branch/main') YIELD to RETURN to",
+        BTreeMap::new(),
+        ExecutionOptions::default(),
+    )
+    .expect("prepare reset on stale target");
+
+    let writer = open_file_storage(&path);
+    call(
+        &writer,
+        "CALL lithograph.branch.delete('stale-target') YIELD name RETURN name",
+    );
+
+    let mut cursor = QueryCursor::new(prepared);
+    let error = cursor
+        .next_batch(&connection, 64)
+        .expect_err("deleted pinned target Branch must not report success");
+    assert_eq!(error.kind, QueryErrorKind::BranchNotFound);
+}
+
+#[test]
 fn concurrent_resolve_reports_session_changed_instead_of_busy_snapshot() {
     let directory = tempdir().expect("temp directory");
     let path = directory.path().join("merge-concurrency.db");

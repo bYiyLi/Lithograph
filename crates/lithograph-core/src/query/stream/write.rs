@@ -49,7 +49,7 @@ impl QueryCursor {
                 .prepared
                 .program
                 .as_ref()
-                .is_some_and(|program| program.version_mutation && !program.writes);
+                .is_some_and(super::super::completeness::retry_version_busy);
         let original_metrics = self.metrics.clone();
         for attempt in 0..2 {
             if attempt != 0 {
@@ -141,15 +141,11 @@ impl QueryCursor {
                 &mut self.metrics,
                 is_interrupted,
             )
-            .and_then(|rows| {
-                let branch = crate::storage::active_branch(connection)?;
-                let commit = crate::storage::branch_head(connection, &branch)?;
-                Ok(CursorWriteOutcome {
-                    rows,
-                    commit,
-                    counters: QueryCounters::default(),
-                    query_type: QueryType::Version,
-                })
+            .map(|(rows, commit)| CursorWriteOutcome {
+                rows,
+                commit,
+                counters: QueryCounters::default(),
+                query_type: QueryType::Version,
             });
         }
         super::super::mutation::execute_program(

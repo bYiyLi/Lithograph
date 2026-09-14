@@ -133,16 +133,14 @@ pub(super) fn start(
     connection: &Connection,
     args: Vec<Value>,
     options: &ExecutionOptions,
+    pinned_ours: HashId,
 ) -> QueryResult<Vec<ProcedureRow>> {
     let source = args
         .first()
         .ok_or_else(|| QueryError::invalid_argument("missing source"))?;
     let theirs = resolve_descriptor(connection, source, "source")?;
     let branch = target_branch(connection, options)?;
-    let ours = storage::branch_head(connection, &branch).map_err(|error| match error {
-        storage::StorageError::NotFound(_) => branch_not_found(&branch),
-        error => error.into(),
-    })?;
+    let ours = pinned_ours;
     let expected = args
         .get(1)
         .map(|value| expected_commit(connection, value))
