@@ -5,13 +5,13 @@ use crate::query::graph::{
     materialize_node, materialize_relationship, node_property, relationship_property,
 };
 use crate::query::{QueryError, QueryErrorKind, QueryResult};
-use crate::storage::Snapshot;
+use crate::storage::{self, Snapshot};
 use unicode_normalization::{is_nfc, is_nfd, is_nfkc, is_nfkd};
 
 use super::operators::{evaluate_binary, evaluate_unary};
 use super::{
-    BindingRow, BindingValue, Expr, InterpolatedPart, ListPredicateKind, NormalizationForm,
-    TypeKind, TypeSpec, TypeTermSpec, compile_expression,
+    BinaryOp, BindingRow, BindingValue, Expr, InterpolatedPart, ListPredicateKind,
+    NormalizationForm, TypeKind, TypeSpec, TypeTermSpec, compile_expression,
 };
 
 #[derive(Clone, Copy)]
@@ -208,6 +208,8 @@ fn evaluate_postfix_expression(
             "subquery expression reached the scalar evaluator",
         )),
         Expr::Unary(op, value) => evaluate_unary(*op, context.evaluate(value)?),
+        Expr::Binary(BinaryOp::And, left, right) => evaluate_lazy_and(left, right, context),
+        Expr::Binary(BinaryOp::Or, left, right) => evaluate_lazy_or(left, right, context),
         Expr::Binary(op, left, right) => {
             let left = context.evaluate(left)?;
             let right = context.evaluate(right)?;
@@ -229,6 +231,51 @@ fn evaluate_postfix_expression(
             "expression dispatch reached an inconsistent evaluator branch",
         )),
     }
+}
+
+fn evaluate_lazy_and(
+    left: &Expr,
+    right: &Expr,
+    context: EvalContext<'_, '_>,
+) -> QueryResult<Value> {
+    match context.evaluate(left)? {
+        Value::Boolean(false) => Ok(Value::Boolean(false)),
+        Value::Boolean(true) => require_boolean_or_null(context.evaluate(right)?),
+        Value::Null => match require_boolean_or_null(context.evaluate(right)?)? {
+            Value::Boolean(false) => Ok(Value::Boolean(false)),
+            Value::Boolean(true) | Value::Null => Ok(Value::Null),
+            _ => unreachable!("boolean-or-null validator returned another value"),
+        },
+        _ => boolean_operand_error(),
+    }
+}
+
+fn evaluate_lazy_or(left: &Expr, right: &Expr, context: EvalContext<'_, '_>) -> QueryResult<Value> {
+    match context.evaluate(left)? {
+        Value::Boolean(true) => Ok(Value::Boolean(true)),
+        Value::Boolean(false) => require_boolean_or_null(context.evaluate(right)?),
+        Value::Null => match require_boolean_or_null(context.evaluate(right)?)? {
+            Value::Boolean(true) => Ok(Value::Boolean(true)),
+            Value::Boolean(false) | Value::Null => Ok(Value::Null),
+            _ => unreachable!("boolean-or-null validator returned another value"),
+        },
+        _ => boolean_operand_error(),
+    }
+}
+
+fn require_boolean_or_null(value: Value) -> QueryResult<Value> {
+    if matches!(value, Value::Boolean(_) | Value::Null) {
+        Ok(value)
+    } else {
+        boolean_operand_error()
+    }
+}
+
+fn boolean_operand_error<T>() -> QueryResult<T> {
+    Err(QueryError::new(
+        QueryErrorKind::Type,
+        "Boolean operator requires Boolean or null",
+    ))
 }
 
 fn evaluate_predicate_expression(
@@ -527,13 +574,6 @@ fn evaluate_subscript(
         (Value::List(values), Value::Integer(index)) => Ok(normalize_index(index, values.len())
             .and_then(|index| values.get(index).cloned())
             .unwrap_or(Value::Null)),
-        (Value::String(value), Value::Integer(index)) => {
-            let characters = value.chars().collect::<Vec<_>>();
-            Ok(normalize_index(index, characters.len())
-                .and_then(|index| characters.get(index).copied())
-                .map(|value| Value::String(value.to_string()))
-                .unwrap_or(Value::Null))
-        }
         (Value::Map(values), Value::String(key)) => {
             Ok(values.get(&key).cloned().unwrap_or(Value::Null))
         }
@@ -548,7 +588,7 @@ fn evaluate_subscript(
         (_, Value::Null) => Ok(Value::Null),
         _ => Err(QueryError::new(
             QueryErrorKind::Type,
-            "subscript requires List/String with Integer or Map/Node/Relationship with String",
+            "subscript requires List with Integer or Map/Node/Relationship with String",
         )),
     }
 }
@@ -564,14 +604,9 @@ fn evaluate_slice(base: Value, start: Option<Value>, end: Option<Value>) -> Quer
             let (start, end) = slice_bounds(start, end, values.len());
             Ok(Value::List(values[start..end].to_vec()))
         }
-        Value::String(value) => {
-            let values = value.chars().collect::<Vec<_>>();
-            let (start, end) = slice_bounds(start, end, values.len());
-            Ok(Value::String(values[start..end].iter().collect()))
-        }
         _ => Err(QueryError::new(
             QueryErrorKind::Type,
-            "slice requires a List or String",
+            "slice requires a List",
         )),
     }
 }
@@ -895,38 +930,14 @@ fn evaluate_function(
     context: EvalContext<'_, '_>,
 ) -> QueryResult<Value> {
     let lower = name.to_ascii_lowercase();
-    if matches!(lower.as_str(), "file" | "linenumber") && args.is_empty() {
-        let Some(load_csv) = &context.row.load_csv_context else {
-            return Ok(Value::Null);
-        };
-        return if lower == "file" {
-            Ok(load_csv
-                .file
-                .as_ref()
-                .map_or(Value::Null, |file| Value::String(file.clone())))
-        } else {
-            Ok(load_csv.line.map_or(Value::Null, Value::Integer))
-        };
+    if let Some(value) = evaluate_bound_relationship_type(&lower, args, context)? {
+        return Ok(value);
     }
-    if lower == "elementid"
-        && args.len() == 1
-        && let Expr::Variable(variable) = &args[0]
-    {
-        if let Some(value) = context.aliases.get(variable) {
-            return super::super::functions::element_id_value(value);
-        }
-        return match context.row.values.get(variable) {
-            Some(BindingValue::Node(id)) => Ok(Value::String(format!("n:{id}"))),
-            Some(BindingValue::Relationship(record)) => {
-                Ok(Value::String(format!("r:{}", record.id)))
-            }
-            Some(BindingValue::Path { .. }) => Err(QueryError::new(
-                QueryErrorKind::Type,
-                "elementId() requires Node or Relationship",
-            )),
-            Some(BindingValue::Scalar(value)) => super::super::functions::element_id_value(value),
-            Some(BindingValue::Null) | None => Ok(Value::Null),
-        };
+    if let Some(value) = evaluate_load_csv_metadata(&lower, args, context) {
+        return Ok(value);
+    }
+    if let Some(value) = evaluate_bound_element_id(&lower, args, context)? {
+        return Ok(value);
     }
     let values = args
         .iter()
@@ -936,6 +947,83 @@ fn evaluate_function(
         return relationship_endpoint(&lower, &values, context.snapshot);
     }
     evaluate_function_values(name, &values)
+}
+
+fn evaluate_bound_relationship_type(
+    lower: &str,
+    args: &[Expr],
+    context: EvalContext<'_, '_>,
+) -> QueryResult<Option<Value>> {
+    if lower != "type" || args.len() != 1 {
+        return Ok(None);
+    }
+    let Expr::Variable(variable) = &args[0] else {
+        return Ok(None);
+    };
+    let Some(BindingValue::Relationship(record)) = context.row.values.get(variable) else {
+        return Ok(None);
+    };
+    let relationship_type =
+        storage::relationship_type_name(context.snapshot.connection_for_query(), record.type_id)?
+            .ok_or_else(|| {
+            QueryError::internal(format!(
+                "Relationship Type id {} is missing",
+                record.type_id
+            ))
+        })?;
+    Ok(Some(Value::String(relationship_type)))
+}
+
+fn evaluate_load_csv_metadata(
+    lower: &str,
+    args: &[Expr],
+    context: EvalContext<'_, '_>,
+) -> Option<Value> {
+    if !matches!(lower, "file" | "linenumber") || !args.is_empty() {
+        return None;
+    }
+    let Some(load_csv) = &context.row.load_csv_context else {
+        return Some(Value::Null);
+    };
+    Some(if lower == "file" {
+        load_csv
+            .file
+            .as_ref()
+            .map_or(Value::Null, |file| Value::String(file.clone()))
+    } else {
+        load_csv.line.map_or(Value::Null, Value::Integer)
+    })
+}
+
+fn evaluate_bound_element_id(
+    lower: &str,
+    args: &[Expr],
+    context: EvalContext<'_, '_>,
+) -> QueryResult<Option<Value>> {
+    if lower != "elementid" || args.len() != 1 {
+        return Ok(None);
+    }
+    let Expr::Variable(variable) = &args[0] else {
+        return Ok(None);
+    };
+    if let Some(value) = context.aliases.get(variable) {
+        return super::super::functions::element_id_value(value).map(Some);
+    }
+    let value = match context.row.values.get(variable) {
+        Some(BindingValue::Node(id)) => Value::String(format!("n:{id}")),
+        Some(BindingValue::Relationship(record)) => Value::String(format!("r:{}", record.id)),
+        Some(BindingValue::Path { .. }) => {
+            return Err(QueryError::new(
+                QueryErrorKind::Type,
+                "elementId() requires Node or Relationship",
+            ));
+        }
+        Some(BindingValue::Scalar(value)) => {
+            return super::super::functions::element_id_value(value).map(Some);
+        }
+        Some(BindingValue::Null) | None => Value::Null,
+    };
+    Ok(Some(value))
 }
 
 pub(crate) fn relationship_endpoint(

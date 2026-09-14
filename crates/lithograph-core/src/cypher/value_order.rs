@@ -15,19 +15,9 @@ const AVERAGE_MONTH_DAYS_NUMERATOR: i128 = 48_699;
 /// Total value ordering used by `ORDER BY` for the Phase 03 value families.
 ///
 /// This is deliberately separate from [`super::value::cypher_compare`], which implements the
-/// `<`, `<=`, `>`, and `>=` operators and therefore rejects values such as Point and Vector.
-/// The frozen 2026.08 public evidence introduces UUID but does not define its value ordering
-/// semantics, so UUID ordering remains owned by the later compatibility phase.
+/// `<`, `<=`, `>`, and `>=` operators and keeps same-family non-comparable values such as Point
+/// and Vector distinct from the total ordering required by `ORDER BY`.
 pub fn cypher_order_compare(left: &Value, right: &Value) -> Result<Ordering, ValueError> {
-    match (left, right) {
-        (Value::Uuid(_), _) | (_, Value::Uuid(_)) => {
-            return Err(ValueError::new(
-                "UUID ORDER BY semantics are not defined by the frozen public Cypher 25 evidence",
-            ));
-        }
-        _ => {}
-    }
-
     let left_rank = value_order_rank(left);
     let right_rank = value_order_rank(right);
     if left_rank != right_rank {
@@ -60,6 +50,7 @@ pub fn cypher_order_compare(left: &Value, right: &Value) -> Result<Ordering, Val
         }
         (Value::String(left), Value::String(right)) => Ok(left.cmp(right)),
         (Value::Boolean(left), Value::Boolean(right)) => Ok(left.cmp(right)),
+        (Value::Uuid(left), Value::Uuid(right)) => Ok(left.as_bytes().cmp(right.as_bytes())),
         (Value::Integer(left), Value::Integer(right)) => Ok(left.cmp(right)),
         (Value::Integer(left), Value::Float(right)) => Ok(sort_integer_float(*left, *right)),
         (Value::Float(left), Value::Integer(right)) => {
@@ -90,9 +81,9 @@ fn value_order_rank(value: &Value) -> u8 {
         Value::Duration(_) => 12,
         Value::String(_) => 13,
         Value::Boolean(_) => 14,
-        Value::Integer(_) | Value::Float(_) => 15,
-        Value::Null => 16,
-        Value::Uuid(_) => unreachable!("UUID is handled before value ranking"),
+        Value::Uuid(_) => 15,
+        Value::Integer(_) | Value::Float(_) => 16,
+        Value::Null => 17,
     }
 }
 

@@ -296,12 +296,12 @@ pub fn cypher_equals(left: &Value, right: &Value) -> Result<Option<bool>, ValueE
     }
     let result = match (left, right) {
         (Value::Integer(left), Value::Integer(right)) => Some(left == right),
-        (Value::Integer(left), Value::Float(right)) => {
-            integer_float_cmp(*left, *right).map(|ordering| ordering == Ordering::Equal)
-        }
-        (Value::Float(left), Value::Integer(right)) => {
-            integer_float_cmp(*right, *left).map(|ordering| ordering == Ordering::Equal)
-        }
+        (Value::Integer(left), Value::Float(right)) => Some(
+            integer_float_cmp(*left, *right).is_some_and(|ordering| ordering == Ordering::Equal),
+        ),
+        (Value::Float(left), Value::Integer(right)) => Some(
+            integer_float_cmp(*right, *left).is_some_and(|ordering| ordering == Ordering::Equal),
+        ),
         (Value::Float(left), Value::Float(right)) => Some(numeric_equal(*left, *right)),
         (Value::Boolean(left), Value::Boolean(right)) => Some(left == right),
         (Value::String(left), Value::String(right)) => Some(left == right),
@@ -334,7 +334,13 @@ pub fn cypher_equals(left: &Value, right: &Value) -> Result<Option<bool>, ValueE
         (Value::Path(path), Value::List(values)) | (Value::List(values), Value::Path(path)) => {
             Some(path_list_equals(path, values))
         }
-        _ => Some(false),
+        _ => {
+            return Err(ValueError::new(format!(
+                "Cypher equality cannot compare {} with {}",
+                value_type_name(left),
+                value_type_name(right)
+            )));
+        }
     };
     Ok(result)
 }
@@ -377,18 +383,33 @@ pub fn cypher_compare(left: &Value, right: &Value) -> Result<Option<CypherCompar
         (Value::ZonedDateTime(left), Value::ZonedDateTime(right)) => {
             CypherComparison::from(compare_zoned_datetime(left, right))
         }
-        (Value::Duration(_), Value::Duration(_)) | (Value::Point(_), Value::Point(_)) => {
+        (Value::Uuid(left), Value::Uuid(right)) => {
+            CypherComparison::from(left.as_bytes().cmp(right.as_bytes()))
+        }
+        (Value::List(left), Value::List(right)) => {
+            return list_compare(left, right);
+        }
+        (Value::Duration(_), Value::Duration(_))
+        | (Value::Point(_), Value::Point(_))
+        | (Value::Vector(_), Value::Vector(_)) => {
             return Ok(None);
         }
-        _ => {
-            return Err(ValueError::new(format!(
-                "Cypher ordering comparison cannot compare {} with {}",
-                value_type_name(left),
-                value_type_name(right)
-            )));
-        }
+        _ => CypherComparison::from(super::value_order::cypher_order_compare(left, right)?),
     };
     Ok(Some(comparison))
+}
+
+fn list_compare(left: &[Value], right: &[Value]) -> Result<Option<CypherComparison>, ValueError> {
+    for (left, right) in left.iter().zip(right) {
+        if matches!(left, Value::Null) || matches!(right, Value::Null) {
+            return Ok(None);
+        }
+        let ordering = super::value_order::cypher_order_compare(left, right)?;
+        if ordering != Ordering::Equal {
+            return Ok(Some(CypherComparison::from(ordering)));
+        }
+    }
+    Ok(Some(CypherComparison::from(left.len().cmp(&right.len()))))
 }
 
 fn list_equals(left: &[Value], right: &[Value]) -> Result<Option<bool>, ValueError> {

@@ -10,6 +10,8 @@ use crate::storage::{
 use super::super::{QueryError, QueryErrorKind, QueryResult};
 use super::equality::property_equality_key;
 
+const CONSTRAINT_VALIDATION_PAGE_SIZE: usize = 4_096;
+
 pub(crate) fn validate_snapshot_against_commit_schema(
     connection: &Connection,
     commit: HashId,
@@ -28,6 +30,30 @@ pub(crate) fn validate_snapshot(
     validate_graph_relationship_types(connection, schema, snapshot)?;
     for constraint in schema.constraints.values() {
         validate_constraint(connection, constraint, snapshot)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_schema_transition(
+    connection: &Connection,
+    previous: &SchemaState,
+    next: &SchemaState,
+    snapshot: &Snapshot<'_>,
+) -> QueryResult<()> {
+    for (label, definition) in &next.graph_nodes {
+        if previous.graph_nodes.get(label) != Some(definition) {
+            validate_graph_node_type(connection, definition, snapshot)?;
+        }
+    }
+    for (relationship_type, definition) in &next.graph_relationships {
+        if previous.graph_relationships.get(relationship_type) != Some(definition) {
+            validate_graph_relationship_type(connection, definition, snapshot)?;
+        }
+    }
+    for (name, constraint) in &next.constraints {
+        if previous.constraints.get(name) != Some(constraint) {
+            validate_constraint(connection, constraint, snapshot)?;
+        }
     }
     Ok(())
 }
@@ -102,14 +128,11 @@ fn validate_graph_node_type(
         .map(|label| Ok((label, storage::find_label(connection, label)?)))
         .collect::<QueryResult<Vec<_>>>()?;
     let properties = resolve_property_rules(connection, &definition.properties)?;
-    let mut nodes = Vec::new();
-    snapshot.visit_nodes(|node_id| {
-        nodes.push(node_id);
-        Ok(())
-    })?;
-    for node_id in nodes {
-        let labels = snapshot.labels(node_id)?;
-        if labels.contains(&label_id) {
+    let mut after = 0_i64;
+    loop {
+        let page = snapshot.scan_label_after(label_id, after, CONSTRAINT_VALIDATION_PAGE_SIZE)?;
+        for node_id in page.items {
+            let labels = snapshot.labels(node_id)?;
             validate_graph_node_instance(
                 definition,
                 snapshot,
@@ -119,6 +142,10 @@ fn validate_graph_node_type(
                 &properties,
             )?;
         }
+        let Some(next_after) = page.next_after else {
+            break;
+        };
+        after = next_after;
     }
     Ok(())
 }
@@ -179,13 +206,14 @@ fn validate_graph_relationship_type(
     let source_label = resolve_optional_label(connection, definition.source_label.as_deref())?;
     let target_label = resolve_optional_label(connection, definition.target_label.as_deref())?;
     let properties = resolve_property_rules(connection, &definition.properties)?;
-    let mut relationships = Vec::new();
-    snapshot.visit_relationships(|relationship| {
-        relationships.push(relationship);
-        Ok(())
-    })?;
-    for relationship in relationships {
-        if relationship.type_id == type_id {
+    let mut after = 0_i64;
+    loop {
+        let page = snapshot.scan_relationship_type_after(
+            type_id,
+            after,
+            CONSTRAINT_VALIDATION_PAGE_SIZE,
+        )?;
+        for relationship in page.items {
             validate_graph_relationship_instance(
                 definition,
                 snapshot,
@@ -195,6 +223,10 @@ fn validate_graph_relationship_type(
                 &properties,
             )?;
         }
+        let Some(next_after) = page.next_after else {
+            break;
+        };
+        after = next_after;
     }
     Ok(())
 }
@@ -302,20 +334,22 @@ fn validate_node_constraint(
         return Ok(());
     };
     let keys = constraint_property_keys(connection, constraint)?;
-    let mut nodes = Vec::new();
-    snapshot.visit_nodes(|node| {
-        nodes.push(node);
-        Ok(())
-    })?;
-    let mut seen = BTreeMap::<Vec<Vec<u8>>, i64>::new();
-    for node in nodes {
-        if !snapshot.labels(node)?.contains(&label_id) {
-            continue;
+    with_constraint_uniqueness_state(connection, constraint, || {
+        let mut after = 0_i64;
+        loop {
+            let page =
+                snapshot.scan_label_after(label_id, after, CONSTRAINT_VALIDATION_PAGE_SIZE)?;
+            for node in page.items {
+                let values = property_values(snapshot, OwnerKind::Node, node, &keys)?;
+                validate_constraint_values(connection, constraint, "node", node, values)?;
+            }
+            let Some(next_after) = page.next_after else {
+                break;
+            };
+            after = next_after;
         }
-        let values = property_values(snapshot, OwnerKind::Node, node, &keys)?;
-        validate_constraint_values(constraint, "node", node, values, &mut seen)?;
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 fn validate_relationship_constraint(
@@ -328,26 +362,63 @@ fn validate_relationship_constraint(
         return Ok(());
     };
     let keys = constraint_property_keys(connection, constraint)?;
-    let mut relationships = Vec::new();
-    snapshot.visit_relationships(|relationship| {
-        relationships.push(relationship);
-        Ok(())
-    })?;
-    let mut seen = BTreeMap::<Vec<Vec<u8>>, i64>::new();
-    for relationship in relationships {
-        if relationship.type_id != type_id {
-            continue;
+    with_constraint_uniqueness_state(connection, constraint, || {
+        let mut after = 0_i64;
+        loop {
+            let page = snapshot.scan_relationships_after(after, CONSTRAINT_VALIDATION_PAGE_SIZE)?;
+            for relationship in page.items {
+                if relationship.type_id != type_id {
+                    continue;
+                }
+                let values =
+                    property_values(snapshot, OwnerKind::Relationship, relationship.id, &keys)?;
+                validate_constraint_values(
+                    connection,
+                    constraint,
+                    "relationship",
+                    relationship.id,
+                    values,
+                )?;
+            }
+            let Some(next_after) = page.next_after else {
+                break;
+            };
+            after = next_after;
         }
-        let values = property_values(snapshot, OwnerKind::Relationship, relationship.id, &keys)?;
-        validate_constraint_values(
-            constraint,
-            "relationship",
-            relationship.id,
-            values,
-            &mut seen,
-        )?;
+        Ok(())
+    })
+}
+
+fn with_constraint_uniqueness_state(
+    connection: &Connection,
+    constraint: &ConstraintDefinition,
+    validate: impl FnOnce() -> QueryResult<()>,
+) -> QueryResult<()> {
+    if !matches!(
+        constraint.kind,
+        ConstraintDefinitionKind::Key | ConstraintDefinitionKind::Unique
+    ) {
+        return validate();
     }
-    Ok(())
+    connection.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS _lithograph_constraint_validation_seen(\
+             key BLOB PRIMARY KEY, owner_id INTEGER NOT NULL\
+         ) WITHOUT ROWID;\
+         DELETE FROM temp._lithograph_constraint_validation_seen;",
+    )?;
+    let result = validate();
+    let cleanup =
+        connection.execute_batch("DROP TABLE temp._lithograph_constraint_validation_seen");
+    match result {
+        Ok(()) => {
+            cleanup?;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = cleanup;
+            Err(error)
+        }
+    }
 }
 
 fn constraint_property_keys<'a>(
@@ -379,11 +450,11 @@ fn property_values<'a>(
 }
 
 fn validate_constraint_values(
+    connection: &Connection,
     constraint: &ConstraintDefinition,
     element: &str,
     element_id: i64,
     values: Vec<(&str, Option<PropertyValue>)>,
-    seen: &mut BTreeMap<Vec<Vec<u8>>, i64>,
 ) -> QueryResult<()> {
     match &constraint.kind {
         ConstraintDefinitionKind::NotNull => {
@@ -411,14 +482,8 @@ fn validate_constraint_values(
             )?;
         }
         ConstraintDefinitionKind::Key | ConstraintDefinitionKind::Unique => {
-            let key = uniqueness_key(constraint, element, element_id, &values)?;
-            if let Some(key) = key
-                && let Some(existing) = seen.insert(key, element_id)
-            {
-                return Err(QueryError::constraint(format!(
-                    "constraint {} conflicts between {element} {existing} and {element} {element_id}",
-                    constraint.name
-                )));
+            if let Some(key) = uniqueness_key(constraint, element, element_id, &values)? {
+                record_uniqueness_key(connection, constraint, element, element_id, &key)?;
             }
         }
     }
@@ -430,7 +495,7 @@ fn uniqueness_key(
     element: &str,
     element_id: i64,
     values: &[(&str, Option<PropertyValue>)],
-) -> QueryResult<Option<Vec<Vec<u8>>>> {
+) -> QueryResult<Option<Vec<u8>>> {
     let require_all = matches!(constraint.kind, ConstraintDefinitionKind::Key);
     let mut key = Vec::with_capacity(values.len());
     for (property, value) in values {
@@ -448,7 +513,46 @@ fn uniqueness_key(
             None => non_reflexive_uniqueness_key(element_id),
         });
     }
-    Ok(Some(key))
+    encode_uniqueness_key(&key).map(Some)
+}
+
+fn encode_uniqueness_key(parts: &[Vec<u8>]) -> QueryResult<Vec<u8>> {
+    let mut encoded = Vec::new();
+    let count = u64::try_from(parts.len())
+        .map_err(|_| QueryError::internal("constraint uniqueness key has too many properties"))?;
+    encoded.extend_from_slice(&count.to_le_bytes());
+    for part in parts {
+        let len = u64::try_from(part.len())
+            .map_err(|_| QueryError::internal("constraint uniqueness key is too large"))?;
+        encoded.extend_from_slice(&len.to_le_bytes());
+        encoded.extend_from_slice(part);
+    }
+    Ok(encoded)
+}
+
+fn record_uniqueness_key(
+    connection: &Connection,
+    constraint: &ConstraintDefinition,
+    element: &str,
+    element_id: i64,
+    key: &[u8],
+) -> QueryResult<()> {
+    let inserted = connection.execute(
+        "INSERT OR IGNORE INTO temp._lithograph_constraint_validation_seen(key, owner_id) VALUES(?1, ?2)",
+        rusqlite::params![key, element_id],
+    )?;
+    if inserted == 1 {
+        return Ok(());
+    }
+    let existing: i64 = connection.query_row(
+        "SELECT owner_id FROM temp._lithograph_constraint_validation_seen WHERE key = ?1",
+        [key],
+        |row| row.get(0),
+    )?;
+    Err(QueryError::constraint(format!(
+        "constraint {} conflicts between {element} {existing} and {element} {element_id}",
+        constraint.name
+    )))
 }
 
 fn non_reflexive_uniqueness_key(element_id: i64) -> Vec<u8> {

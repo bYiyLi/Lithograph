@@ -27,14 +27,25 @@ impl IntegrityIssue {
     }
 }
 
+pub(super) fn hex_bytes(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
+}
+
 /// Checks the full canonical/derived storage graph.
 pub fn integrity_check(connection: &Connection) -> StorageResult<Vec<IntegrityIssue>> {
     let mut issues = structural_integrity_issues(connection)?;
     if !issues.is_empty() {
         return Ok(issues);
     }
-    issues.extend(history_integrity_issues(connection)?);
-    issues.extend(graph_integrity_issues(connection)?);
+    let (history_issues, references) = history_integrity_issues(connection)?;
+    issues.extend(history_issues);
+    issues.extend(graph_integrity_issues(connection, &references)?);
     issues.sort_by(|left, right| (&left.code, &left.message).cmp(&(&right.code, &right.message)));
     issues.dedup();
     Ok(issues)

@@ -150,6 +150,8 @@ Lithograph 不使用 `PRAGMA user_version`，避免占用宿主应用的数据�
 
 除 `lithograph_version()` 外，所有要求 graph state 的 API 在尚未执行 `lithograph_init()` 时返回 `NOT_INITIALIZED`。`lithograph_version()` 不要求先初始化，并分别返回 Extension version、ABI version、支持的 storage-format range 与当前 database 的 storage-format version；`main` 中不存在 Lithograph metadata 时当前 format 与 `databaseId` 为 `null`，更高但 marker 可读的 format 仍报告其实际版本。若 metadata 已存在但损坏，或 metadata 读取本身发生 `BUSY` / resource / I/O 等错误，则返回对应稳定 error，不把失败静默伪装成未初始化。
 
+普通 graph/query/transaction API 的每次 invocation 只执行**结构性初始化校验**：验证 metadata marker、当前 storage-format 可理解、canonical internal-schema inventory / metadata shape 正确，并拒绝会截获 internal write 的 unsafe TEMP trigger。它们**不得**在每次调用前重算完整 Commit / Layer / Schema hash、遍历完整 Commit DAG 或扫描完整 graph 来证明 canonical history integrity；否则 query latency 会随 database 总规模线性增长并违反第 17 节 large-scale invariant。完整 canonical-history / graph integrity scan 由显式 `lithograph_integrity_check()`、初始化/迁移验收和其它明确要求完整 integrity evidence 的维护路径负责。普通执行仍依赖 canonical storage primitives 自身的 point/overlay invariant 校验，并在实际访问到损坏记录时 fail closed。
+
 若 marker 可读但 `storageFormat` 低于当前 Extension 的 minimum supported format，只有存在该旧 format 到当前 format 的显式 migration path 时，`lithograph_init()` 才可以在第 14.3 节 transaction contract 下迁移；没有已实现 migration path 时按内部格式不兼容/损坏返回 `STORAGE_ERROR`。`lithograph_version()` 不把这种低于 minimum 的状态当作正常可用 database 返回成功 JSON。高于 maximum 的可读 format 仍按前述规则报告实际版本，由需要理解内部语义的 API 返回 `FORMAT_TOO_NEW`。
 
 SQL information/init API 返回 JSON object：
@@ -416,6 +418,13 @@ Label、Relationship Type 与 Property Key 使用 append-only integer dictionary
 ### 5.3 Runtime Values 与 Persistent Properties
 
 Query runtime 使用完整 Cypher 25 value model，包括 `NULL`、Boolean、Integer、Float、String、List、Map、Node、Relationship、Path、Temporal、Duration、Point、Vector 与 UUID。
+
+Value comparison 固定遵循 `CY25-2026.08` current semantics，而不是旧 openCypher TCK 的历史 cross-type 规则：
+
+- `=` / `<>` 对 `null` 传播 `null`；Integer/Float 按 numeric value 比较；Path 可以按交替 Node/Relationship sequence 与等价 List 比较；其余不具 equality-comparability 的不同 value family 必须返回稳定 `TYPE_ERROR`，不能静默降为 `false`；
+- `<` / `<=` / `>` / `>=` 对 `null` 传播 `null`。同 family 使用该 family 的 comparison semantics；不同 family 使用 Cypher 25 value hierarchy，顺序为 `MAP < NODE < RELATIONSHIP < LIST < PATH < VECTOR < POINT < ZONED DATETIME < LOCAL DATETIME < DATE < ZONED TIME < LOCAL TIME < DURATION < STRING < BOOLEAN < UUID < NUMBER`；同 family 明确定义为 non-comparable 的 value（例如 Duration direct comparison，以及 Profile 中对应的 Point/Vector direct comparison）返回 `null`，不能借用 `ORDER BY` 的内部 total-order key 改变 predicate 结果；
+- List direct comparison 使用 lexicographic semantics，并保留 `null` element 导致的 unknown result；`ORDER BY` 的 total ordering 与 direct comparison 是两个独立 contract；
+- `STARTS WITH` / `ENDS WITH` / `CONTAINS` / regex 等 String predicate 对 `null` 或非-String input 返回 `null`；需要 String-only access path 时由 planner/type proof 决定是否安全下推，不能把非-String value 改成 query error。
 
 持久化 Property 只接受 Cypher 25 允许的 property value types。Map、Node、Relationship、Path 等 constructed/structural runtime value 不作为 Property value 持久化。Property legality 在 Cypher type/mutation boundary 验证；LCE1 codec 负责 storage-format bytes 的 canonical encode/decode，不作为 Cypher Property 语义验证器，因此 format 1 已冻结的 tagged List bytes 不能因上层 property-type 规则而改变。
 
@@ -1241,7 +1250,7 @@ Index definition 是 versioned Schema；physical index content 是 derived cache
 
 Range / Text / Point index 使用 SQLite B-tree-backed derived tables，key 编码保持 Cypher ordering、comparison、collation 与 type semantics。Planner 根据 statistics 选择 seek / scan。
 
-Derived index 不能通过“只缓存可索引类型”改变 Cypher 的错误或 `null` 语义。对跨类型 equality 明确定义为 `false` 的 exact equality / `IN`，Planner 可以直接使用对应 exact seek；对可能因实际属性类型不兼容而返回 `TYPE_ERROR` 的 ordered comparison、String predicate 和 Point spatial predicate，只有目标 Commit 的 versioned Property Type Constraint 能证明该 index property 的所有 present value 都与该 predicate 兼容时，Planner 才能使用会过滤其它类型的 seek。没有足够 Schema proof 时必须 fallback 到正确的 scan/filter 路径。Property Type proof 与 index definition 一样按目标 Commit 解析，不能使用 current-head Schema 或 derived cache 内容替代。
+Derived index 不能通过“只缓存可索引类型”改变 Cypher 的 error / `null` / cross-type ordering semantics。Exact equality / `IN` 如果目标 property 可能同时存在与 probe value 不具 equality-comparability 的其它 value family，则直接 exact seek 会错误跳过本应产生的 `TYPE_ERROR`；这种情况下只有目标 Commit 的 versioned Property Type Constraint 能证明全部 present value 与 probe equality-compatible，Planner 才能使用 exact seek，否则必须 scan/filter。Ordered comparison 对不同 value family 按第 5.3 节的 Cypher value hierarchy 比较，因此只覆盖单一 physical key family 的 range seek 也必须有足够 Property Type proof，或由访问路径显式覆盖 hierarchy 中全部相关 family，不能把其它 family 静默过滤。String predicate 对非-String value 返回 `null`；Text/Range seek 若会预先丢弃这些 value，只能用于与 filter semantics 等价的上下文，并继续遵守 Graph View / null semantics。Point spatial predicate 同样不得因 derived cache 的类型筛选改变 observable behavior。Property Type proof 与 index definition 一样按目标 Commit 解析，不能使用 current-head Schema 或 derived cache 内容替代。
 
 ### 11.5 Full-text
 
@@ -1312,7 +1321,18 @@ indexesRemoved
 
 没有发生的 counter 返回 `0`，不因 query 类型省略 key。
 
-`summary.metrics` 在 SQL Bridge scalar result 与 Native `SUMMARY` event 使用同一 shape，固定包含 `rows`、`dbHits`、`elapsedMicros`。普通 execution 也返回该字段；`PROFILE` 在不改变 query rows/value semantics 的前提下使用同一基础计量，并在 release compatibility surface 上继续提供 operator runtime profile。`EXPLAIN` 不执行 graph/storage operator，因此除计划输出自身的 row accounting 外不得伪造 storage hits。
+`summary.metrics` 在 SQL Bridge scalar result 与 Native `SUMMARY` event 使用同一 shape，固定包含 `rows`、`dbHits`、`elapsedMicros`。普通 execution 也返回该字段；`PROFILE` 在不改变 query rows/value semantics 的前提下使用同一基础计量，并额外返回 `summary.profile`：
+
+```json
+{
+  "operators": [
+    {"id": 0, "operator": "LabelIndexScan", "rows": 2, "dbHits": 4},
+    {"id": 1, "operator": "Project", "rows": 2, "dbHits": 0}
+  ]
+}
+```
+
+`profile.operators` 与该 execution 的 Physical Plan 使用相同 operator 顺序和 zero-based `id`；`operator` 是 Lithograph Physical Operator 的稳定类别名，`rows` 是该 operator runtime boundary 实际产出的 row 数，`dbHits` 是归属于该 boundary 的底层 graph/index access 数。Planner-only annotation 不伪造 runtime count；如果一个 plan operator 被 executor 融合且没有独立可观察的 storage access，则其 `dbHits` 可以为 `0`，不能通过平均分摊或估算制造计数。所有 operator `dbHits` 之和必须等于 `summary.metrics.dbHits`。普通 execution 和 `EXPLAIN` 省略 `summary.profile`；`EXPLAIN` 不执行 graph/storage operator，因此除计划输出自身的 row accounting 外不得伪造 storage hits。
 
 Lithograph JSON v1 的 value encoding：
 
@@ -1335,6 +1355,8 @@ Parameters 接受同一 tagged encoding。识别到已知 `$type` 的 object 按
 `lithograph_rows` 的 `row` 使用同一 value encoding，因此 scalar 与 streaming adapter 不产生两套结果语义。
 
 `lithograph_rows` 的 `columns` 是 column-name array，`row` 是同顺序 value array；Native `COLUMNS` / `ROW` event 使用完全相同的两个 payload shape。空结果仍通过 Native `COLUMNS` event 暴露列信息；SQL table-valued adapter 的零行结果没有可携带 metadata 的 row，调用方如必须取得空结果的 columns，应使用 `lithograph()` envelope、`EXPLAIN`/metadata surface 或 Native API。
+
+Cypher statement 只有显式结果生成 surface（例如最终 `RETURN` / procedure `YIELD`）才能产生公开 result columns / rows。以 graph/schema/version mutation clause 结束且没有最终结果投影的 statement 固定返回 `columns=[]`、`rows=[]`；executor 为执行后续 mutation 保存的内部 binding row 不属于 Result Contract，也不得经 SQL Bridge、streaming adapter 或 Native ABI 暴露。
 
 ### 13.2 Error Categories
 
@@ -1400,6 +1422,8 @@ Native API 返回 SQLite primary result code + 结构化 `error_json`；SQL Brid
 - dictionary ID 唯一且 name 唯一；
 - checkpoint 与 derived index 声明的 Commit 可解析；
 - internal storage format 与 Extension 兼容。
+
+上述完整检查是显式 maintenance/integrity surface，不是每个普通 query、graph/version API、Native `tx_begin` / `tx_execute` 或 validation call 的隐式前置全库扫描。普通 initialized gate 只执行第 4.1 节定义、可在 bounded metadata/schema cost 内完成的结构性校验，包括 metadata marker、storage format、reserved internal-schema inventory、TEMP internal trigger 与 canonical table/index shape；Commit/Layer/Schema hash 重算、完整 DAG/ref/referential/checkpoint consistency 属于显式 `lithograph_integrity_check()`、初始化/迁移验证和 recovery/maintenance gate。需要证明完整 immutable history 未被离线篡改时，调用方必须显式运行 `lithograph_integrity_check()`。该边界不降低 corruption detection：显式 integrity surface 仍执行完整检查，运行时访问自身触及的 canonical object 也继续 fail closed；它只禁止普通 API 每次 invocation 重复扫描全部 canonical history，否则 read/write latency 会随全图/全历史线性放大并违反第 17 节 large-scale invariant。
 
 ### 14.2 Crash Recovery
 

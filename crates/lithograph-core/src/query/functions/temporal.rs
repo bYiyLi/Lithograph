@@ -110,12 +110,44 @@ fn scale_duration(duration: &DurationValue, scale: f64) -> QueryResult<DurationV
         ));
     }
     let (months, days, seconds, nanoseconds) = duration.components();
-    DurationValue::from_decimal_groups(
-        months as f64 * scale,
-        days as f64 * scale,
-        (seconds as f64 + nanoseconds as f64 / NANOS_PER_SECOND as f64) * scale,
-    )
-    .map_err(Into::into)
+    scaled_duration_from_components(months, days, seconds, nanoseconds, scale)
+}
+
+fn scaled_duration_from_components(
+    months: i64,
+    days: i64,
+    seconds: i64,
+    nanoseconds: i64,
+    scale: f64,
+) -> QueryResult<DurationValue> {
+    let months = months as f64 * scale;
+    let whole_months = months.trunc();
+    let days = days as f64 * scale + (months - whole_months) * (48_699.0 / 1_600.0);
+    let whole_days = days.trunc();
+    let seconds = seconds as f64 * scale + (days - whole_days) * 86_400.0;
+    let mut whole_seconds = seconds.trunc();
+    let mut nanoseconds =
+        (seconds - whole_seconds) * NANOS_PER_SECOND as f64 + nanoseconds as f64 * scale;
+    let carry_seconds = (nanoseconds / NANOS_PER_SECOND as f64).trunc();
+    whole_seconds += carry_seconds;
+    nanoseconds -= carry_seconds * NANOS_PER_SECOND as f64;
+    let rounded_nanoseconds = nanoseconds.round();
+    let nanoseconds = if (nanoseconds - rounded_nanoseconds).abs() < 1e-6 {
+        rounded_nanoseconds
+    } else {
+        nanoseconds.trunc()
+    };
+    for value in [whole_months, whole_days, whole_seconds, nanoseconds] {
+        if value < i64::MIN as f64 || value > i64::MAX as f64 {
+            return Err(duration_overflow());
+        }
+    }
+    Ok(DurationValue::from_components(
+        whole_months as i64,
+        whole_days as i64,
+        whole_seconds as i64,
+        nanoseconds as i64,
+    ))
 }
 
 fn divide_duration(duration: &DurationValue, divisor: f64) -> QueryResult<DurationValue> {
@@ -135,9 +167,9 @@ fn duration_from_i128(
     nanoseconds: i128,
 ) -> QueryResult<DurationValue> {
     let seconds = seconds
-        .checked_add(nanoseconds / NANOS_PER_SECOND)
+        .checked_add(nanoseconds.div_euclid(NANOS_PER_SECOND))
         .ok_or_else(duration_overflow)?;
-    let nanoseconds = nanoseconds % NANOS_PER_SECOND;
+    let nanoseconds = nanoseconds.rem_euclid(NANOS_PER_SECOND);
     Ok(DurationValue::from_components(
         i64::try_from(months).map_err(|_| duration_overflow())?,
         i64::try_from(days).map_err(|_| duration_overflow())?,
@@ -167,7 +199,9 @@ fn shift_temporal(
         nanoseconds = checked_negate(nanoseconds)?;
     }
     match temporal {
-        Value::Date(value) => shift_date(value, months, days).map(Value::Date),
+        Value::Date(value) => {
+            shift_date(value, months, days, seconds, nanoseconds).map(Value::Date)
+        }
         Value::LocalTime(value) => {
             shift_local_time(value, seconds, nanoseconds).map(Value::LocalTime)
         }
@@ -187,8 +221,20 @@ fn shift_temporal(
     }
 }
 
-fn shift_date(value: &DateValue, months: i64, days: i64) -> QueryResult<DateValue> {
+fn shift_date(
+    value: &DateValue,
+    months: i64,
+    days: i64,
+    seconds: i64,
+    nanoseconds: i64,
+) -> QueryResult<DateValue> {
     let shifted = shift_days_by_months(value.days(), months)?;
+    let time_nanoseconds = i128::from(seconds) * NANOS_PER_SECOND + i128::from(nanoseconds);
+    let time_days = time_nanoseconds / NANOS_PER_DAY;
+    let days = i128::from(days)
+        .checked_add(time_days)
+        .and_then(|value| i64::try_from(value).ok())
+        .ok_or_else(|| QueryError::new(QueryErrorKind::Type, "date arithmetic overflow"))?;
     let shifted = shifted
         .checked_add(days)
         .ok_or_else(|| QueryError::new(QueryErrorKind::Type, "date arithmetic overflow"))?;
@@ -721,7 +767,9 @@ fn truncate_date_days(days: i64, unit: &str) -> QueryResult<i64> {
         "decade" => date_days(year.div_euclid(10) * 10, 1, 1),
         "year" => date_days(year, 1, 1),
         "weekyear" => {
-            let january_fourth = date_days(year, 1, 4)?;
+            let day_of_week = (days + 3).rem_euclid(7) + 1;
+            let week_year = crate::cypher::civil_from_days(days + (4 - day_of_week)).0;
+            let january_fourth = date_days(week_year, 1, 4)?;
             Ok(start_of_week(january_fourth))
         }
         "quarter" => date_days(year, (month - 1) / 3 * 3 + 1, 1),
@@ -871,43 +919,39 @@ struct TemporalPoint {
     days: i64,
     nanoseconds: u64,
     instant_nanoseconds: Option<i128>,
+    offset_seconds: Option<i32>,
     has_date: bool,
 }
 
 fn temporal_point(value: &Value, counterpart: Option<&Value>) -> QueryResult<TemporalPoint> {
     let counterpart_days = counterpart.and_then(temporal_days).unwrap_or(0);
+    let counterpart_zone = counterpart.and_then(|value| match value {
+        Value::ZonedDateTime(value) => Some(value.zone()),
+        _ => None,
+    });
     match value {
-        Value::Date(value) => Ok(TemporalPoint {
-            days: value.days(),
-            nanoseconds: 0,
-            instant_nanoseconds: None,
-            has_date: true,
-        }),
-        Value::LocalTime(value) => Ok(TemporalPoint {
-            days: counterpart_days,
-            nanoseconds: value.nanoseconds(),
-            instant_nanoseconds: None,
-            has_date: false,
-        }),
+        Value::Date(value) => temporal_point_local(value.days(), 0, true, counterpart_zone),
+        Value::LocalTime(value) => temporal_point_local(
+            counterpart_days,
+            value.nanoseconds(),
+            false,
+            counterpart_zone,
+        ),
         Value::Time(value) => {
-            let (local, _) = value.storage_components();
+            let (local, offset) = value.storage_components();
             Ok(TemporalPoint {
                 days: counterpart_days,
                 nanoseconds: local,
                 instant_nanoseconds: Some(
                     i128::from(counterpart_days) * NANOS_PER_DAY + value.instant_key(),
                 ),
+                offset_seconds: Some(offset),
                 has_date: false,
             })
         }
         Value::LocalDateTime(value) => {
             let (days, nanoseconds) = value.storage_components();
-            Ok(TemporalPoint {
-                days,
-                nanoseconds,
-                instant_nanoseconds: None,
-                has_date: true,
-            })
+            temporal_point_local(days, nanoseconds, true, counterpart_zone)
         }
         Value::ZonedDateTime(value) => {
             let (days, nanoseconds) = value.local_components()?;
@@ -915,11 +959,37 @@ fn temporal_point(value: &Value, counterpart: Option<&Value>) -> QueryResult<Tem
                 days,
                 nanoseconds,
                 instant_nanoseconds: Some(value.instant_nanoseconds()),
+                offset_seconds: Some(value.offset_seconds()),
                 has_date: true,
             })
         }
         _ => temporal_type_error("duration difference requires temporal instant arguments"),
     }
+}
+
+fn temporal_point_local(
+    days: i64,
+    nanoseconds: u64,
+    has_date: bool,
+    counterpart_zone: Option<&str>,
+) -> QueryResult<TemporalPoint> {
+    let (instant_nanoseconds, offset_seconds) = match counterpart_zone {
+        Some(zone) => {
+            let zoned = ZonedDateTimeValue::from_local(days, nanoseconds, zone, None)?;
+            (
+                Some(zoned.instant_nanoseconds()),
+                Some(zoned.offset_seconds()),
+            )
+        }
+        None => (None, None),
+    };
+    Ok(TemporalPoint {
+        days,
+        nanoseconds,
+        instant_nanoseconds,
+        offset_seconds,
+        has_date,
+    })
 }
 
 fn temporal_days(value: &Value) -> Option<i64> {
@@ -966,9 +1036,14 @@ fn difference_logically(from: TemporalPoint, to: TemporalPoint) -> QueryResult<D
     }
     let months = whole_months_between(from, to)?;
     let shifted_days = shift_days_by_months(from.days, months)?;
-    let remainder = (i128::from(to.days) - i128::from(shifted_days)) * NANOS_PER_DAY
-        + i128::from(to.nanoseconds)
-        - i128::from(from.nanoseconds);
+    let shifted_local = i128::from(shifted_days) * NANOS_PER_DAY + i128::from(from.nanoseconds);
+    let target_local = i128::from(to.days) * NANOS_PER_DAY + i128::from(to.nanoseconds);
+    let remainder = match (from.offset_seconds, to.instant_nanoseconds) {
+        (Some(offset), Some(target)) => {
+            target - (shifted_local - i128::from(offset) * NANOS_PER_SECOND)
+        }
+        _ => target_local - shifted_local,
+    };
     duration_from_i128(
         i128::from(months),
         remainder / NANOS_PER_DAY,
@@ -983,8 +1058,12 @@ fn whole_months_between(from: TemporalPoint, to: TemporalPoint) -> QueryResult<i
     let raw = i128::from(to_year - from_year) * 12 + i128::from(to_month) - i128::from(from_month);
     let mut months = i64::try_from(raw).map_err(|_| duration_overflow())?;
     let shifted_days = shift_days_by_months(from.days, months)?;
-    let shifted = i128::from(shifted_days) * NANOS_PER_DAY + i128::from(from.nanoseconds);
-    let target = i128::from(to.days) * NANOS_PER_DAY + i128::from(to.nanoseconds);
+    let shifted_local = i128::from(shifted_days) * NANOS_PER_DAY + i128::from(from.nanoseconds);
+    let shifted = from.offset_seconds.map_or(shifted_local, |offset| {
+        shifted_local - i128::from(offset) * NANOS_PER_SECOND
+    });
+    let target_local = i128::from(to.days) * NANOS_PER_DAY + i128::from(to.nanoseconds);
+    let target = to.instant_nanoseconds.unwrap_or(target_local);
     if months > 0 && shifted > target {
         months -= 1;
     } else if months < 0 && shifted < target {

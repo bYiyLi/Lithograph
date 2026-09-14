@@ -4,12 +4,87 @@ use rusqlite::Connection;
 
 use super::layer::{DeltaOp, LayerBuilder, PropertyDelta, RelationshipDelta, RelationshipRecord};
 use super::property::PropertyColumns;
-use super::{OwnerKind, PropertyValue, StorageError, StorageResult};
+use super::{OwnerKind, StorageError, StorageResult};
+
+pub(super) fn load_node_deltas(
+    connection: &Connection,
+    layer_id: i64,
+    layer: &mut LayerBuilder,
+) -> StorageResult<()> {
+    visit_node_deltas(connection, layer_id, |node_id, op| {
+        layer.nodes.insert(node_id, op);
+        Ok(())
+    })
+}
+
+pub(super) fn load_label_deltas(
+    connection: &Connection,
+    layer_id: i64,
+    layer: &mut LayerBuilder,
+) -> StorageResult<()> {
+    visit_label_deltas(connection, layer_id, |node_id, label_id, op| {
+        layer.labels.insert((node_id, label_id), op);
+        Ok(())
+    })
+}
 
 pub(super) fn load_relationship_deltas(
     connection: &Connection,
     layer_id: i64,
     layer: &mut LayerBuilder,
+) -> StorageResult<()> {
+    visit_relationship_deltas(connection, layer_id, |record, op| {
+        layer
+            .relationships
+            .insert(record.id, RelationshipDelta { op, record });
+        Ok(())
+    })
+}
+
+pub(super) fn visit_node_deltas(
+    connection: &Connection,
+    layer_id: i64,
+    mut visitor: impl FnMut(i64, DeltaOp) -> StorageResult<()>,
+) -> StorageResult<()> {
+    let mut statement = connection.prepare(
+        "SELECT node_id, op FROM main._lithograph_node_delta WHERE layer_id = ?1 ORDER BY node_id",
+    )?;
+    let rows = statement.query_map([layer_id], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    for row in rows {
+        let (node_id, op) = row?;
+        visitor(node_id, DeltaOp::from_i64(op)?)?;
+    }
+    Ok(())
+}
+
+pub(super) fn visit_label_deltas(
+    connection: &Connection,
+    layer_id: i64,
+    mut visitor: impl FnMut(i64, i64, DeltaOp) -> StorageResult<()>,
+) -> StorageResult<()> {
+    let mut statement = connection.prepare(
+        "SELECT node_id, label_id, op FROM main._lithograph_label_delta WHERE layer_id = ?1 ORDER BY node_id, label_id",
+    )?;
+    let rows = statement.query_map([layer_id], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (node_id, label_id, op) = row?;
+        visitor(node_id, label_id, DeltaOp::from_i64(op)?)?;
+    }
+    Ok(())
+}
+
+pub(super) fn visit_relationship_deltas(
+    connection: &Connection,
+    layer_id: i64,
+    mut visitor: impl FnMut(RelationshipRecord, DeltaOp) -> StorageResult<()>,
 ) -> StorageResult<()> {
     let mut statement = connection.prepare(
         "SELECT relationship_id, source_id, type_id, target_id, op FROM main._lithograph_rel_delta WHERE layer_id = ?1 ORDER BY relationship_id",
@@ -27,13 +102,7 @@ pub(super) fn load_relationship_deltas(
     })?;
     for row in rows {
         let (record, op) = row?;
-        layer.relationships.insert(
-            record.id,
-            RelationshipDelta {
-                op: DeltaOp::from_i64(op)?,
-                record,
-            },
-        );
+        visitor(record, DeltaOp::from_i64(op)?)?;
     }
     Ok(())
 }
@@ -43,6 +112,23 @@ pub(super) fn load_property_deltas(
     layer_id: i64,
     layer: &mut LayerBuilder,
 ) -> StorageResult<()> {
+    visit_property_deltas(
+        connection,
+        layer_id,
+        |owner_kind, owner_id, key_id, delta| {
+            layer
+                .properties
+                .insert((owner_kind, owner_id, key_id), delta);
+            Ok(())
+        },
+    )
+}
+
+pub(super) fn visit_property_deltas(
+    connection: &Connection,
+    layer_id: i64,
+    mut visitor: impl FnMut(OwnerKind, i64, i64, PropertyDelta) -> StorageResult<()>,
+) -> StorageResult<()> {
     let mut statement = connection.prepare(
         "SELECT owner_kind, owner_id, key_id, op, type_tag, int_value, real_value, text_value, blob_value, aux_value FROM main._lithograph_property_delta WHERE layer_id = ?1 ORDER BY owner_kind, owner_id, key_id",
     )?;
@@ -51,23 +137,17 @@ pub(super) fn load_property_deltas(
         let owner_kind = OwnerKind::from_i64(row.get(0)?)?;
         let owner_id = row.get::<_, i64>(1)?;
         let key_id = row.get::<_, i64>(2)?;
-        let op = DeltaOp::from_i64(row.get(3)?)?;
-        let value = property_value_from_row(row, op)?;
-        layer
-            .properties
-            .insert((owner_kind, owner_id, key_id), PropertyDelta { op, value });
+        visitor(owner_kind, owner_id, key_id, property_delta_from_row(row)?)?;
     }
     Ok(())
 }
 
-fn property_value_from_row(
-    row: &rusqlite::Row<'_>,
-    op: DeltaOp,
-) -> StorageResult<Option<PropertyValue>> {
+fn property_delta_from_row(row: &rusqlite::Row<'_>) -> StorageResult<PropertyDelta> {
+    let op = DeltaOp::from_i64(row.get(3)?)?;
     let type_tag = row.get::<_, Option<i64>>(4)?;
     if op == DeltaOp::Remove {
         ensure_remove_payload_is_empty(row, type_tag)?;
-        return Ok(None);
+        return Ok(PropertyDelta { op, value: None });
     }
     let columns = PropertyColumns {
         type_tag: type_tag
@@ -78,7 +158,10 @@ fn property_value_from_row(
         blob_value: row.get(8)?,
         aux_value: row.get(9)?,
     };
-    Ok(Some(columns.to_value()?))
+    Ok(PropertyDelta {
+        op,
+        value: Some(columns.to_value()?),
+    })
 }
 
 fn ensure_remove_payload_is_empty(

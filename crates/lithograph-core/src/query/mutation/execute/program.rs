@@ -961,7 +961,6 @@ fn finish_program(
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<WriteOutcome> {
     check_interrupted(is_interrupted)?;
-    validate_executed_columns(&program.columns, &result.columns)?;
     let final_layer = context.delta.layer()?;
     let counters = context.delta.counters()?;
     let final_snapshot =
@@ -971,22 +970,27 @@ fn finish_program(
         context.base_commit,
         &final_snapshot,
     )?;
-    let rows = result
-        .rows
-        .into_iter()
-        .map(|row| {
-            result
-                .columns
-                .iter()
-                .map(|column| {
-                    binding_value(
-                        &final_snapshot,
-                        row.values.get(column).unwrap_or(&BindingValue::Null),
-                    )
-                })
-                .collect::<QueryResult<Vec<_>>>()
-        })
-        .collect::<QueryResult<Vec<_>>>()?;
+    let rows = if program.public_result {
+        validate_executed_columns(&program.columns, &result.columns)?;
+        result
+            .rows
+            .into_iter()
+            .map(|row| {
+                result
+                    .columns
+                    .iter()
+                    .map(|column| {
+                        binding_value(
+                            &final_snapshot,
+                            row.values.get(column).unwrap_or(&BindingValue::Null),
+                        )
+                    })
+                    .collect::<QueryResult<Vec<_>>>()
+            })
+            .collect::<QueryResult<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
     check_interrupted(is_interrupted)?;
     let options = program
         .write_options

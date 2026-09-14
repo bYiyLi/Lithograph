@@ -134,6 +134,50 @@ pub enum PhysicalOperator {
     Commit,
 }
 
+impl PhysicalOperator {
+    pub(crate) fn profile_name(&self) -> &'static str {
+        match self {
+            Self::NodeScan { .. } => "NodeScan",
+            Self::LabelIndexScan { .. } => "LabelIndexScan",
+            Self::IndexSeek { .. } => "IndexSeek",
+            Self::VectorSearch { .. } => "VectorSearch",
+            Self::RelationshipScan { .. } => "RelationshipScan",
+            Self::AdjacencySeek { .. } => "AdjacencySeek",
+            Self::Filter => "Filter",
+            Self::Project => "Project",
+            Self::ExternalSort => "ExternalSort",
+            Self::Skip => "Skip",
+            Self::Limit => "Limit",
+            Self::Aggregate => "Aggregate",
+            Self::Distinct => "Distinct",
+            Self::Optional => "Optional",
+            Self::Cartesian => "Cartesian",
+            Self::Let => "Let",
+            Self::Unwind => "Unwind",
+            Self::Union { .. } => "Union",
+            Self::Subquery => "Subquery",
+            Self::When => "When",
+            Self::Next => "Next",
+            Self::Eager => "Eager",
+            Self::Mutation { .. } => "Mutation",
+            Self::Schema { .. } => "Schema",
+            Self::Commit => "Commit",
+        }
+    }
+
+    pub(crate) fn is_storage_access(&self) -> bool {
+        matches!(
+            self,
+            Self::NodeScan { .. }
+                | Self::LabelIndexScan { .. }
+                | Self::IndexSeek { .. }
+                | Self::VectorSearch { .. }
+                | Self::RelationshipScan { .. }
+                | Self::AdjacencySeek { .. }
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Outgoing,

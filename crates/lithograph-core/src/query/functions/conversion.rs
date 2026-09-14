@@ -127,11 +127,22 @@ fn to_integer(value: &Value) -> QueryResult<Value> {
         }
         Value::Float(_) => Ok(Value::Null),
         Value::Boolean(value) => Ok(Value::Integer(i64::from(*value))),
-        Value::String(value) => value
-            .trim()
-            .parse::<i64>()
-            .map(Value::Integer)
-            .or(Ok(Value::Null)),
+        Value::String(value) => {
+            let value = value.trim();
+            if let Ok(value) = value.parse::<i64>() {
+                return Ok(Value::Integer(value));
+            }
+            match value.parse::<f64>() {
+                Ok(value)
+                    if value.is_finite()
+                        && value >= i64::MIN as f64
+                        && value < 9_223_372_036_854_775_808.0 =>
+                {
+                    Ok(Value::Integer(value.trunc() as i64))
+                }
+                _ => Ok(Value::Null),
+            }
+        }
         _ => conversion_error("Integer"),
     }
 }

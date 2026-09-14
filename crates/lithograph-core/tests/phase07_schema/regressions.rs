@@ -485,14 +485,14 @@ fn range_index_cache_covers_all_property_value_families() {
     ];
     for (name, target) in &equality_cases {
         let params = BTreeMap::from([("target".to_owned(), target.clone())]);
-        let (rows, _) = execute_params(
+        let error = execute_params(
             &connection,
             "MATCH (n:Indexed) WHERE n.value = $target RETURN n.name",
             params,
             ExecutionOptions::default(),
         )
-        .unwrap_or_else(|error| panic!("{name} range equality scan: {error}"));
-        assert_eq!(rows, vec![vec![Value::String((*name).to_owned())]]);
+        .expect_err("heterogeneous equality scan must surface incompatible value families");
+        assert_eq!(error.kind, QueryErrorKind::Type, "{name}");
     }
 
     execute(
@@ -507,14 +507,14 @@ fn range_index_cache_covers_all_property_value_families() {
 
     for (name, target) in equality_cases {
         let params = BTreeMap::from([("target".to_owned(), target)]);
-        let (rows, _) = execute_params(
+        let error = execute_params(
             &connection,
             "MATCH (n:Indexed) WHERE n.value = $target RETURN n.name",
             params.clone(),
             ExecutionOptions::default(),
         )
-        .unwrap_or_else(|error| panic!("{name} range equality seek: {error}"));
-        assert_eq!(rows, vec![vec![Value::String(name.to_owned())]]);
+        .expect_err("Range Index must not suppress heterogeneous equality errors");
+        assert_eq!(error.kind, QueryErrorKind::Type, "{name}");
         let (plan, _) = execute_params(
             &connection,
             "EXPLAIN MATCH (n:Indexed) WHERE n.value = $target RETURN n.name",
@@ -522,7 +522,7 @@ fn range_index_cache_covers_all_property_value_families() {
             ExecutionOptions::default(),
         )
         .unwrap_or_else(|error| panic!("{name} range equality explain: {error}"));
-        assert!(matches!(&plan[0][0], Value::String(plan) if plan.contains("indexed_value")));
+        assert!(matches!(&plan[0][0], Value::String(plan) if !plan.contains("IndexSeek")));
     }
 }
 
@@ -638,7 +638,7 @@ fn typed_standard_indexes_do_not_answer_untyped_existence_predicates() {
 }
 
 #[test]
-fn typed_standard_indexes_preserve_type_errors_without_type_proof() {
+fn typed_standard_indexes_preserve_null_and_type_semantics_without_type_proof() {
     let connection = fresh_storage();
     execute(
         &connection,
@@ -649,11 +649,12 @@ fn typed_standard_indexes_preserve_type_errors_without_type_proof() {
 
     let text_query = "MATCH (n:Mixed) WHERE n.text STARTS WITH 'a' RETURN n.name";
     let point_query = "MATCH (n:Mixed) WHERE point.withinBBox(n.location, point({x:0.0,y:0.0}), point({x:2.0,y:3.0})) RETURN n.name";
-    for query in [text_query, point_query] {
-        let error = execute(&connection, query, ExecutionOptions::default())
-            .expect_err("scan must surface incompatible property types");
-        assert_eq!(error.kind, QueryErrorKind::Type, "{query}");
-    }
+    let (text_scan, _) = execute(&connection, text_query, ExecutionOptions::default())
+        .expect("String predicate returns null for non-String values");
+    assert_eq!(text_scan, vec![vec![Value::String("typed".to_owned())]]);
+    let point_error = execute(&connection, point_query, ExecutionOptions::default())
+        .expect_err("Point predicate must surface incompatible property types");
+    assert_eq!(point_error.kind, QueryErrorKind::Type);
 
     execute(
         &connection,
@@ -668,10 +669,15 @@ fn typed_standard_indexes_preserve_type_errors_without_type_proof() {
     )
     .expect("point index");
 
+    let (text_indexed, _) = execute(&connection, text_query, ExecutionOptions::default())
+        .expect("Text Index presence must preserve String-predicate null semantics");
+    assert_eq!(text_indexed, text_scan);
     for (query, forbidden_index) in [(text_query, "mixed_text"), (point_query, "mixed_location")] {
-        let error = execute(&connection, query, ExecutionOptions::default())
-            .expect_err("typed Index must not suppress incompatible property type errors");
-        assert_eq!(error.kind, QueryErrorKind::Type, "{query}");
+        if query == point_query {
+            let error = execute(&connection, query, ExecutionOptions::default())
+                .expect_err("Point Index must not suppress incompatible property type errors");
+            assert_eq!(error.kind, QueryErrorKind::Type, "{query}");
+        }
         let (plan, _) = execute(
             &connection,
             &format!("EXPLAIN {query}"),
@@ -695,9 +701,9 @@ fn range_order_seek_requires_property_type_proof() {
     )
     .expect("seed heterogeneous range property");
     let query = "MATCH (n:Mixed) WHERE n.value > 1 RETURN n.name";
-    let error = execute(&connection, query, ExecutionOptions::default())
-        .expect_err("heterogeneous range scan must fail");
-    assert_eq!(error.kind, QueryErrorKind::Type);
+    let (scan, _) = execute(&connection, query, ExecutionOptions::default())
+        .expect("heterogeneous range scan follows cross-type hierarchy");
+    assert_eq!(scan, vec![vec![Value::String("number".to_owned())]]);
 
     execute(
         &connection,
@@ -705,9 +711,9 @@ fn range_order_seek_requires_property_type_proof() {
         ExecutionOptions::default(),
     )
     .expect("range index");
-    let error = execute(&connection, query, ExecutionOptions::default())
-        .expect_err("Range Index must not suppress heterogeneous comparison errors");
-    assert_eq!(error.kind, QueryErrorKind::Type);
+    let (indexed, _) = execute(&connection, query, ExecutionOptions::default())
+        .expect("Range Index presence must preserve cross-type hierarchy");
+    assert_eq!(indexed, scan);
     let (plan, _) = execute(
         &connection,
         &format!("EXPLAIN {query}"),
@@ -715,6 +721,72 @@ fn range_order_seek_requires_property_type_proof() {
     )
     .expect("explain");
     assert!(matches!(&plan[0][0], Value::String(plan) if !plan.contains("mixed_value")));
+}
+
+#[test]
+fn bounded_numeric_range_seek_pages_only_matching_candidates() {
+    let connection = fresh_storage();
+    execute(
+        &connection,
+        "UNWIND range(1,5000) AS value CREATE (:Metric {value:value}) FINISH",
+        ExecutionOptions::default(),
+    )
+    .expect("seed range metrics");
+    execute(
+        &connection,
+        "CREATE CONSTRAINT metric_value_type FOR (n:Metric) REQUIRE n.value IS :: INTEGER",
+        ExecutionOptions::default(),
+    )
+    .expect("add range type proof");
+    execute(
+        &connection,
+        "CREATE RANGE INDEX metric_value FOR (n:Metric) ON (n.value)",
+        ExecutionOptions::default(),
+    )
+    .expect("create range index");
+
+    let (rows, summary) = execute(
+        &connection,
+        "MATCH (n:Metric) WHERE n.value >= 2500 AND n.value < 2510 RETURN n.value",
+        ExecutionOptions::default(),
+    )
+    .expect("bounded range seek");
+    assert_eq!(rows.len(), 10);
+    assert!(
+        summary.metrics.db_hits < 100,
+        "bounded Range seek must not scan the full multi-page cache: {:?}",
+        summary.metrics
+    );
+}
+
+#[test]
+fn unique_constraint_detects_duplicates_across_validation_pages() {
+    let connection = fresh_storage();
+    execute(
+        &connection,
+        "UNWIND range(1,4999) AS value CREATE (:PagedUnique {value:value}) FINISH",
+        ExecutionOptions::default(),
+    )
+    .expect("seed first uniqueness page set");
+    execute(
+        &connection,
+        "CREATE (:PagedUnique {value:1}) FINISH",
+        ExecutionOptions::default(),
+    )
+    .expect("seed duplicate beyond the first validation page");
+
+    let before = branch_head(&connection, "main").expect("head before unique constraint");
+    let error = execute(
+        &connection,
+        "CREATE CONSTRAINT paged_unique_value FOR (n:PagedUnique) REQUIRE n.value IS UNIQUE",
+        ExecutionOptions::default(),
+    )
+    .expect_err("cross-page duplicate must reject the constraint");
+    assert_eq!(error.kind, QueryErrorKind::Constraint);
+    assert_eq!(
+        branch_head(&connection, "main").expect("head after rejected unique constraint"),
+        before
+    );
 }
 
 #[test]

@@ -5,9 +5,7 @@ use std::collections::BTreeMap;
 use rusqlite::{Connection, params};
 use serde_json::{Value as JsonValue, json};
 
-use super::property::PropertyColumns;
-use super::snapshot::Snapshot;
-use super::{HashId, LabelId, RelationshipTypeId, StorageResult};
+use super::{HashId, LabelId, RelationshipTypeId, StorageError, StorageResult};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SnapshotStatistics {
@@ -22,7 +20,6 @@ pub fn create_checkpoint(connection: &Connection, commit: HashId) -> StorageResu
     if checkpoint_exists(connection, commit)? {
         return Ok(());
     }
-    let snapshot = Snapshot::resolve(connection, commit)?;
     with_savepoint(connection, || {
         let created_at: i64 = connection.query_row(
             "SELECT CAST(unixepoch('subsec') * 1000000 AS INTEGER)",
@@ -33,20 +30,11 @@ pub fn create_checkpoint(connection: &Connection, commit: HashId) -> StorageResu
             "INSERT INTO main._lithograph_checkpoints(commit_id, created_at, metadata) VALUES(?1, ?2, NULL)",
             params![commit.as_bytes().as_slice(), created_at],
         )?;
-        let node_count = write_nodes(connection, commit, &snapshot)?;
-        let label_counts = write_labels(connection, commit, &snapshot)?;
-        let (relationship_count, type_counts) = write_relationships(connection, commit, &snapshot)?;
-        write_properties(connection, commit, &snapshot)?;
-        write_statistics(
-            connection,
-            commit,
-            &SnapshotStatistics {
-                node_count,
-                relationship_count,
-                label_counts,
-                type_counts,
-            },
-        )
+        for layer_id in first_parent_layers(connection, commit)? {
+            apply_layer(connection, commit, layer_id)?;
+        }
+        let statistics = checkpoint_statistics(connection, commit)?;
+        write_statistics(connection, commit, &statistics)
     })
 }
 
@@ -67,90 +55,116 @@ pub fn delete_checkpoint(connection: &Connection, commit: HashId) -> StorageResu
     })
 }
 
-fn write_nodes(
-    connection: &Connection,
-    commit: HashId,
-    snapshot: &Snapshot<'_>,
-) -> StorageResult<u64> {
-    let mut statement = connection
-        .prepare("INSERT INTO main._lithograph_cp_nodes(commit_id, node_id) VALUES(?1, ?2)")?;
-    let mut count = 0_u64;
-    snapshot.visit_nodes(|node_id| {
-        statement.execute(params![commit.as_bytes().as_slice(), node_id])?;
-        count = count.saturating_add(1);
-        Ok(())
-    })?;
-    Ok(count)
+fn first_parent_layers(connection: &Connection, commit: HashId) -> StorageResult<Vec<i64>> {
+    let mut current = Some(commit);
+    let mut layers = Vec::new();
+    while let Some(commit) = current {
+        let (parent, layer_id): (Option<Vec<u8>>, i64) = connection
+            .query_row(
+                "SELECT parent1, layer_id FROM main._lithograph_commits WHERE id = ?1",
+                [commit.as_bytes().as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(StorageError::from)?;
+        layers.push(layer_id);
+        current = parent.as_deref().map(HashId::from_slice).transpose()?;
+    }
+    layers.reverse();
+    Ok(layers)
 }
 
-fn write_labels(
-    connection: &Connection,
-    commit: HashId,
-    snapshot: &Snapshot<'_>,
-) -> StorageResult<BTreeMap<LabelId, u64>> {
-    let mut statement = connection.prepare(
-        "INSERT INTO main._lithograph_cp_labels(commit_id, node_id, label_id) VALUES(?1, ?2, ?3)",
+fn apply_layer(connection: &Connection, commit: HashId, layer_id: i64) -> StorageResult<()> {
+    let commit = commit.as_bytes().as_slice();
+    connection.execute(
+        "DELETE FROM main._lithograph_cp_nodes WHERE commit_id = ?1 AND node_id IN (SELECT node_id FROM main._lithograph_node_delta WHERE layer_id = ?2 AND op = 2)",
+        params![commit, layer_id],
     )?;
-    let mut counts = BTreeMap::new();
-    snapshot.visit_labels(|node_id, label_id| {
-        statement.execute(params![commit.as_bytes().as_slice(), node_id, label_id])?;
-        let count = counts.entry(label_id).or_insert(0_u64);
-        *count = count.saturating_add(1);
-        Ok(())
-    })?;
-    Ok(counts)
+    connection.execute(
+        "INSERT OR IGNORE INTO main._lithograph_cp_nodes(commit_id, node_id) SELECT ?1, node_id FROM main._lithograph_node_delta WHERE layer_id = ?2 AND op = 1",
+        params![commit, layer_id],
+    )?;
+
+    connection.execute(
+        "DELETE FROM main._lithograph_cp_labels WHERE commit_id = ?1 AND (node_id, label_id) IN (SELECT node_id, label_id FROM main._lithograph_label_delta WHERE layer_id = ?2 AND op = 2)",
+        params![commit, layer_id],
+    )?;
+    connection.execute(
+        "INSERT OR IGNORE INTO main._lithograph_cp_labels(commit_id, node_id, label_id) SELECT ?1, node_id, label_id FROM main._lithograph_label_delta WHERE layer_id = ?2 AND op = 1",
+        params![commit, layer_id],
+    )?;
+
+    connection.execute(
+        "DELETE FROM main._lithograph_cp_relationships WHERE commit_id = ?1 AND relationship_id IN (SELECT relationship_id FROM main._lithograph_rel_delta WHERE layer_id = ?2 AND op = 2)",
+        params![commit, layer_id],
+    )?;
+    connection.execute(
+        "INSERT OR REPLACE INTO main._lithograph_cp_relationships(commit_id, relationship_id, source_id, type_id, target_id) SELECT ?1, relationship_id, source_id, type_id, target_id FROM main._lithograph_rel_delta WHERE layer_id = ?2 AND op = 1",
+        params![commit, layer_id],
+    )?;
+
+    connection.execute(
+        "DELETE FROM main._lithograph_cp_properties WHERE commit_id = ?1 AND (owner_kind, owner_id, key_id) IN (SELECT owner_kind, owner_id, key_id FROM main._lithograph_property_delta WHERE layer_id = ?2 AND op = 2)",
+        params![commit, layer_id],
+    )?;
+    connection.execute(
+        "INSERT OR REPLACE INTO main._lithograph_cp_properties(commit_id, owner_kind, owner_id, key_id, type_tag, int_value, real_value, text_value, blob_value, aux_value) SELECT ?1, owner_kind, owner_id, key_id, type_tag, int_value, real_value, text_value, blob_value, aux_value FROM main._lithograph_property_delta WHERE layer_id = ?2 AND op = 1",
+        params![commit, layer_id],
+    )?;
+    Ok(())
 }
 
-fn write_relationships(
+fn checkpoint_statistics(
     connection: &Connection,
     commit: HashId,
-    snapshot: &Snapshot<'_>,
-) -> StorageResult<(u64, BTreeMap<RelationshipTypeId, u64>)> {
-    let mut statement = connection.prepare(
-        "INSERT INTO main._lithograph_cp_relationships(commit_id, relationship_id, source_id, type_id, target_id) VALUES(?1, ?2, ?3, ?4, ?5)",
+) -> StorageResult<SnapshotStatistics> {
+    let commit = commit.as_bytes().as_slice();
+    let node_count: i64 = connection.query_row(
+        "SELECT count(*) FROM main._lithograph_cp_nodes WHERE commit_id = ?1",
+        [commit],
+        |row| row.get(0),
     )?;
-    let mut count = 0_u64;
-    let mut type_counts = BTreeMap::new();
-    snapshot.visit_relationships(|relationship| {
-        statement.execute(params![
-            commit.as_bytes().as_slice(),
-            relationship.id,
-            relationship.source,
-            relationship.type_id,
-            relationship.target,
-        ])?;
-        count = count.saturating_add(1);
-        let type_count = type_counts.entry(relationship.type_id).or_insert(0_u64);
-        *type_count = type_count.saturating_add(1);
-        Ok(())
-    })?;
-    Ok((count, type_counts))
-}
-
-fn write_properties(
-    connection: &Connection,
-    commit: HashId,
-    snapshot: &Snapshot<'_>,
-) -> StorageResult<()> {
-    let mut statement = connection.prepare(
-        "INSERT INTO main._lithograph_cp_properties(commit_id, owner_kind, owner_id, key_id, type_tag, int_value, real_value, text_value, blob_value, aux_value) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+    let relationship_count: i64 = connection.query_row(
+        "SELECT count(*) FROM main._lithograph_cp_relationships WHERE commit_id = ?1",
+        [commit],
+        |row| row.get(0),
     )?;
-    snapshot.visit_properties(|owner_kind, owner_id, key_id, value| {
-        let columns = PropertyColumns::from_value(&value)?;
-        statement.execute(params![
-            commit.as_bytes().as_slice(),
-            owner_kind as i64,
-            owner_id,
-            key_id,
-            columns.type_tag,
-            columns.int_value,
-            columns.real_value,
-            columns.text_value.as_deref(),
-            columns.blob_value.as_deref(),
-            columns.aux_value.as_deref(),
-        ])?;
-        Ok(())
+    Ok(SnapshotStatistics {
+        node_count: u64::try_from(node_count)
+            .map_err(|_| StorageError::corrupt("checkpoint Node count is negative"))?,
+        relationship_count: u64::try_from(relationship_count)
+            .map_err(|_| StorageError::corrupt("checkpoint Relationship count is negative"))?,
+        label_counts: grouped_counts(
+            connection,
+            "SELECT label_id, count(*) FROM main._lithograph_cp_labels WHERE commit_id = ?1 GROUP BY label_id",
+            commit,
+        )?,
+        type_counts: grouped_counts(
+            connection,
+            "SELECT type_id, count(*) FROM main._lithograph_cp_relationships WHERE commit_id = ?1 GROUP BY type_id",
+            commit,
+        )?,
     })
+}
+
+fn grouped_counts(
+    connection: &Connection,
+    sql: &str,
+    commit: &[u8],
+) -> StorageResult<BTreeMap<i64, u64>> {
+    let mut statement = connection.prepare(sql)?;
+    let rows = statement.query_map([commit], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    let mut counts = BTreeMap::new();
+    for row in rows {
+        let (id, count) = row?;
+        counts.insert(
+            id,
+            u64::try_from(count)
+                .map_err(|_| StorageError::corrupt("checkpoint grouped count is negative"))?,
+        );
+    }
+    Ok(counts)
 }
 
 fn write_statistics(

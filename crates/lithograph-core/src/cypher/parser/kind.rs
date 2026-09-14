@@ -306,6 +306,7 @@ fn expression_ast_kind(rule: Rule) -> AstKind {
         | Rule::KW_IS
         | Rule::additive_operator
         | Rule::multiplicative_operator
+        | Rule::power_operator
         | Rule::unary_operator
         | Rule::AND_OP
         | Rule::OR_OP
@@ -696,6 +697,7 @@ pub(super) fn leaf_text(rule: Rule, text: &str) -> Option<String> {
         | Rule::KW_IS
         | Rule::additive_operator
         | Rule::multiplicative_operator
+        | Rule::power_operator
         | Rule::unary_operator
         | Rule::AND_OP
         | Rule::OR_OP

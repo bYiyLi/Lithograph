@@ -27,7 +27,10 @@ pub use plan::{
     LogicalOperator, LogicalPlan, PhysicalOperator, PhysicalPlan, PreparedQuery, prepare,
 };
 pub use stats::PlannerStatistics;
-pub use stream::{QueryBatch, QueryCounters, QueryCursor, QueryMetrics, QuerySummary, QueryType};
+pub use stream::{
+    OperatorRuntimeMetrics, QueryBatch, QueryCounters, QueryCursor, QueryMetrics, QuerySummary,
+    QueryType,
+};
 #[doc(hidden)]
 pub use version::validate_candidate_state;
 

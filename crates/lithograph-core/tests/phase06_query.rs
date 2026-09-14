@@ -7,6 +7,8 @@ use rusqlite::Connection;
 
 #[path = "phase06_query/mutation.rs"]
 mod mutation;
+#[path = "phase06_query/path_scale.rs"]
+mod path_scale;
 #[path = "phase06_query/spatial.rs"]
 mod spatial;
 #[path = "phase06_query/temporal.rs"]
@@ -1307,11 +1309,12 @@ fn label_and_pattern_expressions_use_the_current_graph_view() {
     assert_eq!(
         rows_with_options(
             &connection,
-            "MATCH (n:Person {name:'a'}) RETURN n['name'] AS dynamicProperty, n:Person AS staticLabel, n:$(\"Person\") AS dynamicLabel, n IS NOT LABELED Admin AS notAdmin, PROPERTY_EXISTS(n, name) AS hasName, PROPERTY_EXISTS(n, missing) AS hasMissing, exists((n)--()) AS hasOutgoing, [(n)-->(m) | m.name] AS names, [p = (n)-->(m) WHERE m.name = 'b' | length(p)] AS lengths",
+            "MATCH (n:Person {name:'a'}) RETURN n['name'] AS dynamicProperty, n:Person AS staticLabel, n:Person:Visible AS conjunctiveLabels, n:$(\"Person\") AS dynamicLabel, n IS NOT LABELED Admin AS notAdmin, PROPERTY_EXISTS(n, name) AS hasName, PROPERTY_EXISTS(n, missing) AS hasMissing, exists((n)--()) AS hasOutgoing, [(n)-->(m) | m.name] AS names, [p = (n)-->(m) WHERE m.name = 'b' | length(p)] AS lengths",
             options,
         ),
         vec![vec![
             Value::String("a".to_owned()),
+            Value::Boolean(true),
             Value::Boolean(true),
             Value::Boolean(true),
             Value::Boolean(true),

@@ -24,6 +24,7 @@ const RANGE_FAMILY_LOCAL_TIME: i64 = 5;
 const RANGE_FAMILY_TIME: i64 = 6;
 const RANGE_FAMILY_LOCAL_DATETIME: i64 = 7;
 const RANGE_FAMILY_ZONED_DATETIME: i64 = 8;
+const INDEX_BUILD_PAGE_SIZE: usize = 4_096;
 
 #[derive(Debug, Clone)]
 enum RangeOrderKey {
@@ -191,6 +192,23 @@ fn scan_property_index_after(
 ) -> QueryResult<ScanPage<i64>> {
     ensure_planned_index_cache(snapshot, seek)?;
 
+    if seek.kind == StandardIndexKind::Range
+        && seek.predicates.len() == 1
+        && let (ordinal, StandardIndexPredicate::Bounds { lower, upper }) = &seek.predicates[0]
+        && let Some(page) = scan_range_bounds_page(
+            snapshot,
+            &seek.index_name,
+            owner_kind,
+            *ordinal,
+            after,
+            limit,
+            lower,
+            upper,
+        )?
+    {
+        return Ok(page);
+    }
+
     let mut matched: Option<BTreeSet<i64>> = None;
     for (ordinal, predicate) in &seek.predicates {
         let candidates = scan_predicate_candidates(
@@ -298,6 +316,9 @@ fn scan_predicate_candidates(
         | StandardIndexPredicate::Distance { .. } => {
             scan_filtered_candidates(snapshot, index_name, owner_kind, ordinal, predicate, after)
         }
+        StandardIndexPredicate::Bounds { .. } => Err(QueryError::internal(
+            "bounded Range predicate requires the single-property Range seek path",
+        )),
     }
 }
 
@@ -345,6 +366,86 @@ fn scan_range_predicate_candidates(
         _ => return Ok(None),
     };
     Ok(Some(candidates))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the bounded Range cache helper keeps the complete indexed bound/page contract explicit"
+)]
+fn scan_range_bounds_page(
+    snapshot: &Snapshot<'_>,
+    index_name: &str,
+    owner_kind: i64,
+    ordinal: usize,
+    after: i64,
+    limit: usize,
+    lower: &Option<(Value, bool)>,
+    upper: &Option<(Value, bool)>,
+) -> QueryResult<Option<ScanPage<i64>>> {
+    let lower = match lower {
+        Some((value, inclusive)) => match numeric_range_value(value) {
+            Some(value) => Some((value, *inclusive)),
+            None => return Ok(None),
+        },
+        None => None,
+    };
+    let upper = match upper {
+        Some((value, inclusive)) => match numeric_range_value(value) {
+            Some(value) => Some((value, *inclusive)),
+            None => return Ok(None),
+        },
+        None => None,
+    };
+    if lower.is_none() && upper.is_none() {
+        return Ok(None);
+    }
+
+    let mut sql = "SELECT owner_id FROM temp._lithograph_standard_index_cache \
+         WHERE snapshot_hash = ? AND index_name = ? AND owner_kind = ? \
+         AND property_ordinal = ? AND owner_id > ? AND sort_family = ?"
+        .to_owned();
+    let mut parameters = vec![
+        SqlValue::Blob(snapshot.cache_identity().as_bytes().to_vec()),
+        SqlValue::Text(index_name.to_owned()),
+        SqlValue::Integer(owner_kind),
+        SqlValue::Integer(i64::try_from(ordinal).unwrap_or(i64::MAX)),
+        SqlValue::Integer(after),
+        SqlValue::Integer(RANGE_FAMILY_NUMBER),
+    ];
+    if let Some((value, inclusive)) = lower {
+        sql.push_str(if inclusive {
+            " AND sort_number >= ?"
+        } else {
+            " AND sort_number > ?"
+        });
+        parameters.push(value);
+    }
+    if let Some((value, inclusive)) = upper {
+        sql.push_str(if inclusive {
+            " AND sort_number <= ?"
+        } else {
+            " AND sort_number < ?"
+        });
+        parameters.push(value);
+    }
+    sql.push_str(" ORDER BY owner_id LIMIT ?");
+    parameters.push(SqlValue::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
+
+    let mut statement = snapshot.connection_for_query().prepare(&sql)?;
+    let rows = statement.query_map(rusqlite::params_from_iter(parameters), |row| row.get(0))?;
+    let items = rows.collect::<Result<Vec<i64>, _>>()?;
+    let next_after = (items.len() == limit)
+        .then(|| items.last().copied())
+        .flatten();
+    Ok(Some(ScanPage { items, next_after }))
+}
+
+fn numeric_range_value(value: &Value) -> Option<SqlValue> {
+    match value {
+        Value::Integer(value) => Some(SqlValue::Integer(*value)),
+        Value::Float(value) if !value.is_nan() => Some(SqlValue::Real(*value)),
+        _ => None,
+    }
 }
 
 fn scan_owner_id_candidates(
@@ -770,6 +871,23 @@ fn predicate_matches(value: &Value, predicate: &StandardIndexPredicate) -> Query
         StandardIndexPredicate::Less(_, _) | StandardIndexPredicate::Greater(_, _) => {
             order_predicate_matches(value, predicate)
         }
+        StandardIndexPredicate::Bounds { lower, upper } => {
+            let lower_matches = match lower {
+                Some((expected, inclusive)) => order_predicate_matches(
+                    value,
+                    &StandardIndexPredicate::Greater(expected.clone(), *inclusive),
+                )?,
+                None => true,
+            };
+            let upper_matches = match upper {
+                Some((expected, inclusive)) => order_predicate_matches(
+                    value,
+                    &StandardIndexPredicate::Less(expected.clone(), *inclusive),
+                )?,
+                None => true,
+            };
+            Ok(lower_matches && upper_matches)
+        }
         StandardIndexPredicate::IsNotNull => Ok(!matches!(value, Value::Null)),
         StandardIndexPredicate::StartsWith(_)
         | StandardIndexPredicate::EndsWith(_)
@@ -888,11 +1006,15 @@ fn ordering_matches(
 pub(crate) fn ensure_standard_indexes_for_commit(
     connection: &Connection,
     commit: HashId,
+    previous: &SchemaState,
     schema: &SchemaState,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<()> {
     let snapshot = Snapshot::resolve(connection, commit)?;
-    for index in schema.indexes.values() {
+    for (name, index) in &schema.indexes {
+        if previous.indexes.get(name) == Some(index) {
+            continue;
+        }
         if is_interrupted() {
             return Err(QueryError::interrupted());
         }
@@ -985,13 +1107,11 @@ fn build_relationship_lookup_cache(
     snapshot: &Snapshot<'_>,
     index: &IndexDefinition,
 ) -> QueryResult<()> {
-    let mut relationships = Vec::new();
-    snapshot.visit_relationships(|relationship| {
-        relationships.push(relationship);
-        Ok(())
-    })?;
-    for relationship in relationships {
-        snapshot.connection_for_query().execute(
+    let mut after = 0_i64;
+    loop {
+        let page = snapshot.scan_relationships_after(after, INDEX_BUILD_PAGE_SIZE)?;
+        for relationship in page.items {
+            snapshot.connection_for_query().execute(
             "INSERT OR REPLACE INTO temp._lithograph_standard_index_cache\
              (snapshot_hash, index_name, owner_kind, owner_id, property_ordinal, token_id, value_blob, text_value)\
              VALUES(?1, ?2, ?3, ?4, 0, ?5, NULL, NULL)",
@@ -1002,7 +1122,12 @@ fn build_relationship_lookup_cache(
                 relationship.id,
                 relationship.type_id,
             ],
-        )?;
+            )?;
+        }
+        let Some(next_after) = page.next_after else {
+            break;
+        };
+        after = next_after;
     }
     Ok(())
 }
@@ -1019,15 +1144,16 @@ fn build_node_property_cache(
     let Some(keys) = property_key_ids(snapshot, properties)? else {
         return Ok(());
     };
-    let mut nodes = Vec::new();
-    snapshot.visit_nodes(|node| {
-        nodes.push(node);
-        Ok(())
-    })?;
-    for node in nodes {
-        if snapshot.labels(node)?.contains(&label_id) {
+    let mut after = 0_i64;
+    loop {
+        let page = snapshot.scan_label_after(label_id, after, INDEX_BUILD_PAGE_SIZE)?;
+        for node in page.items {
             insert_owner_values(snapshot, index, NODE_OWNER_KIND, node, &keys)?;
         }
+        let Some(next_after) = page.next_after else {
+            break;
+        };
+        after = next_after;
     }
     Ok(())
 }
@@ -1046,21 +1172,24 @@ fn build_relationship_property_cache(
     let Some(keys) = property_key_ids(snapshot, properties)? else {
         return Ok(());
     };
-    let mut relationships = Vec::new();
-    snapshot.visit_relationships(|relationship| {
-        relationships.push(relationship);
-        Ok(())
-    })?;
-    for relationship in relationships {
-        if relationship.type_id == type_id {
-            insert_owner_values(
-                snapshot,
-                index,
-                RELATIONSHIP_OWNER_KIND,
-                relationship.id,
-                &keys,
-            )?;
+    let mut after = 0_i64;
+    loop {
+        let page = snapshot.scan_relationships_after(after, INDEX_BUILD_PAGE_SIZE)?;
+        for relationship in page.items {
+            if relationship.type_id == type_id {
+                insert_owner_values(
+                    snapshot,
+                    index,
+                    RELATIONSHIP_OWNER_KIND,
+                    relationship.id,
+                    &keys,
+                )?;
+            }
         }
+        let Some(next_after) = page.next_after else {
+            break;
+        };
+        after = next_after;
     }
     Ok(())
 }

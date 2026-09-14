@@ -47,7 +47,7 @@ fn order_by_is_distinct_from_direct_comparison() {
     let vector_i16 = Value::Vector(
         VectorValue::new(VectorCoordinateType::I16, VectorValues::I16(vec![0])).expect("vector"),
     );
-    assert!(cypher_compare(&vector_i8, &vector_i16).is_err());
+    assert_eq!(cypher_compare(&vector_i8, &vector_i16), Ok(None));
     assert_eq!(
         cypher_order_compare(&vector_i8, &vector_i16),
         Ok(Ordering::Less)
@@ -60,8 +60,15 @@ fn order_by_is_distinct_from_direct_comparison() {
 
     let uuid_a = uuid("00000000-0000-0000-0000-000000000001");
     let uuid_b = uuid("00000000-0000-0000-0000-000000000002");
-    assert!(cypher_order_compare(&uuid_a, &uuid_b).is_err());
-    assert!(cypher_order_compare(&uuid_a, &Value::String("x".into())).is_err());
+    assert_eq!(
+        cypher_compare(&uuid_a, &uuid_b),
+        Ok(Some(lithograph_core::cypher::CypherComparison::Less))
+    );
+    assert_eq!(cypher_order_compare(&uuid_a, &uuid_b), Ok(Ordering::Less));
+    assert_eq!(
+        cypher_order_compare(&uuid_a, &Value::String("x".into())),
+        Ok(Ordering::Greater)
+    );
 }
 
 #[test]

@@ -179,7 +179,7 @@ pub(crate) fn query_body_ends_with_call(node: &AstNode) -> bool {
     query_body_terminal_matches(node, single_query_ends_with_call)
 }
 
-fn query_body_terminal_matches(node: &AstNode, terminal: fn(&AstNode) -> bool) -> bool {
+pub(crate) fn query_body_terminal_matches(node: &AstNode, terminal: fn(&AstNode) -> bool) -> bool {
     match node.kind {
         AstKind::QueryBody
         | AstKind::Subquery(SubqueryKind::Braced)

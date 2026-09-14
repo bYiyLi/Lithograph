@@ -16,9 +16,24 @@ pub fn allocate_node_id(connection: &Connection) -> StorageResult<NodeId> {
     allocate_id(connection, NODE_SEQUENCE)
 }
 
+/// Allocates a contiguous database-wide NodeId range and returns its first id.
+#[cfg(feature = "test-support")]
+pub fn allocate_node_id_range(connection: &Connection, count: u64) -> StorageResult<NodeId> {
+    allocate_id_range(connection, NODE_SEQUENCE, count)
+}
+
 /// Allocates the next database-wide RelationshipId.
 pub fn allocate_relationship_id(connection: &Connection) -> StorageResult<RelationshipId> {
     allocate_id(connection, RELATIONSHIP_SEQUENCE)
+}
+
+/// Allocates a contiguous database-wide RelationshipId range and returns its first id.
+#[cfg(feature = "test-support")]
+pub fn allocate_relationship_id_range(
+    connection: &Connection,
+    count: u64,
+) -> StorageResult<RelationshipId> {
+    allocate_id_range(connection, RELATIONSHIP_SEQUENCE, count)
 }
 
 /// Returns whether a NodeId has already been allocated by this database.
@@ -109,6 +124,15 @@ pub(crate) fn allocate_layer_id(connection: &Connection) -> StorageResult<i64> {
 }
 
 fn allocate_id(connection: &Connection, kind: i64) -> StorageResult<i64> {
+    allocate_id_range(connection, kind, 1)
+}
+
+fn allocate_id_range(connection: &Connection, kind: i64, count: u64) -> StorageResult<i64> {
+    if count == 0 {
+        return Err(StorageError::corrupt(
+            "identity allocation range must contain at least one id",
+        ));
+    }
     let current: i64 = connection
         .query_row(
             "SELECT next_id FROM main._lithograph_sequences WHERE kind = ?1",
@@ -116,14 +140,22 @@ fn allocate_id(connection: &Connection, kind: i64) -> StorageResult<i64> {
             |row| row.get(0),
         )
         .map_err(StorageError::from)?;
-    if current <= 0 || current == i64::MAX {
+    let count = i64::try_from(count).map_err(|_| {
+        StorageError::corrupt(format!("sequence {kind} allocation range is too large"))
+    })?;
+    let next = current.checked_add(count).ok_or_else(|| {
+        StorageError::corrupt(format!(
+            "sequence {kind} cannot allocate another positive INTEGER64 identity range"
+        ))
+    })?;
+    if current <= 0 || next <= current {
         return Err(StorageError::corrupt(format!(
-            "sequence {kind} cannot allocate another positive INTEGER64 identity"
+            "sequence {kind} cannot allocate another positive INTEGER64 identity range"
         )));
     }
     let changed = connection.execute(
-        "UPDATE main._lithograph_sequences SET next_id = ?2 WHERE kind = ?1 AND next_id = ?2 - 1",
-        params![kind, current + 1],
+        "UPDATE main._lithograph_sequences SET next_id = ?2 WHERE kind = ?1 AND next_id = ?3",
+        params![kind, next, current],
     )?;
     if changed != 1 {
         return Err(StorageError::corrupt(format!(

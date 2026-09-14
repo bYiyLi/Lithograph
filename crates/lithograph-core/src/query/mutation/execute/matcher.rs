@@ -82,7 +82,8 @@ fn match_path_from(
         let next = match rel_spec.direction {
             Direction::Outgoing => relationship.target,
             Direction::Incoming => relationship.source,
-            Direction::Undirected => unreachable!(),
+            Direction::Undirected if relationship.source == current => relationship.target,
+            Direction::Undirected => relationship.source,
         };
         let mut next_row = row.clone();
         if !node_matches(
@@ -172,7 +173,21 @@ fn path_relationship_candidates(
                     .snapshot
                     .scan_incoming_after(current, Some(type_id), after, SCAN_BATCH)?
             }
-            Direction::Undirected => return Ok(Vec::new()),
+            Direction::Undirected => {
+                let mut records = context
+                    .snapshot
+                    .scan_outgoing_after(current, Some(type_id), 0, usize::MAX)?
+                    .items;
+                records.extend(
+                    context
+                        .snapshot
+                        .scan_incoming_after(current, Some(type_id), 0, usize::MAX)?
+                        .items,
+                );
+                records.sort_by_key(|record| record.id);
+                records.dedup_by_key(|record| record.id);
+                return Ok(records);
+            }
         };
         output.extend(page.items);
         let Some(next) = page.next_after else {

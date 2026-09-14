@@ -117,37 +117,53 @@ pub(super) fn is_phase01_metadata_bootstrap(connection: &Connection) -> Lithogra
     }
 
     let mut errors = Vec::new();
-    check_temp_internal_triggers(connection, &mut errors)?;
-    check_metadata_schema(connection, &mut errors)?;
-    check_metadata_columns(connection, &mut errors)?;
-    check_metadata_row_count(connection, &mut errors)?;
-    check_metadata_marker(connection, &mut errors)?;
+    check_base_metadata_integrity(connection, &mut errors)?;
     Ok(errors.is_empty())
 }
 
 pub(super) fn ensure_current_metadata_integrity(connection: &Connection) -> LithographResult<()> {
-    if let Some(error) = current_metadata_integrity_errors(connection)?
-        .into_iter()
-        .next()
-    {
-        return Err(error);
+    ensure_no_integrity_errors(current_metadata_integrity_errors(connection)?)
+}
+
+pub(super) fn ensure_runtime_metadata_integrity(connection: &Connection) -> LithographResult<()> {
+    ensure_no_integrity_errors(runtime_metadata_integrity_errors(connection)?)
+}
+
+fn ensure_no_integrity_errors(errors: Vec<LithographError>) -> LithographResult<()> {
+    match errors.into_iter().next() {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
-    Ok(())
+}
+
+fn runtime_metadata_integrity_errors(
+    connection: &Connection,
+) -> LithographResult<Vec<LithographError>> {
+    let mut errors = Vec::new();
+    check_base_metadata_integrity(connection, &mut errors)?;
+    check_structural_storage_integrity(connection, &mut errors)?;
+    Ok(errors)
 }
 
 fn current_metadata_integrity_errors(
     connection: &Connection,
 ) -> LithographResult<Vec<LithographError>> {
     let mut errors = Vec::new();
-
-    check_temp_internal_triggers(connection, &mut errors)?;
-    check_metadata_schema(connection, &mut errors)?;
-    check_metadata_columns(connection, &mut errors)?;
-    check_metadata_row_count(connection, &mut errors)?;
-    check_metadata_marker(connection, &mut errors)?;
+    check_base_metadata_integrity(connection, &mut errors)?;
     check_storage_integrity(connection, &mut errors)?;
-
     Ok(errors)
+}
+
+fn check_base_metadata_integrity(
+    connection: &Connection,
+    errors: &mut Vec<LithographError>,
+) -> LithographResult<()> {
+    check_temp_internal_triggers(connection, errors)?;
+    check_metadata_schema(connection, errors)?;
+    check_metadata_columns(connection, errors)?;
+    check_metadata_row_count(connection, errors)?;
+    check_metadata_marker(connection, errors)?;
+    Ok(())
 }
 
 fn check_temp_internal_triggers(
@@ -213,6 +229,21 @@ fn check_storage_integrity(
 ) -> LithographResult<()> {
     let findings = storage::integrity_check(connection)
         .map_err(|error| map_storage_error(error, "failed to verify Lithograph storage"))?;
+    for finding in findings {
+        errors.push(LithographError::storage(format!(
+            "{}: {}",
+            finding.code, finding.message
+        )));
+    }
+    Ok(())
+}
+
+fn check_structural_storage_integrity(
+    connection: &Connection,
+    errors: &mut Vec<LithographError>,
+) -> LithographResult<()> {
+    let findings = storage::structural_integrity_issues(connection)
+        .map_err(|error| map_storage_error(error, "failed to verify Lithograph storage schema"))?;
     for finding in findings {
         errors.push(LithographError::storage(format!(
             "{}: {}",

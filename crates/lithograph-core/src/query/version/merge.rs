@@ -16,6 +16,13 @@ mod support;
 
 use support::*;
 
+mod conflict_page;
+use conflict_page::{ConflictPage, ConflictPageBuilder};
+
+mod sparse;
+pub(crate) use sparse::sparse_candidate_layer;
+use sparse::try_sparse_property_merge;
+
 mod state;
 
 pub(crate) use state::{logical_slots, set_logical_slot};
@@ -75,58 +82,6 @@ struct ConflictScanContext<'a> {
     derived: Vec<MergeConflict>,
     candidate: SnapshotState,
     unresolved: usize,
-}
-
-struct ConflictPage {
-    conflicts: Vec<MergeConflict>,
-    has_more: bool,
-}
-
-struct ConflictPageBuilder {
-    offset: usize,
-    limit: usize,
-    seen: usize,
-    conflicts: Vec<MergeConflict>,
-    has_more: bool,
-}
-
-impl ConflictPageBuilder {
-    fn new(offset: usize, limit: usize) -> Self {
-        Self {
-            offset,
-            limit,
-            seen: 0,
-            conflicts: Vec::with_capacity(limit),
-            has_more: false,
-        }
-    }
-
-    fn push(&mut self, conflict: MergeConflict) -> bool {
-        if self.seen < self.offset {
-            self.seen += 1;
-            return false;
-        }
-        if self.conflicts.len() < self.limit {
-            self.conflicts.push(conflict);
-            self.seen += 1;
-            return false;
-        }
-        self.seen += 1;
-        self.has_more = true;
-        true
-    }
-
-    fn finish(self) -> QueryResult<ConflictPage> {
-        if self.seen < self.offset {
-            return Err(QueryError::invalid_argument(
-                "merge conflict cursor is out of range",
-            ));
-        }
-        Ok(ConflictPage {
-            conflicts: self.conflicts,
-            has_more: self.has_more,
-        })
-    }
 }
 
 pub(super) fn start(
@@ -341,27 +296,56 @@ fn prepare_finalize(
     if computation.unresolved != 0 {
         return Err(merge_conflict());
     }
-    let action = match computation.status {
+    let action = finalize_action_for_computation(connection, &session, computation, &resolutions)?;
+    Ok((id, expected_revision, session, action))
+}
+
+fn finalize_action_for_computation(
+    connection: &Connection,
+    session: &MergeSessionRecord,
+    computation: MergeComputation,
+    resolutions: &BTreeMap<HashId, Value>,
+) -> QueryResult<FinalizeAction> {
+    Ok(match computation.status {
         "up_to_date" => FinalizeAction::UpToDate,
         "fast_forward" => FinalizeAction::FastForward,
-        "ready" => {
-            let candidate = computation.candidate.ok_or_else(|| {
-                QueryError::internal("ready merge is missing its candidate Snapshot")
-            })?;
-            let ours = storage::load_snapshot_state(connection, session.ours)?;
-            FinalizeAction::Merge {
-                layer: storage::layer_between(&ours, &candidate)?,
-                schema_blob: candidate.schema.canonical_blob()?,
-            }
-        }
+        "ready" => ready_finalize_action(connection, session, computation.candidate, resolutions)?,
         "conflicted" => return Err(merge_conflict()),
         status => {
             return Err(QueryError::internal(format!(
                 "unexpected merge status {status}"
             )));
         }
+    })
+}
+
+fn ready_finalize_action(
+    connection: &Connection,
+    session: &MergeSessionRecord,
+    candidate: Option<SnapshotState>,
+    resolutions: &BTreeMap<HashId, Value>,
+) -> QueryResult<FinalizeAction> {
+    if let Some(candidate) = candidate {
+        let ours = storage::load_snapshot_state(connection, session.ours)?;
+        return Ok(FinalizeAction::Merge {
+            layer: storage::layer_between(&ours, &candidate)?,
+            schema_blob: candidate.schema.canonical_blob()?,
+        });
+    }
+    let Some((layer, schema, unresolved)) =
+        sparse_candidate_layer(connection, session.ours, session.theirs, resolutions)?
+    else {
+        return Err(QueryError::internal(
+            "ready merge is missing its candidate state",
+        ));
     };
-    Ok((id, expected_revision, session, action))
+    if unresolved != 0 {
+        return Err(merge_conflict());
+    }
+    Ok(FinalizeAction::Merge {
+        layer,
+        schema_blob: schema.canonical_blob()?,
+    })
 }
 
 fn lock_finalize_target(
@@ -443,6 +427,20 @@ pub(crate) fn compute_summary(
 ) -> QueryResult<MergeComputation> {
     if let Some(computation) = topology_computation(connection, ours_commit, theirs_commit)? {
         return Ok(computation);
+    }
+    if let Some(sparse) =
+        try_sparse_property_merge(connection, ours_commit, theirs_commit, resolutions)?
+    {
+        let unresolved = sparse.unresolved_count()?;
+        return Ok(MergeComputation {
+            status: if unresolved == 0 {
+                "ready"
+            } else {
+                "conflicted"
+            },
+            unresolved,
+            candidate: None,
+        });
     }
     let scan = prepare_conflict_scan(connection, ours_commit, theirs_commit, resolutions)?;
     let unresolved = scan.unresolved;
@@ -598,6 +596,11 @@ fn conflict_page(
     if topology_computation(connection, ours_commit, theirs_commit)?.is_some() {
         return ConflictPageBuilder::new(offset, limit).finish();
     }
+    if let Some(sparse) =
+        try_sparse_property_merge(connection, ours_commit, theirs_commit, resolutions)?
+    {
+        return sparse.conflict_page(offset, limit);
+    }
     let scan = prepare_conflict_scan(connection, ours_commit, theirs_commit, resolutions)?;
     collect_conflict_page(connection, &scan, offset, limit)
 }
@@ -613,6 +616,11 @@ fn conflicts_for_ids(
         || topology_computation(connection, ours_commit, theirs_commit)?.is_some()
     {
         return Ok(BTreeMap::new());
+    }
+    if let Some(sparse) =
+        try_sparse_property_merge(connection, ours_commit, theirs_commit, resolutions)?
+    {
+        return sparse.conflicts_for_ids(requested);
     }
     let scan = prepare_conflict_scan(connection, ours_commit, theirs_commit, resolutions)?;
     let mut found = BTreeMap::new();

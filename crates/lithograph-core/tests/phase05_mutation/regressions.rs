@@ -40,7 +40,7 @@ fn write_projection_order_by_uses_cypher_total_value_ordering() {
 }
 
 #[test]
-fn unsupported_write_projection_ordering_rolls_back_the_mutation() {
+fn write_projection_orders_uuid_values_and_commits() {
     let connection = fresh_storage();
     let before = branch_head(&connection, "main").expect("head before write");
     let params = BTreeMap::from([(
@@ -48,22 +48,23 @@ fn unsupported_write_projection_ordering_rolls_back_the_mutation() {
         Value::Uuid(UuidValue::parse("018f1f6e-7a5b-7c3d-8e9f-0123456789ab").expect("UUID")),
     )]);
 
-    let error = execute_with_params(
+    let (rows, summary) = execute_with_params(
         &connection,
         "CREATE (:Created {id: $id}) RETURN $id AS id ORDER BY id",
         params,
         ExecutionOptions::default(),
     )
-    .expect_err("UUID ORDER BY remains unsupported");
+    .expect("UUID ORDER BY follows the Cypher 25 value ordering");
 
-    assert_eq!(error.kind, QueryErrorKind::Type);
-    assert_eq!(
-        branch_head(&connection, "main").expect("head after error"),
+    assert_eq!(rows.len(), 1);
+    assert_eq!(summary.counters.nodes_created, 1);
+    assert_ne!(
+        branch_head(&connection, "main").expect("head after write"),
         before
     );
     assert_eq!(
         read_rows(&connection, "MATCH (n:Created) RETURN count(n)"),
-        vec![vec![Value::Integer(0)]]
+        vec![vec![Value::Integer(1)]]
     );
 }
 

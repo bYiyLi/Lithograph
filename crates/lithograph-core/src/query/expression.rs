@@ -6,6 +6,7 @@ use crate::cypher::{
 use crate::storage::RelationshipRecord;
 
 use super::{QueryError, QueryResult};
+use comparison::{compile_comparison, compile_power};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum BindingValue {
@@ -43,18 +44,41 @@ impl BindingRow {
 }
 
 pub(crate) fn surface_expressions(node: &AstNode) -> Vec<&AstNode> {
-    fn collect<'a>(node: &'a AstNode, output: &mut Vec<&'a AstNode>) {
+    collect_surface_expressions(node, false)
+}
+
+pub(crate) fn surface_expressions_without_nested_queries(node: &AstNode) -> Vec<&AstNode> {
+    collect_surface_expressions(node, true)
+}
+
+fn collect_surface_expressions(node: &AstNode, stop_at_query_boundaries: bool) -> Vec<&AstNode> {
+    fn collect<'a>(
+        node: &'a AstNode,
+        output: &mut Vec<&'a AstNode>,
+        stop_at_query_boundaries: bool,
+    ) {
         for child in &node.children {
+            if stop_at_query_boundaries
+                && (matches!(child.kind, AstKind::Subquery(_))
+                    || matches!(
+                        child.kind,
+                        AstKind::QueryBody
+                            | AstKind::ComposedQuery
+                            | AstKind::ConditionalQuery
+                            | AstKind::SingleQuery
+                    ))
+            {
+                continue;
+            }
             if matches!(child.kind, AstKind::Expression(_)) {
                 output.push(child);
             } else {
-                collect(child, output);
+                collect(child, output, stop_at_query_boundaries);
             }
         }
     }
-
     let mut output = Vec::new();
-    collect(node, &mut output);
+    collect(node, &mut output, stop_at_query_boundaries);
     output.sort_by_key(|expression| expression.span.start);
     output
 }
@@ -255,7 +279,7 @@ fn compile_expression_kind(node: &AstNode, kind: ExpressionKind) -> QueryResult<
         ExpressionKind::Comparison => compile_comparison(node),
         ExpressionKind::Additive => compile_operator_fold(node),
         ExpressionKind::Multiplicative => compile_operator_fold(node),
-        ExpressionKind::Power => compile_operator_fold(node),
+        ExpressionKind::Power => compile_power(node),
         ExpressionKind::Unary => compile_unary(node),
         ExpressionKind::Not => compile_not(node),
         ExpressionKind::Postfix => compile_postfix(node),
@@ -273,12 +297,6 @@ fn compile_expression_kind(node: &AstNode, kind: ExpressionKind) -> QueryResult<
 }
 
 fn compile_list(node: &AstNode) -> QueryResult<Expr> {
-    if node
-        .descendants()
-        .any(|child| matches!(child.kind, AstKind::Pattern))
-    {
-        return Ok(Expr::PatternComprehension(node.clone()));
-    }
     if let Some(variable) = node
         .children
         .iter()
@@ -314,6 +332,13 @@ fn compile_list(node: &AstNode) -> QueryResult<Expr> {
                 .transpose()?
                 .map(Box::new),
         });
+    }
+    if node
+        .children
+        .iter()
+        .any(|child| matches!(child.kind, AstKind::Pattern))
+    {
+        return Ok(Expr::PatternComprehension(node.clone()));
     }
     let Some(arguments) = node
         .children
@@ -373,6 +398,7 @@ fn compile_map_projection_item(item: &AstNode, base: &str) -> QueryResult<Option
         .find(|child| child.kind == AstKind::PropertyKey)
         .and_then(|child| child.text.clone())
     {
+        let property = unescape_identifier(&property);
         let expression =
             Expr::Property(Box::new(Expr::Variable(base.to_owned())), property.clone());
         return Ok(Some((property, expression)));
@@ -626,71 +652,6 @@ enum FoldPiece {
     Op(String),
 }
 
-fn compile_comparison(node: &AstNode) -> QueryResult<Expr> {
-    let left_node = node
-        .children
-        .iter()
-        .find(|child| is_expression_value(child))
-        .ok_or_else(|| QueryError::semantic("comparison is missing its left operand"))?;
-    let left = compile_expression(left_node)?;
-    let suffixes = node
-        .children
-        .iter()
-        .filter(|child| matches!(child.kind, AstKind::ComparisonSuffix))
-        .collect::<Vec<_>>();
-    if suffixes.is_empty() {
-        return Ok(left);
-    }
-    let mut previous = left;
-    let mut result = None;
-    for suffix in suffixes {
-        let comparison = compile_comparison_suffix(suffix, &mut previous)?;
-        result = Some(conjoin_expression(result, comparison));
-    }
-    result.ok_or_else(|| QueryError::internal("comparison suffix lowering produced no expression"))
-}
-
-fn compile_comparison_suffix(suffix: &AstNode, previous: &mut Expr) -> QueryResult<Expr> {
-    let operator = suffix
-        .descendants()
-        .find(|child| matches!(child.kind, AstKind::Operator))
-        .and_then(|node| node.text.as_deref())
-        .ok_or_else(|| QueryError::semantic("comparison is missing its operator"))?;
-    let suffix_text = suffix
-        .text
-        .as_deref()
-        .unwrap_or_default()
-        .to_ascii_uppercase();
-    if operator.eq_ignore_ascii_case("IS") {
-        return compile_is_predicate(suffix, previous, &suffix_text);
-    }
-    let right_node = suffix
-        .children
-        .iter()
-        .find(|child| is_expression_value(child))
-        .or_else(|| {
-            suffix
-                .descendants()
-                .skip(1)
-                .find(|child| is_expression_value(child))
-        })
-        .ok_or_else(|| QueryError::semantic("comparison is missing its right operand"))?;
-    let right = compile_expression(right_node)?;
-    let comparison = Expr::Binary(
-        binary_operator(operator)?,
-        Box::new(previous.clone()),
-        Box::new(right.clone()),
-    );
-    *previous = right;
-    Ok(comparison)
-}
-
-fn conjoin_expression(existing: Option<Expr>, expression: Expr) -> Expr {
-    existing.map_or(expression.clone(), |left| {
-        Expr::Binary(BinaryOp::And, Box::new(left), Box::new(expression))
-    })
-}
-
 fn compile_is_predicate(suffix: &AstNode, value: &Expr, text: &str) -> QueryResult<Expr> {
     let negated = text.contains("IS NOT");
     if let Some(type_expression) = suffix
@@ -761,6 +722,9 @@ fn compile_not(node: &AstNode) -> QueryResult<Expr> {
 }
 
 fn compile_unary(node: &AstNode) -> QueryResult<Expr> {
+    if crate::cypher::is_i64_min_unary_expression(node) {
+        return Ok(Expr::Literal(Value::Integer(i64::MIN)));
+    }
     let mut expression = compile_only_child(node)?;
     let operators = node
         .children
@@ -798,12 +762,14 @@ fn compile_postfix(node: &AstNode) -> QueryResult<Expr> {
         })
         .ok_or_else(|| QueryError::semantic("postfix expression is missing its base"))?;
     let mut expression = compile_expression(base)?;
+    let mut label_base: Option<Expr> = None;
     for operator in node.children.iter().skip(1) {
         if let Some(subscript) = operator
             .descendants()
             .find(|child| child.kind == AstKind::Subscript)
         {
             expression = compile_subscript(expression, subscript)?;
+            label_base = None;
             continue;
         }
         if let Some(type_expression) = operator
@@ -815,16 +781,24 @@ fn compile_postfix(node: &AstNode) -> QueryResult<Expr> {
                 type_spec: compile_type_spec(type_expression)?,
                 negated: false,
             };
+            label_base = None;
             continue;
         }
         if let Some(name_expression) = operator
             .descendants()
             .find(|child| matches!(child.kind, AstKind::NameExpression(_)))
         {
-            expression = Expr::LabelPredicate {
-                value: Box::new(expression),
+            let chained = label_base.is_some();
+            let base = label_base.get_or_insert_with(|| expression.clone()).clone();
+            let predicate = Expr::LabelPredicate {
+                value: Box::new(base),
                 name_expression: name_expression.clone(),
                 negated: false,
+            };
+            expression = if chained {
+                Expr::Binary(BinaryOp::And, Box::new(expression), Box::new(predicate))
+            } else {
+                predicate
             };
             continue;
         }
@@ -834,8 +808,9 @@ fn compile_postfix(node: &AstNode) -> QueryResult<Expr> {
         {
             expression = Expr::Property(
                 Box::new(expression),
-                property.text.clone().unwrap_or_default(),
+                unescape_identifier(property.text.as_deref().unwrap_or_default()),
             );
+            label_base = None;
         }
     }
     Ok(expression)
@@ -915,6 +890,14 @@ fn compile_function(node: &AstNode) -> QueryResult<Expr> {
 }
 
 fn function_name(node: &AstNode) -> QueryResult<String> {
+    if predicate_variable(node).is_some()
+        && let Some(name) = node
+            .text
+            .as_deref()
+            .and_then(|text| text.split_once('(').map(|(name, _)| name.trim().to_owned()))
+    {
+        return Ok(name);
+    }
     node.descendants()
         .find(|child| matches!(child.kind, AstKind::FunctionName))
         .and_then(|child| child.text.clone())
@@ -1131,7 +1114,7 @@ fn append_property_exists_key(name: &str, node: &AstNode, args: &mut Vec<Expr>) 
             .find(|child| child.kind == AstKind::PropertyKey)
             .and_then(|child| child.text.clone())
     {
-        args.push(Expr::Literal(Value::String(property)));
+        args.push(Expr::Literal(Value::String(unescape_identifier(&property))));
     }
 }
 
@@ -1351,6 +1334,7 @@ fn binary_operator(text: &str) -> QueryResult<BinaryOp> {
     }
 }
 
+mod comparison;
 mod evaluate;
 mod operators;
 mod properties;

@@ -1,0 +1,107 @@
+name: Release Matrix
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  storage-fixture:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal
+      - name: Create cross-platform storage fixture
+        run: |
+          mkdir -p target/phase10-interop
+          cargo run --locked --quiet -p lithograph-test-support \
+            --bin lithograph-phase10-storage-fixture -- \
+            create target/phase10-interop/interop.sqlite
+      - uses: actions/upload-artifact@v4
+        with:
+          name: phase10-storage-fixture
+          path: target/phase10-interop/interop.sqlite
+          if-no-files-found: error
+
+  unix-artifacts:
+    needs: storage-fixture
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            os: ubuntu-24.04
+            built: target/release/liblithograph.so
+            artifact: target/release/lithograph.so
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            built: target/release/liblithograph.so
+            artifact: target/release/lithograph.so
+          - name: macos-x64
+            os: macos-15-intel
+            built: target/release/liblithograph.dylib
+            artifact: target/release/lithograph.dylib
+          - name: macos-arm64
+            os: macos-15
+            built: target/release/liblithograph.dylib
+            artifact: target/release/lithograph.dylib
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install host SQLite on Linux
+        if: startsWith(matrix.os, 'ubuntu-')
+        run: sudo apt-get update && sudo apt-get install -y sqlite3 libsqlite3-dev
+      - name: Install host SQLite on macOS
+        if: startsWith(matrix.os, 'macos-')
+        run: brew install sqlite
+      - name: Select Homebrew SQLite
+        if: startsWith(matrix.os, 'macos-')
+        run: echo "LITHOGRAPH_SQLITE3=$(brew --prefix sqlite)/bin/sqlite3" >> "$GITHUB_ENV"
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal
+      - uses: actions/download-artifact@v4
+        with:
+          name: phase10-storage-fixture
+          path: target/phase10-interop
+      - name: Build release artifact
+        run: |
+          cargo build --release --locked -p lithograph-extension
+          cp "${{ matrix.built }}" "${{ matrix.artifact }}"
+      - name: Run release load, ABI, runtime, and interoperability gates
+        run: scripts/release-artifact-smoke.sh "${{ matrix.artifact }}" target/phase10-interop/interop.sqlite
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lithograph-${{ matrix.name }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+
+  windows-artifacts:
+    needs: storage-fixture
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+          - name: windows-arm64
+            os: windows-11-vs2026-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal
+      - uses: actions/download-artifact@v4
+        with:
+          name: phase10-storage-fixture
+          path: target/phase10-interop
+      - name: Build release artifact
+        run: cargo build --release --locked -p lithograph-extension
+      - name: Run release load, ABI, runtime, and interoperability gates
+        shell: pwsh
+        run: ./scripts/windows-release-smoke.ps1 -ExtensionPath target/release/lithograph.dll -InteropFixture target/phase10-interop/interop.sqlite
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lithograph-${{ matrix.name }}
+          path: target/release/lithograph.dll
+          if-no-files-found: error

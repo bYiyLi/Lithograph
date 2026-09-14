@@ -147,7 +147,13 @@ fn projection_output_columns(
     specs: &[ProjectionSpec],
     star: bool,
 ) -> Vec<String> {
-    let mut columns = if star { input.to_vec() } else { Vec::new() };
+    let mut columns = if star {
+        let mut columns = input.to_vec();
+        columns.sort();
+        columns
+    } else {
+        Vec::new()
+    };
     for spec in specs {
         if !columns.contains(&spec.column) {
             columns.push(spec.column.clone());
@@ -331,23 +337,27 @@ fn execute_read_snapshot_with_version_summary(
         version_summary_commit: None,
     };
     let result = executor.execute_query_body(&program.root, RowSet::seed())?;
-    validate_executed_columns(&program.columns, &result.columns)?;
-    let rows = result
-        .rows
-        .into_iter()
-        .map(|row| {
-            result
-                .columns
-                .iter()
-                .map(|column| {
-                    binding_value(
-                        &executor.snapshot,
-                        row.values.get(column).unwrap_or(&BindingValue::Null),
-                    )
-                })
-                .collect::<QueryResult<Vec<_>>>()
-        })
-        .collect::<QueryResult<Vec<_>>>()?;
+    let rows = if program.public_result {
+        validate_executed_columns(&program.columns, &result.columns)?;
+        result
+            .rows
+            .into_iter()
+            .map(|row| {
+                result
+                    .columns
+                    .iter()
+                    .map(|column| {
+                        binding_value(
+                            &executor.snapshot,
+                            row.values.get(column).unwrap_or(&BindingValue::Null),
+                        )
+                    })
+                    .collect::<QueryResult<Vec<_>>>()
+            })
+            .collect::<QueryResult<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
     Ok((rows, executor.version_summary_commit))
 }
 
@@ -543,17 +553,42 @@ impl ReadExecutor<'_, '_> {
     ) -> QueryResult<RowSet> {
         let columns = self.match_columns(clause, &input.columns)?;
         let predicate = match_predicate(clause)?;
-        let mut rows = Vec::new();
-        for input_row in input.rows {
-            rows.extend(self.execute_match_row(
-                clause,
-                optional,
-                &columns,
-                predicate.as_ref(),
-                input_row,
-            )?);
+        let access_operator_count = usize::from(
+            clause
+                .descendants()
+                .any(|node| node.kind == AstKind::Search),
+        ) + clause
+            .descendants()
+            .filter(|node| node.kind == AstKind::PatternPart)
+            .map(|part| {
+                1 + part
+                    .descendants()
+                    .filter(|node| node.kind == AstKind::RelationshipPattern)
+                    .count()
+            })
+            .sum::<usize>();
+        let previous_operator = self
+            .metrics
+            .activate_access_operator_group(access_operator_count);
+        let result = (|| {
+            let mut rows = Vec::new();
+            for input_row in input.rows {
+                rows.extend(self.execute_match_row(
+                    clause,
+                    optional,
+                    &columns,
+                    predicate.as_ref(),
+                    input_row,
+                )?);
+            }
+            Ok(RowSet { columns, rows })
+        })();
+        if let Ok(output) = &result {
+            self.metrics
+                .record_active_rows(output.rows.len().try_into().unwrap_or(u64::MAX));
         }
-        Ok(RowSet { columns, rows })
+        self.metrics.restore_active_operator(previous_operator);
+        result
     }
 
     fn match_columns(&self, clause: &AstNode, input: &[String]) -> QueryResult<Vec<String>> {
@@ -914,7 +949,6 @@ impl ReadExecutor<'_, '_> {
         let mut projected = Vec::with_capacity(groups.len());
         for group in groups.into_values() {
             let representative = group.first().cloned().unwrap_or_default();
-            let aliases = self.projection_alias_values(specs, &representative)?;
             let mut output = BindingRow::default();
             preserve_common_load_csv_context(&group, &mut output);
             for spec in specs {
@@ -922,7 +956,7 @@ impl ReadExecutor<'_, '_> {
                     &spec.expression,
                     &group,
                     &representative,
-                    &aliases,
+                    &BTreeMap::new(),
                 )?;
                 output.insert(
                     spec.column.clone(),
@@ -988,20 +1022,11 @@ impl ReadExecutor<'_, '_> {
                     distinct,
                     star,
                 } if super::super::registry::is_aggregating(name) => {
-                    self.evaluate_aggregate(name, args, *distinct, *star, group)?
+                    Some(self.evaluate_aggregate(name, args, *distinct, *star, group)?)
                 }
-                Expr::Subquery { kind, node } => {
-                    self.evaluate_subquery_expression(*kind, node, representative)?
-                }
-                Expr::PatternPredicate(node) => {
-                    self.evaluate_pattern_predicate(node, representative)?
-                }
-                Expr::PatternComprehension(node) => {
-                    self.evaluate_pattern_comprehension(node, representative)?
-                }
-                _ => return Ok(None),
+                _ => self.evaluate_graph_runtime_candidate(candidate, representative)?,
             };
-            Ok(Some(Expr::Literal(replacement)))
+            Ok(replacement.map(Expr::Literal))
         })
     }
 
@@ -1142,165 +1167,6 @@ impl ReadExecutor<'_, '_> {
         expression::evaluate(&expression, &self.snapshot, row, self.params)
     }
 
-    fn materialize_subqueries(
-        &mut self,
-        value: &expression::Expr,
-        row: &BindingRow,
-    ) -> QueryResult<expression::Expr> {
-        expression::transform_expression(value, &mut |candidate| {
-            use expression::Expr;
-            let replacement = match candidate {
-                Expr::Subquery { kind, node } => {
-                    self.evaluate_subquery_expression(*kind, node, row)?
-                }
-                Expr::PatternPredicate(node) => self.evaluate_pattern_predicate(node, row)?,
-                Expr::PatternComprehension(node) => {
-                    self.evaluate_pattern_comprehension(node, row)?
-                }
-                _ => return Ok(None),
-            };
-            Ok(Some(Expr::Literal(replacement)))
-        })
-    }
-
-    fn evaluate_pattern_predicate(
-        &mut self,
-        pattern: &AstNode,
-        row: &BindingRow,
-    ) -> QueryResult<Value> {
-        let clause = pattern_expression_clause(pattern, None)?;
-        let matches = super::path::execute_match(
-            &self.snapshot,
-            self.graph_view,
-            self.params,
-            &clause,
-            vec![row.clone()],
-            self.metrics,
-            self.is_interrupted,
-        )?;
-        Ok(Value::Boolean(!matches.is_empty()))
-    }
-
-    fn evaluate_pattern_comprehension(
-        &mut self,
-        node: &AstNode,
-        row: &BindingRow,
-    ) -> QueryResult<Value> {
-        let expressions = node
-            .children
-            .iter()
-            .filter(|child| matches!(child.kind, AstKind::Expression(_)))
-            .collect::<Vec<_>>();
-        let projection = expressions
-            .last()
-            .ok_or_else(|| QueryError::semantic("pattern comprehension has no projection"))?;
-        let predicate = (expressions.len() == 2).then_some(expressions[0]);
-        if expressions.len() > 2 {
-            return Err(QueryError::semantic(
-                "pattern comprehension has an invalid expression shape",
-            ));
-        }
-        let pattern = node
-            .children
-            .iter()
-            .find(|child| child.kind == AstKind::Pattern)
-            .ok_or_else(|| QueryError::semantic("pattern comprehension has no pattern"))?;
-        let assignment = node
-            .children
-            .iter()
-            .find(|child| child.kind == AstKind::PathAssignment)
-            .cloned();
-        let clause = pattern_expression_clause(pattern, assignment)?;
-        let mut matches = super::path::execute_match(
-            &self.snapshot,
-            self.graph_view,
-            self.params,
-            &clause,
-            vec![row.clone()],
-            self.metrics,
-            self.is_interrupted,
-        )?;
-        if let Some(predicate) = predicate {
-            let predicate = compile_expression(predicate)?;
-            let mut filtered = Vec::new();
-            for row in matches {
-                if expression::predicate(self.evaluate(&predicate, &row)?)? {
-                    filtered.push(row);
-                }
-            }
-            matches = filtered;
-        }
-        let projection = compile_expression(projection)?;
-        matches
-            .into_iter()
-            .map(|row| self.evaluate(&projection, &row))
-            .collect::<QueryResult<Vec<_>>>()
-            .map(Value::List)
-    }
-
-    fn evaluate_subquery_expression(
-        &mut self,
-        kind: crate::cypher::SubqueryKind,
-        node: &AstNode,
-        row: &BindingRow,
-    ) -> QueryResult<Value> {
-        let input = RowSet {
-            columns: row.order.clone(),
-            rows: vec![row.clone()],
-        };
-        let previous_globals = std::mem::replace(&mut self.global_bindings, row.clone());
-        let result = if let Some(body) = node
-            .children
-            .iter()
-            .find(|child| child.kind == AstKind::QueryBody)
-        {
-            self.execute_query_body(body, input)
-        } else {
-            let clause = AstNode {
-                kind: AstKind::Clause(ClauseKind::Match),
-                span: node.span,
-                text: None,
-                children: node.children.clone(),
-            };
-            self.execute_match(&clause, false, input)
-        };
-        self.global_bindings = previous_globals;
-        let result = result?;
-        match kind {
-            crate::cypher::SubqueryKind::Exists => Ok(Value::Boolean(!result.rows.is_empty())),
-            crate::cypher::SubqueryKind::Count => Ok(Value::Integer(
-                i64::try_from(result.rows.len()).map_err(|_| {
-                    QueryError::new(
-                        QueryErrorKind::Resource,
-                        "COUNT subquery result is too large",
-                    )
-                })?,
-            )),
-            crate::cypher::SubqueryKind::Collect => {
-                if result.columns.len() != 1 {
-                    return Err(QueryError::semantic(
-                        "COLLECT subquery must return exactly one column",
-                    ));
-                }
-                let column = &result.columns[0];
-                result
-                    .rows
-                    .into_iter()
-                    .map(|row| {
-                        binding_value(
-                            &self.snapshot,
-                            row.values.get(column).unwrap_or(&BindingValue::Null),
-                        )
-                    })
-                    .collect::<QueryResult<Vec<_>>>()
-                    .map(Value::List)
-            }
-            _ => Err(QueryError::internal(
-                "CALL/braced subquery reached expression evaluation",
-            )),
-        }
-    }
-
     fn check_interrupted(&self) -> QueryResult<()> {
         if (self.is_interrupted)() {
             Err(QueryError::interrupted())
@@ -1343,6 +1209,7 @@ fn preserve_common_load_csv_context(group: &[BindingRow], output: &mut BindingRo
 }
 
 mod call;
+mod graph_expression;
 mod helpers;
 mod load_csv;
 mod registry;

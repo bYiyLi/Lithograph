@@ -544,9 +544,10 @@ fn lower_relationship_write_spec(node: &AstNode) -> QueryResult<RelationshipWrit
     let direction = match (left, right) {
         (false, true) => Direction::Outgoing,
         (true, false) => Direction::Incoming,
-        _ => {
+        (false, false) => Direction::Undirected,
+        (true, true) => {
             return Err(QueryError::semantic(
-                "relationship mutation patterns must be directed",
+                "relationship mutation pattern cannot point in both directions",
             ));
         }
     };

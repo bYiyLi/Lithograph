@@ -52,6 +52,12 @@ fn run() -> Result<ProbeResult, Box<dyn Error>> {
     checks.push("format1-to-format2-migration");
     check_failed_migration_rolls_back(&load)?;
     checks.push("migration-failure-rollback");
+    check_metadata_update_fault_rolls_back(&load)?;
+    checks.push("migration-finalize-fault-rollback");
+    check_corrupt_history_refuses_migration(&load)?;
+    checks.push("migration-corrupt-history-refusal");
+    check_too_new_format_is_rejected(&load)?;
+    checks.push("too-new-format-rejection");
     check_session_restart_and_adapter_boundaries(&load)?;
     checks.push("merge-session-restart-and-adapters");
 
@@ -193,6 +199,216 @@ fn check_failed_migration_rolls_back(load: &str) -> Result<(), Box<dyn Error>> {
     require(
         !commit_data_exists,
         "failed migration must rollback sidecar tables created before the failure",
+    )
+}
+
+fn check_metadata_update_fault_rolls_back(load: &str) -> Result<(), Box<dyn Error>> {
+    let fixture = FileDatabaseFixture::new(0x0904)?;
+    seed_format1_database(fixture.path(), false)?;
+    let old_root = HashId::from_hex(FORMAT1_ROOT)?;
+    let root_snapshot = install_migration_metadata_fault(fixture.path(), old_root)?;
+    let script = format!("{load}\nSELECT lithograph_init();");
+    expect_migration_failure(&fixture, &script)?;
+    verify_metadata_fault_rollback(fixture.path(), old_root, &root_snapshot)?;
+
+    let output = fixture.execute_script(&script)?;
+    let init: Value = serde_json::from_str(&output)?;
+    require(
+        init["storageFormat"] == 2,
+        "migration must succeed when retried after metadata fault removal",
+    )?;
+    let after = Connection::open(fixture.path())?;
+    require(
+        branch_head(&after, "main")? == old_root,
+        "retried migration must preserve the format-1 Branch head",
+    )?;
+    require(
+        load_snapshot_state(&after, old_root)? == root_snapshot,
+        "retried migration must preserve the format-1 Root Snapshot",
+    )
+}
+
+fn install_migration_metadata_fault(
+    path: &std::path::Path,
+    old_root: HashId,
+) -> Result<lithograph_core::storage::SnapshotState, Box<dyn Error>> {
+    let connection = Connection::open(path)?;
+    let root_snapshot = load_snapshot_state(&connection, old_root)?;
+    connection.execute_batch(
+        "CREATE TRIGGER phase10_fail_format_update \
+         BEFORE UPDATE OF storage_format ON main._lithograph_meta \
+         WHEN NEW.storage_format = 2 \
+         BEGIN \
+           SELECT RAISE(ABORT, 'phase10 migration metadata fault'); \
+         END;",
+    )?;
+    Ok(root_snapshot)
+}
+
+fn expect_migration_failure(
+    fixture: &FileDatabaseFixture,
+    script: &str,
+) -> Result<(), Box<dyn Error>> {
+    match fixture.execute_script(script) {
+        Err(FixtureError::Sqlite { .. }) => {}
+        Err(error) => return Err(error.into()),
+        Ok(_) => {
+            return Err("format-1 migration unexpectedly survived metadata fault".into());
+        }
+    }
+    Ok(())
+}
+
+fn verify_metadata_fault_rollback(
+    path: &std::path::Path,
+    old_root: HashId,
+    root_snapshot: &lithograph_core::storage::SnapshotState,
+) -> Result<(), Box<dyn Error>> {
+    let recovery = Connection::open(path)?;
+    let format: i64 = recovery.query_row(
+        "SELECT storage_format FROM main._lithograph_meta WHERE id=1",
+        [],
+        |row| row.get(0),
+    )?;
+    require(
+        format == 1,
+        "metadata-update fault must leave storage format at 1",
+    )?;
+    require(
+        branch_head(&recovery, "main")? == old_root,
+        "metadata-update fault must preserve the format-1 Branch head",
+    )?;
+    require(
+        load_snapshot_state(&recovery, old_root)? == *root_snapshot,
+        "metadata-update fault must preserve the format-1 Root Snapshot",
+    )?;
+    for table in [
+        "_lithograph_commit_data",
+        "_lithograph_tags",
+        "_lithograph_merge_sessions",
+        "_lithograph_merge_resolutions",
+    ] {
+        let exists: bool = recovery.query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name=?1)",
+            [table],
+            |row| row.get(0),
+        )?;
+        require(
+            !exists,
+            "metadata-update fault must rollback every format-2 sidecar table",
+        )?;
+    }
+    recovery.execute_batch("DROP TRIGGER main.phase10_fail_format_update")?;
+    Ok(())
+}
+
+fn check_corrupt_history_refuses_migration(load: &str) -> Result<(), Box<dyn Error>> {
+    let fixture = FileDatabaseFixture::new(0x0905)?;
+    seed_format1_database(fixture.path(), false)?;
+    let root = HashId::from_hex(FORMAT1_ROOT)?;
+    let connection = Connection::open(fixture.path())?;
+    let (layer_id, original_hash): (i64, Vec<u8>) = connection.query_row(
+        "SELECT layer_id, hash FROM main._lithograph_commits c \
+         JOIN main._lithograph_layers l ON l.id = c.layer_id WHERE c.id=?1",
+        [root.as_bytes().as_slice()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    connection.execute(
+        "UPDATE main._lithograph_layers SET hash=zeroblob(32) WHERE id=?1",
+        [layer_id],
+    )?;
+    drop(connection);
+
+    let script = format!("{load}\nSELECT lithograph_init();");
+    require_corrupt_migration_refusal(&fixture, &script)?;
+    repair_corrupt_history_fixture(fixture.path(), layer_id, original_hash)?;
+
+    let output = fixture.execute_script(&script)?;
+    let init: Value = serde_json::from_str(&output)?;
+    require(
+        init["storageFormat"] == 2 && init["root"] == FORMAT1_ROOT,
+        "repaired format-1 history must migrate without changing Root Commit identity",
+    )
+}
+
+fn require_corrupt_migration_refusal(
+    fixture: &FileDatabaseFixture,
+    script: &str,
+) -> Result<(), Box<dyn Error>> {
+    match fixture.execute_script(script) {
+        Err(FixtureError::Sqlite { stderr, .. }) => require(
+            stderr.contains("LITHOGRAPH_STORAGE_ERROR")
+                && stderr.contains("history.commit_hash_mismatch"),
+            &format!(
+                "corrupt history migration must report an immutable history hash mismatch: {stderr}"
+            ),
+        )?,
+        Err(error) => return Err(error.into()),
+        Ok(_) => return Err("corrupt format-1 history unexpectedly migrated".into()),
+    }
+    Ok(())
+}
+
+fn repair_corrupt_history_fixture(
+    path: &std::path::Path,
+    layer_id: i64,
+    original_hash: Vec<u8>,
+) -> Result<(), Box<dyn Error>> {
+    let recovery = Connection::open(path)?;
+    let format: i64 = recovery.query_row(
+        "SELECT storage_format FROM main._lithograph_meta WHERE id=1",
+        [],
+        |row| row.get(0),
+    )?;
+    require(
+        format == 1,
+        "corrupt-history refusal must rollback the storage-format metadata update",
+    )?;
+    let sidecar_exists: bool = recovery.query_row(
+        "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema \
+         WHERE type='table' AND name='_lithograph_commit_data')",
+        [],
+        |row| row.get(0),
+    )?;
+    require(
+        !sidecar_exists,
+        "corrupt-history refusal must rollback format-2 sidecar creation",
+    )?;
+    recovery.execute(
+        "UPDATE main._lithograph_layers SET hash=?1 WHERE id=?2",
+        params![original_hash, layer_id],
+    )?;
+    Ok(())
+}
+
+fn check_too_new_format_is_rejected(load: &str) -> Result<(), Box<dyn Error>> {
+    let fixture = FileDatabaseFixture::new(0x0906)?;
+    seed_format1_database(fixture.path(), false)?;
+    let connection = Connection::open(fixture.path())?;
+    connection.execute(
+        "UPDATE main._lithograph_meta SET storage_format=3 WHERE id=1",
+        [],
+    )?;
+    drop(connection);
+
+    let script = format!("{load}\nSELECT lithograph_init();");
+    match fixture.execute_script(&script) {
+        Err(FixtureError::Sqlite { stderr, .. }) => require(
+            stderr.contains("FORMAT_TOO_NEW"),
+            "too-new format must fail with the stable FORMAT_TOO_NEW category",
+        )?,
+        Err(error) => return Err(error.into()),
+        Ok(_) => return Err("too-new storage format unexpectedly initialized".into()),
+    }
+    let connection = Connection::open(fixture.path())?;
+    let format: i64 = connection.query_row(
+        "SELECT storage_format FROM main._lithograph_meta WHERE id=1",
+        [],
+        |row| row.get(0),
+    )?;
+    require(
+        format == 3,
+        "too-new refusal must not mutate database metadata",
     )
 }
 

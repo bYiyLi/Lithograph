@@ -31,6 +31,9 @@ fn date_time_property(days: i64, nanoseconds: u64, key: &str) -> QueryResult<Val
 
 fn zoned_datetime_property(value: &ZonedDateTimeValue, key: &str) -> QueryResult<Value> {
     let (days, nanoseconds) = value.local_components()?;
+    if key.eq_ignore_ascii_case("timezone") {
+        return Ok(Value::String(value.zone().to_owned()));
+    }
     if let Ok(component) = date_property(days, key) {
         return Ok(component);
     }
@@ -39,7 +42,6 @@ fn zoned_datetime_property(value: &ZonedDateTimeValue, key: &str) -> QueryResult
     }
     let instant = value.instant_nanoseconds();
     match key.to_ascii_lowercase().as_str() {
-        "timezone" => Ok(Value::String(value.zone().to_owned())),
         "epochseconds" => integer_from_i128(instant.div_euclid(NANOS_PER_SECOND), key),
         "epochmillis" => integer_from_i128(instant.div_euclid(1_000_000), key),
         _ => Err(property_error(key)),

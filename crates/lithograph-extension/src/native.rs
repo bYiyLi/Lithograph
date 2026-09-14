@@ -771,15 +771,17 @@ fn finalize_explicit_transaction(
 
     let staged_head = storage::branch_head(connection, &state.branch)
         .map_err(|error| execution::map_query_error(error.into()))?;
-    let base_state = storage::load_snapshot_state(connection, state.base_commit)
+    let layer = storage::layer_between_commits(connection, state.base_commit, staged_head)
         .map_err(|error| execution::map_query_error(error.into()))?;
-    let final_state = storage::load_snapshot_state(connection, staged_head)
+    let base_schema = storage::SchemaState::load(connection, state.base_commit)
         .map_err(|error| execution::map_query_error(error.into()))?;
-    query::validate_candidate_state(connection, state.base_commit, &final_state)
-        .map_err(execution::map_query_error)?;
-    let counters = transaction_counters(&base_state, &final_state);
-    let layer = storage::layer_between(&base_state, &final_state)
+    let final_schema = storage::SchemaState::load(connection, staged_head)
         .map_err(|error| execution::map_query_error(error.into()))?;
+    // Each staged execution already validates the graph/schema state before
+    // advancing the staged Branch. Composing the touched first-parent Layer
+    // slots back to the transaction base avoids duplicate O(total graph)
+    // materialization at final Commit time.
+    let counters = transaction_counters(&layer, &base_schema, &final_schema);
 
     storage::move_branch_ref(
         connection,
@@ -790,8 +792,7 @@ fn finalize_explicit_transaction(
     .map_err(|error| execution::map_query_error(error.into()))?;
     storage::discard_uncommitted_chain(connection, state.base_commit, staged_head)
         .map_err(|error| execution::map_query_error(error.into()))?;
-    let schema_hash = final_state
-        .schema
+    let schema_hash = final_schema
         .persist(connection)
         .map_err(|error| execution::map_query_error(error.into()))?;
     let metadata = storage::CommitMetadata {
@@ -817,63 +818,37 @@ fn finalize_explicit_transaction(
 }
 
 fn transaction_counters(
-    before: &storage::SnapshotState,
-    after: &storage::SnapshotState,
+    layer: &storage::LayerBuilder,
+    before_schema: &storage::SchemaState,
+    after_schema: &storage::SchemaState,
 ) -> query::QueryCounters {
+    let layer_counts = layer.delta_counts();
     let mut counters = query::QueryCounters {
-        nodes_created: after.nodes.difference(&before.nodes).count() as u64,
-        nodes_deleted: before.nodes.difference(&after.nodes).count() as u64,
-        labels_added: after.labels.difference(&before.labels).count() as u64,
-        labels_removed: before.labels.difference(&after.labels).count() as u64,
+        nodes_created: layer_counts.nodes_created,
+        nodes_deleted: layer_counts.nodes_deleted,
+        relationships_created: layer_counts.relationships_created,
+        relationships_deleted: layer_counts.relationships_deleted,
+        properties_set: layer_counts.properties_set,
+        properties_removed: layer_counts.properties_removed,
+        labels_added: layer_counts.labels_added,
+        labels_removed: layer_counts.labels_removed,
         ..query::QueryCounters::default()
     };
-    let before_relationships = before
-        .relationships
-        .keys()
-        .copied()
-        .collect::<std::collections::BTreeSet<_>>();
-    let after_relationships = after
-        .relationships
-        .keys()
-        .copied()
-        .collect::<std::collections::BTreeSet<_>>();
-    counters.relationships_created = after_relationships
-        .difference(&before_relationships)
-        .count() as u64;
-    counters.relationships_deleted = before_relationships
-        .difference(&after_relationships)
-        .count() as u64;
-
-    let mut property_slots = std::collections::BTreeSet::new();
-    property_slots.extend(before.properties.keys().copied());
-    property_slots.extend(after.properties.keys().copied());
-    for slot in property_slots {
-        match (before.properties.get(&slot), after.properties.get(&slot)) {
-            (Some(left), Some(right)) if left == right => {}
-            (Some(_), None) => counters.properties_removed += 1,
-            (_, Some(_)) => counters.properties_set += 1,
-            (None, None) => {}
-        }
-    }
-    let before_constraints = before
-        .schema
+    let before_constraints = before_schema
         .constraints
         .keys()
         .collect::<std::collections::BTreeSet<_>>();
-    let after_constraints = after
-        .schema
+    let after_constraints = after_schema
         .constraints
         .keys()
         .collect::<std::collections::BTreeSet<_>>();
     counters.constraints_added = after_constraints.difference(&before_constraints).count() as u64;
     counters.constraints_removed = before_constraints.difference(&after_constraints).count() as u64;
-    let before_indexes = before
-        .schema
+    let before_indexes = before_schema
         .indexes
         .keys()
         .collect::<std::collections::BTreeSet<_>>();
-    let after_indexes = after
-        .schema
+    let after_indexes = after_schema
         .indexes
         .keys()
         .collect::<std::collections::BTreeSet<_>>();

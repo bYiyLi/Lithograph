@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use rusqlite::types::FromSql;
 use rusqlite::{Connection, params};
 
+use super::super::layer::{DeltaOp, PropertyDelta, RelationshipDelta, load_layer};
 use super::super::{
     HashId, LayerBuilder, NodeId, OwnerKind, PropertyKeyId, PropertyValue, RelationshipId,
     RelationshipRecord, SchemaState, Snapshot, StorageError, StorageResult,
@@ -65,6 +66,163 @@ pub fn layer_between(before: &SnapshotState, after: &SnapshotState) -> StorageRe
     append_relationship_delta(&mut layer, before, after)?;
     append_property_delta(&mut layer, before, after)?;
     Ok(layer)
+}
+
+/// Computes the net Layer from `base` to a first-parent descendant without
+/// materializing either complete Snapshot into Rust memory.
+///
+/// Only logical slots touched by the descendant chain are retained. Each slot
+/// is normalized against the base Snapshot through point lookups so create /
+/// delete or remove / restore sequences that cancel within the chain disappear
+/// from the resulting Layer.
+pub fn layer_between_commits(
+    connection: &Connection,
+    base: HashId,
+    descendant: HashId,
+) -> StorageResult<LayerBuilder> {
+    if base == descendant {
+        return Ok(LayerBuilder::default());
+    }
+    let mut latest = LayerBuilder::default();
+    let mut current = descendant;
+    while current != base {
+        let (parent, layer_id): (Option<Vec<u8>>, i64) = connection
+            .query_row(
+                "SELECT parent1, layer_id FROM main._lithograph_commits WHERE id = ?1",
+                [current.as_bytes().as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(StorageError::from)?;
+        let layer = load_layer(connection, layer_id)?;
+        for (node_id, op) in layer.nodes {
+            latest.nodes.entry(node_id).or_insert(op);
+        }
+        for (slot, op) in layer.labels {
+            latest.labels.entry(slot).or_insert(op);
+        }
+        for (relationship_id, delta) in layer.relationships {
+            latest.relationships.entry(relationship_id).or_insert(delta);
+        }
+        for (slot, delta) in layer.properties {
+            latest.properties.entry(slot).or_insert(delta);
+        }
+        current = parent
+            .as_deref()
+            .map(HashId::from_slice)
+            .transpose()?
+            .ok_or_else(|| {
+                StorageError::corrupt(format!(
+                    "Commit {} is not a first-parent descendant of {}",
+                    descendant.to_hex(),
+                    base.to_hex()
+                ))
+            })?;
+    }
+
+    normalize_touched_layer(connection, base, latest)
+}
+
+fn normalize_touched_layer(
+    connection: &Connection,
+    base_commit: HashId,
+    latest: LayerBuilder,
+) -> StorageResult<LayerBuilder> {
+    let base = Snapshot::resolve(connection, base_commit)?;
+    let mut result = LayerBuilder::default();
+    normalize_touched_nodes(&base, &mut result, latest.nodes)?;
+    normalize_touched_labels(&base, &mut result, latest.labels)?;
+    normalize_touched_relationships(&base, &mut result, latest.relationships)?;
+    normalize_touched_properties(&base, &mut result, latest.properties)?;
+    Ok(result)
+}
+
+fn normalize_touched_nodes(
+    base: &Snapshot<'_>,
+    result: &mut LayerBuilder,
+    nodes: BTreeMap<NodeId, DeltaOp>,
+) -> StorageResult<()> {
+    for (node_id, op) in nodes {
+        let before = base.node_exists(node_id)?;
+        let after = op == DeltaOp::Add;
+        match (before, after) {
+            (false, true) => result.add_node(node_id)?,
+            (true, false) => result.remove_node(node_id)?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn normalize_touched_labels(
+    base: &Snapshot<'_>,
+    result: &mut LayerBuilder,
+    labels: BTreeMap<(NodeId, i64), DeltaOp>,
+) -> StorageResult<()> {
+    let mut base_labels = BTreeMap::<NodeId, BTreeSet<i64>>::new();
+    for ((node_id, label_id), op) in labels {
+        let labels = match base_labels.entry(node_id) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(base.labels(node_id)?.into_iter().collect())
+            }
+        };
+        let before = labels.contains(&label_id);
+        let after = op == DeltaOp::Add;
+        match (before, after) {
+            (false, true) => result.add_label(node_id, label_id)?,
+            (true, false) => result.remove_label(node_id, label_id)?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn normalize_touched_relationships(
+    base: &Snapshot<'_>,
+    result: &mut LayerBuilder,
+    relationships: BTreeMap<RelationshipId, RelationshipDelta>,
+) -> StorageResult<()> {
+    for (relationship_id, delta) in relationships {
+        let before = base.relationship(relationship_id)?;
+        let after = (delta.op == DeltaOp::Add).then_some(delta.record);
+        match (before, after) {
+            (None, Some(relationship)) => result.add_relationship(relationship)?,
+            (Some(relationship), None) => result.remove_relationship(relationship)?,
+            (Some(before), Some(after)) if before != after => {
+                return Err(StorageError::corrupt(format!(
+                    "RelationshipId {relationship_id} changed immutable endpoints or type"
+                )));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn normalize_touched_properties(
+    base: &Snapshot<'_>,
+    result: &mut LayerBuilder,
+    properties: BTreeMap<(OwnerKind, i64, PropertyKeyId), PropertyDelta>,
+) -> StorageResult<()> {
+    for ((owner, owner_id, key_id), delta) in properties {
+        let before = base.property(owner, owner_id, key_id)?;
+        let after = if delta.op == DeltaOp::Add {
+            delta.value
+        } else {
+            None
+        };
+        match (before, after) {
+            (None, Some(value)) => result.set_property(owner, owner_id, key_id, value)?,
+            (Some(_), None) => result.remove_property(owner, owner_id, key_id)?,
+            (Some(before), Some(after))
+                if before.canonical_bytes()? != after.canonical_bytes()? =>
+            {
+                result.set_property(owner, owner_id, key_id, after)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn append_node_label_delta(

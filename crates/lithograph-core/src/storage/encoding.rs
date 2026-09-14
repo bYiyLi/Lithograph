@@ -15,6 +15,73 @@ pub(crate) fn record(domain: &str, fields: &[Vec<u8>]) -> Vec<u8> {
     output
 }
 
+pub(crate) struct RecordHasher {
+    hasher: blake3::Hasher,
+}
+
+impl RecordHasher {
+    pub(crate) fn new(domain: &str, field_count: usize) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(MAGIC);
+        hash_uleb(domain.len() as u64, &mut hasher);
+        hasher.update(domain.as_bytes());
+        hash_uleb(field_count as u64, &mut hasher);
+        Self { hasher }
+    }
+
+    pub(crate) fn field(&mut self, field: &[u8]) {
+        hash_uleb(field.len() as u64, &mut self.hasher);
+        self.hasher.update(field);
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn record_field(&mut self, domain: &str, fields: &[&[u8]]) {
+        let encoded_len = MAGIC.len()
+            + uleb_len(domain.len() as u64)
+            + domain.len()
+            + uleb_len(fields.len() as u64)
+            + fields
+                .iter()
+                .map(|field| uleb_len(field.len() as u64) + field.len())
+                .sum::<usize>();
+        hash_uleb(encoded_len as u64, &mut self.hasher);
+        self.hasher.update(MAGIC);
+        hash_uleb(domain.len() as u64, &mut self.hasher);
+        self.hasher.update(domain.as_bytes());
+        hash_uleb(fields.len() as u64, &mut self.hasher);
+        for field in fields {
+            hash_uleb(field.len() as u64, &mut self.hasher);
+            self.hasher.update(field);
+        }
+    }
+
+    pub(crate) fn finish(self) -> HashId {
+        HashId::from_bytes(*self.hasher.finalize().as_bytes())
+    }
+}
+
+fn hash_uleb(value: u64, hasher: &mut blake3::Hasher) {
+    let (bytes, len) = uleb_array(value);
+    hasher.update(&bytes[..len]);
+}
+
+fn uleb_array(mut value: u64) -> ([u8; 10], usize) {
+    let mut bytes = [0_u8; 10];
+    let mut len = 0;
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        bytes[len] = byte;
+        len += 1;
+        if value == 0 {
+            return (bytes, len);
+        }
+    }
+}
+
 pub(crate) fn hash(bytes: &[u8]) -> HashId {
     HashId::from_bytes(*blake3::hash(bytes).as_bytes())
 }

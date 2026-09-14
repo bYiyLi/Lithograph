@@ -2,25 +2,26 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use rusqlite::Connection;
+use rusqlite::types::FromSql;
+use rusqlite::{Connection, OptionalExtension, ToSql, params};
 
 use super::encoding::hash;
-use super::integrity::IntegrityIssue;
-use super::layer::load_layer;
+use super::integrity::{IntegrityIssue, hex_bytes};
+use super::layer::{StoredLayerReferenceMaxima, stored_layer_integrity};
 use super::schema::commit_hash;
 use super::{CommitMetadata, HashId, STORAGE_FORMAT, StorageResult};
 
 pub(super) fn history_integrity_issues(
     connection: &Connection,
-) -> StorageResult<Vec<IntegrityIssue>> {
+) -> StorageResult<(Vec<IntegrityIssue>, StoredLayerReferenceMaxima)> {
     let mut issues = Vec::new();
-    let layers = check_layers(connection, &mut issues)?;
+    let (layers, references) = check_layers(connection, &mut issues)?;
     let schemas = check_schemas(connection, &mut issues)?;
     let commits = load_commits(connection, &mut issues)?;
     check_commit_rows(&commits, &layers, &schemas, &mut issues);
     check_commit_dag(&commits, &mut issues);
     check_orphan_rows(connection, &mut issues)?;
-    Ok(issues)
+    Ok((issues, references))
 }
 
 #[derive(Debug, Clone)]
@@ -39,11 +40,12 @@ struct CommitRecord {
 fn check_layers(
     connection: &Connection,
     issues: &mut Vec<IntegrityIssue>,
-) -> StorageResult<BTreeMap<i64, HashId>> {
+) -> StorageResult<(BTreeMap<i64, HashId>, StoredLayerReferenceMaxima)> {
     let mut statement =
         connection.prepare("SELECT id, hash FROM main._lithograph_layers ORDER BY id")?;
     let mut rows = statement.query([])?;
     let mut layers = BTreeMap::new();
+    let mut references = StoredLayerReferenceMaxima::default();
     while let Some(row) = rows.next()? {
         let layer_id = row.get::<_, i64>(0)?;
         let bytes = row.get::<_, Vec<u8>>(1)?;
@@ -54,10 +56,22 @@ fn check_layers(
             ));
             continue;
         };
-        check_one_layer(connection, layer_id, stored_hash, issues);
+        if let Some(layer_references) = check_one_layer(connection, layer_id, stored_hash, issues) {
+            references.node_id = references.node_id.max(layer_references.node_id);
+            references.relationship_id = references
+                .relationship_id
+                .max(layer_references.relationship_id);
+            references.label_id = references.label_id.max(layer_references.label_id);
+            references.relationship_type_id = references
+                .relationship_type_id
+                .max(layer_references.relationship_type_id);
+            references.property_key_id = references
+                .property_key_id
+                .max(layer_references.property_key_id);
+        }
         layers.insert(layer_id, stored_hash);
     }
-    Ok(layers)
+    Ok((layers, references))
 }
 
 fn check_one_layer(
@@ -65,21 +79,27 @@ fn check_one_layer(
     layer_id: i64,
     stored_hash: HashId,
     issues: &mut Vec<IntegrityIssue>,
-) {
-    match load_layer(connection, layer_id).and_then(|layer| layer.content_hash()) {
-        Ok(actual_hash) if actual_hash == stored_hash => {}
-        Ok(actual_hash) => issues.push(IntegrityIssue::new(
-            "history.layer_hash_mismatch",
-            format!(
-                "Layer {layer_id} stores {} but recomputes as {}",
-                stored_hash.to_hex(),
-                actual_hash.to_hex()
-            ),
-        )),
-        Err(error) => issues.push(IntegrityIssue::new(
-            "history.layer_payload_invalid",
-            format!("Layer {layer_id} cannot be decoded: {error}"),
-        )),
+) -> Option<StoredLayerReferenceMaxima> {
+    match stored_layer_integrity(connection, layer_id) {
+        Ok((actual_hash, references)) if actual_hash == stored_hash => Some(references),
+        Ok((actual_hash, references)) => {
+            issues.push(IntegrityIssue::new(
+                "history.layer_hash_mismatch",
+                format!(
+                    "Layer {layer_id} stores {} but recomputes as {}",
+                    stored_hash.to_hex(),
+                    actual_hash.to_hex()
+                ),
+            ));
+            Some(references)
+        }
+        Err(error) => {
+            issues.push(IntegrityIssue::new(
+                "history.layer_payload_invalid",
+                format!("Layer {layer_id} cannot be decoded: {error}"),
+            ));
+            None
+        }
     }
 }
 
@@ -356,43 +376,128 @@ fn check_orphan_rows(
     connection: &Connection,
     issues: &mut Vec<IntegrityIssue>,
 ) -> StorageResult<()> {
+    let layer_ids = load_integer_references(
+        connection,
+        "SELECT id FROM main._lithograph_layers ORDER BY id",
+    )?;
     for (name, table) in [
         ("node delta", "_lithograph_node_delta"),
         ("label delta", "_lithograph_label_delta"),
         ("relationship delta", "_lithograph_rel_delta"),
         ("property delta", "_lithograph_property_delta"),
     ] {
-        let sql = format!(
-            "SELECT count(*) FROM main.{table} d LEFT JOIN main._lithograph_layers l ON l.id = d.layer_id WHERE l.id IS NULL"
-        );
-        push_orphan_count(connection, name, &sql, issues)?;
+        if let Some(reference) =
+            first_orphan_integer_reference(connection, table, "layer_id", &layer_ids)?
+        {
+            push_orphan_issue(name, "LayerId", reference.to_string(), issues);
+        }
     }
+
+    let checkpoint_ids = load_blob_references(
+        connection,
+        "SELECT commit_id FROM main._lithograph_checkpoints ORDER BY commit_id",
+    )?;
     for (name, table) in [
         ("checkpoint nodes", "_lithograph_cp_nodes"),
         ("checkpoint labels", "_lithograph_cp_labels"),
         ("checkpoint relationships", "_lithograph_cp_relationships"),
         ("checkpoint properties", "_lithograph_cp_properties"),
     ] {
-        let sql = format!(
-            "SELECT count(*) FROM main.{table} c LEFT JOIN main._lithograph_checkpoints p ON p.commit_id = c.commit_id WHERE p.commit_id IS NULL"
-        );
-        push_orphan_count(connection, name, &sql, issues)?;
+        if let Some(reference) =
+            first_orphan_blob_reference(connection, table, "commit_id", &checkpoint_ids)?
+        {
+            push_orphan_issue(name, "Commit", hex_bytes(&reference), issues);
+        }
     }
     Ok(())
 }
 
-fn push_orphan_count(
+fn load_integer_references(connection: &Connection, sql: &str) -> StorageResult<Vec<i64>> {
+    load_references(connection, sql)
+}
+
+fn load_blob_references(connection: &Connection, sql: &str) -> StorageResult<Vec<Vec<u8>>> {
+    load_references(connection, sql)
+}
+
+fn load_references<T>(connection: &Connection, sql: &str) -> StorageResult<Vec<T>>
+where
+    T: FromSql,
+{
+    let mut statement = connection.prepare(sql)?;
+    let rows = statement.query_map([], |row| row.get(0))?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+fn first_orphan_integer_reference(
     connection: &Connection,
-    name: &str,
-    sql: &str,
-    issues: &mut Vec<IntegrityIssue>,
-) -> StorageResult<()> {
-    let count: i64 = connection.query_row(sql, [], |row| row.get(0))?;
-    if count > 0 {
-        issues.push(IntegrityIssue::new(
-            "history.orphan_rows",
-            format!("found {count} orphan {name} row(s)"),
-        ));
+    table: &str,
+    column: &str,
+    valid: &[i64],
+) -> StorageResult<Option<i64>> {
+    first_orphan_reference(connection, table, column, valid)
+}
+
+fn first_orphan_blob_reference(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    valid: &[Vec<u8>],
+) -> StorageResult<Option<Vec<u8>>> {
+    first_orphan_reference(connection, table, column, valid)
+}
+
+fn first_orphan_reference<T>(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    valid: &[T],
+) -> StorageResult<Option<T>>
+where
+    T: FromSql + ToSql,
+{
+    if valid.is_empty() {
+        let sql = format!("SELECT {column} FROM main.{table} LIMIT 1");
+        return connection
+            .query_row(&sql, [], |row| row.get(0))
+            .optional()
+            .map_err(Into::into);
     }
-    Ok(())
+    let below = format!("SELECT {column} FROM main.{table} WHERE {column} < ?1 LIMIT 1");
+    if let Some(value) = connection
+        .query_row(&below, params![&valid[0]], |row| row.get(0))
+        .optional()?
+    {
+        return Ok(Some(value));
+    }
+    let between =
+        format!("SELECT {column} FROM main.{table} WHERE {column} > ?1 AND {column} < ?2 LIMIT 1");
+    for window in valid.windows(2) {
+        if let Some(value) = connection
+            .query_row(&between, params![&window[0], &window[1]], |row| row.get(0))
+            .optional()?
+        {
+            return Ok(Some(value));
+        }
+    }
+    let above = format!("SELECT {column} FROM main.{table} WHERE {column} > ?1 LIMIT 1");
+    let Some(last) = valid.last() else {
+        return Ok(None);
+    };
+    connection
+        .query_row(&above, params![last], |row| row.get(0))
+        .optional()
+        .map_err(Into::into)
+}
+
+fn push_orphan_issue(
+    name: &str,
+    reference_name: &str,
+    reference: String,
+    issues: &mut Vec<IntegrityIssue>,
+) {
+    issues.push(IntegrityIssue::new(
+        "history.orphan_rows",
+        format!("found orphan {name} row(s) referencing missing {reference_name} {reference}"),
+    ));
 }

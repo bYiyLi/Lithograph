@@ -113,28 +113,57 @@ pub fn is_ancestor(
     Ok(reachable_commits(connection, [descendant])?.contains(&ancestor))
 }
 
+const BEST_COMMON_ANCESTORS_SQL: &str = r#"
+WITH RECURSIVE
+left_anc(id) AS (
+  SELECT ?1
+  UNION
+  SELECT c.parent1
+  FROM main._lithograph_commits c JOIN left_anc a ON c.id = a.id
+  WHERE c.parent1 IS NOT NULL
+  UNION
+  SELECT c.parent2
+  FROM main._lithograph_commits c JOIN left_anc a ON c.id = a.id
+  WHERE c.parent2 IS NOT NULL
+),
+right_anc(id) AS (
+  SELECT ?2
+  UNION
+  SELECT c.parent1
+  FROM main._lithograph_commits c JOIN right_anc a ON c.id = a.id
+  WHERE c.parent1 IS NOT NULL
+  UNION
+  SELECT c.parent2
+  FROM main._lithograph_commits c JOIN right_anc a ON c.id = a.id
+  WHERE c.parent2 IS NOT NULL
+),
+common(id) AS (
+  SELECT id FROM left_anc
+  INTERSECT
+  SELECT id FROM right_anc
+)
+SELECT candidate.id
+FROM common candidate
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM main._lithograph_commits child
+  JOIN common common_child ON common_child.id = child.id
+  WHERE child.parent1 = candidate.id OR child.parent2 = candidate.id
+)
+ORDER BY candidate.id
+"#;
+
 pub fn best_common_ancestors(
     connection: &Connection,
     left: HashId,
     right: HashId,
 ) -> StorageResult<Vec<HashId>> {
-    let left_ancestors = reachable_commits(connection, [left])?;
-    let right_ancestors = reachable_commits(connection, [right])?;
-    let common = left_ancestors
-        .intersection(&right_ancestors)
-        .copied()
-        .collect::<Vec<_>>();
-    let mut best = Vec::new();
-    'candidate: for candidate in &common {
-        for other in &common {
-            if candidate != other && is_ancestor(connection, *candidate, *other)? {
-                continue 'candidate;
-            }
-        }
-        best.push(*candidate);
-    }
-    best.sort();
-    Ok(best)
+    let mut statement = connection.prepare(BEST_COMMON_ANCESTORS_SQL)?;
+    let rows = statement.query_map(
+        params![left.as_bytes().as_slice(), right.as_bytes().as_slice()],
+        |row| row.get::<_, Vec<u8>>(0),
+    )?;
+    rows.map(|row| HashId::from_slice(&row?)).collect()
 }
 
 pub fn reachable_child_count(

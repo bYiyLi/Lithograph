@@ -33,6 +33,10 @@ pub(crate) enum StandardIndexPredicate {
     In(Vec<Value>),
     Less(Value, bool),
     Greater(Value, bool),
+    Bounds {
+        lower: Option<(Value, bool)>,
+        upper: Option<(Value, bool)>,
+    },
     IsNotNull,
     StartsWith(String),
     EndsWith(String),
@@ -204,7 +208,7 @@ fn choose_property_seek(
     let variable = variable?;
     let mut predicates = Vec::with_capacity(properties.len());
     for (ordinal, property) in properties.iter().enumerate() {
-        let predicate = candidates
+        let supported = candidates
             .iter()
             .filter(|(candidate_variable, candidate_property, predicate)| {
                 candidate_variable == variable
@@ -212,7 +216,11 @@ fn choose_property_seek(
                     && predicate_supported(schema, index, property, predicate)
             })
             .map(|(_, _, predicate)| predicate.clone())
-            .min_by_key(predicate_priority)?;
+            .collect::<Vec<_>>();
+        let predicate = choose_property_predicate(
+            index.kind == StandardIndexKind::Range && properties.len() == 1,
+            &supported,
+        )?;
         predicates.push((ordinal, predicate));
     }
     Some(StandardIndexSeek {
@@ -220,6 +228,41 @@ fn choose_property_seek(
         kind: index.kind,
         predicates,
     })
+}
+
+fn choose_property_predicate(
+    allow_numeric_bounds: bool,
+    supported: &[StandardIndexPredicate],
+) -> Option<StandardIndexPredicate> {
+    let best = supported
+        .iter()
+        .min_by_key(|predicate| predicate_priority(predicate))?;
+    if !allow_numeric_bounds
+        || !matches!(
+            best,
+            StandardIndexPredicate::Less(_, _) | StandardIndexPredicate::Greater(_, _)
+        )
+    {
+        return Some(best.clone());
+    }
+    let lower = supported.iter().find_map(|predicate| match predicate {
+        StandardIndexPredicate::Greater(
+            value @ (Value::Integer(_) | Value::Float(_)),
+            inclusive,
+        ) => Some((value.clone(), *inclusive)),
+        _ => None,
+    });
+    let upper = supported.iter().find_map(|predicate| match predicate {
+        StandardIndexPredicate::Less(value @ (Value::Integer(_) | Value::Float(_)), inclusive) => {
+            Some((value.clone(), *inclusive))
+        }
+        _ => None,
+    });
+    if lower.is_none() && upper.is_none() {
+        Some(best.clone())
+    } else {
+        Some(StandardIndexPredicate::Bounds { lower, upper })
+    }
 }
 
 fn index_seek_priority(seek: &StandardIndexSeek) -> (u8, Reverse<usize>, String) {
@@ -246,7 +289,9 @@ fn predicate_priority(predicate: &StandardIndexPredicate) -> u8 {
         StandardIndexPredicate::Equal(_) => 0,
         StandardIndexPredicate::In(_) => 1,
         StandardIndexPredicate::WithinBBox { .. } | StandardIndexPredicate::Distance { .. } => 2,
-        StandardIndexPredicate::Less(_, _) | StandardIndexPredicate::Greater(_, _) => 3,
+        StandardIndexPredicate::Less(_, _)
+        | StandardIndexPredicate::Greater(_, _)
+        | StandardIndexPredicate::Bounds { .. } => 3,
         StandardIndexPredicate::StartsWith(_) => 4,
         StandardIndexPredicate::EndsWith(_) | StandardIndexPredicate::Contains(_) => 5,
         StandardIndexPredicate::IsNotNull => 6,
@@ -285,9 +330,17 @@ fn predicate_supported(
                 matches!(property_type, PropertyType::String)
             })
         }
-        (StandardIndexKind::Point, StandardIndexPredicate::Equal(Value::Point(_))) => true,
+        (StandardIndexKind::Point, StandardIndexPredicate::Equal(Value::Point(_))) => {
+            property_type_proves(schema, index, property, |property_type| {
+                matches!(property_type, PropertyType::Point)
+            })
+        }
         (StandardIndexKind::Point, StandardIndexPredicate::In(values)) => {
-            !values.is_empty() && values.iter().all(|value| matches!(value, Value::Point(_)))
+            !values.is_empty()
+                && values.iter().all(|value| matches!(value, Value::Point(_)))
+                && property_type_proves(schema, index, property, |property_type| {
+                    matches!(property_type, PropertyType::Point)
+                })
         }
         (StandardIndexKind::Point, StandardIndexPredicate::WithinBBox { lower, upper }) => {
             matches!((lower, upper), (Value::Point(_), Value::Point(_)))
@@ -302,7 +355,11 @@ fn predicate_supported(
                     matches!(property_type, PropertyType::Point)
                 })
         }
-        (StandardIndexKind::Text, StandardIndexPredicate::Equal(Value::String(_))) => true,
+        (StandardIndexKind::Text, StandardIndexPredicate::Equal(Value::String(_))) => {
+            property_type_proves(schema, index, property, |property_type| {
+                matches!(property_type, PropertyType::String)
+            })
+        }
         (
             StandardIndexKind::Text,
             StandardIndexPredicate::StartsWith(_)
@@ -312,7 +369,11 @@ fn predicate_supported(
             matches!(property_type, PropertyType::String)
         }),
         (StandardIndexKind::Text, StandardIndexPredicate::In(values)) => {
-            !values.is_empty() && values.iter().all(|value| matches!(value, Value::String(_)))
+            !values.is_empty()
+                && values.iter().all(|value| matches!(value, Value::String(_)))
+                && property_type_proves(schema, index, property, |property_type| {
+                    matches!(property_type, PropertyType::String)
+                })
         }
         _ => false,
     }
@@ -373,18 +434,23 @@ fn property_type_all_members_match(
 }
 
 fn property_type_order_compatible(property_type: &PropertyType, value: &Value) -> bool {
+    property_type_scalar_compatible(property_type, value).unwrap_or(false)
+}
+
+fn property_type_scalar_compatible(property_type: &PropertyType, value: &Value) -> Option<bool> {
     match value {
-        Value::Integer(_) | Value::Float(_) => {
-            matches!(property_type, PropertyType::Integer | PropertyType::Float)
-        }
-        Value::Boolean(_) => matches!(property_type, PropertyType::Boolean),
-        Value::String(_) => matches!(property_type, PropertyType::String),
-        Value::Date(_) => matches!(property_type, PropertyType::Date),
-        Value::LocalTime(_) => matches!(property_type, PropertyType::LocalTime),
-        Value::Time(_) => matches!(property_type, PropertyType::ZonedTime),
-        Value::LocalDateTime(_) => matches!(property_type, PropertyType::LocalDateTime),
-        Value::ZonedDateTime(_) => matches!(property_type, PropertyType::ZonedDateTime),
-        _ => false,
+        Value::Integer(_) | Value::Float(_) => Some(matches!(
+            property_type,
+            PropertyType::Integer | PropertyType::Float
+        )),
+        Value::Boolean(_) => Some(matches!(property_type, PropertyType::Boolean)),
+        Value::String(_) => Some(matches!(property_type, PropertyType::String)),
+        Value::Date(_) => Some(matches!(property_type, PropertyType::Date)),
+        Value::LocalTime(_) => Some(matches!(property_type, PropertyType::LocalTime)),
+        Value::Time(_) => Some(matches!(property_type, PropertyType::ZonedTime)),
+        Value::LocalDateTime(_) => Some(matches!(property_type, PropertyType::LocalDateTime)),
+        Value::ZonedDateTime(_) => Some(matches!(property_type, PropertyType::ZonedDateTime)),
+        _ => None,
     }
 }
 
@@ -397,12 +463,31 @@ fn range_equality_value(
     if !value.is_property_value() {
         return false;
     }
-    let Value::Vector(vector) = value else {
-        return true;
-    };
     property_type_proves(schema, index, property, |property_type| {
-        vector_equality_compatible(property_type, vector.coordinate_type(), vector.dimension())
+        property_type_equality_compatible(property_type, value)
     })
+}
+
+fn property_type_equality_compatible(property_type: &PropertyType, value: &Value) -> bool {
+    if let Some(compatible) = property_type_scalar_compatible(property_type, value) {
+        return compatible;
+    }
+    match value {
+        Value::Duration(_) => matches!(property_type, PropertyType::Duration),
+        Value::Point(_) => matches!(property_type, PropertyType::Point),
+        Value::Uuid(_) => matches!(property_type, PropertyType::Uuid),
+        Value::Vector(vector) => {
+            vector_equality_compatible(property_type, vector.coordinate_type(), vector.dimension())
+        }
+        Value::List(values) => match property_type {
+            PropertyType::List { element } if values.is_empty() => true,
+            PropertyType::List { element } => values
+                .iter()
+                .all(|value| property_type_equality_compatible(element, value)),
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 fn vector_equality_compatible(
@@ -415,7 +500,7 @@ fn vector_equality_compatible(
         dimension: constrained_dimension,
     } = property_type
     else {
-        return !matches!(property_type, PropertyType::Any);
+        return false;
     };
     VectorCoordinateType::parse(coordinate) == Some(coordinate_type)
         && usize::try_from(*constrained_dimension).ok() == Some(dimension)

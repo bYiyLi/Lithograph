@@ -130,9 +130,13 @@ pub(crate) fn execute_transaction_program(
         next_batch_id: 1,
     };
     let result = execute_transaction_query(&mut runtime, &program.root, RowSet::seed())?;
-    super::completeness::execute::validate_executed_columns(&program.columns, &result.columns)?;
     let snapshot = Snapshot::resolve(connection, runtime.commit)?;
-    let rows = materialize_rows(&snapshot, result)?;
+    let rows = if program.public_result {
+        super::completeness::execute::validate_executed_columns(&program.columns, &result.columns)?;
+        materialize_rows(&snapshot, result)?
+    } else {
+        Vec::new()
+    };
     Ok(TransactionProgramOutcome {
         rows,
         commit: runtime.commit,

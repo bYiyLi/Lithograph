@@ -20,6 +20,10 @@ mod snapshot_stream;
 mod value;
 mod version;
 
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod test_support;
+
 use std::fmt;
 
 use rusqlite::Error as SqliteError;
@@ -35,8 +39,10 @@ pub use identity::{
     label_name, node_id_is_allocated, property_key_name, relationship_id_is_allocated,
     relationship_type_name,
 };
+#[cfg(feature = "test-support")]
+pub use identity::{allocate_node_id_range, allocate_relationship_id_range};
 pub use integrity::{IntegrityIssue, integrity_check, structural_integrity_issues};
-pub use layer::{LayerBuilder, RelationshipRecord};
+pub use layer::{LayerBuilder, LayerDeltaCounts, RelationshipRecord};
 pub use schema::{
     create_format2_schema, create_storage_schema, initialize_root, load_schema_blob,
     persist_schema_blob, root_commit, schema_hash_for_commit,
@@ -54,7 +60,7 @@ pub use version::{
     active_branch, best_common_ancestors, capture_allocation_state, clear_commit_data,
     collect_garbage, commit_data, create_branch_ref, create_empty_commit, create_merge_session,
     create_tag, delete_branch_ref, delete_merge_session, delete_tag, discard_uncommitted_chain,
-    initialize_connection_state, is_ancestor, layer_between, list_branches,
+    initialize_connection_state, is_ancestor, layer_between, layer_between_commits, list_branches,
     list_merge_sessions_after, list_tags, load_commit, load_merge_resolutions, load_merge_session,
     load_snapshot_state, merge_session_roots, move_branch_ref, move_tag, reachable_child_count,
     reachable_commits, resolve_version_descriptor, restore_allocation_state,

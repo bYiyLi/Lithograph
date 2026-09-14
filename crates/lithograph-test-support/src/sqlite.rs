@@ -174,6 +174,11 @@ pub fn load_extension(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Executes one complete sqlite3 CLI script against an existing database file.
+pub fn execute_script(database: &Path, script: &str) -> Result<String> {
+    run_sqlite(database.as_os_str(), script)
+}
+
 pub fn extension_load_command(path: &Path) -> Result<String> {
     let path = path
         .to_str()

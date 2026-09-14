@@ -15,15 +15,20 @@ use crate::cypher::{
 
 pub(crate) mod execute;
 mod path;
+mod validation;
 
 use execute::execute_read_snapshot;
 pub(crate) use execute::execute_version_program;
+use validation::{
+    has_graph_expression, query_body_has_public_result, validate_static_property_accesses,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedProgram {
     pub(crate) root: AstNode,
     pub(crate) source: String,
     pub(crate) columns: Vec<String>,
+    pub(crate) public_result: bool,
     pub(crate) writes: bool,
     pub(crate) version_operation: bool,
     pub(crate) version_mutation: bool,
@@ -184,6 +189,7 @@ pub(crate) fn requires_program(root: &AstNode) -> bool {
         ),
         _ => false,
     }) || has_aggregating_function(root)
+        || has_graph_expression(root, false)
         || has_advanced_pattern(root)
 }
 
@@ -243,7 +249,9 @@ pub(crate) fn prepare_program(
         validate_transaction_program(&ast.root)?;
     }
     validate_surface_expressions(&ast.root)?;
-    let columns = output_columns(&ast.root, source)?;
+    validate_static_property_accesses(&ast.root)?;
+    let public_result = query_body_has_public_result(&ast.root);
+    let columns = output_columns(&ast.root, source, public_result)?;
     let writes = contains_mutation(&ast.root);
     let version_operation = contains_version_procedure(&ast.root);
     let version_mutation = contains_version_mutation(&ast.root);
@@ -273,6 +281,7 @@ pub(crate) fn prepare_program(
         root: ast.root.clone(),
         source: source.to_owned(),
         columns,
+        public_result,
         writes,
         version_operation,
         version_mutation,
@@ -471,8 +480,12 @@ pub(crate) fn contains_mutation(root: &AstNode) -> bool {
     })
 }
 
-fn output_columns(root: &AstNode, source: &str) -> QueryResult<Vec<String>> {
-    infer_columns(root, &[], source)
+fn output_columns(root: &AstNode, source: &str, public_result: bool) -> QueryResult<Vec<String>> {
+    if public_result {
+        infer_columns(root, &[], source)
+    } else {
+        Ok(Vec::new())
+    }
 }
 
 fn projection_columns(clause: &AstNode, source: &str) -> QueryResult<Vec<String>> {
@@ -669,7 +682,9 @@ fn infer_projection_columns(
 ) -> QueryResult<Vec<String>> {
     let body = projection_body(clause)?;
     let mut columns = if has_surface_star(body) {
-        input.to_vec()
+        let mut columns = input.to_vec();
+        columns.sort();
+        columns
     } else {
         Vec::new()
     };

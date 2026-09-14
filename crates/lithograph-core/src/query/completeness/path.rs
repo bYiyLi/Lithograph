@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::cypher::{
-    AstKind, AstNode, MatchModeKind, PathModeKind, PathSelectorKind, QuantifierKind, Value,
+    AstKind, AstNode, MatchModeKind, NameExpressionKind, PathModeKind, PathSelectorKind,
+    QuantifierKind, Value,
 };
 use crate::storage::{self, OwnerKind, RelationshipRecord, Snapshot};
 
@@ -516,7 +517,7 @@ fn parse_variable_length(node: &AstNode) -> QueryResult<Bounds> {
         });
     }
     if let Some((lower, upper)) = range.split_once("..") {
-        return validate_bounds(Bounds {
+        return Ok(Bounds {
             minimum: if lower.is_empty() {
                 1
             } else {
@@ -669,11 +670,7 @@ fn match_start_node(
             ))),
         };
     }
-    let mut ids = Vec::new();
-    context.snapshot.visit_nodes(|id| {
-        ids.push(id);
-        Ok(())
-    })?;
+    let ids = candidate_start_nodes(context, &simple.start)?;
     let mut output = Vec::new();
     for id in ids {
         if let Some(state) = match_node(context, &simple.start, state.clone(), id)? {
@@ -681,6 +678,54 @@ fn match_start_node(
         }
     }
     Ok(output)
+}
+
+fn candidate_start_nodes(
+    context: &mut PathContext<'_, '_>,
+    spec: &NodePattern,
+) -> QueryResult<Vec<i64>> {
+    let static_label = simple_static_label(spec);
+    let pattern_label = match static_label {
+        Some(name) => match storage::find_label(context.snapshot.connection_for_query(), name)? {
+            Some(label_id) => Some(label_id),
+            None => return Ok(Vec::new()),
+        },
+        None => None,
+    };
+    let scan_label = pattern_label.or_else(|| context.graph_view.scan_label());
+    let mut ids = Vec::new();
+    let mut after = 0_i64;
+    loop {
+        check_interrupted(context.is_interrupted)?;
+        let page = match scan_label {
+            Some(label_id) => context.snapshot.scan_label_after(label_id, after, 256)?,
+            None => context.snapshot.scan_nodes_after(after, 256)?,
+        };
+        context.metrics.record_db_hits(page.items.len() as u64);
+        ids.extend(page.items);
+        let Some(next) = page.next_after else {
+            break;
+        };
+        after = next;
+    }
+    Ok(ids)
+}
+
+fn simple_static_label(spec: &NodePattern) -> Option<&str> {
+    let labels = spec.labels.as_ref()?;
+    if labels.descendants().any(|node| match node.kind {
+        AstKind::NameExpression(NameExpressionKind::Negation(count)) => count > 0,
+        AstKind::NameExpression(NameExpressionKind::Dynamic | NameExpressionKind::Wildcard) => true,
+        _ => false,
+    }) {
+        return None;
+    }
+    let mut names = labels
+        .descendants()
+        .filter(|node| node.kind == AstKind::LabelName)
+        .filter_map(|node| node.text.as_deref());
+    let name = names.next()?;
+    names.next().is_none().then_some(name)
 }
 
 fn match_node(
@@ -692,7 +737,7 @@ fn match_node(
     if !context.graph_view.visible_node(context.snapshot, node_id)? {
         return Ok(None);
     }
-    context.metrics.db_hits = context.metrics.db_hits.saturating_add(1);
+    context.metrics.record_db_hits(1);
     if !bind_node(&mut state.row, spec.variable.as_deref(), node_id)? {
         return Ok(None);
     }
@@ -736,6 +781,12 @@ fn execute_repeated_relationship(
     state: PathState,
 ) -> QueryResult<Vec<PathState>> {
     let maximum = effective_maximum(context, chain.bounds)?;
+    let prebound_group = chain
+        .relationship
+        .variable
+        .as_ref()
+        .and_then(|variable| state.row.values.get(variable))
+        .cloned();
     let mut output = Vec::new();
     let mut frontier = vec![(state, Vec::<BindingValue>::new())];
     for depth in 0..=maximum {
@@ -746,9 +797,14 @@ fn execute_repeated_relationship(
                 let Some(end) = state.current else {
                     continue;
                 };
-                if let Some(matched) =
-                    complete_repeated_state(context, chain, &state, &collected, end)?
-                {
+                if let Some(matched) = complete_repeated_state(
+                    context,
+                    chain,
+                    &state,
+                    &collected,
+                    prebound_group.as_ref(),
+                    end,
+                )? {
                     output.push(matched);
                 }
             }
@@ -771,15 +827,57 @@ fn complete_repeated_state(
     chain: &RelationshipChain,
     state: &PathState,
     collected: &[BindingValue],
+    prebound_group: Option<&BindingValue>,
     end: i64,
 ) -> QueryResult<Option<PathState>> {
     let Some(mut matched) = match_node(context, &chain.end, state.clone(), end)? else {
         return Ok(None);
     };
-    if let Some(variable) = &chain.relationship.variable {
-        bind_group_values(context.snapshot, &mut matched.row, variable, collected)?;
+    if let Some(variable) = &chain.relationship.variable
+        && !bind_repeated_relationship_values(
+            context.snapshot,
+            &mut matched.row,
+            variable,
+            collected,
+            prebound_group,
+        )?
+    {
+        return Ok(None);
     }
     Ok(Some(matched))
+}
+
+fn bind_repeated_relationship_values(
+    snapshot: &Snapshot<'_>,
+    row: &mut BindingRow,
+    variable: &str,
+    values: &[BindingValue],
+    prebound_group: Option<&BindingValue>,
+) -> QueryResult<bool> {
+    let values = values
+        .iter()
+        .map(|value| binding_value(snapshot, value))
+        .collect::<QueryResult<Vec<_>>>()?;
+    let value = Value::List(values);
+    match prebound_group.or_else(|| row.values.get(variable)) {
+        Some(BindingValue::Scalar(existing)) => {
+            if crate::cypher::cypher_equals(existing, &value)? == Some(true) {
+                row.insert(variable.to_owned(), BindingValue::Scalar(value));
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+        Some(BindingValue::Null) => Ok(false),
+        Some(_) => Err(QueryError::new(
+            QueryErrorKind::Type,
+            format!("variable {variable} is not a Relationship-list binding"),
+        )),
+        None => {
+            row.insert(variable.to_owned(), BindingValue::Scalar(value));
+            Ok(true)
+        }
+    }
 }
 
 fn advance_repeated_state(
@@ -936,10 +1034,7 @@ fn expand_one(
     let mut candidates =
         relationship_candidates(context.snapshot, current, relationship.direction)?;
     candidates.sort_by_key(|record| record.id);
-    context.metrics.db_hits = context
-        .metrics
-        .db_hits
-        .saturating_add(candidates.len() as u64);
+    context.metrics.record_db_hits(candidates.len() as u64);
     let mut output = Vec::new();
     for record in candidates {
         check_interrupted(context.is_interrupted)?;
@@ -1283,3 +1378,6 @@ fn check_interrupted(is_interrupted: &dyn Fn() -> bool) -> QueryResult<()> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

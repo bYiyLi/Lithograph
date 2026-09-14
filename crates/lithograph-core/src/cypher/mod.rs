@@ -39,7 +39,10 @@ pub(crate) use semantic::unescape_identifier;
 pub use semantic::{BindingKind, analyze, validate};
 pub(crate) use semantic_clause::{show_projection_clause, show_yield_node};
 pub(crate) use semantic_interpolation::interpolation_fragments;
-pub(crate) use semantic_transaction::{query_body_ends_with_call, query_body_returns_columns};
+pub(crate) use semantic_transaction::{
+    query_body_ends_with_call, query_body_returns_columns, query_body_terminal_matches,
+};
+pub(crate) use types_literal::is_i64_min_unary_expression;
 
 pub(crate) use builtins::{
     AGGREGATING_FUNCTIONS, SCALAR_FUNCTIONS, is_aggregating_function, is_builtin_function,

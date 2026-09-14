@@ -318,18 +318,14 @@ fn delete_node(
 ) -> QueryResult<()> {
     for label_id in staged.labels(id)? {
         check_interrupted(is_interrupted)?;
-        context
-            .delta
-            .set_label(&context.base, id, label_id, false)?;
+        context.set_label(id, label_id, false)?;
     }
     for (key_id, _) in staged.properties(OwnerKind::Node, id)? {
         check_interrupted(is_interrupted)?;
-        context
-            .delta
-            .set_property(&context.base, OwnerKind::Node, id, key_id, None)?;
+        context.set_property(OwnerKind::Node, id, key_id, None)?;
     }
     if staged.node_exists(id)? {
-        context.delta.set_node(&context.base, id, false)?;
+        context.set_node(id, false)?;
     }
     Ok(())
 }
@@ -342,18 +338,10 @@ fn delete_relationship(
 ) -> QueryResult<()> {
     for (key_id, _) in staged.properties(OwnerKind::Relationship, record.id)? {
         check_interrupted(is_interrupted)?;
-        context.delta.set_property(
-            &context.base,
-            OwnerKind::Relationship,
-            record.id,
-            key_id,
-            None,
-        )?;
+        context.set_property(OwnerKind::Relationship, record.id, key_id, None)?;
     }
     if staged.relationship(record.id)?.is_some() {
-        context
-            .delta
-            .set_relationship(&context.base, record.id, None)?;
+        context.set_relationship(record.id, None)?;
     }
     Ok(())
 }

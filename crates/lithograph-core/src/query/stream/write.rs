@@ -159,7 +159,10 @@ impl QueryCursor {
         .map(write_cursor_outcome)
     }
 
-    fn install_active_write(&mut self, savepoint: String, outcome: CursorWriteOutcome) {
+    fn install_active_write(&mut self, savepoint: String, mut outcome: CursorWriteOutcome) {
+        if self.prepared.columns.is_empty() {
+            outcome.rows.clear();
+        }
         self.metrics.rows = outcome.rows.len().try_into().unwrap_or(u64::MAX);
         let summary = super::committed_summary(
             outcome.query_type,
@@ -217,6 +220,7 @@ impl QueryCursor {
         if done {
             self.metrics.elapsed_micros =
                 self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+            self.metrics.finish_profile();
             summary.metrics = self.metrics.clone();
         }
         Ok(QueryBatch {
@@ -263,6 +267,7 @@ impl QueryCursor {
                 }
                 self.metrics.elapsed_micros =
                     self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                self.metrics.finish_profile();
                 summary.metrics = self.metrics.clone();
                 self.finished = true;
                 self.write_state = WriteState::Completed(summary.clone());

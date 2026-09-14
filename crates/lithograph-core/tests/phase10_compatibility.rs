@@ -84,13 +84,64 @@ fn profile_preserves_results_and_collects_execution_metrics() {
     )
     .expect("seed");
     let query = "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name";
-    let (normal_rows, _) = execute(&connection, query).expect("normal query");
+    let (normal_rows, normal_summary) = execute(&connection, query).expect("normal query");
     let (profile_rows, profile_summary) =
         execute(&connection, &format!("PROFILE {query}")).expect("PROFILE query");
 
     assert_eq!(profile_rows, normal_rows);
+    assert!(normal_summary.metrics.operator_profile().is_none());
     assert_eq!(profile_summary.metrics.rows, profile_rows.len() as u64);
     assert!(profile_summary.metrics.db_hits > 0);
+    let operators = profile_summary
+        .metrics
+        .operator_profile()
+        .expect("PROFILE operator metrics");
+    assert_eq!(
+        operators
+            .iter()
+            .map(|operator| operator.id)
+            .collect::<Vec<_>>(),
+        (0..operators.len() as u64).collect::<Vec<_>>()
+    );
+    assert!(operators.iter().any(|operator| {
+        matches!(operator.operator.as_str(), "LabelIndexScan" | "IndexSeek")
+            && operator.rows > 0
+            && operator.db_hits > 0
+    }));
+    assert_eq!(
+        operators
+            .iter()
+            .map(|operator| operator.db_hits)
+            .sum::<u64>(),
+        profile_summary.metrics.db_hits
+    );
+    assert_eq!(
+        operators.last().map(|operator| operator.rows),
+        Some(profile_summary.metrics.rows)
+    );
+}
+
+#[test]
+fn mutation_without_final_projection_does_not_expose_internal_bindings() {
+    let connection = fresh_storage();
+
+    let (rows, summary) =
+        execute(&connection, "CREATE (n:Hidden {value: 42})").expect("mutation without RETURN");
+    assert!(rows.is_empty());
+    assert_eq!(summary.metrics.rows, 0);
+    assert_eq!(summary.counters.nodes_created, 1);
+    assert_eq!(summary.counters.properties_set, 1);
+
+    let (rows, projected_summary) = execute(
+        &connection,
+        "CREATE (n:Visible {value: 7}) RETURN n.value AS value",
+    )
+    .expect("mutation with RETURN");
+    assert_eq!(rows, vec![vec![Value::Integer(7)]]);
+    assert_eq!(projected_summary.metrics.rows, 1);
+
+    let (rows, _) = execute(&connection, "MATCH (n) RETURN count(n)").expect("verify writes");
+    assert_eq!(rows, vec![vec![Value::Integer(2)]]);
 }
 
 #[test]

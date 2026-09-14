@@ -132,6 +132,7 @@ fn commit_change_inner(
         require_commit(connection, parent)?;
     }
     require_schema(connection, schema_hash)?;
+    Snapshot::resolve(connection, expected_head)?.validate_layer_invariants(layer)?;
     let (layer_id, layer_hash) = persist_layer(connection, layer)?;
     let commit = commit_hash(
         super::STORAGE_FORMAT,
@@ -150,7 +151,6 @@ fn commit_change_inner(
         metadata,
     };
     insert_commit(connection, &row)?;
-    Snapshot::resolve(connection, commit)?.validate_graph_invariants()?;
     compare_and_move_branch(connection, branch, expected_head, commit)?;
     Ok(commit)
 }

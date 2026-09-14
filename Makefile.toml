@@ -165,6 +165,7 @@ cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase06 -
 cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase07 -- "$extension"
 cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase08 -- "$extension"
 cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase09 -- "$extension"
+cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase10-tck
 scripts/native-abi-smoke.sh "$extension"
 
 cargo llvm-cov report \

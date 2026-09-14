@@ -49,6 +49,18 @@ fn resolve_candidate_context_snapshot(
     connection: &Connection,
     selector: &MergeSessionSelector,
 ) -> QueryResult<CandidateContext> {
+    let session = require_candidate_session(connection, selector)?;
+    let resolutions = merge::load_resolutions(connection, &selector.id)?;
+    if let Some(context) = sparse_candidate_context(connection, selector, &session, &resolutions)? {
+        return Ok(context);
+    }
+    candidate_context_from_computation(connection, selector, &session, &resolutions)
+}
+
+fn require_candidate_session(
+    connection: &Connection,
+    selector: &MergeSessionSelector,
+) -> QueryResult<storage::MergeSessionRecord> {
     let session = storage::load_merge_session(connection, &selector.id)?.ok_or_else(|| {
         QueryError::new(
             QueryErrorKind::MergeSessionNotFound,
@@ -61,9 +73,43 @@ fn resolve_candidate_context_snapshot(
             format!("Merge Session {:?} revision changed", selector.id),
         ));
     }
-    let resolutions = merge::load_resolutions(connection, &selector.id)?;
+    Ok(session)
+}
+
+fn sparse_candidate_context(
+    connection: &Connection,
+    selector: &MergeSessionSelector,
+    session: &storage::MergeSessionRecord,
+    resolutions: &BTreeMap<HashId, Value>,
+) -> QueryResult<Option<CandidateContext>> {
+    if let Some((layer, schema, unresolved)) =
+        merge::sparse_candidate_layer(connection, session.ours, session.theirs, resolutions)?
+    {
+        if unresolved != 0 {
+            return Err(QueryError::new(
+                QueryErrorKind::MergeConflict,
+                "Merge Session has unresolved conflicts",
+            ));
+        }
+        return Ok(Some(CandidateContext {
+            base_commit: session.ours,
+            layer,
+            schema,
+            session_id: selector.id.clone(),
+            revision: selector.revision,
+        }));
+    }
+    Ok(None)
+}
+
+fn candidate_context_from_computation(
+    connection: &Connection,
+    selector: &MergeSessionSelector,
+    session: &storage::MergeSessionRecord,
+    resolutions: &BTreeMap<HashId, Value>,
+) -> QueryResult<CandidateContext> {
     let computation =
-        merge::compute_summary(connection, session.ours, session.theirs, &resolutions)?;
+        merge::compute_summary(connection, session.ours, session.theirs, resolutions)?;
     if computation.unresolved != 0 {
         return Err(QueryError::new(
             QueryErrorKind::MergeConflict,

@@ -868,18 +868,22 @@ fn runtime_value_equality_ordering_and_uuid_helpers_cover_edge_families() {
         Ok(Some(CypherComparison::Greater))
     );
 
-    assert_eq!(
-        cypher_equals(&Value::Integer(1), &Value::String("1".into())),
-        Ok(Some(false)),
-        "Cypher equality across distinct value types is false"
+    assert!(
+        cypher_equals(&Value::Integer(1), &Value::String("1".into())).is_err(),
+        "Cypher 25 rejects equality across non-comparable value families"
     );
-    assert_eq!(
+    assert!(
         cypher_equals(
             &Value::List(vec![Value::Integer(1), Value::Integer(2)]),
             &Value::String("foo".into())
-        ),
-        Ok(Some(false)),
-        "TCK List3 requires list/literal equality to be false"
+        )
+        .is_err(),
+        "List/String equality is not equality-comparable in Cypher 25"
+    );
+    assert_eq!(
+        cypher_compare(&Value::String("1".into()), &Value::Integer(1)),
+        Ok(Some(CypherComparison::Less)),
+        "direct ordered comparison follows the Cypher 25 cross-type hierarchy"
     );
     assert_eq!(
         cypher_compare(

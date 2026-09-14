@@ -53,7 +53,7 @@ pub(super) fn evaluate_binary(op: BinaryOp, left: Value, right: Value) -> QueryR
 }
 
 fn in_operator(left: Value, right: Value) -> QueryResult<Value> {
-    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+    if matches!(right, Value::Null) {
         return Ok(Value::Null);
     }
     let Value::List(values) = right else {
@@ -62,6 +62,12 @@ fn in_operator(left: Value, right: Value) -> QueryResult<Value> {
             "IN right operand must be a List or null",
         ));
     };
+    if values.is_empty() {
+        return Ok(Value::Boolean(false));
+    }
+    if matches!(left, Value::Null) {
+        return Ok(Value::Null);
+    }
     let mut unknown = false;
     for value in values {
         match cypher::cypher_equals(&left, &value)? {
@@ -82,10 +88,7 @@ fn string_predicate(op: BinaryOp, left: Value, right: Value) -> QueryResult<Valu
         return Ok(Value::Null);
     }
     let (Value::String(left), Value::String(right)) = (left, right) else {
-        return Err(QueryError::new(
-            QueryErrorKind::Type,
-            "String predicate requires two String operands",
-        ));
+        return Ok(Value::Null);
     };
     let value = match op {
         BinaryOp::StartsWith => left.starts_with(&right),
@@ -101,10 +104,7 @@ fn regex_predicate(left: Value, right: Value) -> QueryResult<Value> {
         return Ok(Value::Null);
     }
     let (Value::String(left), Value::String(pattern)) = (left, right) else {
-        return Err(QueryError::new(
-            QueryErrorKind::Type,
-            "=~ requires two String operands",
-        ));
+        return Ok(Value::Null);
     };
     let pattern = format!("^(?:{pattern})$");
     let expression = regex::Regex::new(&pattern)
@@ -167,13 +167,8 @@ fn numeric_binary(op: BinaryOp, left: Value, right: Value) -> QueryResult<Value>
         return result;
     }
     match (left, right) {
-        (Value::Integer(left), Value::Integer(right))
-            if op != BinaryOp::Divide && op != BinaryOp::Power =>
-        {
+        (Value::Integer(left), Value::Integer(right)) if op != BinaryOp::Power => {
             integer_binary(op, left, right)
-        }
-        (Value::Integer(_), Value::Integer(0)) if op == BinaryOp::Divide => {
-            Err(QueryError::new(QueryErrorKind::Type, "division by zero"))
         }
         (Value::Integer(left), Value::Integer(right)) => {
             float_binary(op, left as f64, right as f64)
@@ -213,6 +208,10 @@ fn integer_binary(op: BinaryOp, left: i64, right: i64) -> QueryResult<Value> {
         BinaryOp::Add => left.checked_add(right),
         BinaryOp::Subtract => left.checked_sub(right),
         BinaryOp::Multiply => left.checked_mul(right),
+        BinaryOp::Divide if right != 0 => left.checked_div(right),
+        BinaryOp::Divide => {
+            return Err(QueryError::new(QueryErrorKind::Type, "division by zero"));
+        }
         BinaryOp::Modulo if right != 0 => left.checked_rem(right),
         BinaryOp::Modulo => {
             return Err(QueryError::new(QueryErrorKind::Type, "division by zero"));

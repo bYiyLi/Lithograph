@@ -329,29 +329,50 @@ fn parse_offset(text: &str) -> Result<i32, ValueError> {
             ));
         }
     };
-    let (hour, minute) = if let Some((hour, minute)) = digits.split_once(':') {
-        (
-            parse_two_digits(hour, "Offset hour")?,
-            parse_two_digits(minute, "Offset minute")?,
-        )
+    let (hour, minute, second) = if digits.contains(':') {
+        let parts = digits.split(':').collect::<Vec<_>>();
+        match parts.as_slice() {
+            [hour, minute] => (
+                parse_two_digits(hour, "Offset hour")?,
+                parse_two_digits(minute, "Offset minute")?,
+                0,
+            ),
+            [hour, minute, second] => (
+                parse_two_digits(hour, "Offset hour")?,
+                parse_two_digits(minute, "Offset minute")?,
+                parse_two_digits(second, "Offset second")?,
+            ),
+            _ => {
+                return Err(ValueError::new(
+                    "Time zone offset must use ±HH, ±HHMM, ±HHMMSS, ±HH:MM, or ±HH:MM:SS",
+                ));
+            }
+        }
     } else if digits.len() == 2 {
-        (parse_two_digits(digits, "Offset hour")?, 0)
+        (parse_two_digits(digits, "Offset hour")?, 0, 0)
     } else if digits.len() == 4 {
         (
             parse_two_digits(&digits[..2], "Offset hour")?,
             parse_two_digits(&digits[2..], "Offset minute")?,
+            0,
+        )
+    } else if digits.len() == 6 {
+        (
+            parse_two_digits(&digits[..2], "Offset hour")?,
+            parse_two_digits(&digits[2..4], "Offset minute")?,
+            parse_two_digits(&digits[4..], "Offset second")?,
         )
     } else {
         return Err(ValueError::new(
-            "Time zone offset must use ±HH, ±HHMM, or ±HH:MM",
+            "Time zone offset must use ±HH, ±HHMM, ±HHMMSS, ±HH:MM, or ±HH:MM:SS",
         ));
     };
-    if hour > 18 || minute > 59 || (hour == 18 && minute != 0) {
+    if hour > 18 || minute > 59 || second > 59 || (hour == 18 && (minute != 0 || second != 0)) {
         return Err(ValueError::new(
             "Time zone offset is outside the ±18:00 range",
         ));
     }
-    Ok(sign * (hour as i32 * 3_600 + minute as i32 * 60))
+    Ok(sign * (hour as i32 * 3_600 + minute as i32 * 60 + second as i32))
 }
 
 pub(crate) fn format_offset(offset_seconds: i32) -> String {
@@ -360,11 +381,14 @@ pub(crate) fn format_offset(offset_seconds: i32) -> String {
     }
     let sign = if offset_seconds < 0 { '-' } else { '+' };
     let absolute = offset_seconds.unsigned_abs();
-    format!(
-        "{sign}{:02}:{:02}",
-        absolute / 3_600,
-        (absolute % 3_600) / 60
-    )
+    let hour = absolute / 3_600;
+    let minute = (absolute % 3_600) / 60;
+    let second = absolute % 60;
+    if second == 0 {
+        format!("{sign}{hour:02}:{minute:02}")
+    } else {
+        format!("{sign}{hour:02}:{minute:02}:{second:02}")
+    }
 }
 
 pub(crate) fn format_local_time(nanoseconds: u64) -> String {

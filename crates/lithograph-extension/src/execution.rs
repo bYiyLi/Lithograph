@@ -158,7 +158,7 @@ pub(super) fn row_json(row: &[cypher::Value]) -> Value {
 }
 
 pub(super) fn summary_json(summary: &query::QuerySummary) -> Value {
-    json!({
+    let mut value = json!({
         "queryType": summary.query_type.as_str(),
         "commit": summary.commit,
         "mergeSession": summary.merge_session.as_ref().map(|session| json!({
@@ -167,6 +167,21 @@ pub(super) fn summary_json(summary: &query::QuerySummary) -> Value {
         })),
         "counters": counters_json(&summary.counters),
         "metrics": metrics_json(&summary.metrics),
+    });
+    if let Some(operators) = summary.metrics.operator_profile() {
+        value["profile"] = json!({
+            "operators": operators.iter().map(operator_profile_json).collect::<Vec<_>>(),
+        });
+    }
+    value
+}
+
+fn operator_profile_json(operator: &query::OperatorRuntimeMetrics) -> Value {
+    json!({
+        "id": operator.id,
+        "operator": operator.operator,
+        "rows": operator.rows,
+        "dbHits": operator.db_hits,
     })
 }
 

@@ -148,6 +148,11 @@ fn validate_ref_selector(name: &str) -> QueryResult<()> {
 }
 
 pub(crate) fn materialize_node(snapshot: &Snapshot<'_>, node_id: i64) -> QueryResult<NodeValue> {
+    if !snapshot.node_exists(node_id)? {
+        return Err(QueryError::semantic(format!(
+            "Node n:{node_id} is no longer present in the active graph state"
+        )));
+    }
     let mut labels = Vec::new();
     for label_id in snapshot.labels(node_id)? {
         let name =
@@ -168,6 +173,12 @@ pub(crate) fn materialize_relationship(
     snapshot: &Snapshot<'_>,
     relationship: RelationshipRecord,
 ) -> QueryResult<RelationshipValue> {
+    if snapshot.relationship(relationship.id)?.is_none() {
+        return Err(QueryError::semantic(format!(
+            "Relationship r:{} is no longer present in the active graph state",
+            relationship.id
+        )));
+    }
     let relationship_type =
         storage::relationship_type_name(snapshot_connection(snapshot), relationship.type_id)?
             .ok_or_else(|| {
@@ -191,6 +202,11 @@ pub(crate) fn node_property(
     node_id: i64,
     key: &str,
 ) -> QueryResult<Value> {
+    if !snapshot.node_exists(node_id)? {
+        return Err(QueryError::semantic(format!(
+            "Node n:{node_id} is no longer present in the active graph state"
+        )));
+    }
     element_property(snapshot, OwnerKind::Node, node_id, key)
 }
 
@@ -199,6 +215,11 @@ pub(crate) fn relationship_property(
     id: i64,
     key: &str,
 ) -> QueryResult<Value> {
+    if snapshot.relationship(id)?.is_none() {
+        return Err(QueryError::semantic(format!(
+            "Relationship r:{id} is no longer present in the active graph state"
+        )));
+    }
     element_property(snapshot, OwnerKind::Relationship, id, key)
 }
 

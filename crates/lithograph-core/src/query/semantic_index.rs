@@ -14,6 +14,8 @@ use super::{QueryError, QueryResult};
 mod hnsw;
 use hnsw::{build_vector_cache, query_vector_cache};
 
+const SEMANTIC_SCAN_PAGE_SIZE: usize = 4_096;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum SemanticEntity {
     Node(i64),
@@ -172,18 +174,20 @@ fn scan_vector_candidates(
         .first()
         .ok_or_else(|| QueryError::internal("VECTOR Index is missing its indexed property"))?;
     let mut hits = Vec::new();
-    for entity in indexed_entities(
+    visit_indexed_entities(
         connection,
         snapshot,
         index,
         Some(graph_view),
         is_interrupted,
-    )? {
-        let value = semantic_property(snapshot, entity, property)?;
-        if let Some(hit) = vector_hit(index, input, entity, value)? {
-            hits.push(hit);
-        }
-    }
+        |entity| {
+            let value = semantic_property(snapshot, entity, property)?;
+            if let Some(hit) = vector_hit(index, input, entity, value)? {
+                hits.push(hit);
+            }
+            Ok(())
+        },
+    )?;
     Ok(hits)
 }
 
@@ -232,31 +236,33 @@ fn vector_hit(
     }))
 }
 
-fn indexed_entities(
+fn visit_indexed_entities(
     connection: &Connection,
     snapshot: &Snapshot<'_>,
     index: &IndexDefinition,
     graph_view: Option<&ResolvedGraphView>,
     is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<Vec<SemanticEntity>> {
+    mut visit: impl FnMut(SemanticEntity) -> QueryResult<()>,
+) -> QueryResult<()> {
     let membership = semantic_membership(connection, index)?;
-    let candidates = snapshot_semantic_entities(snapshot, &membership)?;
-    let mut entities = Vec::new();
-    for entity in candidates {
-        if is_interrupted() {
-            return Err(QueryError::interrupted());
-        }
-        if !semantic_entity_matches(snapshot, entity, &membership)? {
-            continue;
-        }
-        if let Some(view) = graph_view
-            && !semantic_entity_visible(snapshot, view, entity)?
-        {
-            continue;
-        }
-        entities.push(entity);
+    match membership {
+        SemanticMembership::NodeLabels(labels) => visit_semantic_nodes(
+            connection,
+            snapshot,
+            &labels,
+            graph_view,
+            is_interrupted,
+            &mut visit,
+        ),
+        SemanticMembership::RelationshipTypes(types) => visit_semantic_relationships(
+            connection,
+            snapshot,
+            &types,
+            graph_view,
+            is_interrupted,
+            &mut visit,
+        ),
     }
-    Ok(entities)
 }
 
 enum SemanticMembership {
@@ -281,24 +287,131 @@ fn semantic_membership(
     }
 }
 
-fn snapshot_semantic_entities(
+fn visit_semantic_nodes(
+    connection: &Connection,
     snapshot: &Snapshot<'_>,
-    membership: &SemanticMembership,
-) -> QueryResult<Vec<SemanticEntity>> {
-    let mut entities = Vec::new();
-    match membership {
-        SemanticMembership::NodeLabels(_) => snapshot.visit_nodes(|node| {
-            entities.push(SemanticEntity::Node(node));
+    labels: &BTreeSet<i64>,
+    graph_view: Option<&ResolvedGraphView>,
+    is_interrupted: &dyn Fn() -> bool,
+    visit: &mut impl FnMut(SemanticEntity) -> QueryResult<()>,
+) -> QueryResult<()> {
+    with_semantic_seen_state(connection, labels.len() > 1, || {
+        for label_id in labels {
+            let mut after = 0_i64;
+            loop {
+                let page = snapshot.scan_label_after(*label_id, after, SEMANTIC_SCAN_PAGE_SIZE)?;
+                for node in page.items {
+                    if is_interrupted() {
+                        return Err(QueryError::interrupted());
+                    }
+                    if labels.len() > 1 && !mark_semantic_seen(connection, 1, node)? {
+                        continue;
+                    }
+                    visit_visible_entity(snapshot, graph_view, SemanticEntity::Node(node), visit)?;
+                }
+                let Some(next_after) = page.next_after else {
+                    break;
+                };
+                after = next_after;
+            }
+        }
+        Ok(())
+    })
+}
+
+fn visit_semantic_relationships(
+    connection: &Connection,
+    snapshot: &Snapshot<'_>,
+    types: &BTreeSet<i64>,
+    graph_view: Option<&ResolvedGraphView>,
+    is_interrupted: &dyn Fn() -> bool,
+    visit: &mut impl FnMut(SemanticEntity) -> QueryResult<()>,
+) -> QueryResult<()> {
+    with_semantic_seen_state(connection, types.len() > 1, || {
+        for type_id in types {
+            let mut after = 0_i64;
+            loop {
+                let page = snapshot.scan_relationship_type_after(
+                    *type_id,
+                    after,
+                    SEMANTIC_SCAN_PAGE_SIZE,
+                )?;
+                for relationship in page.items {
+                    if is_interrupted() {
+                        return Err(QueryError::interrupted());
+                    }
+                    if types.len() > 1 && !mark_semantic_seen(connection, 2, relationship.id)? {
+                        continue;
+                    }
+                    visit_visible_entity(
+                        snapshot,
+                        graph_view,
+                        SemanticEntity::Relationship(relationship),
+                        visit,
+                    )?;
+                }
+                let Some(next_after) = page.next_after else {
+                    break;
+                };
+                after = next_after;
+            }
+        }
+        Ok(())
+    })
+}
+
+fn visit_visible_entity(
+    snapshot: &Snapshot<'_>,
+    graph_view: Option<&ResolvedGraphView>,
+    entity: SemanticEntity,
+    visit: &mut impl FnMut(SemanticEntity) -> QueryResult<()>,
+) -> QueryResult<()> {
+    if let Some(view) = graph_view
+        && !semantic_entity_visible(snapshot, view, entity)?
+    {
+        return Ok(());
+    }
+    visit(entity)
+}
+
+fn with_semantic_seen_state(
+    connection: &Connection,
+    enabled: bool,
+    visit: impl FnOnce() -> QueryResult<()>,
+) -> QueryResult<()> {
+    if !enabled {
+        return visit();
+    }
+    connection.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS _lithograph_semantic_scan_seen(\
+             owner_kind INTEGER NOT NULL, owner_id INTEGER NOT NULL,\
+             PRIMARY KEY(owner_kind, owner_id)\
+         ) WITHOUT ROWID;\
+         DELETE FROM temp._lithograph_semantic_scan_seen;",
+    )?;
+    let result = visit();
+    let cleanup = connection.execute_batch("DROP TABLE temp._lithograph_semantic_scan_seen");
+    match result {
+        Ok(()) => {
+            cleanup?;
             Ok(())
-        })?,
-        SemanticMembership::RelationshipTypes(_) => {
-            snapshot.visit_relationships(|relationship| {
-                entities.push(SemanticEntity::Relationship(relationship));
-                Ok(())
-            })?
+        }
+        Err(error) => {
+            let _ = cleanup;
+            Err(error)
         }
     }
-    Ok(entities)
+}
+
+fn mark_semantic_seen(
+    connection: &Connection,
+    owner_kind: i64,
+    owner_id: i64,
+) -> QueryResult<bool> {
+    Ok(connection.execute(
+        "INSERT OR IGNORE INTO temp._lithograph_semantic_scan_seen(owner_kind, owner_id) VALUES(?1, ?2)",
+        rusqlite::params![owner_kind, owner_id],
+    )? == 1)
 }
 
 fn semantic_entity_matches(
@@ -307,9 +420,10 @@ fn semantic_entity_matches(
     membership: &SemanticMembership,
 ) -> QueryResult<bool> {
     match (entity, membership) {
-        (SemanticEntity::Node(node), SemanticMembership::NodeLabels(labels)) => {
-            node_has_any_label(snapshot, node, labels)
-        }
+        (SemanticEntity::Node(node), SemanticMembership::NodeLabels(labels)) => Ok(snapshot
+            .labels(node)?
+            .into_iter()
+            .any(|label| labels.contains(&label))),
         (
             SemanticEntity::Relationship(relationship),
             SemanticMembership::RelationshipTypes(types),
@@ -367,20 +481,6 @@ fn resolve_dictionary_ids(
         }
     }
     Ok(ids)
-}
-
-fn node_has_any_label(
-    snapshot: &Snapshot<'_>,
-    node: i64,
-    labels: &BTreeSet<i64>,
-) -> QueryResult<bool> {
-    if labels.is_empty() {
-        return Ok(false);
-    }
-    Ok(snapshot
-        .labels(node)?
-        .into_iter()
-        .any(|label| labels.contains(&label)))
 }
 
 fn entity_id(entity: SemanticEntity) -> i64 {
@@ -731,16 +831,23 @@ fn populate_fulltext_cache(
         columns.join(", "),
         placeholders.join(", ")
     );
-    for entity in indexed_entities(connection, snapshot, index, None, is_interrupted)? {
-        insert_fulltext_values(
-            connection,
-            &sql,
-            entity_id(entity),
-            properties,
-            |property| semantic_property(snapshot, entity, property),
-        )?;
-    }
-    Ok(())
+    visit_indexed_entities(
+        connection,
+        snapshot,
+        index,
+        None,
+        is_interrupted,
+        |entity| {
+            insert_fulltext_values(
+                connection,
+                &sql,
+                entity_id(entity),
+                properties,
+                |property| semantic_property(snapshot, entity, property),
+            )?;
+            Ok(())
+        },
+    )
 }
 
 fn insert_fulltext_values(

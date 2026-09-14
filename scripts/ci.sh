@@ -55,6 +55,7 @@ cargo clippy --locked --workspace --all-targets --all-features
 # integration tests if all packages were tested in one workspace invocation.
 cargo test --locked -p lithograph-core -p lithograph-test-support
 cargo test --locked -p lithograph-extension
+cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase10-tck >/dev/null
 cargo build --locked -p lithograph-extension
 
 target_dir=${CARGO_TARGET_DIR:-target}

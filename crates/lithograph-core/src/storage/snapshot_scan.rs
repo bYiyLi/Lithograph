@@ -43,6 +43,30 @@ impl Snapshot<'_> {
         Ok(self.merge_relationship_page(after, limit, base, overlay, |_| true))
     }
 
+    /// Reads at most `limit` visible Relationships of `type_id` after `after`.
+    pub fn scan_relationship_type_after(
+        &self,
+        type_id: RelationshipTypeId,
+        after: RelationshipId,
+        limit: usize,
+    ) -> StorageResult<ScanPage<RelationshipRecord>> {
+        let limit = normalized_limit(limit);
+        let base = self.base_relationship_type_page(type_id, after, limit)?;
+        let overlay = self
+            .overlay
+            .relationships
+            .range(after.saturating_add(1)..)
+            .filter(|(_, delta)| delta.record.type_id == type_id)
+            .take(limit)
+            .map(|(id, _)| *id)
+            .collect();
+        Ok(
+            self.merge_relationship_page(after, limit, base, overlay, |record| {
+                record.type_id == type_id
+            }),
+        )
+    }
+
     pub fn scan_outgoing_after(
         &self,
         node_id: NodeId,
@@ -363,6 +387,30 @@ impl Snapshot<'_> {
                     target: row.get(3)?,
                 })
             },
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    fn base_relationship_type_page(
+        &self,
+        type_id: RelationshipTypeId,
+        after: RelationshipId,
+        limit: usize,
+    ) -> StorageResult<Vec<RelationshipRecord>> {
+        let Some(checkpoint) = self.checkpoint else {
+            return Ok(Vec::new());
+        };
+        let mut statement = self.connection.prepare(
+            "SELECT relationship_id, source_id, type_id, target_id FROM main._lithograph_cp_relationships WHERE commit_id = ?1 AND type_id = ?2 AND relationship_id > ?3 ORDER BY relationship_id LIMIT ?4",
+        )?;
+        let rows = statement.query_map(
+            params![
+                checkpoint.as_bytes().as_slice(),
+                type_id,
+                after,
+                limit as i64
+            ],
+            relationship_from_row,
         )?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }

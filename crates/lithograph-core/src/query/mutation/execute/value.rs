@@ -23,22 +23,18 @@ pub(super) fn evaluate_map(
     reason = "property-map mutation keeps storage, snapshot, delta, owner, and counters explicit"
 )]
 pub(super) fn set_property_map(
-    connection: &Connection,
-    base: &Snapshot<'_>,
+    context: &mut MutationContext<'_, '_>,
     staged: &Snapshot<'_>,
-    delta: &mut DeltaBuilder,
     owner_kind: OwnerKind,
     owner_id: i64,
     map: &BTreeMap<String, Value>,
     replace: bool,
 ) -> QueryResult<()> {
     if replace {
-        replace_missing_properties(connection, base, staged, delta, owner_kind, owner_id, map)?;
+        replace_missing_properties(context, staged, owner_kind, owner_id, map)?;
     }
     for (key, value) in map {
-        set_map_property(
-            connection, base, staged, delta, owner_kind, owner_id, key, value,
-        )?;
+        set_map_property(context, staged, owner_kind, owner_id, key, value)?;
     }
     Ok(())
 }
@@ -48,23 +44,21 @@ pub(super) fn set_property_map(
     reason = "property replacement keeps storage, snapshot, delta, owner, and counters explicit"
 )]
 fn replace_missing_properties(
-    connection: &Connection,
-    base: &Snapshot<'_>,
+    context: &mut MutationContext<'_, '_>,
     staged: &Snapshot<'_>,
-    delta: &mut DeltaBuilder,
     owner_kind: OwnerKind,
     owner_id: i64,
     map: &BTreeMap<String, Value>,
 ) -> QueryResult<()> {
     let names = map.keys().cloned().collect::<BTreeSet<_>>();
     for (key_id, _) in staged.properties(owner_kind, owner_id)? {
-        let Some(key) = storage::property_key_name(connection, key_id)? else {
+        let Some(key) = storage::property_key_name(context.connection, key_id)? else {
             return Err(QueryError::internal(format!(
                 "PropertyKeyId {key_id} is missing from the dictionary"
             )));
         };
         if !names.contains(&key) {
-            delta.set_property(base, owner_kind, owner_id, key_id, None)?;
+            context.set_property(owner_kind, owner_id, key_id, None)?;
         }
     }
     Ok(())
@@ -75,10 +69,8 @@ fn replace_missing_properties(
     reason = "single property-map entries keep storage, snapshot, delta, owner, and counters explicit"
 )]
 fn set_map_property(
-    connection: &Connection,
-    base: &Snapshot<'_>,
+    context: &mut MutationContext<'_, '_>,
     staged: &Snapshot<'_>,
-    delta: &mut DeltaBuilder,
     owner_kind: OwnerKind,
     owner_id: i64,
     key: &str,
@@ -86,8 +78,8 @@ fn set_map_property(
 ) -> QueryResult<()> {
     let next = property_from_value(value.clone())?;
     let key_id = match &next {
-        Some(_) => storage::intern_property_key(connection, key)?,
-        None => match storage::find_property_key(connection, key)? {
+        Some(_) => storage::intern_property_key(context.connection, key)?,
+        None => match storage::find_property_key(context.connection, key)? {
             Some(key_id) => key_id,
             None => return Ok(()),
         },
@@ -96,7 +88,7 @@ fn set_map_property(
     if property_states_equal(&previous, &next)? {
         return Ok(());
     }
-    delta.set_property(base, owner_kind, owner_id, key_id, next.clone())?;
+    context.set_property(owner_kind, owner_id, key_id, next.clone())?;
     Ok(())
 }
 

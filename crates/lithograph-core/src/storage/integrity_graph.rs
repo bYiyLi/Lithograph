@@ -2,17 +2,19 @@
 
 use rusqlite::{Connection, OptionalExtension};
 
-use super::integrity::IntegrityIssue;
+use super::integrity::{IntegrityIssue, hex_bytes};
+use super::layer::StoredLayerReferenceMaxima;
 use super::snapshot::Snapshot;
 use super::{HashId, StorageResult};
 
 pub(super) fn graph_integrity_issues(
     connection: &Connection,
+    references: &StoredLayerReferenceMaxima,
 ) -> StorageResult<Vec<IntegrityIssue>> {
     let mut issues = Vec::new();
     check_branch_refs(connection, &mut issues)?;
-    check_sequences(connection, &mut issues)?;
-    check_dictionary_refs(connection, &mut issues)?;
+    check_sequences(connection, references, &mut issues)?;
+    check_dictionary_refs(connection, references, &mut issues)?;
     check_identity_history(connection, &mut issues)?;
     check_checkpoint_refs(connection, &mut issues)?;
     check_snapshot_invariants(connection, &mut issues)?;
@@ -166,18 +168,20 @@ fn check_version_sidecar_refs(
     Ok(())
 }
 
-fn check_sequences(connection: &Connection, issues: &mut Vec<IntegrityIssue>) -> StorageResult<()> {
+fn check_sequences(
+    connection: &Connection,
+    references: &StoredLayerReferenceMaxima,
+    issues: &mut Vec<IntegrityIssue>,
+) -> StorageResult<()> {
+    check_sequence_max(connection, 1, "NodeId", references.node_id, issues)?;
+    check_sequence_max(
+        connection,
+        2,
+        "RelationshipId",
+        references.relationship_id,
+        issues,
+    )?;
     for (kind, name, max_sql) in [
-        (
-            1_i64,
-            "NodeId",
-            "SELECT coalesce(max(node_id), 0) FROM main._lithograph_node_delta",
-        ),
-        (
-            2_i64,
-            "RelationshipId",
-            "SELECT coalesce(max(relationship_id), 0) FROM main._lithograph_rel_delta",
-        ),
         (
             3_i64,
             "LabelId",
@@ -199,7 +203,8 @@ fn check_sequences(connection: &Connection, issues: &mut Vec<IntegrityIssue>) ->
             "SELECT coalesce(max(id), 0) FROM main._lithograph_layers",
         ),
     ] {
-        check_sequence(connection, kind, name, max_sql, issues)?;
+        let max_id: i64 = connection.query_row(max_sql, [], |row| row.get(0))?;
+        check_sequence_max(connection, kind, name, max_id, issues)?;
     }
     let unexpected: i64 = connection.query_row(
         "SELECT count(*) FROM main._lithograph_sequences WHERE kind NOT BETWEEN 1 AND 6",
@@ -215,11 +220,11 @@ fn check_sequences(connection: &Connection, issues: &mut Vec<IntegrityIssue>) ->
     Ok(())
 }
 
-fn check_sequence(
+fn check_sequence_max(
     connection: &Connection,
     kind: i64,
     name: &str,
-    max_sql: &str,
+    max_id: i64,
     issues: &mut Vec<IntegrityIssue>,
 ) -> StorageResult<()> {
     let next_id = connection
@@ -236,7 +241,6 @@ fn check_sequence(
         ));
         return Ok(());
     };
-    let max_id: i64 = connection.query_row(max_sql, [], |row| row.get(0))?;
     if next_id <= 0 || next_id <= max_id {
         issues.push(IntegrityIssue::new(
             "identity.sequence_regressed",
@@ -248,39 +252,41 @@ fn check_sequence(
 
 fn check_dictionary_refs(
     connection: &Connection,
+    references: &StoredLayerReferenceMaxima,
     issues: &mut Vec<IntegrityIssue>,
 ) -> StorageResult<()> {
-    for (name, sql) in [
+    for (name, table, max_reference) in [
+        ("LabelId", "_lithograph_labels", references.label_id),
         (
-            "label delta",
-            "SELECT count(*) FROM main._lithograph_label_delta d LEFT JOIN main._lithograph_labels x ON x.id = d.label_id WHERE x.id IS NULL",
+            "RelationshipTypeId",
+            "_lithograph_rel_types",
+            references.relationship_type_id,
         ),
         (
-            "relationship delta",
-            "SELECT count(*) FROM main._lithograph_rel_delta d LEFT JOIN main._lithograph_rel_types x ON x.id = d.type_id WHERE x.id IS NULL",
-        ),
-        (
-            "property delta",
-            "SELECT count(*) FROM main._lithograph_property_delta d LEFT JOIN main._lithograph_prop_keys x ON x.id = d.key_id WHERE x.id IS NULL",
-        ),
-        (
-            "checkpoint label",
-            "SELECT count(*) FROM main._lithograph_cp_labels d LEFT JOIN main._lithograph_labels x ON x.id = d.label_id WHERE x.id IS NULL",
-        ),
-        (
-            "checkpoint relationship",
-            "SELECT count(*) FROM main._lithograph_cp_relationships d LEFT JOIN main._lithograph_rel_types x ON x.id = d.type_id WHERE x.id IS NULL",
-        ),
-        (
-            "checkpoint property",
-            "SELECT count(*) FROM main._lithograph_cp_properties d LEFT JOIN main._lithograph_prop_keys x ON x.id = d.key_id WHERE x.id IS NULL",
+            "PropertyKeyId",
+            "_lithograph_prop_keys",
+            references.property_key_id,
         ),
     ] {
-        let count: i64 = connection.query_row(sql, [], |row| row.get(0))?;
-        if count > 0 {
+        let sql = format!(
+            "SELECT count(*), coalesce(min(id), 0), coalesce(max(id), 0) FROM main.{table}"
+        );
+        let (count, min_id, max_id): (i64, i64, i64) =
+            connection.query_row(&sql, [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        if (count == 0 && (min_id != 0 || max_id != 0))
+            || (count > 0 && (min_id != 1 || count != max_id))
+        {
+            issues.push(IntegrityIssue::new(
+                "dictionary.id_gap",
+                format!("{name} dictionary is not a contiguous append-only 1..={max_id} id range"),
+            ));
+        }
+        if max_reference > max_id {
             issues.push(IntegrityIssue::new(
                 "dictionary.dangling_id",
-                format!("found {count} {name} row(s) with missing dictionary ids"),
+                format!(
+                    "canonical history references {name} {max_reference} but dictionary max id is {max_id}"
+                ),
             ));
         }
     }
@@ -337,16 +343,29 @@ fn check_checkpoint_semantics(
     connection: &Connection,
     issues: &mut Vec<IntegrityIssue>,
 ) -> StorageResult<()> {
-    let mut statement = connection
-        .prepare("SELECT commit_id FROM main._lithograph_checkpoints ORDER BY commit_id")?;
+    visit_commit_ids(
+        connection,
+        "SELECT commit_id FROM main._lithograph_checkpoints ORDER BY commit_id",
+        |commit| {
+            if commit_exists(connection, commit)? {
+                compare_checkpoint_semantics(connection, commit, issues);
+            }
+            Ok(())
+        },
+    )
+}
+
+fn visit_commit_ids(
+    connection: &Connection,
+    sql: &str,
+    mut visit: impl FnMut(HashId) -> StorageResult<()>,
+) -> StorageResult<()> {
+    let mut statement = connection.prepare(sql)?;
     let rows = statement.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
     for row in rows {
         let bytes = row?;
-        let Ok(commit) = HashId::from_slice(&bytes) else {
-            continue;
-        };
-        if commit_exists(connection, commit)? {
-            compare_checkpoint_semantics(connection, commit, issues);
+        if let Ok(commit) = HashId::from_slice(&bytes) {
+            visit(commit)?;
         }
     }
     Ok(())
@@ -357,22 +376,16 @@ fn compare_checkpoint_semantics(
     commit: HashId,
     issues: &mut Vec<IntegrityIssue>,
 ) {
-    let with_checkpoint =
-        Snapshot::resolve(connection, commit).and_then(|snapshot| snapshot.semantic_hash());
-    let rebuilt = Snapshot::resolve_without_target_checkpoint(connection, commit)
-        .and_then(|snapshot| snapshot.semantic_hash());
-    match (with_checkpoint, rebuilt) {
-        (Ok(left), Ok(right)) if left == right => {}
-        (Ok(left), Ok(right)) => issues.push(IntegrityIssue::new(
+    match checkpoint_semantics_match(connection, commit) {
+        Ok(true) => {}
+        Ok(false) => issues.push(IntegrityIssue::new(
             "checkpoint.snapshot_mismatch",
             format!(
-                "checkpoint for Commit {} hashes as {} but canonical replay hashes as {}",
-                commit.to_hex(),
-                left.to_hex(),
-                right.to_hex()
+                "checkpoint for Commit {} differs from canonical first-parent replay",
+                commit.to_hex()
             ),
         )),
-        (Err(error), _) | (_, Err(error)) => issues.push(IntegrityIssue::new(
+        Err(error) => issues.push(IntegrityIssue::new(
             "checkpoint.snapshot_invalid",
             format!(
                 "checkpoint for Commit {} cannot be verified: {error}",
@@ -380,6 +393,87 @@ fn compare_checkpoint_semantics(
             ),
         )),
     }
+}
+
+fn checkpoint_semantics_match(connection: &Connection, commit: HashId) -> StorageResult<bool> {
+    let commit = commit.as_bytes().as_slice();
+    for sql in [
+        checkpoint_match_sql(
+            "_lithograph_node_delta",
+            "d.node_id",
+            "d.node_id",
+            "node_id",
+            "_lithograph_cp_nodes",
+        ),
+        checkpoint_match_sql(
+            "_lithograph_label_delta",
+            "d.node_id, d.label_id",
+            "d.node_id, d.label_id",
+            "node_id, label_id",
+            "_lithograph_cp_labels",
+        ),
+        checkpoint_match_sql(
+            "_lithograph_rel_delta",
+            "d.relationship_id, d.source_id, d.type_id, d.target_id",
+            "d.relationship_id",
+            "relationship_id, source_id, type_id, target_id",
+            "_lithograph_cp_relationships",
+        ),
+        checkpoint_match_sql(
+            "_lithograph_property_delta",
+            "d.owner_kind, d.owner_id, d.key_id, d.type_tag, d.int_value, d.real_value, d.text_value, d.blob_value, d.aux_value",
+            "d.owner_kind, d.owner_id, d.key_id",
+            "owner_kind, owner_id, key_id, type_tag, int_value, real_value, text_value, blob_value, aux_value",
+            "_lithograph_cp_properties",
+        ),
+    ] {
+        let matches: bool = connection.query_row(&sql, [commit], |row| row.get(0))?;
+        if !matches {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn checkpoint_match_sql(
+    delta_table: &str,
+    ranked_columns: &str,
+    partition_columns: &str,
+    expected_columns: &str,
+    checkpoint_table: &str,
+) -> String {
+    format!(
+        r#"
+WITH RECURSIVE lineage(commit_id, depth) AS (
+  SELECT ?1, 0
+  UNION ALL
+  SELECT c.parent1, lineage.depth + 1
+  FROM lineage
+  JOIN main._lithograph_commits c ON c.id = lineage.commit_id
+  WHERE c.parent1 IS NOT NULL
+), ranked AS (
+  SELECT {ranked_columns}, d.op,
+         row_number() OVER (PARTITION BY {partition_columns} ORDER BY lineage.depth) AS rn
+  FROM lineage
+  JOIN main._lithograph_commits c ON c.id = lineage.commit_id
+  JOIN main.{delta_table} d ON d.layer_id = c.layer_id
+), expected AS (
+  SELECT {expected_columns} FROM ranked WHERE rn = 1 AND op = 1
+)
+SELECT
+  NOT EXISTS(SELECT 1 FROM (
+    SELECT {expected_columns} FROM expected
+    EXCEPT
+    SELECT {expected_columns} FROM main.{checkpoint_table} WHERE commit_id = ?1
+  ) LIMIT 1)
+  AND
+  NOT EXISTS(SELECT 1 FROM (
+    SELECT {expected_columns} FROM main.{checkpoint_table} WHERE commit_id = ?1
+    EXCEPT
+    SELECT {expected_columns} FROM expected
+  ) LIMIT 1)
+"#
+    )
 }
 
 fn commit_exists(connection: &Connection, commit: HashId) -> StorageResult<bool> {
@@ -395,37 +489,97 @@ fn check_snapshot_invariants(
     connection: &Connection,
     issues: &mut Vec<IntegrityIssue>,
 ) -> StorageResult<()> {
-    let mut statement =
-        connection.prepare("SELECT id FROM main._lithograph_commits ORDER BY id")?;
-    let rows = statement.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
-    for row in rows {
-        let bytes = row?;
-        let Ok(commit) = HashId::from_slice(&bytes) else {
-            continue;
-        };
-        if let Err(error) = validate_snapshot(connection, commit) {
-            issues.push(IntegrityIssue::new(
-                "graph.snapshot_invalid",
-                format!(
-                    "Commit {} cannot resolve a valid graph: {error}",
-                    commit.to_hex()
-                ),
-            ));
-        }
+    visit_commit_ids(
+        connection,
+        "SELECT id FROM main._lithograph_commits ORDER BY id",
+        |commit| {
+            let validation = if checkpoint_exists(connection, commit)? {
+                validate_checkpoint_graph(connection, commit)
+            } else {
+                validate_snapshot(connection, commit)
+            };
+            if let Err(error) = validation {
+                issues.push(IntegrityIssue::new(
+                    "graph.snapshot_invalid",
+                    format!(
+                        "Commit {} cannot resolve a valid graph: {error}",
+                        commit.to_hex()
+                    ),
+                ));
+            }
+            Ok(())
+        },
+    )
+}
+
+fn checkpoint_exists(connection: &Connection, commit: HashId) -> StorageResult<bool> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM main._lithograph_checkpoints WHERE commit_id = ?1)",
+            [commit.as_bytes().as_slice()],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+}
+
+fn validate_checkpoint_graph(connection: &Connection, commit: HashId) -> StorageResult<()> {
+    let commit = commit.as_bytes().as_slice();
+    let missing_endpoint: Option<i64> = connection
+        .query_row(
+            "SELECT r.relationship_id \
+             FROM main._lithograph_cp_relationships r \
+             LEFT JOIN main._lithograph_cp_nodes s ON s.commit_id = r.commit_id AND s.node_id = r.source_id \
+             LEFT JOIN main._lithograph_cp_nodes t ON t.commit_id = r.commit_id AND t.node_id = r.target_id \
+             WHERE r.commit_id = ?1 AND (s.node_id IS NULL OR t.node_id IS NULL) LIMIT 1",
+            [commit],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(relationship_id) = missing_endpoint {
+        return Err(super::StorageError::corrupt(format!(
+            "RelationshipId {relationship_id} has a missing endpoint"
+        )));
+    }
+
+    let missing_label_owner: Option<(i64, i64)> = connection
+        .query_row(
+            "SELECT l.node_id, l.label_id \
+             FROM main._lithograph_cp_labels l \
+             LEFT JOIN main._lithograph_cp_nodes n ON n.commit_id = l.commit_id AND n.node_id = l.node_id \
+             WHERE l.commit_id = ?1 AND n.node_id IS NULL LIMIT 1",
+            [commit],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((node_id, label_id)) = missing_label_owner {
+        return Err(super::StorageError::corrupt(format!(
+            "LabelId {label_id} refers to missing NodeId {node_id}"
+        )));
+    }
+
+    let missing_property_owner: Option<(i64, i64, i64)> = connection
+        .query_row(
+            "SELECT p.owner_kind, p.owner_id, p.key_id \
+             FROM main._lithograph_cp_properties p \
+             LEFT JOIN main._lithograph_cp_nodes n ON p.owner_kind = 1 AND n.commit_id = p.commit_id AND n.node_id = p.owner_id \
+             LEFT JOIN main._lithograph_cp_relationships r ON p.owner_kind = 2 AND r.commit_id = p.commit_id AND r.relationship_id = p.owner_id \
+             WHERE p.commit_id = ?1 AND (\
+                 (p.owner_kind = 1 AND n.node_id IS NULL) OR \
+                 (p.owner_kind = 2 AND r.relationship_id IS NULL) OR \
+                 p.owner_kind NOT IN (1,2)\
+             ) LIMIT 1",
+            [commit],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    if let Some((_owner_kind, owner_id, key_id)) = missing_property_owner {
+        return Err(super::StorageError::corrupt(format!(
+            "PropertyKeyId {key_id} refers to missing owner {owner_id}"
+        )));
     }
     Ok(())
 }
 
 fn validate_snapshot(connection: &Connection, commit: HashId) -> StorageResult<()> {
     Snapshot::resolve(connection, commit)?.validate_graph_invariants()
-}
-
-fn hex_bytes(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = write!(output, "{byte:02x}");
-    }
-    output
 }

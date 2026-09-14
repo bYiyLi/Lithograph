@@ -12,12 +12,14 @@ use crate::cypher::{
 use crate::query::{QueryError, QueryErrorKind, QueryResult};
 
 mod normalize;
+mod zone;
 
 use normalize::{
     local_datetime_text as normalize_local_datetime_text,
     local_time_text as normalize_local_time_text, offset_text as normalize_offset_text,
     zoned_time_text as normalize_zoned_time_text,
 };
+use zone::{normalize_time_with_default_zone, shifted_time_for_offset, zoned_datetime_from_map};
 
 thread_local! {
     static STATEMENT_TIME: RefCell<Option<DateTime<Utc>>> = const { RefCell::new(None) };
@@ -202,7 +204,7 @@ fn time(values: &[Value], realtime: bool, clock_function: bool) -> QueryResult<V
         Some(Value::String(zone)) if clock_function => {
             current_time(realtime, zone)?.as_str().to_owned()
         }
-        Some(Value::String(value)) => normalize_zoned_time_text(value),
+        Some(Value::String(value)) => normalize_time_with_default_zone(value),
         Some(Value::Time(value)) => return Ok(Value::Time(value.clone())),
         Some(Value::LocalTime(value)) => {
             return TimeValue::from_components(value.nanoseconds(), 0)
@@ -470,13 +472,6 @@ fn map_zone(map: &std::collections::BTreeMap<String, Value>) -> QueryResult<Opti
     map.get("timezone").map(|_| timezone(map)).transpose()
 }
 
-fn temporal_base_zone(map: &std::collections::BTreeMap<String, Value>) -> Option<&str> {
-    match map.get("datetime").or_else(|| map.get("time")) {
-        Some(Value::ZonedDateTime(value)) => Some(value.zone()),
-        _ => None,
-    }
-}
-
 fn normalize_zoned_extractors(
     map: &std::collections::BTreeMap<String, Value>,
     realtime: bool,
@@ -524,12 +519,6 @@ fn normalize_zoned_extractors(
         }
     }
     Ok(normalized)
-}
-
-fn shifted_time_for_offset(local: u64, source_offset: i32, target_offset: i32) -> u64 {
-    const NANOS_PER_DAY: i128 = 86_400 * 1_000_000_000;
-    (i128::from(local) + i128::from(target_offset - source_offset) * 1_000_000_000)
-        .rem_euclid(NANOS_PER_DAY) as u64
 }
 
 #[derive(Clone, Copy)]
@@ -850,26 +839,6 @@ fn local_datetime_from_map(map: &std::collections::BTreeMap<String, Value>) -> Q
     Ok(format!("{date}T{}", time.as_str()))
 }
 
-fn zoned_datetime_from_map(
-    map: &std::collections::BTreeMap<String, Value>,
-    realtime: bool,
-) -> QueryResult<ZonedDateTimeValue> {
-    validate_temporal_map(map, TemporalMapTarget::ZonedDateTime)?;
-    if timezone_only(map) {
-        return current_zoned_datetime(realtime, timezone(map)?);
-    }
-    let zone = map_zone(map)?
-        .or_else(|| temporal_base_zone(map))
-        .unwrap_or("Z");
-    if let Some(epoch) = epoch_nanoseconds(map)? {
-        return ZonedDateTimeValue::from_instant(epoch, zone).map_err(Into::into);
-    }
-    let map = normalize_zoned_extractors(map, realtime)?;
-    let date = DateValue::parse(&date_from_map(&map)?)?;
-    ZonedDateTimeValue::from_local(date.days(), time_components(&map)?, zone, None)
-        .map_err(Into::into)
-}
-
 fn epoch_nanoseconds(map: &std::collections::BTreeMap<String, Value>) -> QueryResult<Option<i128>> {
     let nanos = optional_integer(map, "nanosecond")?.unwrap_or(0);
     if !(0..1_000_000_000).contains(&nanos) {
@@ -1141,15 +1110,30 @@ fn date_from_map(map: &std::collections::BTreeMap<String, Value>) -> QueryResult
     let (base_year, base_month, base_day) = base
         .map(crate::cypher::civil_from_days)
         .unwrap_or((0, 1, 1));
+    let base_day_of_week = base.map(|days| (days + 3).rem_euclid(7) + 1);
+    let base_week_year = base.map(|days| {
+        let day_of_week = (days + 3).rem_euclid(7) + 1;
+        crate::cypher::civil_from_days(days + (4 - day_of_week)).0
+    });
+    let base_quarter_start =
+        base.map(|_| crate::cypher::days_from_civil(base_year, (base_month - 1) / 3 * 3 + 1, 1));
+    let base_day_of_quarter = base
+        .zip(base_quarter_start)
+        .map(|(days, start)| days - start + 1);
+    let week = optional_integer(map, "week")?;
+    let quarter = optional_integer(map, "quarter")?;
+    let ordinal = optional_integer(map, "ordinalDay")?;
+    let inherited_year = if week.is_some() {
+        base_week_year
+    } else {
+        base.map(|_| base_year)
+    };
     let year = optional_integer(map, "year")?
-        .or(base.map(|_| base_year))
+        .or(inherited_year)
         .ok_or_else(|| {
             QueryError::new(QueryErrorKind::Type, "temporal field year must be Integer")
         })?;
     DateValue::from_components(year, 1, 1)?;
-    let week = optional_integer(map, "week")?;
-    let quarter = optional_integer(map, "quarter")?;
-    let ordinal = optional_integer(map, "ordinalDay")?;
     if [week, quarter, ordinal].into_iter().flatten().count() > 1 {
         return Err(QueryError::semantic(
             "date map cannot combine week, quarter, and ordinal forms",
@@ -1160,7 +1144,9 @@ fn date_from_map(map: &std::collections::BTreeMap<String, Value>) -> QueryResult
             map,
             &["month", "day", "quarter", "dayOfQuarter", "ordinalDay"],
         )?;
-        let weekday = optional_integer(map, "dayOfWeek")?.unwrap_or(1);
+        let weekday = optional_integer(map, "dayOfWeek")?
+            .or(base_day_of_week)
+            .unwrap_or(1);
         iso_week_date(
             year,
             unsigned_component(week, "week")?,
@@ -1168,7 +1154,9 @@ fn date_from_map(map: &std::collections::BTreeMap<String, Value>) -> QueryResult
         )?
     } else if let Some(quarter) = quarter {
         reject_date_fields(map, &["month", "day", "week", "dayOfWeek", "ordinalDay"])?;
-        let day = optional_integer(map, "dayOfQuarter")?.unwrap_or(1);
+        let day = optional_integer(map, "dayOfQuarter")?
+            .or(base_day_of_quarter)
+            .unwrap_or(1);
         quarter_date(
             year,
             unsigned_component(quarter, "quarter")?,

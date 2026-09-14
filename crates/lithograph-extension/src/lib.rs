@@ -547,6 +547,10 @@ fn migrate_storage_format_1_to_2(
                 "storage-format-1 migration lost the metadata compare-and-swap",
             ));
         }
+        // Validate the fully materialized target format before releasing the
+        // migration savepoint. A corrupt immutable history must fail closed
+        // without leaving the database partially or permanently upgraded.
+        ensure_current_metadata_integrity(connection)?;
         Ok(())
     })
 }
@@ -613,7 +617,7 @@ fn version_json(connection: &Connection) -> LithographResult<Value> {
         )));
     }
     if metadata.storage_format <= STORAGE_FORMAT_MAX {
-        ensure_current_metadata_integrity(connection)?;
+        ensure_runtime_metadata_integrity(connection)?;
     }
 
     Ok(json!({
@@ -681,7 +685,7 @@ fn require_initialized(connection: &Connection) -> LithographResult<Metadata> {
         Err(error) => return Err(error),
     };
     ensure_supported_format(&metadata)?;
-    ensure_current_metadata_integrity(connection)?;
+    ensure_runtime_metadata_integrity(connection)?;
     Ok(metadata)
 }
 
@@ -891,8 +895,9 @@ mod rows;
 mod scalar;
 
 use metadata_integrity::{
-    ensure_current_metadata_integrity, has_any_internal_object, is_phase01_metadata_bootstrap,
-    metadata_integrity_json, metadata_object_type, query_metadata_marker,
+    ensure_current_metadata_integrity, ensure_runtime_metadata_integrity, has_any_internal_object,
+    is_phase01_metadata_bootstrap, metadata_integrity_json, metadata_object_type,
+    query_metadata_marker,
 };
 
 #[cfg(test)]

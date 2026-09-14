@@ -19,21 +19,22 @@ fn error_json_has_stable_shape() {
 
 #[test]
 fn summary_json_exposes_execution_metrics_on_shared_adapter_surface() {
+    let mut metrics = query::QueryMetrics::default();
+    metrics.rows = 3;
+    metrics.db_hits = 7;
+    metrics.elapsed_micros = 11;
     let summary = query::QuerySummary {
         query_type: query::QueryType::Read,
         commit: Some("commit/probe".to_owned()),
         merge_session: None,
         counters: query::QueryCounters::default(),
-        metrics: query::QueryMetrics {
-            rows: 3,
-            db_hits: 7,
-            elapsed_micros: 11,
-        },
+        metrics,
     };
     let value = execution::summary_json(&summary);
     assert_eq!(value["metrics"]["rows"], 3);
     assert_eq!(value["metrics"]["dbHits"], 7);
     assert_eq!(value["metrics"]["elapsedMicros"], 11);
+    assert!(value.get("profile").is_none());
 }
 
 #[test]

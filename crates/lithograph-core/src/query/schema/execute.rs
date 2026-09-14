@@ -1,11 +1,11 @@
 use chrono::Utc;
 use rusqlite::Connection;
 
-use crate::storage::{self, CommitMetadata, HashId, Snapshot};
+use crate::storage::{self, CommitMetadata, HashId, SchemaState, Snapshot};
 
 use super::super::{QueryError, QueryResult};
 use super::command::{PreparedSchema, SchemaCounters};
-use super::validate::validate_snapshot;
+use super::validate::validate_schema_transition;
 
 #[derive(Debug, Clone)]
 pub(crate) struct SchemaOutcome {
@@ -21,7 +21,8 @@ pub(crate) fn execute_schema(
 ) -> QueryResult<SchemaOutcome> {
     check_interrupted(is_interrupted)?;
     let snapshot = Snapshot::resolve(connection, base_commit)?;
-    validate_snapshot(connection, &prepared.state, &snapshot)?;
+    let previous = SchemaState::load(connection, base_commit)?;
+    validate_schema_transition(connection, &previous, &prepared.state, &snapshot)?;
     check_interrupted(is_interrupted)?;
     let schema_hash = prepared.state.persist(connection)?;
     let metadata = CommitMetadata {
@@ -39,6 +40,7 @@ pub(crate) fn execute_schema(
     super::index::ensure_standard_indexes_for_commit(
         connection,
         commit,
+        &previous,
         &prepared.state,
         is_interrupted,
     )?;

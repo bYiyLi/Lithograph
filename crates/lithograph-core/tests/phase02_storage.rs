@@ -3,7 +3,8 @@ use lithograph_core::storage::{
     Snapshot, VectorCoordinateType, VectorValue, ZonedDateTimeValue, allocate_node_id,
     allocate_relationship_id, branch_head, commit_layer, create_branch, create_checkpoint,
     create_storage_schema, delete_checkpoint, initialize_root, integrity_check, intern_label,
-    intern_property_key, intern_relationship_type, root_commit,
+    intern_property_key, intern_relationship_type, layer_between, layer_between_commits,
+    load_snapshot_state, root_commit,
 };
 use rusqlite::{Connection, params};
 
@@ -86,6 +87,101 @@ fn graph_delta_supports_labels_properties_parallel_edges_and_self_loops() {
             .expect("integrity must run")
             .is_empty()
     );
+}
+
+#[test]
+fn first_parent_layer_composition_matches_full_snapshot_diff() {
+    let connection = fresh_storage();
+    let root = root_commit(&connection).expect("Root must resolve");
+    let label = intern_label(&connection, "Composed").expect("label");
+    let key = intern_property_key(&connection, "value").expect("property key");
+    let rel_type = intern_relationship_type(&connection, "LINK").expect("relationship type");
+    let n1 = allocate_node_id(&connection).expect("n1");
+    let n2 = allocate_node_id(&connection).expect("n2");
+    let n3 = allocate_node_id(&connection).expect("n3");
+    let n4 = allocate_node_id(&connection).expect("n4");
+    let r1 = allocate_relationship_id(&connection).expect("r1");
+
+    let mut base_layer = LayerBuilder::default();
+    base_layer.add_node(n1).expect("base n1");
+    base_layer.add_node(n2).expect("base n2");
+    base_layer.add_label(n1, label).expect("base label");
+    base_layer
+        .set_property(OwnerKind::Node, n1, key, PropertyValue::Integer(1))
+        .expect("base property");
+    let relationship = RelationshipRecord {
+        id: r1,
+        source: n1,
+        type_id: rel_type,
+        target: n2,
+    };
+    base_layer
+        .add_relationship(relationship)
+        .expect("base relationship");
+    let base = commit_layer(
+        &connection,
+        "main",
+        root,
+        None,
+        &base_layer,
+        &metadata("compose-base", 10),
+    )
+    .expect("base commit");
+
+    let mut first = LayerBuilder::default();
+    first.add_node(n3).expect("temporary node");
+    first.add_label(n3, label).expect("temporary label");
+    first
+        .set_property(OwnerKind::Node, n3, key, PropertyValue::Integer(30))
+        .expect("temporary property");
+    first
+        .set_property(OwnerKind::Node, n1, key, PropertyValue::Integer(2))
+        .expect("first property update");
+    let first_commit = commit_layer(
+        &connection,
+        "main",
+        base,
+        None,
+        &first,
+        &metadata("compose-first", 11),
+    )
+    .expect("first staged commit");
+
+    let mut second = LayerBuilder::default();
+    second
+        .remove_property(OwnerKind::Node, n3, key)
+        .expect("remove temporary property");
+    second
+        .remove_label(n3, label)
+        .expect("remove temporary label");
+    second.remove_node(n3).expect("remove temporary node");
+    second.add_node(n4).expect("final node");
+    second
+        .set_property(OwnerKind::Node, n1, key, PropertyValue::Integer(3))
+        .expect("final property update");
+    second
+        .remove_relationship(relationship)
+        .expect("remove base relationship");
+    let head = commit_layer(
+        &connection,
+        "main",
+        first_commit,
+        None,
+        &second,
+        &metadata("compose-second", 12),
+    )
+    .expect("second staged commit");
+
+    let before = load_snapshot_state(&connection, base).expect("base state");
+    let after = load_snapshot_state(&connection, head).expect("head state");
+    let full = layer_between(&before, &after).expect("full state diff");
+    let incremental =
+        layer_between_commits(&connection, base, head).expect("incremental first-parent diff");
+    assert_eq!(incremental, full);
+    let counts = incremental.delta_counts();
+    assert_eq!(counts.nodes_created, 1);
+    assert_eq!(counts.relationships_deleted, 1);
+    assert_eq!(counts.properties_set, 1);
 }
 
 struct GraphFixtureIds {

@@ -7,7 +7,7 @@ use super::super::spill::distinct_row_key;
 use super::super::{QueryError, QueryErrorKind, QueryResult};
 use super::{contains_null, require_arity};
 
-const MAX_RANGE_VALUES: usize = 1_000_000;
+const MAX_RANGE_VALUES: usize = 2_000_000;
 
 pub(super) fn evaluate(name: &str, values: &[Value]) -> Option<QueryResult<Value>> {
     let result = match name {

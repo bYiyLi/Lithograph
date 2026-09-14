@@ -1,4 +1,4 @@
-use crate::storage::{self, OwnerKind, RelationshipRecord, StandardIndexKind};
+use crate::storage::{self, OwnerKind, StandardIndexKind};
 
 use super::super::super::semantic_index::{
     FullTextQueryInput, SemanticEntity, fulltext_query, resolve_semantic_index,
@@ -503,83 +503,94 @@ impl ReadExecutor<'_, '_> {
         if super::super::super::registry::procedure(name).is_none() {
             return Err(QueryError::semantic(format!("unknown procedure {name}")));
         }
-        let (nodes, relationships) = self.current_graph_entities()?;
         match name.to_ascii_lowercase().as_str() {
-            "db.labels" => self.current_labels(nodes),
-            "db.relationshiptypes" => self.current_relationship_types(relationships),
-            "db.propertykeys" => self.current_property_keys(nodes, relationships),
+            "db.labels" => self.current_labels(),
+            "db.relationshiptypes" => self.current_relationship_types(),
+            "db.propertykeys" => self.current_property_keys(),
             _ => Err(QueryError::internal(format!(
                 "registered procedure {name} has no executor"
             ))),
         }
     }
 
-    fn current_graph_entities(&self) -> QueryResult<(Vec<i64>, Vec<RelationshipRecord>)> {
-        let mut nodes = Vec::new();
-        self.snapshot.visit_nodes(|node| {
-            nodes.push(node);
-            Ok(())
-        })?;
-        let mut relationships = Vec::new();
-        self.snapshot.visit_relationships(|relationship| {
-            relationships.push(relationship);
-            Ok(())
-        })?;
-        Ok((nodes, relationships))
-    }
-
-    fn current_labels(&self, nodes: Vec<i64>) -> QueryResult<Vec<BTreeMap<String, Value>>> {
+    fn current_labels(&self) -> QueryResult<Vec<BTreeMap<String, Value>>> {
         let mut values = BTreeSet::new();
-        for node in nodes {
-            if self.graph_view.visible_node(&self.snapshot, node)? {
+        let mut after = 0_i64;
+        loop {
+            let page = self.snapshot.scan_nodes_after(after, 4_096)?;
+            for node in page.items {
+                if !self.graph_view.visible_node(&self.snapshot, node)? {
+                    continue;
+                }
                 for label in self.snapshot.labels(node)? {
                     if let Some(name) = storage::label_name(self.connection, label)? {
                         values.insert(name);
                     }
                 }
             }
+            let Some(next_after) = page.next_after else {
+                break;
+            };
+            after = next_after;
         }
         Ok(single_column_rows("label", values))
     }
 
-    fn current_relationship_types(
-        &self,
-        relationships: Vec<RelationshipRecord>,
-    ) -> QueryResult<Vec<BTreeMap<String, Value>>> {
+    fn current_relationship_types(&self) -> QueryResult<Vec<BTreeMap<String, Value>>> {
         let mut values = BTreeSet::new();
-        for relationship in relationships {
-            if self
-                .graph_view
-                .visible_relationship(&self.snapshot, relationship)?
-                && let Some(name) =
-                    storage::relationship_type_name(self.connection, relationship.type_id)?
-            {
-                values.insert(name);
+        let mut after = 0_i64;
+        loop {
+            let page = self.snapshot.scan_relationships_after(after, 4_096)?;
+            for relationship in page.items {
+                if self
+                    .graph_view
+                    .visible_relationship(&self.snapshot, relationship)?
+                    && let Some(name) =
+                        storage::relationship_type_name(self.connection, relationship.type_id)?
+                {
+                    values.insert(name);
+                }
             }
+            let Some(next_after) = page.next_after else {
+                break;
+            };
+            after = next_after;
         }
         Ok(single_column_rows("relationshipType", values))
     }
 
-    fn current_property_keys(
-        &self,
-        nodes: Vec<i64>,
-        relationships: Vec<RelationshipRecord>,
-    ) -> QueryResult<Vec<BTreeMap<String, Value>>> {
+    fn current_property_keys(&self) -> QueryResult<Vec<BTreeMap<String, Value>>> {
         let mut values = BTreeSet::new();
-        for node in nodes {
-            if self.graph_view.visible_node(&self.snapshot, node)? {
+        let mut node_after = 0_i64;
+        loop {
+            let page = self.snapshot.scan_nodes_after(node_after, 4_096)?;
+            for node in page.items {
+                if !self.graph_view.visible_node(&self.snapshot, node)? {
+                    continue;
+                }
                 for (key, _) in self.snapshot.properties(OwnerKind::Node, node)? {
                     if let Some(name) = storage::property_key_name(self.connection, key)? {
                         values.insert(name);
                     }
                 }
             }
+            let Some(next_after) = page.next_after else {
+                break;
+            };
+            node_after = next_after;
         }
-        for relationship in relationships {
-            if self
-                .graph_view
-                .visible_relationship(&self.snapshot, relationship)?
-            {
+        let mut relationship_after = 0_i64;
+        loop {
+            let page = self
+                .snapshot
+                .scan_relationships_after(relationship_after, 4_096)?;
+            for relationship in page.items {
+                if !self
+                    .graph_view
+                    .visible_relationship(&self.snapshot, relationship)?
+                {
+                    continue;
+                }
                 for (key, _) in self
                     .snapshot
                     .properties(OwnerKind::Relationship, relationship.id)?
@@ -589,6 +600,10 @@ impl ReadExecutor<'_, '_> {
                     }
                 }
             }
+            let Some(next_after) = page.next_after else {
+                break;
+            };
+            relationship_after = next_after;
         }
         Ok(single_column_rows("propertyKey", values))
     }
@@ -598,7 +613,7 @@ impl ReadExecutor<'_, '_> {
         let default_columns = super::super::show_default_columns(clause)?;
         let yield_node = crate::cypher::show_yield_node(clause);
         let mut registry = RowSet {
-            columns: all_columns,
+            columns: all_columns.clone(),
             rows: show_registry_rows(self.connection, &self.snapshot, clause)?,
         };
         if let Some(yield_node) = yield_node {
@@ -607,6 +622,12 @@ impl ReadExecutor<'_, '_> {
                 registry,
                 false,
             )?;
+            if yield_node
+                .descendants()
+                .any(|node| node.kind == AstKind::YieldAll)
+            {
+                registry.columns = all_columns;
+            }
         }
         let input_columns = input.columns.clone();
         let mut result = cross_join_registry(input, registry);

@@ -23,6 +23,7 @@ use value::{
 struct MutationContext<'connection, 'query> {
     connection: &'connection Connection,
     base: Snapshot<'connection>,
+    staged: Snapshot<'connection>,
     base_commit: HashId,
     params: &'query BTreeMap<String, Value>,
     graph_view_selector: &'query GraphViewSelector,
@@ -37,9 +38,11 @@ impl<'connection, 'query> MutationContext<'connection, 'query> {
         params: &'query BTreeMap<String, Value>,
         graph_view_selector: &'query GraphViewSelector,
     ) -> QueryResult<Self> {
+        let base = Snapshot::resolve(connection, base_commit)?;
         Ok(Self {
             connection,
-            base: Snapshot::resolve(connection, base_commit)?,
+            staged: base.clone(),
+            base,
             base_commit,
             params,
             graph_view_selector,
@@ -49,12 +52,70 @@ impl<'connection, 'query> MutationContext<'connection, 'query> {
     }
 
     fn staged_snapshot(&self) -> QueryResult<Snapshot<'connection>> {
-        let layer = self.delta.layer()?;
-        Ok(Snapshot::resolve_with_layer(
-            self.connection,
-            self.base_commit,
-            &layer,
-        )?)
+        Ok(self.staged.clone())
+    }
+
+    fn set_node(&mut self, id: i64, current: bool) -> QueryResult<()> {
+        self.delta.set_node(&self.base, id, current)?;
+        let mut layer = LayerBuilder::default();
+        if current {
+            layer.add_node(id)?;
+        } else {
+            layer.remove_node(id)?;
+        }
+        self.staged.apply_layer(&layer);
+        Ok(())
+    }
+
+    fn set_label(&mut self, node_id: i64, label_id: i64, current: bool) -> QueryResult<()> {
+        self.delta
+            .set_label(&self.base, node_id, label_id, current)?;
+        let mut layer = LayerBuilder::default();
+        if current {
+            layer.add_label(node_id, label_id)?;
+        } else {
+            layer.remove_label(node_id, label_id)?;
+        }
+        self.staged.apply_layer(&layer);
+        Ok(())
+    }
+
+    fn set_relationship(
+        &mut self,
+        id: i64,
+        current: Option<RelationshipRecord>,
+    ) -> QueryResult<()> {
+        let previous = self.staged.relationship(id)?;
+        self.delta.set_relationship(&self.base, id, current)?;
+        let mut layer = LayerBuilder::default();
+        match current {
+            Some(record) => layer.add_relationship(record)?,
+            None => {
+                if let Some(record) = previous {
+                    layer.remove_relationship(record)?;
+                }
+            }
+        }
+        self.staged.apply_layer(&layer);
+        Ok(())
+    }
+
+    fn set_property(
+        &mut self,
+        owner_kind: OwnerKind,
+        owner_id: i64,
+        key_id: i64,
+        current: Option<PropertyValue>,
+    ) -> QueryResult<()> {
+        self.delta
+            .set_property(&self.base, owner_kind, owner_id, key_id, current.clone())?;
+        let mut layer = LayerBuilder::default();
+        match current {
+            Some(value) => layer.set_property(owner_kind, owner_id, key_id, value)?,
+            None => layer.remove_property(owner_kind, owner_id, key_id)?,
+        }
+        self.staged.apply_layer(&layer);
+        Ok(())
     }
 
     fn graph_view(&self) -> QueryResult<ResolvedGraphView> {
@@ -478,7 +539,7 @@ fn create_pattern_part(
         let (source, target) = match relationship.direction {
             Direction::Outgoing => (current, next),
             Direction::Incoming => (next, current),
-            Direction::Undirected => unreachable!(),
+            Direction::Undirected => (current, next),
         };
         let record = create_relationship(
             context,
@@ -550,7 +611,7 @@ fn create_node(
     touched: &mut TouchedElements,
 ) -> QueryResult<i64> {
     let id = storage::allocate_node_id(context.connection)?;
-    context.delta.set_node(&context.base, id, true)?;
+    context.set_node(id, true)?;
     touched.nodes.insert(id);
     add_node_labels(context, row, id, &spec.labels, clause_input)?;
     apply_create_properties(
@@ -593,9 +654,7 @@ fn set_new_property_map(
             continue;
         };
         let key_id = storage::intern_property_key(context.connection, key)?;
-        context
-            .delta
-            .set_property(&context.base, owner_kind, owner_id, key_id, Some(value))?;
+        context.set_property(owner_kind, owner_id, key_id, Some(value))?;
     }
     Ok(())
 }
@@ -623,7 +682,7 @@ fn add_node_labels(
     };
     for label in resolved {
         let label_id = storage::intern_label(context.connection, &label)?;
-        context.delta.set_label(&context.base, id, label_id, true)?;
+        context.set_label(id, label_id, true)?;
     }
     Ok(())
 }
@@ -663,9 +722,7 @@ fn create_relationship(
         type_id,
         target,
     };
-    context
-        .delta
-        .set_relationship(&context.base, id, Some(record))?;
+    context.set_relationship(id, Some(record))?;
     touched.relationships.insert(id);
     apply_create_properties(
         context,
@@ -711,7 +768,6 @@ fn apply_set_item(
     if matches!(row.values.get(target), Some(BindingValue::Null)) {
         return Ok(());
     }
-    let staged = context.staged_snapshot()?;
     match item {
         SetItem::Property {
             variable,
@@ -719,7 +775,6 @@ fn apply_set_item(
             value,
         } => set_single_property(
             context,
-            &staged,
             clause_input,
             row,
             variable,
@@ -732,28 +787,34 @@ fn apply_set_item(
             variable,
             operator,
             value,
-        } => set_property_map_item(
-            context,
-            &staged,
-            clause_input,
-            row,
-            variable,
-            *operator,
-            value,
-            graph_view,
-            touched,
-        ),
-        SetItem::Labels { variable, labels } => mutate_labels(
-            context,
-            &staged,
-            clause_input,
-            row,
-            variable,
-            labels,
-            graph_view,
-            touched,
-            LabelMutation::Add,
-        ),
+        } => {
+            let staged = context.staged_snapshot()?;
+            set_property_map_item(
+                context,
+                &staged,
+                clause_input,
+                row,
+                variable,
+                *operator,
+                value,
+                graph_view,
+                touched,
+            )
+        }
+        SetItem::Labels { variable, labels } => {
+            let staged = context.staged_snapshot()?;
+            mutate_labels(
+                context,
+                &staged,
+                clause_input,
+                row,
+                variable,
+                labels,
+                graph_view,
+                touched,
+                LabelMutation::Add,
+            )
+        }
     }
 }
 
@@ -763,7 +824,6 @@ fn apply_set_item(
 )]
 fn set_single_property(
     context: &mut MutationContext<'_, '_>,
-    staged: &Snapshot<'_>,
     clause_input: &Snapshot<'_>,
     row: &BindingRow,
     variable: &str,
@@ -772,9 +832,9 @@ fn set_single_property(
     graph_view: &ResolvedGraphView,
     touched: &mut TouchedElements,
 ) -> QueryResult<()> {
-    let (owner_kind, id) = visible_owner(staged, clause_input, row, variable, graph_view)?;
-    let key = resolve_property_key(key, staged, row, context.params)?;
-    let value = expression::evaluate(value, staged, row, context.params)?;
+    let (owner_kind, id) = visible_owner(&context.staged, clause_input, row, variable, graph_view)?;
+    let key = resolve_property_key(key, &context.staged, row, context.params)?;
+    let value = expression::evaluate(value, &context.staged, row, context.params)?;
     let next = property_from_value(value)?;
     let key_id = match &next {
         Some(_) => storage::intern_property_key(context.connection, &key)?,
@@ -783,11 +843,9 @@ fn set_single_property(
             None => return Ok(()),
         },
     };
-    let previous = staged.property(owner_kind, id, key_id)?;
+    let previous = context.staged.property(owner_kind, id, key_id)?;
     if !property_states_equal(&previous, &next)? {
-        context
-            .delta
-            .set_property(&context.base, owner_kind, id, key_id, next.clone())?;
+        context.set_property(owner_kind, id, key_id, next.clone())?;
     }
     touched.insert(owner_kind, id);
     Ok(())
@@ -811,10 +869,8 @@ fn set_property_map_item(
     let (owner_kind, id) = visible_owner(staged, clause_input, row, variable, graph_view)?;
     let map = evaluate_map(value, staged, row, context.params)?;
     set_property_map(
-        context.connection,
-        &context.base,
+        context,
         staged,
-        &mut context.delta,
         owner_kind,
         id,
         &map,
@@ -860,11 +916,9 @@ fn mutate_labels(
         };
         let present = existing.binary_search(&label_id).is_ok();
         if matches!(mutation, LabelMutation::Add) && !present {
-            context.delta.set_label(&context.base, id, label_id, true)?;
+            context.set_label(id, label_id, true)?;
         } else if matches!(mutation, LabelMutation::Remove) && present {
-            context
-                .delta
-                .set_label(&context.base, id, label_id, false)?;
+            context.set_label(id, label_id, false)?;
         }
     }
     touched.nodes.insert(id);
@@ -945,9 +999,7 @@ fn remove_property(
         return Ok(());
     };
     if staged.property(owner_kind, id, key_id)?.is_some() {
-        context
-            .delta
-            .set_property(&context.base, owner_kind, id, key_id, None)?;
+        context.set_property(owner_kind, id, key_id, None)?;
     }
     touched.insert(owner_kind, id);
     Ok(())

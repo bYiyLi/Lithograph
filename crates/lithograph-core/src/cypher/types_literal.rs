@@ -52,7 +52,7 @@ fn validate_integer_literal(text: &str, span: Span, source: &str) -> Result<(), 
     Ok(())
 }
 
-pub(super) fn is_i64_min_unary_expression(node: &AstNode) -> bool {
+pub(crate) fn is_i64_min_unary_expression(node: &AstNode) -> bool {
     let direct_operators = node
         .children
         .iter()

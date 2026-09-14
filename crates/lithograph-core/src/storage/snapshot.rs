@@ -5,14 +5,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::checkpoint::{SnapshotStatistics, load_checkpoint_statistics};
-use super::layer::{DeltaOp, PropertyDelta, RelationshipDelta, RelationshipRecord, load_layer};
+use super::layer::{
+    DeltaOp, LayerBuilder, PropertyDelta, RelationshipDelta, RelationshipRecord, load_layer,
+};
 use super::property::PropertyColumns;
 use super::{
     HashId, LabelId, NodeId, OwnerKind, PropertyKeyId, PropertyValue, RelationshipId,
     RelationshipTypeId, SchemaState, StorageError, StorageResult,
 };
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Overlay {
     pub(super) nodes: BTreeMap<NodeId, DeltaOp>,
     pub(super) labels: BTreeMap<(NodeId, LabelId), DeltaOp>,
@@ -29,6 +31,7 @@ pub(super) struct Overlay {
 }
 
 /// Commit-pinned graph snapshot.
+#[derive(Clone)]
 pub struct Snapshot<'connection> {
     pub(super) connection: &'connection Connection,
     pub(super) commit: HashId,
@@ -58,6 +61,10 @@ impl<'connection> Snapshot<'connection> {
         Ok(snapshot)
     }
 
+    pub(crate) fn apply_layer(&mut self, layer: &LayerBuilder) {
+        self.overlay.apply(layer.clone());
+    }
+
     pub(crate) fn resolve_with_layer_and_schema(
         connection: &'connection Connection,
         commit: HashId,
@@ -74,13 +81,6 @@ impl<'connection> Snapshot<'connection> {
         snapshot.cache_identity = HashId::from_bytes(*hasher.finalize().as_bytes());
         snapshot.schema_override = Some(schema);
         Ok(snapshot)
-    }
-
-    pub(crate) fn resolve_without_target_checkpoint(
-        connection: &'connection Connection,
-        commit: HashId,
-    ) -> StorageResult<Self> {
-        Self::resolve_with_checkpoint_skip(connection, commit, Some(commit))
     }
 
     fn resolve_with_checkpoint_skip(
@@ -354,13 +354,325 @@ impl<'connection> Snapshot<'connection> {
     }
 
     pub(crate) fn validate_graph_invariants(&self) -> StorageResult<()> {
-        self.validate_node_deltas()?;
-        self.validate_label_deltas()?;
-        self.validate_relationship_deltas()?;
-        self.validate_property_deltas()?;
+        self.validate_overlay_invariants()?;
         self.validate_visible_relationships()?;
         self.validate_visible_labels()?;
         self.validate_visible_properties()
+    }
+
+    /// Validates the newly applied Layer against an already-valid parent Snapshot.
+    ///
+    /// Commit construction uses this bounded check so a large graph does not rescan
+    /// every visible element on every write. Full-graph validation remains owned by
+    /// integrity/recovery surfaces, which do not assume the parent history is valid.
+    pub(crate) fn validate_overlay_invariants(&self) -> StorageResult<()> {
+        self.validate_node_deltas()?;
+        self.validate_label_deltas()?;
+        self.validate_relationship_deltas()?;
+        self.validate_property_deltas()
+    }
+
+    /// Validates one candidate Layer against this already-valid parent Snapshot.
+    ///
+    /// Unlike resolving the child Commit, this does not materialize the candidate
+    /// Layer into all adjacency indexes. Large append batches therefore remain
+    /// bounded by the candidate Layer rather than the total parent graph size.
+    pub(crate) fn validate_layer_invariants(&self, layer: &LayerBuilder) -> StorageResult<()> {
+        let next_node = sequence_next_id(self.connection, 1)?;
+        let next_relationship = sequence_next_id(self.connection, 2)?;
+        let max_persisted_relationship: i64 = self.connection.query_row(
+            "SELECT coalesce(max(relationship_id), 0) FROM main._lithograph_rel_delta",
+            [],
+            |row| row.get(0),
+        )?;
+
+        self.validate_layer_nodes(layer, next_node)?;
+        self.validate_layer_labels(layer, next_node)?;
+
+        self.validate_layer_relationships(
+            layer,
+            next_node,
+            next_relationship,
+            max_persisted_relationship,
+        )?;
+
+        self.validate_layer_properties(layer, next_node, next_relationship)?;
+
+        self.validate_removed_nodes(layer)
+    }
+
+    fn validate_layer_nodes(&self, layer: &LayerBuilder, next_node: i64) -> StorageResult<()> {
+        for node_id in layer.nodes.keys() {
+            require_allocated_below(*node_id, next_node, "NodeId")?;
+        }
+        Ok(())
+    }
+
+    fn validate_layer_labels(&self, layer: &LayerBuilder, next_node: i64) -> StorageResult<()> {
+        let label_ids = layer
+            .labels
+            .keys()
+            .map(|(_, label)| *label)
+            .collect::<BTreeSet<_>>();
+        for label_id in label_ids {
+            require_dictionary_id(self.connection, DictionaryKind::Label, label_id)?;
+        }
+        for ((node_id, label_id), op) in &layer.labels {
+            require_allocated_below(*node_id, next_node, "NodeId")?;
+            if *op == DeltaOp::Add && !self.node_exists_after(layer, *node_id)? {
+                return Err(StorageError::corrupt(format!(
+                    "LabelId {label_id} refers to missing NodeId {node_id}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_layer_relationships(
+        &self,
+        layer: &LayerBuilder,
+        next_node: i64,
+        next_relationship: i64,
+        max_persisted_relationship: i64,
+    ) -> StorageResult<()> {
+        let type_ids = layer
+            .relationships
+            .values()
+            .map(|delta| delta.record.type_id)
+            .collect::<BTreeSet<_>>();
+        for type_id in type_ids {
+            require_dictionary_id(self.connection, DictionaryKind::RelationshipType, type_id)?;
+        }
+        for delta in layer.relationships.values() {
+            self.validate_layer_relationship(
+                layer,
+                delta,
+                next_node,
+                next_relationship,
+                max_persisted_relationship,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn validate_layer_relationship(
+        &self,
+        layer: &LayerBuilder,
+        delta: &super::layer::RelationshipDelta,
+        next_node: i64,
+        next_relationship: i64,
+        max_persisted_relationship: i64,
+    ) -> StorageResult<()> {
+        let record = delta.record;
+        require_allocated_below(record.id, next_relationship, "RelationshipId")?;
+        require_allocated_below(record.source, next_node, "source NodeId")?;
+        require_allocated_below(record.target, next_node, "target NodeId")?;
+        if record.id <= max_persisted_relationship {
+            require_relationship_tuple_stable(self.connection, record)?;
+        }
+        if delta.op == DeltaOp::Add {
+            if !self.node_exists_after(layer, record.source)?
+                || !self.node_exists_after(layer, record.target)?
+            {
+                return Err(StorageError::corrupt(format!(
+                    "RelationshipId {} has a missing endpoint",
+                    record.id
+                )));
+            }
+        } else if self.relationship_has_visible_property_after(layer, record.id)? {
+            return Err(StorageError::corrupt(format!(
+                "RelationshipId {} is removed while visible Properties still reference it",
+                record.id
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_layer_properties(
+        &self,
+        layer: &LayerBuilder,
+        next_node: i64,
+        next_relationship: i64,
+    ) -> StorageResult<()> {
+        let property_keys = layer
+            .properties
+            .keys()
+            .map(|(_, _, key_id)| *key_id)
+            .collect::<BTreeSet<_>>();
+        for key_id in property_keys {
+            require_dictionary_id(self.connection, DictionaryKind::PropertyKey, key_id)?;
+        }
+        for ((owner_kind, owner_id, key_id), delta) in &layer.properties {
+            self.validate_layer_property(
+                layer,
+                *owner_kind,
+                *owner_id,
+                *key_id,
+                delta,
+                next_node,
+                next_relationship,
+            )?;
+        }
+        Ok(())
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "property invariant validation keeps the owner slot and allocation bounds explicit"
+    )]
+    fn validate_layer_property(
+        &self,
+        layer: &LayerBuilder,
+        owner_kind: OwnerKind,
+        owner_id: i64,
+        key_id: i64,
+        delta: &super::layer::PropertyDelta,
+        next_node: i64,
+        next_relationship: i64,
+    ) -> StorageResult<()> {
+        match owner_kind {
+            OwnerKind::Node => require_allocated_below(owner_id, next_node, "NodeId")?,
+            OwnerKind::Relationship => {
+                require_allocated_below(owner_id, next_relationship, "RelationshipId")?
+            }
+        }
+        if delta.op != DeltaOp::Add {
+            return Ok(());
+        }
+        let owner_exists = match owner_kind {
+            OwnerKind::Node => self.node_exists_after(layer, owner_id)?,
+            OwnerKind::Relationship => layer.relationships.get(&owner_id).map_or_else(
+                || self.relationship(owner_id).map(|value| value.is_some()),
+                |relationship| Ok(relationship.op == DeltaOp::Add),
+            )?,
+        };
+        if !owner_exists {
+            return Err(StorageError::corrupt(format!(
+                "property key {key_id} refers to missing owner {owner_id}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_removed_nodes(&self, layer: &LayerBuilder) -> StorageResult<()> {
+        for (node_id, op) in &layer.nodes {
+            if *op == DeltaOp::Remove && self.node_has_visible_dependents_after(layer, *node_id)? {
+                return Err(StorageError::corrupt(format!(
+                    "NodeId {node_id} is removed while visible graph state still references it"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn node_exists_after(&self, layer: &LayerBuilder, node_id: NodeId) -> StorageResult<bool> {
+        match layer.nodes.get(&node_id) {
+            Some(DeltaOp::Add) => Ok(true),
+            Some(DeltaOp::Remove) => Ok(false),
+            None => self.node_exists(node_id),
+        }
+    }
+
+    fn node_has_visible_dependents_after(
+        &self,
+        layer: &LayerBuilder,
+        node_id: NodeId,
+    ) -> StorageResult<bool> {
+        if self.node_has_relationship_dependents_after(layer, node_id)? {
+            return Ok(true);
+        }
+        if self.node_has_label_dependents_after(layer, node_id)? {
+            return Ok(true);
+        }
+        self.node_has_property_dependents_after(layer, node_id)
+    }
+
+    fn node_has_relationship_dependents_after(
+        &self,
+        layer: &LayerBuilder,
+        node_id: NodeId,
+    ) -> StorageResult<bool> {
+        let relationship_survives = self
+            .outgoing(node_id, None)?
+            .into_iter()
+            .chain(self.incoming(node_id, None)?)
+            .any(|record| {
+                !matches!(
+                    layer.relationships.get(&record.id),
+                    Some(delta) if delta.op == DeltaOp::Remove
+                )
+            });
+        if relationship_survives
+            || layer.relationships.values().any(|delta| {
+                delta.op == DeltaOp::Add
+                    && (delta.record.source == node_id || delta.record.target == node_id)
+            })
+        {
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn node_has_label_dependents_after(
+        &self,
+        layer: &LayerBuilder,
+        node_id: NodeId,
+    ) -> StorageResult<bool> {
+        let label_survives = self.labels(node_id)?.into_iter().any(|label_id| {
+            !matches!(
+                layer.labels.get(&(node_id, label_id)),
+                Some(DeltaOp::Remove)
+            )
+        });
+        if label_survives
+            || layer
+                .labels
+                .iter()
+                .any(|((owner, _), op)| *owner == node_id && *op == DeltaOp::Add)
+        {
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn node_has_property_dependents_after(
+        &self,
+        layer: &LayerBuilder,
+        node_id: NodeId,
+    ) -> StorageResult<bool> {
+        self.owner_has_visible_property_after(layer, OwnerKind::Node, node_id)
+    }
+
+    fn relationship_has_visible_property_after(
+        &self,
+        layer: &LayerBuilder,
+        relationship_id: RelationshipId,
+    ) -> StorageResult<bool> {
+        self.owner_has_visible_property_after(layer, OwnerKind::Relationship, relationship_id)
+    }
+
+    fn owner_has_visible_property_after(
+        &self,
+        layer: &LayerBuilder,
+        owner_kind: OwnerKind,
+        owner_id: i64,
+    ) -> StorageResult<bool> {
+        let property_survives = self
+            .properties(owner_kind, owner_id)?
+            .iter()
+            .any(|(key_id, _)| {
+                !matches!(
+                    layer.properties.get(&(owner_kind, owner_id, *key_id)),
+                    Some(delta) if delta.op == DeltaOp::Remove
+                )
+            });
+        Ok(property_survives
+            || layer
+                .properties
+                .iter()
+                .any(|((slot_kind, owner, _), delta)| {
+                    *slot_kind == owner_kind && *owner == owner_id && delta.op == DeltaOp::Add
+                }))
     }
 
     fn validate_visible_relationships(&self) -> StorageResult<()> {
@@ -409,9 +721,11 @@ impl<'connection> Snapshot<'connection> {
                 DeltaOp::Remove => {
                     if !self.outgoing(*node_id, None)?.is_empty()
                         || !self.incoming(*node_id, None)?.is_empty()
+                        || !self.labels(*node_id)?.is_empty()
+                        || !self.properties(OwnerKind::Node, *node_id)?.is_empty()
                     {
                         return Err(StorageError::corrupt(format!(
-                            "NodeId {node_id} is removed while visible Relationships still reference it"
+                            "NodeId {node_id} is removed while visible graph state still references it"
                         )));
                     }
                 }
@@ -450,6 +764,16 @@ impl<'connection> Snapshot<'connection> {
             {
                 return Err(StorageError::corrupt(format!(
                     "RelationshipId {} has a missing endpoint",
+                    delta.record.id
+                )));
+            }
+            if delta.op == DeltaOp::Remove
+                && !self
+                    .properties(OwnerKind::Relationship, delta.record.id)?
+                    .is_empty()
+            {
+                return Err(StorageError::corrupt(format!(
+                    "RelationshipId {} is removed while visible Properties still reference it",
                     delta.record.id
                 )));
             }
@@ -549,6 +873,26 @@ fn require_allocated(
         [sequence_kind],
         |row| row.get(0),
     )?;
+    if id > 0 && id < next_id {
+        Ok(())
+    } else {
+        Err(StorageError::corrupt(format!(
+            "{name} {id} was not allocated by the database sequence"
+        )))
+    }
+}
+
+fn sequence_next_id(connection: &Connection, kind: i64) -> StorageResult<i64> {
+    connection
+        .query_row(
+            "SELECT next_id FROM main._lithograph_sequences WHERE kind = ?1",
+            [kind],
+            |row| row.get(0),
+        )
+        .map_err(StorageError::from)
+}
+
+fn require_allocated_below(id: i64, next_id: i64, name: &str) -> StorageResult<()> {
     if id > 0 && id < next_id {
         Ok(())
     } else {

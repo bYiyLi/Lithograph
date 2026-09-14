@@ -493,14 +493,22 @@ fn collect_vector_cache_entries(
         .first()
         .ok_or_else(|| QueryError::internal("VECTOR Index is missing its indexed property"))?;
     let mut entries = Vec::new();
-    for entity in indexed_entities(connection, snapshot, index, None, is_interrupted)? {
-        let value = semantic_property(snapshot, entity, property)?;
-        if let Some(entry) = vector_cache_entry(index, entity_id(entity), value)?
-            && entry.vector.len() == query_dimension
-        {
-            entries.push(entry);
-        }
-    }
+    visit_indexed_entities(
+        connection,
+        snapshot,
+        index,
+        None,
+        is_interrupted,
+        |entity| {
+            let value = semantic_property(snapshot, entity, property)?;
+            if let Some(entry) = vector_cache_entry(index, entity_id(entity), value)?
+                && entry.vector.len() == query_dimension
+            {
+                entries.push(entry);
+            }
+            Ok(())
+        },
+    )?;
     entries.sort_by_key(|entry| entry.owner_id);
     Ok(entries)
 }

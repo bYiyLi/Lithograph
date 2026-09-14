@@ -15,18 +15,13 @@ use super::spill::{
 };
 use super::{QueryError, QueryResult};
 
+mod profile;
 mod project;
 mod write;
+pub use profile::{OperatorRuntimeMetrics, QueryMetrics};
 use project::{order_values, project_row};
 
 const PIPELINE_BATCH: usize = 256;
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct QueryMetrics {
-    pub rows: u64,
-    pub db_hits: u64,
-    pub elapsed_micros: u64,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueryType {
@@ -506,7 +501,7 @@ impl PartCursor {
                 self.indexed_relationship_after,
                 PIPELINE_BATCH,
             )?;
-            metrics.db_hits = metrics.db_hits.saturating_add(page.items.len() as u64);
+            metrics.record_db_hits(page.items.len() as u64);
             self.indexed_relationship_ids = page.items;
             self.indexed_relationship_index = 0;
             if let Some(after) = page.next_after {
@@ -646,7 +641,7 @@ impl PartCursor {
                     snapshot.scan_nodes_after(self.start_after, PIPELINE_BATCH)?
                 }
             };
-            metrics.db_hits = metrics.db_hits.saturating_add(page.items.len() as u64);
+            metrics.record_db_hits(page.items.len() as u64);
             self.start_buffer = page.items;
             self.start_index = 0;
             if let Some(after) = page.next_after {
@@ -681,7 +676,7 @@ impl PartCursor {
                 snapshot.scan_incident_after(start, spec.type_id, after, PIPELINE_BATCH)?
             }
         };
-        metrics.db_hits = metrics.db_hits.saturating_add(page.items.len() as u64);
+        metrics.record_db_hits(page.items.len() as u64);
         Ok(page)
     }
 
@@ -701,7 +696,7 @@ impl PartCursor {
         if !graph_view.visible_relationship(snapshot, relationship)? {
             return Ok(None);
         }
-        metrics.db_hits = metrics.db_hits.saturating_add(2);
+        metrics.record_db_hits(2);
         let end_id = match spec.direction {
             Direction::Outgoing => relationship.target,
             Direction::Incoming => relationship.source,
@@ -764,12 +759,12 @@ fn node_matches(
     if !graph_view.visible_node(snapshot, node_id)? {
         return Ok(false);
     }
-    metrics.db_hits = metrics.db_hits.saturating_add(1);
+    metrics.record_db_hits(1);
     if spec.labels.is_empty() {
         return Ok(true);
     }
     let labels = snapshot.labels(node_id)?;
-    metrics.db_hits = metrics.db_hits.saturating_add(1);
+    metrics.record_db_hits(1);
     Ok(spec
         .labels
         .iter()
@@ -901,10 +896,11 @@ impl QueryCursor {
             WriteState::None
         };
         let statement_time = Utc::now();
+        let metrics = QueryMetrics::for_execution(prepared.mode, &prepared.physical);
         Self {
             pipeline: MatchPipeline::new(prepared.matches.clone()),
             prepared,
-            metrics: QueryMetrics::default(),
+            metrics,
             started: Instant::now(),
             statement_time,
             transaction_time: statement_time,
@@ -1097,6 +1093,7 @@ impl QueryCursor {
         if done {
             self.metrics.elapsed_micros =
                 self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+            self.metrics.finish_profile();
             if let Some(summary) = &mut self.transaction_summary {
                 summary.metrics = self.metrics.clone();
             }
@@ -1148,6 +1145,7 @@ impl QueryCursor {
             let Some(binding) = next else {
                 return self.finish(rows);
             };
+            self.metrics.record_active_rows(1);
             if self.skipped < self.prepared.skip {
                 self.skipped += 1;
                 continue;
@@ -1272,6 +1270,7 @@ impl QueryCursor {
         else {
             return Ok(None);
         };
+        self.metrics.record_active_rows(1);
         let row = project_row(&self.prepared, snapshot, &binding)?;
         Ok(Some((binding, row)))
     }
@@ -1341,6 +1340,7 @@ impl QueryCursor {
     fn finish(&mut self, rows: Vec<Vec<Value>>) -> QueryResult<QueryBatch> {
         self.metrics.elapsed_micros =
             self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+        self.metrics.finish_profile();
         self.finished = true;
         Ok(QueryBatch {
             rows,

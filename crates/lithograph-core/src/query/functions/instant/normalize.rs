@@ -55,11 +55,7 @@ pub(super) fn offset_text(value: &str) -> String {
 pub(super) fn local_datetime_text(value: &str) -> QueryResult<String> {
     let (date, time) = match value.split_once("T") {
         Some(parts) => parts,
-        None => {
-            return Err(QueryError::semantic(
-                "datetime input requires date and time",
-            ));
-        }
+        None => return Ok(super::normalize_date_text(value)? + "T00:00:00"),
     };
     let date = super::normalize_date_text(date)?;
     let time = local_time_text(time);

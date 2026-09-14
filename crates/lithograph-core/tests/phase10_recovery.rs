@@ -1,13 +1,17 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use lithograph_core::query::{ExecutionOptions, QueryCursor, QueryError, prepare};
 use lithograph_core::storage::{
-    CommitMetadata, LayerBuilder, allocate_node_id, branch_head, capture_allocation_state,
-    clear_commit_data, commit_data, commit_exists, commit_layer, create_checkpoint,
-    create_storage_schema, create_tag, delete_tag, initialize_connection_state, initialize_root,
-    integrity_check, list_tags, move_tag, set_commit_data,
+    CommitMetadata, HashId, LayerBuilder, allocate_node_id, branch_head, capture_allocation_state,
+    clear_commit_data, commit_data, commit_exists, commit_layer, create_branch_ref,
+    create_checkpoint, create_merge_session, create_storage_schema, create_tag, delete_tag,
+    initialize_connection_state, initialize_root, integrity_check, list_tags,
+    load_merge_resolutions, load_merge_session, move_tag, set_commit_data,
+    update_merge_resolutions,
 };
 use rusqlite::Connection;
 
@@ -85,6 +89,328 @@ fn run_crash_writer(path: &PathBuf, mode: &str, expected_code: i32) {
             .status()
             .expect("run crash-writer subprocess");
     assert_eq!(status.code(), Some(expected_code));
+}
+
+fn execute_query(connection: &Connection, query: &str) -> Result<(), QueryError> {
+    let prepared = prepare(
+        connection,
+        query,
+        BTreeMap::new(),
+        ExecutionOptions::default(),
+    )?;
+    let mut cursor = QueryCursor::new(prepared);
+    loop {
+        let batch = cursor.next_batch(connection, 64)?;
+        if batch.done {
+            cursor.complete(connection)?;
+            return Ok(());
+        }
+    }
+}
+
+#[test]
+fn branch_move_fault_rolls_back_canonical_commit_and_layer() {
+    let path = database_path("branch-move-fault");
+    let connection = initialize_file_database(&path);
+    let root = branch_head(&connection, "main").expect("root head");
+    let commit_rows_before: i64 = connection
+        .query_row("SELECT count(*) FROM main._lithograph_commits", [], |row| {
+            row.get(0)
+        })
+        .expect("pre-fault Commit count");
+    let layer_rows_before: i64 = connection
+        .query_row("SELECT count(*) FROM main._lithograph_layers", [], |row| {
+            row.get(0)
+        })
+        .expect("pre-fault Layer count");
+    let node_delta_rows_before: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM main._lithograph_node_delta",
+            [],
+            |row| row.get(0),
+        )
+        .expect("pre-fault Node delta count");
+
+    let node = allocate_node_id(&connection).expect("NodeId");
+    let mut layer = LayerBuilder::default();
+    layer.add_node(node).expect("add Node");
+    connection
+        .execute_batch(
+            "CREATE TEMP TRIGGER phase10_fail_branch_move \
+             BEFORE UPDATE OF commit_id ON main._lithograph_branches \
+             BEGIN \
+               SELECT RAISE(ABORT, 'phase10 branch move fault'); \
+             END;",
+        )
+        .expect("install branch-move fault trigger");
+
+    let error = commit_layer(
+        &connection,
+        "main",
+        root,
+        None,
+        &layer,
+        &CommitMetadata {
+            author: Some("phase10-recovery".to_owned()),
+            message: Some("must roll back".to_owned()),
+            committed_at: 2,
+        },
+    )
+    .expect_err("branch-move fault must reject Commit");
+    assert!(error.to_string().contains("phase10 branch move fault"));
+    connection
+        .execute_batch("DROP TRIGGER temp.phase10_fail_branch_move")
+        .expect("remove branch-move fault trigger");
+
+    assert_eq!(branch_head(&connection, "main").expect("head"), root);
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM main._lithograph_commits", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("post-fault Commit count"),
+        commit_rows_before
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM main._lithograph_layers", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("post-fault Layer count"),
+        layer_rows_before
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM main._lithograph_node_delta",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("post-fault Node delta count"),
+        node_delta_rows_before
+    );
+    assert!(
+        integrity_check(&connection)
+            .expect("integrity after branch-move fault")
+            .is_empty()
+    );
+    drop(connection);
+    cleanup_database(&path);
+}
+
+#[test]
+fn checkpoint_write_fault_leaves_no_partial_derived_state_and_can_rebuild() {
+    let path = database_path("checkpoint-write-fault");
+    let connection = initialize_file_database(&path);
+    let root = branch_head(&connection, "main").expect("root head");
+    let node = allocate_node_id(&connection).expect("checkpoint NodeId");
+    let mut layer = LayerBuilder::default();
+    layer.add_node(node).expect("checkpoint Node");
+    let commit = commit_layer(
+        &connection,
+        "main",
+        root,
+        None,
+        &layer,
+        &CommitMetadata {
+            author: Some("phase10-recovery".to_owned()),
+            message: Some("checkpoint fault candidate".to_owned()),
+            committed_at: 3,
+        },
+    )
+    .expect("checkpoint candidate Commit");
+
+    connection
+        .execute_batch(
+            "CREATE TEMP TRIGGER phase10_fail_checkpoint_node \
+             BEFORE INSERT ON main._lithograph_cp_nodes \
+             BEGIN \
+               SELECT RAISE(ABORT, 'phase10 checkpoint node fault'); \
+             END;",
+        )
+        .expect("install checkpoint fault trigger");
+    let error = create_checkpoint(&connection, commit)
+        .expect_err("checkpoint write fault must reject partial checkpoint");
+    assert!(error.to_string().contains("phase10 checkpoint node fault"));
+    connection
+        .execute_batch("DROP TRIGGER temp.phase10_fail_checkpoint_node")
+        .expect("remove checkpoint fault trigger");
+
+    for table in [
+        "_lithograph_checkpoints",
+        "_lithograph_cp_nodes",
+        "_lithograph_cp_labels",
+        "_lithograph_cp_relationships",
+        "_lithograph_cp_properties",
+    ] {
+        let count: i64 = connection
+            .query_row(
+                &format!("SELECT count(*) FROM main.{table} WHERE commit_id = ?1"),
+                [commit.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|error| panic!("read {table} after checkpoint fault: {error}"));
+        assert_eq!(count, 0, "{table} must not keep partial checkpoint rows");
+    }
+    assert!(commit_exists(&connection, commit).expect("canonical Commit survives"));
+    assert!(
+        integrity_check(&connection)
+            .expect("integrity after checkpoint fault")
+            .is_empty()
+    );
+
+    create_checkpoint(&connection, commit).expect("checkpoint rebuild after fault");
+    let checkpoint_rows: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM main._lithograph_checkpoints WHERE commit_id = ?1",
+            [commit.as_bytes().as_slice()],
+            |row| row.get(0),
+        )
+        .expect("rebuilt checkpoint row");
+    let checkpoint_node_rows: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM main._lithograph_cp_nodes WHERE commit_id = ?1",
+            [commit.as_bytes().as_slice()],
+            |row| row.get(0),
+        )
+        .expect("rebuilt checkpoint Node rows");
+    assert_eq!(checkpoint_rows, 1);
+    assert_eq!(checkpoint_node_rows, 1);
+    assert!(
+        integrity_check(&connection)
+            .expect("integrity after checkpoint rebuild")
+            .is_empty()
+    );
+    drop(connection);
+    cleanup_database(&path);
+}
+
+#[test]
+fn merge_abort_fault_rolls_back_session_and_resolutions() {
+    let path = database_path("merge-abort-fault");
+    let connection = initialize_file_database(&path);
+    let root = branch_head(&connection, "main").expect("root head");
+    let session = create_merge_session(&connection, "main", root, root, Some(root), 3)
+        .expect("create Merge Session");
+    let conflict = HashId::from_bytes([0x7a; 32]);
+    let resolutions = BTreeMap::from([(conflict, r#"{"choice":"ours"}"#.to_owned())]);
+    let revision = update_merge_resolutions(
+        &connection,
+        &session.id,
+        session.revision,
+        &resolutions,
+        true,
+    )
+    .expect("seed Merge Session resolution");
+    assert_eq!(revision, 2);
+
+    connection
+        .execute_batch(
+            "CREATE TEMP TRIGGER phase10_fail_resolution_delete \
+             BEFORE DELETE ON main._lithograph_merge_resolutions \
+             BEGIN \
+               SELECT RAISE(ABORT, 'phase10 resolution delete fault'); \
+             END;",
+        )
+        .expect("install resolution-delete fault trigger");
+    let error = execute_query(
+        &connection,
+        &format!(
+            "CALL lithograph.merge.abort('{}', {revision}) YIELD session RETURN session",
+            session.id
+        ),
+    )
+    .expect_err("Merge Session abort fault must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("phase10 resolution delete fault")
+    );
+    connection
+        .execute_batch("DROP TRIGGER temp.phase10_fail_resolution_delete")
+        .expect("remove resolution-delete fault trigger");
+
+    let restored = load_merge_session(&connection, &session.id)
+        .expect("load Merge Session after fault")
+        .expect("Merge Session must survive failed abort");
+    assert_eq!(restored.revision, revision);
+    assert_eq!(
+        load_merge_resolutions(&connection, &session.id).expect("restored resolutions"),
+        resolutions
+    );
+    assert!(
+        integrity_check(&connection)
+            .expect("integrity after Merge Session abort fault")
+            .is_empty()
+    );
+    drop(connection);
+    cleanup_database(&path);
+}
+
+#[test]
+fn merge_finalize_fault_rolls_back_ref_move_and_preserves_session() {
+    let path = database_path("merge-finalize-fault");
+    let connection = initialize_file_database(&path);
+    let root = branch_head(&connection, "main").expect("root head");
+    create_branch_ref(&connection, "source", root).expect("source Branch");
+    let node = allocate_node_id(&connection).expect("source NodeId");
+    let mut layer = LayerBuilder::default();
+    layer.add_node(node).expect("source Node");
+    let source = commit_layer(
+        &connection,
+        "source",
+        root,
+        None,
+        &layer,
+        &CommitMetadata {
+            author: Some("phase10-recovery".to_owned()),
+            message: Some("fast-forward source".to_owned()),
+            committed_at: 4,
+        },
+    )
+    .expect("source Commit");
+    let session = create_merge_session(&connection, "main", root, source, Some(root), 5)
+        .expect("create fast-forward Merge Session");
+
+    connection
+        .execute_batch(
+            "CREATE TEMP TRIGGER phase10_fail_session_delete \
+             BEFORE DELETE ON main._lithograph_merge_sessions \
+             BEGIN \
+               SELECT RAISE(ABORT, 'phase10 session delete fault'); \
+             END;",
+        )
+        .expect("install session-delete fault trigger");
+    let error = execute_query(
+        &connection,
+        &format!(
+            "CALL lithograph.merge.finalize('{}', {}) YIELD status RETURN status",
+            session.id, session.revision
+        ),
+    )
+    .expect_err("Merge Session finalize fault must fail");
+    assert!(error.to_string().contains("phase10 session delete fault"));
+    connection
+        .execute_batch("DROP TRIGGER temp.phase10_fail_session_delete")
+        .expect("remove session-delete fault trigger");
+
+    assert_eq!(
+        branch_head(&connection, "main").expect("target head after failed finalize"),
+        root
+    );
+    assert_eq!(
+        load_merge_session(&connection, &session.id)
+            .expect("load Merge Session after failed finalize"),
+        Some(session)
+    );
+    assert!(commit_exists(&connection, source).expect("source Commit survives"));
+    assert!(
+        integrity_check(&connection)
+            .expect("integrity after Merge Session finalize fault")
+            .is_empty()
+    );
+    drop(connection);
+    cleanup_database(&path);
 }
 
 #[test]

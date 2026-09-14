@@ -86,10 +86,10 @@ Phase 03 已交付 parser/AST/scope/type/value frontend foundation；Phase 04/05
 | LOAD CSV | headers、field parsing、URI source、periodic transaction composition | `done` | 08 |
 | IN TRANSACTIONS | batch size、error behavior、status output、native transaction boundaries | `done` | 08, 10 |
 | IN CONCURRENT TRANSACTIONS | concurrent batching、DISJOINT BY semantics、SQLite serialized commit | `done` | 08, 10 |
-| EXPLAIN | semantic validation + plan without execution | `partial` | 04, 10 |
-| PROFILE | execution + operator runtime counters | `partial` | 04, 10 |
+| EXPLAIN | semantic validation + plan without execution | `done` | 04, 10 |
+| PROFILE | execution + operator runtime counters | `done` | 04, 10 |
 | SHOW current graph surfaces | functions/procedures/indexes/constraints/current graph type | `done` | 06–08 |
-| Error compatibility | syntax position、semantic/type/constraint failures、transaction errors | `partial` | 03–10 |
+| Error compatibility | syntax position、semantic/type/constraint failures、transaction errors | `done` | 03–10 |
 
 ### Phase 03 frontend evidence
 
@@ -141,9 +141,9 @@ Phase 09 的 46 个 targeted version scenarios 覆盖 Branch/Tag/Commit Data/exp
 
 ### Phase 10 compatibility/release evidence
 
-Phase 10 的当前 compatibility regression 新增 3 个 release-level scenarios：mutating query 与 Version Procedure 的 `EXPLAIN` 都执行 semantic validation + planning 而不产生 graph/ref side effect；`PROFILE` 与普通 execution 返回相同 rows，并稳定记录 aggregate rows/dbHits/time foundation；SQL Bridge scalar summary 与 Native `SUMMARY` event 现经同一 serializer 暴露 `metrics.rows/dbHits/elapsedMicros`，不再把 Core 已记录的 execution metrics 丢在 adapter 边界；parse/semantic/type error 保留 source line/column、constraint failure 保持 `CONSTRAINT_ERROR`，SQLite `BUSY/LOCKED` 在 Core public `QueryErrorKind` 与 Extension public category 都映射为 `BUSY` 并保留 primary SQLite code，adapter 同时继续隐藏底层 storage detail。
+Phase 10 的 release-level compatibility evidence 已闭合三个最终 family：mutating query 与 Version Procedure 的 `EXPLAIN` 都执行 semantic validation + logical/physical planning 而不产生 graph/ref side effect；`PROFILE` 与普通 execution 返回相同 rows，并通过 public serializer 暴露 query-level 与 per-operator `rows` / `dbHits` / time counters，targeted regression 同时校验 operator totals 与 query metrics 一致；parse/semantic/type error 保留 source line/column、constraint failure 保持 `CONSTRAINT_ERROR`，SQLite `BUSY/LOCKED` 在 Core public `QueryErrorKind` 与 Extension public category 都映射为 `BUSY` 并保留 primary SQLite code，adapter 继续隐藏底层 storage detail。
 
-这些 regression 只收紧当前 release boundary，不把三个 matrix row 提前提升为 `done`：`PROFILE` 的 aggregate metrics public adapter parity 已闭合，但仍缺 per-operator runtime counters 与最终 oracle closure；`EXPLAIN` 与 error compatibility 仍需按 Phase 10 完成 applicable TCK/oracle、剩余 SQL Bridge/Native parity 和 unexplained-skip 清零。当前 matrix 因此继续准确保持 `partial`。
+最终 executable inherited openCypher TCK runner 在当前 worktree 上执行 3,897 个 scenarios：3,777 个 applicable scenarios 全部通过、0 failure；其余 120 个全部由显式 machine-readable reason 分类为当前产品面之外或已被 Cypher 25 语义取代，没有 unexplained skip。Phase 10 targeted compatibility suite 4/4、hardening 6/6、recovery 10/10 同时通过。因此 `EXPLAIN`、`PROFILE` 与 Error compatibility 三行由 `partial` 正式提升为 `done`；当前 matrix 已不存在 unresolved/partial capability family。
 
 ## 5. 2025.06+ Cypher 25 Delta Inventory
 
