@@ -40,7 +40,12 @@ Phase 09 Versioned State Operations
         |
         v
 Phase 10 Compatibility / Scale / Release Closure
+        |
+        v
+Phase 11 Performance Optimization (ready)
 ```
+
+Phase 00–10保留已完成状态；Phase 11是追加的性能专项。产品目标行为仍由Design定义，实际执行/验收见 [Phase 11计划](phases/11-performance-optimization.md)。
 
 ## 2. 为什么 Version Storage 必须早于 Cypher Engine
 
@@ -90,6 +95,32 @@ Phase 10 Compatibility / Scale / Release Closure
 | Scale / crash / migration / cross-platform release | 10 | 10 |
 
 ## 4. Vertical Slice 顺序
+
+### Phase 11性能纵向闭环
+
+```text
+reproducible before + physical-work counters
+ -> adjacency keyset aligned with existing B-tree
+ -> query-owned resolved state + read lifetime
+ -> format3 + persistent index generation + reopen
+ -> ancestor base + relevant delta + staged/candidate correctness
+ -> measured residual executor hotspots
+ -> Search/Merge/mixed workload + quantitative acceptance
+ -> migration/recovery/compatibility/six-platform closure
+```
+
+上面的Component表保留首次功能完成Phase，不把原有成果重新标为未完成。追加改动的owner如下：
+
+| 本轮变更 | 首次基线 | Phase 11 owner |
+| --- | --- | --- |
+| Benchmark口径、physical counters与定量门禁 | 10 | 11.1、11.8 |
+| Adjacency复合cursor与overlay归并 | 02/04 | 11.2 |
+| Query-scoped state、Graph View proof/cache与read guard | 04/09 | 11.3、11.6 |
+| format3、persistent Standard Index与rebuild入口 | 07/09 | 11.4 |
+| Index base/delta、历史/staged/candidate可见性 | 07/09 | 11.5 |
+| Search/Merge与并发压力证据 | 08–10 | 11.7 |
+
+不因增加持久cache重新设计canonical history，不以性能为由改变Cypher类型/错误、Constraint或Native transaction合同。只读query不写main的cache，迁移与显式rebuild的副作用由其独立boundary承担。
 
 每个复杂子系统先形成最小真实纵向闭环，再扩 coverage。
 

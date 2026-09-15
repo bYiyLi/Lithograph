@@ -2,6 +2,8 @@
 
 本文是 Lithograph 的产品与技术设计真源。开发计划、阶段状态和验收记录位于 `docs/development/`。
 
+Phase 00–10 是已实现的功能与 release-hardening 基线；本文新增的 Phase 11 性能专项设计尚待实现。第 7.8、8.3.1、11.7、14.3.1、17.1–17.3 节定义目标行为，不表示当前代码已经具备该优化。实现顺序和实际状态见 [Phase 11](development/phases/11-performance-optimization.md)。
+
 ## 1. 产品定义
 
 Lithograph 是一个运行在标准 SQLite 上的、可加载的 Property Graph 数据库扩展。它在同一个 SQLite 数据库文件内提供三项一体化能力：
@@ -139,6 +141,8 @@ Lithograph v1 的 canonical graph storage 固定属于目标 connection 的 SQLi
 `.load` 只注册 Extension API，不修改数据库内容。`lithograph_init()` 在当前 database 内原子创建或迁移 `_lithograph_*` 内部结构，并创建表示空图的 Root Commit 与默认 `main` Branch。
 
 首次初始化生成一个 RFC 9562 UUID 作为 `databaseId`，保存在 `_lithograph_meta`，在该 database 的整个生命周期和 storage migration 中保持不变。Storage format `1` 是首个 canonical graph-storage baseline；加入 Commit Data / Tag sidecar 与 Merge Session operational storage 后，首个公开 release 的 current storage format 固定为 `2`。最终 Extension 对 fresh database 直接创建 format `2`；已存在 format `1` database 只能通过第 14.3 节定义的显式 `1 -> 2` migration 升级，既有 Commit ID 不重算。
+
+上述 format `2` 是 Phase 10 已实现基线。Phase 11 为持久 derived Standard Index 增加 format `3`，其 fresh/init、旧格式读取、exact internal-schema inventory 与迁移边界由第 14.3.1 节统一定义；不能在 format `2` 中静默添加未声明的 reserved table/index。公开 C ABI 和 Cypher Profile 不因此升级。
 
 重复执行 `lithograph_init()` 是幂等的。数据库格式高于当前 Extension 可理解版本时直接返回 `FORMAT_TOO_NEW`，不得自动降级或重写历史。
 
@@ -580,6 +584,41 @@ Graph View **不投影 Schema / Constraint / Index definition**。当前 Commit 
 
 Graph View 是执行语义，不是认证或权限系统。持有原始 Lithograph execution surface 的调用方可以省略 `graphView` 访问完整 graph；上层产品若把它用于租户或内部数据隔离，必须控制调用方能提交的 options。Lithograph 只保证在**已经选择的** Graph View 内没有 query/operator/Search/write bypass。
 
+### 7.8 Query-scoped Resolved State（Phase 11）
+
+**目标：一次只读 execution 的同一 graph state 只解析一次，不能按返回 batch 重放 lineage / Layer。** 这包含 prepare/planner 与 executor 的共享，不只是把每批重复解析改成两处独立解析。`EXPLAIN` 是另一 execution；不得让 benchmark 的预先 EXPLAIN 悄悄预热随后被计时的 execution。
+
+实现把不借用 SQLite connection 的 resolved state（pinned Commit、checkpoint identity、immutable overlay、versioned Schema、statistics）与短生命周期 storage accessor 分开。QueryCursor 持有前者，各次访问只临时绑定原 connection；不得通过延长 Rust borrow 到 `'static`、悬挂 pointer 或复制整个 overlay 来绕过生命周期。内部 read context 可以调整，现有 SQL/C ABI、batch 返回格式和错误合同不变。
+
+生命周期固定为：
+
+```text
+parse / classify
+ -> establish main-database read guard
+ -> resolve version + Snapshot + Schema once
+ -> plan / execute / consume batches against that state
+ -> EOF | LIMIT | cancel | error | drop
+ -> release owned buffers / statements / read guard
+```
+
+Read guard 必须从 version resolution 前持续到 cursor 结束，保护 checkpoint、index generation 和 canonical rows 在查询期间的 SQLite read view；只保存 Commit ID 不足以抵抗其它 connection 的 GC/cache eviction。SQL Bridge 借用宿主 transaction，并由 adapter 保持一个真正读取 `main` 的 SQLite statement cursor，直到 execution 释放；Native 普通只读 execution 使用相同 guard 原则，不能靠各 batch 内独立 SELECT 的短 implicit transaction。Guard 仅持有 read view，不取得 writer、不建立第二 connection、不创建持久 pin registry；不依赖要求特殊编译选项的 `sqlite3_snapshot_*`。Standalone Core caller 同样必须提供跨 prepare/consume 的 read context，不能绕过此保护。
+
+Guard 的 statement handle 由 owning adapter 的 RAII boundary 管理，不能被 Core 当作可跨 connection 使用的缓存。`xFilter` 重扫先释放旧 execution；SQL 外层提前停止、`xClose`、Native callback failure、interrupt、panic、连接 teardown 和 prepare failure 都必须释放对应资源。读结束只释放本次拥有的 statement/context，不 `COMMIT`、`ROLLBACK` 或 `RELEASE` caller-owned transaction。多个只读 cursor 可以共存；同 connection 有 active read cursor 时，重入 Lithograph mutation、GC 或 cache maintenance 在产生副作用前返回 `TRANSACTION_BOUNDARY_REQUIRED`，避免自己删除尚在使用的 rows。宿主不得在 active execution 中通过 raw SQLite 改写 internal tables、重置同一 connection 的 transaction 或执行 schema replacement；不通过安装全局 authorizer 扩大对宿主的控制。
+
+WAL 下另一 connection 可以继续提交，读者保持旧 read view；rollback-journal 下沿用 SQLite 的 reader/writer 锁规则，不宣称所有模式都不阻塞 writer。长读可能延迟 SQLite WAL checkpoint，应测量 WAL 增长并通过及时关闭 cursor 释放，不偷偷切换到新 Snapshot。这里的 SQLite WAL checkpoint 与 Lithograph graph checkpoint 是两种不同资源。
+
+Write / candidate state 不复用过期的 read membership：
+
+- 普通 read-write execution 保留 immutable base，已完成 clause 的 staged mutation 以单调 state revision 更新；后续 clause 的 accessor、visibility 和 index overlay 必须读取新 revision。
+- Native explicit transaction 每次 `tx_execute` 有自己的 statement state，观察前序成功 execution 的 staged changes；最终 commit/abort 清理所有 staged cache。不得把 transaction 起点的 membership 当成整个 transaction 不变的集合。
+- Merge candidate 绑定 `(session, revision, candidate identity)`；一次 inspection 在同一 read view 验证 revision 并执行，不能跨 revision 复用。`IN TRANSACTIONS` 仍按第 9.6 节每个 inner transaction 独立 pin，不跨 batch transaction 复用旧 state。
+
+Storage page 与输出 batch 分离：改变调用方的 `max_rows` 不应导致重复解析或重新执行已消费的查询。复用 prepared storage statements、按需读取 properties，并用 bounded ordered merge 代替每页不必要的 map/set 重建；不以增大 batch 隐藏每 batch 重复工作，也不把整图预装内存。
+
+Graph View 优化仅消除有证据的重复检查：对同一合法 Snapshot access path 已证明存在且可见的起点复用 proof；终点按需/分批检查。空 selector 可以省略 Label predicate，但不能把任意外部 Node/Relationship reference 直接认作有效，也不能关闭 canonical integrity 或触及损坏记录时的 fail-closed 检查。可见性缓存限于 query，key 至少包含 state identity/revision、规范化 selector 与 NodeId，采用固定预算、可逐出；revision 改变必须失效，不能随遍历过的所有 Node 无界增长。
+
+紧凑 row/slot 化只在前三项核心优化完成后的 profiling 仍证明 allocation、clone 或 string lookup 为热点时实施。优先复用/移动既有 binding，限制在被测 read pipeline；保留变量作用域、重复列名/行、OPTIONAL null、path relationship uniqueness、错误与时钟语义。不预先新增 JIT、并行 executor 或第二套 query engine。Planner 复用已有 `optimize_node_scan` 的最低 cardinality 选择；只修实测的路径覆盖缺口，不把已有能力重新实现一次。
+
 ## 8. Version-aware Storage Model
 
 ### 8.1 Canonical History
@@ -766,6 +805,27 @@ properties:
 ```
 
 Snapshot overlay 对增量 add/remove 建立同构的 query-local lookup structure。`ExpandAll/ExpandInto` 必须合并 checkpoint adjacency 与 overlay add/tombstone，不允许为了 overlay 便利回退到 Relationship 全扫描。
+
+### 8.3.1 Adjacency Keyset Cursor（Phase 11）
+
+邻接分页使用与上述 B-tree 一致的内部复合位置，不再对每页仅按 `relationship_id > after ORDER BY relationship_id` 访问。固定 endpoint / type 后，比较和排序键如下：
+
+| 访问 | 固定前缀 | 剩余 keyset position |
+| --- | --- | --- |
+| outgoing、指定 type | checkpoint/Layer + source + type | `(target_id, relationship_id)` |
+| incoming、指定 type | checkpoint/Layer + target + type | `(source_id, relationship_id)` |
+| outgoing、任意 type | checkpoint/Layer + source | `(type_id, target_id, relationship_id)` |
+| incoming、任意 type | checkpoint/Layer + target | `(type_id, source_id, relationship_id)` |
+
+第一页无 continuation predicate；后续页使用严格 lexicographic `>` 和同序 `ORDER BY` / `LIMIT`。例如 typed outgoing 用 `(target_id, relationship_id) > (?, ?)`，不能把 range predicate 和 sort key 分别落在两个不一致的顺序上。优先使用现有覆盖索引；`INDEXED BY` 只在 SQL/key 已正确、固定内部索引存在性被验证后作为防 plan regression 的约束，不作为掩盖错误分页的 hint。不能每页重扫/排序整个邻接域，也不默认增加一套覆盖 100M Relationships 的重复索引。
+
+Cursor 绑定 graph-state identity/revision、起点、方向和 type selector；换 Snapshot、起点、type 或 staged revision 时必须重新建立，不能把旧位置解释为新查询的位置。它只属于内部执行器，不是 public History/Merge cursor，也不改变持久 RelationshipId、Layer canonical sort 或 Commit hash。内部 Rust scan API 的所有调用者必须一起迁移，不能保留一个仍按全局 RelationshipId 扫描的隐蔽热路径。
+
+Checkpoint 与 overlay 使用相同 tuple order 做有界归并：overlay tombstone 屏蔽 base，新增 relationship 按位置插入，同一 identity 只出现一次；同端点平行边由 RelationshipId 区分。Continuation 推进到**最后实际检查的位置**，即使整页均被 tombstone 或 view 过滤也必须继续，不漏行、不重复、不死循环。内存与输入页/overlay 相关，不与全部 degree 或最终输出行数相关。
+
+Incident/undirected access 分开读取 outgoing 和 incoming 两个有序流，使用包含 half-stream 状态的 continuation，避免 `source_id = n OR target_id = n` 退化为全库扫描。Storage incident enumeration 只发一次 self-loop；Cypher pattern orientation、反向边、平行边和 path match-mode 的重复语义仍由 executor 按既有合同处理，不能把所有同端点边去重。无 `ORDER BY` 的内部行顺序不是公开保证，但不能借此改变显式排序、LIMIT/SKIP 的合法结果、path selection、null/error 或 aggregation 语义。
+
+验证同时检查 Lithograph operator 与 SQLite 的实际 access plan/执行工作量；一个叫 `AdjacencySeek` 的 operator 或少量 logical `dbHits` 不足以证明没有扫描无关 Relationship，见第 17.1 节。
 
 ### 8.4 Content Addressing
 
@@ -1271,6 +1331,98 @@ Vector property 保留 dimension 与 coordinate type。Vector index 使用 HNSW 
 
 HNSW physical graph 是 derived cache，可以按 `(index definition, commit)` 重建。Vector cache 的缺失不能改变语义；没有 cache 时可以使用 exact scan 作为 correctness fallback。
 
+### 11.7 Persistent Standard Index Base + Delta（Phase 11）
+
+本节覆盖 Node/Relationship 的 Range、Text、Point 和 Relationship Lookup 物理内容；Node Lookup 继续使用既有 Label access path。Full-text/HNSW 暂不换存储架构，Phase 11 先扩大其测量与回归覆盖。目标是**已有物理索引跨 connection/reopen 可复用，少量图变化不触发整域重建**，不是承诺删除全部缓存后的首次 query 无构建成本。
+
+#### 11.7.1 Generation identity 与持久布局
+
+物理 generation 以 `(anchor_commit, definition_hash, encoding_version)` 唯一标识。`definition_hash` 使用带 domain separator 的 canonical IndexDefinition 编码，包含 name、kind、target、完整 property 序列及 options；不能只用 index name，也不能把整个 Schema hash 当作唯一 reuse key。新增无关 constraint/index 不应使未变化的 index 失效。Hash 和 physical encoding version 都是 derived identity，不参与 canonical Commit/Layer/Schema hash。
+
+Anchor 是**已经完整构建索引的 immutable Commit**，不要求该 Commit 恰好有 graph checkpoint。例如图 checkpoint 在 B，index 在后续 S 创建，允许从 B + delta 构建 anchor S，不复制整张图建立一个新 graph checkpoint。查询只选择 target 的 first-parent ancestry 上具有匹配 definition 的 anchor；不能把相邻 Branch、second-parent lineage 或最新 Branch head 的 index 当作当前 target 的 base。Target Schema 决定 index 是否存在和 predicate 的 type proof。
+
+Format 3 固定增加两张 `main` derived table，逻辑字段如下；实现的 exact DDL、约束、索引名与 inventory 必须由 storage schema 常量统一生成并验证，不能运行时按用户输入拼表名：
+
+```text
+_lithograph_index_generations
+  generation_id INTEGER PRIMARY KEY                -- internal identity
+  anchor_commit BLOB(32), definition_hash BLOB(32)
+  definition_blob BLOB, encoding_version INTEGER
+  complete INTEGER(0|1), indexed_entities INTEGER, entry_count INTEGER
+  created_at INTEGER
+  UNIQUE(anchor_commit, definition_hash, encoding_version)
+
+_lithograph_index_entries
+  generation_id INTEGER, owner_kind INTEGER(1|2)
+  owner_id INTEGER, property_ordinal INTEGER, token_id INTEGER NULL
+  value_blob BLOB NULL, equality_blob BLOB NULL, text_value TEXT NULL
+  sort_family INTEGER NULL, sort_number NUMERIC NULL
+  sort_a INTEGER NULL, sort_b INTEGER NULL, sort_c INTEGER NULL, sort_text TEXT NULL
+  point_crs INTEGER NULL, point_x REAL NULL, point_y REAL NULL, point_z REAL NULL
+  PRIMARY KEY(generation_id, owner_kind, owner_id, property_ordinal)
+```
+
+范围/编码合法性、manifest 与 entries 的对应关系由 storage primitives 验证，不依赖宿主 `foreign_keys` 开关。Key encoding 沿用第 5.3、11.4 节的语义；`value_blob` 保留必要的精确 recheck 值。索引前缀固定是 generation + owner kind + property ordinal，后接 equality、typed range、text 或 spatial key，并以 owner identity 处理同值重复。Relationship Lookup 使用 generation + owner kind + token + owner identity。采用固定、按非空 key family 过滤的 partial secondary indexes，避免给不适用 family 填入大量全 NULL key；相关 SQL 必须包含匹配 predicate，并经真实 plan 验证。构建一个 generation 不得 DROP 或重建其它 generation 正在使用的全部 secondary indexes。
+
+Persistent generation 只覆盖 committed canonical state，不缓存某个 Graph View，也不持久化 Native staged state 或 Merge candidate。数据库文件本身隔离 database identity；内存 handle 还必须绑定原 connection/database，不能仅凭一个 generation number 跨库复用。
+
+#### 11.7.2 Read path 与 delta overlay
+
+```text
+target Commit + target IndexDefinition
+ -> compatible first-parent anchor generation
+ -> collect relevant changed owners from anchor..target Layers
+ -> indexed base candidates minus all changed owners
+ -> union matching final-state values of changed owners
+ -> Cypher predicate recheck / Graph View / semantic LIMIT or aggregation
+```
+
+相关 owner 包含 Node add/delete、Label membership change、被索引 property set/remove，以及 Relationship add/delete/type-domain/property change；即使 owner 的新值不再匹配，也必须屏蔽旧 base entry。Composite index 任一组成 property 或 membership 改变，都重新获取该 owner 的完整最终 tuple。Staged clause 与 Merge candidate 使用相同规则，但 cache key 额外绑定 state revision/candidate identity；不能把只有 committed target 身份的 cache 用于 staged state。
+
+Base 与 delta 的候选合并必须 bounded/streamed，按实际 predicate key 分页；不能先把全部 matching owner 收集为无界 `BTreeSet`，也不能每一输出页重新计算同一 changed-owner set。结果需要重排时按第 7.3 节 spill，不能靠全域 scan 或大 OFFSET 模拟 indexed pagination。删除/添加 Label、property remove、相同值、复合键缺项、跨类型 ordering、`null`、并行 Branch 与历史 query 都必须与 canonical scan oracle 一致。
+
+小变化只产生与**相关 Layer delta / changed owners**有关的解析和 point read；不复制整个 base generation 为每个新 Commit 建一份 index。Empty-delta Commit 与无关 Label/property write 不应触发 full index build。跨越较长 lineage 的 anchor 查找允许 query/connection-local 有预算的 immutable metadata cache，不能为每次查询扫描完整 Commit DAG。Delta 超过内部内存预算时允许 TEMP spill 或正确的 bounded scan fallback，并在诊断中明确标记；不能因缓存预算不足截断结果或悄悄使用过期 base。
+
+#### 11.7.3 Build、publish、read-only 与 maintenance
+
+以下是不同状态，不能在 benchmark 中混为一个“cold”数字：
+
+| 状态 | 行为 |
+| --- | --- |
+| generation 完整且兼容 | 直接从持久 B-tree seek；新 connection 不重新构建 |
+| 小 delta | 复用 ancestor base + delta，生成 bounded query-local overlay |
+| generation 不存在、未完成或 encoding 不兼容 | 正确的 canonical scan / TEMP materialization fallback；不得返回不完整结果 |
+| 明确重建或新 Index DDL | 在拥有 write authority 的 boundary 构建、原子发布 generation |
+
+普通 read、`lithograph_rows()`、只读 SQLite connection、`EXPLAIN`、validation 和 Merge candidate inspection **不得**为 cache miss 隐式写 `main`、升级 storage format 或打开辅助 write connection。可用的 TEMP 仍只是 query-local 可重建数据；宿主连 TEMP write 也禁止时使用流式 canonical fallback。`EXPLAIN`/validation 不执行 index rebuild。Cache miss 的慢路径必须被测量，而不是从延迟报告删除。
+
+新 Index DDL 在既有第 11.2 节 write boundary 内生成与最终 Schema/Commit 对应的物理 generation；Native transaction 中未提交的 index 可使用 staged/TEMP 内容，只能在最终 commit 时发布到 committed identity，abort 不得留下可见 generation。既有普通 graph mutation 不逐次重建所有 index；后续 read 使用 delta，maintenance 可以在当前目标 Commit re-anchor。
+
+为使持久 cache 删除/失效后的恢复无需 DROP/CREATE 逻辑 index、无需伪造 Commit，Phase 11 增加一个独立维护 procedure（不是新 Cypher grammar）：
+
+```text
+CALL lithograph.index.rebuild(name, version)
+YIELD name, commit, indexedEntities
+```
+
+两个参数均为非空 STRING；`version` 使用第 10.2 节已有 `commit/`、`branch/`、`tag/` descriptor，取得 writer 后解析并 pin。目标 Schema 中必须存在该 name，且属于本节支持的 Standard Index family；缺失 name、不支持的 kind/Node Lookup 或非法参数返回 `INVALID_ARGUMENT`，version 解析沿用已有稳定错误。只重建该 target 的完整 canonical index，不解释为 view-local index，不创建 Commit、不移动 ref。结果固定一行 `name: STRING, commit: STRING, indexedEntities: INTEGER`；`summary.queryType = "version"`、`summary.commit = null`、graph/schema mutation counters为0。结果中的 `commit` 是实际 anchor，`indexedEntities` 为本 generation 索引的 owner 数，不是 property-entry 数。
+
+该 procedure 只能独立调用并后接 `YIELD`/`RETURN` 等只读结果处理，不与 graph mutation 或其它维护 operation 混在一个 execution。通过 `lithograph()` 或普通 Native execution 调用；`lithograph_rows()` 返回 `READ_ONLY_ADAPTER`；Native explicit transaction、transaction-owning subquery 或 Merge candidate 中返回 `TRANSACTION_BOUNDARY_REQUIRED`。`at` 返回 `READ_ONLY_SNAPSHOT`，`branch`、`author`、`message`、`graphView` 等不适用 options 返回 `INVALID_ARGUMENT`。`SHOW PROCEDURES`/validate/EXPLAIN 必须认识该 procedure，但 validate/EXPLAIN 无写副作用。只读文件的真实执行返回既有 I/O/read-only 错误，不吞掉用户明确请求的 rebuild failure。
+
+Rebuild 和 DDL 使用现有 invocation SAVEPOINT/transaction discipline：从 pin 到 publish 在同一 SQLite transaction，边扫描边分批编码/写 entries，最后置 `complete=1`，成功后才让其它 reader 看到。重建已存在 generation 时旧内容的移除与替换同样原子；failure、cancel、disk-full 或 crash 只留下旧完整 generation 或无 generation，不留下可被使用的半成品。不会引入异步 worker、server、持久 build job 或 request-id 系统。此最小方案的全量重建可能长时间持有 writer，必须单独报告 build、writer-wait/hold、临时空间与峰值内存，不能把“最后设置 complete 很快”描述为整个重建的 writer 很短；使用者应在维护窗口进行全量 rebuild。
+
+完整构建Relationship Lookup本来就需要枚举全部Relationships。Relationship property generation有可复用的兼容Lookup/type访问路径时优先使用；不存在时，显式首次全量build允许一次有界canonical枚举并记录其全部成本，不能称为type seek。已经ready的property/Lookup读取不再重复这一过程。除非新的工作量证据证明必要，不为构建捷径追加一套覆盖所有Relationships的重复永久索引。
+
+Generation 成为 complete 后视为不可原地改写的内容。Read guard 保护正在使用的 generation；maintenance 负责成组删除 manifest/entries，不能通过读路径清理数据库。默认每个 definition 保留至多两个 complete anchors（保留本次目标并逐出最旧的其它 anchor），这是可调整但不公开配置化的性能策略；被逐出版本继续使用 ancestor/fallback。显式 canonical GC 同时清理 anchor 已不可达的 generation；generation **不是** canonical GC root，不延长用户已删除历史的生命周期。Manifest/entry count、encoding 和被访问 payload 的可检测异常使整个 generation 失效并回退，不允许跳过坏 entry 返回少量“正常”结果。完整 cache-vs-canonical 检查属于显式 integrity gate，普通 query 不全量重算 index checksum。真正的 canonical corruption、内部 schema/trigger 篡改继续 fail closed，而不是伪装成 cache miss。
+
+#### 11.7.4 Adoption boundary
+
+Cache失效在首行输出前被发现时，可以切换canonical fallback重新执行。已经向调用方发出结果后才发现损坏，不得从头fallback造成重复行或返回成功SUMMARY；除非能证明continuation的等价性，否则使用既有 `STORAGE_ERROR` 终止该execution、清理read资源，要求显式完整性检查/重建后重试。常规maintenance删除generation必须同时使manifest失效并原子清理entries；离线任意修改单个entry而保留完整marker属于篡改，不能承诺每次point query在不全量核验的情况下都能检测。
+
+可删除的 derived data 在这里指 generation manifest/entries，而不是任意修改内部 table definition。Format 3 的结构仍由第 4.1 节 exact inventory 校验；缺表、错列、额外 trigger/index 不能被静默当作可用缓存。完整重建入口解决 payload 层缺失；结构损坏沿用明确的恢复/迁移检查。`lithograph_init()` 的 format migration 只建立空 cache 结构，不在迁移期间扫描所有图数据建立每个索引。
+
+本节不改变 Graph Type/Constraint 的校验域与第 11.4 节 type proof。不能仅因为 persistent index 看起来完整，就把 derived entries 当成所有 canonical owner/value 的可信替身；任何约束验证加速必须另有针对相同 target state 的等价性证明及失败回归。
+
 ## 12. LOAD CSV 与 External I/O
 
 `LOAD CSV` 支持 `file://`、`http://` 与 `https://` source。读取权限继承宿主进程的 OS / network authority；Lithograph 不注入隐藏 credentials。
@@ -1447,6 +1599,17 @@ Storage format version 记录在 `_lithograph_meta`。升级迁移必须：
 
 首个正式 migration path 是 `1 -> 2`：增加 Commit Data / Tag sidecar 与 Merge Session operational storage，以及对应 integrity / GC semantics；不改写任何既有 Commit、Layer、Schema object 或 hash input。Migration 在一个 SQLite transaction 内创建新 internal objects、把 `storageFormat` 提升到 `2`，失败时整体 rollback。Format `1` database 不存在 Commit Data / Tag / Merge Session，因此迁移不需要为历史 Commit 合成 annotation、ref 或 workspace；升级后三者从空集合开始。
 
+### 14.3.1 Performance Storage Format 3（Phase 11）
+
+Phase 10 的 format `2` 保持已实现历史基线。Phase 11 实现后 current format 为 `3`，仅为第 11.7 节持久 derived index 增加固定 table/index inventory，不重写 Node/Relationship/Layer 的 canonical 编码。
+
+- Fresh database 的显式 `lithograph_init()` 创建 format `3`；format `2` 的显式 init 原子执行 `2 -> 3`，format `1` 的 init 在同一外层 migration transaction 完成 `1 -> 2 -> 3`。任何一步失败回到原格式及原 schema/metadata，而非留下半升级的 format `2`。
+- 保留 `databaseId`、全部旧 Commit ID/各自 `format_version`、Layer hash、Schema hash、parents、Branch/Tag、Commit Data 与 open Merge Session/resolutions。新 Commit 使用新 engine 的 format `3` hash input；旧 Commit 仍按原1/2编码验证，不能全库 rehash。
+- 新 Engine 对尚未 init 升级的 format `1/2` 保留既有 legacy read 能力及 TEMP/canonical fallback；任何会持久化 graph/schema/ref/session/cache 的 operation 都先返回 `STORAGE_ERROR` 并提示显式 `lithograph_init()`，不得在旧 schema 写 format `3` Commit。`lithograph_version()` 仍报告实际旧格式与支持范围，`EXPLAIN`/validation 不隐式迁移。所有 legacy 检查使用该版本自己的 exact inventory。
+- 旧的 maximum-format-2 Engine 遇到 format `3`，按既有 `FORMAT_TOO_NEW` 合同拒绝 graph read/write，不尝试忽略新 reserved objects 继续工作。没有自动 downgrade；回退需要迁移前的完整数据库备份，或使用新 Engine，不能删 cache 表再修改版本号。
+- Migration 只增加空 derived structures 和更新 metadata；已有必须执行的 integrity validation 不被省略，但不把全量 cache build 混入 migration。后续新 index DDL 或显式 rebuild 填充内容；普通只读查询可先走 fallback。
+- 初始化/迁移、exact-schema collision/TEMP trigger、reopen、crash rollback、mixed-format Commit DAG、GC 与六平台 interoperability fixtures 全部需要扩展到 format `3`。不能因数据可重建就免除 storage-format 变更的测试。
+
 ## 15. Deployment 与 Runtime Boundary
 
 ### 15.1 Implementation Language 与 SQLite ABI
@@ -1504,6 +1667,49 @@ Lithograph 是 embedded extension，没有独立 account / role / authentication
 - Graph View 不能通过预先 materialize 整个子图实现；scan/seek/expand/search 必须在现有 Snapshot access path 上按需执行 visibility check，且不得因 view 导致本可 seek 的查询退化为无条件全图扫描；
 - 10M Node / 100M Relationship benchmark tier 必须作为 release hardening 的真实规模验证，覆盖 traversal、indexed lookup、write、history、diff 与 search；通过条件是正确完成、无 OOM、无意外全图扫描，并建立可持续 regression baseline。
 - Merge conflict enumeration 必须 bounded/pageable；大量 conflict 的 start/list/resolve/finalize 不能要求一次把全部 conflict 或完整 candidate materialize 到 caller memory。Open Session 只持久化 pinned inputs + resolution set，candidate/conflict 可以重算或临时 spill。
+
+### 17.1 Performance Evidence Contract（Phase 11）
+
+Phase 10 的成功记录保留为功能/规模验收历史；Phase 11 必须在当前代码上重新证明物理访问路径及资源边界。单次 wall time、少量结果行、`AdjacencySeek` / `IndexSeek` 名称或 logical `dbHits` 都不能代替该证明。旧 baseline 及其限制见 [性能证据](research/phase11-performance-evidence.md)。
+
+Benchmark 报告至少保存：Git commit 与 dirty-tree digest、fixture seed/version/真实 cardinality、pinned Commit、数据/索引量与分布、CPU/RAM/OS、Rust/build profile、实际 SQLite version/compile options、journal/synchronous/cache/temp 参数、读取 adapter、并发数、batch 大小、缓存状态与重复次数。不得通过关闭 durability、安全检查或减少 fixture cardinality 获得未标注的“优化”。Fixture 构造与完整 integrity check 单独计时，不混入或静默从被测 query 中移除工作。
+
+每次查询统一从参数/options 解码或 Core prepare 入口计到全部结果被消费/释放，分别报告 prepare、Snapshot resolve、cache lookup/build/overlay、first-row、完整消费和 serialization/callback 成本。Core、Native callback 与 SQL `lithograph_rows` 分别测量，不直接比较不同 adapter 的数字；`MATCH ... RETURN 1` 必须真正消费每行，不能用 `count(*)` 或预知 cardinality 替换。旧 runner 对 streaming query 在 prepare 后开始计时，对 `execute` 则包含 prepare，新的报告必须消除这种口径差异。
+
+缓存实验固定分为四类：同 connection 的 warm read；新 connection/进程但 persistent generation 存在；generation 缺失/被删除后的 fallback 与显式 rebuild；小 delta 后的 ancestor-generation read。它们分别统计，不汇总成一个 P95。OS page cache cold 只有明确完成并记录隔离方法时才能如此命名；仅重开连接仍可能是 OS warm。统计、checkpoint、index readiness 与测试顺序都要记录，不能用 preceding EXPLAIN/查询隐藏预热成本。
+
+性能诊断保存底层 SQL template/绑定条件、`EXPLAIN QUERY PLAN`、公开 `sqlite3_stmt_status` 的 VM_STEP / FULLSCAN_STEP / SORT 等以及 Engine 的 resolved-state 构造次数、Layer 加载数、base/delta owner 检查数、generation build 次数。后者是 internal/test instrumentation，不增加公开 query options 或承诺新的 ABI metrics 字段。FULLSCAN_STEP 为零不能排除错误的宽 index-range scan；必须结合 VM work 和无关数据规模增长实验。SQLite 32-bit statement counters 在溢出前分段采样/reset 并聚合到宽计数，溢出/不可用标为无效证据，不能报告小值通过门禁；可选 scanstatus 不成为 stock runtime 的必需编译选项。
+
+固定 degree/result/相关 delta，将无关图数据增至原来的10倍时，邻接与 ready index path 的实际读取工作不得近似线性增长。工程门禁为 `work(10×unrelated) ≤ 2×work(unrelated) + 1000 VM steps`，汇总一次query的全部相关SQLite statement，配合正确endpoint/type plan和不必要SORT检查；允许B-tree的对数变化，不允许宽主键范围扫描。大结果集 memory 包含 resolver、overlay、visibility、index candidates、row buffers、SQLite cache 与 TEMP spill；报告 process peak RSS、增量 RSS、TEMP/WAL/disk bytes。不能只证明输出256行一批，就声称整个 executor 的内存有界。
+
+### 17.2 Phase 11 性能验收目标
+
+以下是针对 **Apple M2 / 8 CPU / 16 GiB、Release build、同一固定 SQLite runtime 与 10M Node / 100M Relationship fixture** 的工程目标，不是已测结果或跨硬件 SLA。Phase 11.1 在优化前固定可重复的 before 基线；Phase 11 完成时须达到下表与结构性门禁。更换机器/runtime 要重建同机 before/after，不能混比；不能在观察优化结果后通过放宽目标或减少数据把失败改成通过。
+
+| 工作负载/状态 | 完成目标 | 计量边界 |
+| --- | --- | --- |
+| 单起点、固定小 degree 的 typed/untyped one-hop，含0结果 | warm P95 ≤ 100 ms；新 connection P95 ≤ 500 ms | Core 和 Native 各测；结果完整消费，persistent state 已存在 |
+| 10M Label rows streaming | 中位数 ≤ 60 s，最慢一轮 ≤ 90 s | Core 与 Native 分开满足；不得以 count 替代 |
+| 单 hub 的1M outgoing rows streaming | 中位数 ≤ 30 s，最慢一轮 ≤ 45 s | Core 与 Native；包含页间推进、row/visibility工作 |
+| 已构建 Range Index 的 equality，命中1行或0行 | warm P95 ≤ 50 ms，新 connection P95 ≤ 500 ms | 包含 prepare/metadata，full generation build count = 0 |
+| 同一 index 返回1000行的 range read | warm P95 ≤ 250 ms，新 connection P95 ≤ 1 s | 完整范围结果；不能从 offset0重复扫描到本页 |
+| 相同 indexed domain 上1000 owner 变化后的 equality/range | P95 ≤ 1 s，full generation build count = 0 | ancestor base + delta；包括旧值移除/新值命中，不预先重建 |
+
+新 connection 项不包含 shared library 编译、显式 init/migration 或 OS cache purge，但必须分别报告 open/load 成本。上述长 streaming workloads 至少独立运行3次，报告每次、中位数和最大值，不用3个样本声称 P95。短查询warm集合至少5个connection、每个20次以上；新connection集合至少100次独立重开，每次只采第一条被测query。两类各自报告 P50/P95/max 和全部失败，不能将warm样本充作reopen样本。`0 ms` 不能写成零成本，计时使用微秒或更高精度。
+
+10M/100M 核心 read workload 的总 process peak RSS 目标 ≤ 1 GiB；在固定 graph state / batch / cache budget 下，将同一 streaming query 的消费行数从1M增加到10M，额外 peak RSS ≤ 128 MiB，且无与输出行数同阶增长的 retained collection。全量 persistent index build 必须分批/可取消并单独报告内存、writer hold、磁盘体积和耗时，不能把其成本移到未计时 setup 后宣称 cold-build 已优化；它不适用 ready-index 的毫秒级延迟目标。
+
+1000 Node batch+Commit、History、Diff、Native explicit transaction、10K-conflict Merge 各阶段作为非回退集：相同条件下新中位数不得超过 before 的 `max(1.20 × before, before + 10 ms)`。重复3轮仍出现超标时按 finding 处理，不靠删掉慢样本通过。Merge 的 read preparation、writer wait、writer hold 与 total finalize 分开测量；total finalize 时间不能当成 writer hold。
+
+### 17.3 扩展压力场景与范围控制
+
+Phase 11 必须增加相互独立的100K与1M Search corpus，不能把“大图里1000个 sample documents”写成百万向量压测。固定并记录 document 长度、vector dimensions/coordinate type、seed、similarity、HNSW build/search 参数、top-k、过滤选择性及历史/staged状态。至少有100K×1536和1M×128维向量场景；不同维度不比较成同一个延迟曲线。另有1M全文文档场景。10M向量可作为容量探索，不是本轮强制范围，也不得在未测前宣传支持该规模的低延迟。
+
+Vector 用确定的 query sample 对 exact top-k oracle 报告 recall@k、分数/排序与 visible filtering；oracle construction 单独计时。ANN参数/数据相同条件下 recall@10 不得低于优化前，验收最低均值为0.95；不能降低 recall 换延迟。全文结果与相同语义 oracle 比较。报告 index build/加载/查询、cold/warm/new connection、peak RSS/磁盘以及历史 correctness；若这些新增场景暴露架构或 OOM 问题，完成最小必要设计修订后修复，不预先重写 FTS/HNSW。
+
+Mixed-workload 验证覆盖1/4/8个 reader与一个 writer、不同 Graph View、Branch/Tag移动、GC、cache eviction/rebuild；每种并发配置持续压力至少30分钟，记录吞吐、P95、BUSY/retry、失败数、writer持锁、WAL与资源回收。WAL reader pin 不得让返回值跨 Snapshot 漂移；不能为提高吞吐忽略冲突/CAS。10K-conflict Merge 仍分40轮并保持 revision/candidate/finalize语义，先测热点再优化 resolution，不改变公众冲突协议。
+
+性能改动按证据优先：邻接键序 → query-scoped resolved state → persistent Standard Index base/delta → 剩余实测热点。Row slot 化、Search算法重写、更多索引或并行调度不是默认任务；没有 profiling/acceptance 驱动就不增加。Phase 11 以固定验收集合闭合，不以“所有可能优化都做完”作为无限任务。
 
 ## 18. 关键架构决定与取舍
 
@@ -1584,6 +1790,20 @@ Lithograph 是 embedded extension，没有独立 account / role / authentication
 - 备选：一次性 merge + 全量 resolutions；长生命周期 SQLite/Native transaction；merge prepare/finalize 但 candidate 只存内存；finalize-time application callback；让上层先 merge 再 revert invalid result。
 - 取舍：format 2 增加 mutable Merge Session/resolution operational storage，GC 需要把 open Session 当 root，Version API 增加 session lifecycle 与 revision concurrency；换取 resumable conflict resolution、bounded conflict pagination、crash recovery、上层 pre-commit candidate validation，以及历史中始终只有最终一次 merge/fast-forward 结果。
 
+### D12 性能优化保持版本语义，先修物理访问与生命周期
+
+- 决定：第 8.3.1 节让邻接 cursor 匹配现有 B-tree；第 7.8 节让同一 query 共享 owned resolved state 与 read guard；第 17 节用实际物理工作量和统一计时验收。
+- 依据：当前 scale baseline 与代码复查发现错误的邻接 access plan、逐 batch resolution 及混合计时口径；证据强度和限制见性能研究记录。
+- 备选：添加重复巨型索引、单纯增大 batch、关闭 Graph View/constraint 检查、直接重写 executor。
+- 取舍：需要迁移内部 cursor、resource ownership 和关键失败测试，但不改变 Cypher 语义、Commit identity 或公开 ABI；长 read guard 仍可能造成 WAL 增长。
+
+### D13 持久 derived index 复用 anchor，不为每个 Snapshot 重建全域
+
+- 决定：第 11.7 节采用 committed anchor generation + query-local delta；format 3 显式容纳其 exact schema；新 DDL 与单独 rebuild procedure 负责发布，只读路径不隐式写 `main`。
+- 依据：TEMP Standard Index 在 connection 关闭后丢失，且 cache identity 按 Snapshot 分裂；持久化必须同时尊重 reserved-schema、只读 adapter、staged state 与版本类型语义。
+- 备选：继续只用 TEMP、每个 Commit 复制完整 index、把 physical cache 纳入 canonical history、引入后台 server。
+- 取舍：付出 derived disk space、generation cleanup 与一次显式2→3迁移；换取 reopen可复用和小delta不全量重建。缓存确实缺失时仍有 fallback/build 成本，显式全量 rebuild 仍可能持有长 writer，不能隐瞒。
+
 ## 19. 参考基线
 
 外部项目只提供 evidence 和实现参考，不覆盖本文设计：
@@ -1598,3 +1818,5 @@ Lithograph 是 embedded extension，没有独立 account / role / authentication
 - Git merge semantics: <https://git-scm.com/docs/git-merge>
 
 外部研究证据的快照与采用边界另见 `docs/research/reference-baseline.md`。
+
+Phase 11 的当前实现/性能观察、SQLite row-value pagination、INDEXED BY、read-transaction 与 statement-counter 依据及不采用边界见 [性能证据](research/phase11-performance-evidence.md)。

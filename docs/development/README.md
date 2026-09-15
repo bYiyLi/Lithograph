@@ -38,6 +38,8 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 
 ## 3. 当前基线
 
+**状态分界：Phase 00–10 `done`；Phase 11 Performance Optimization `ready`。** Phase 11 是在已完成的基础功能/规模验收之上增加的性能专项，不回开Phase 10，也不把Phase 10单次scale通过解释成全场景低延迟保证。第11阶段的目标行为写入Design，代码尚未实现；当前storage format仍为2，计划中的format3和persistent index不能当作现有能力使用。
+
 当前仓库已经完成 Phase 00 Engineering Foundation、Phase 01 SQLite Extension Boundary、Phase 02 Version-aware Storage Core、Phase 03 Cypher Frontend and Value Semantics、Phase 04 Read Query Engine、Phase 05 Mutation, Transaction and Commit、Phase 06 Cypher 25 Query Completeness、Phase 07 Schema, Constraint and Standard Indexes、Phase 08 Search and Data Ingestion、Phase 09 Versioned State Operations 与 Phase 10 Compatibility Closure and Release Hardening。现有 current-graph engine 已闭合 query composition、aggregation、advanced path、expression/function/value、mutation、versioned Graph Type/Constraint、lookup/range/text/point/full-text/vector index、`SEARCH`、`LOAD CSV` 与 Cypher transaction batching，并在同一 Graph View、version-aware storage、Commit/savepoint 与 SQL Bridge/Native 边界上执行。Phase 10 已完成 deterministic generated/property hardening、EXPLAIN/PROFILE/error compatibility、3,777/3,777 applicable inherited openCypher TCK、crash/recovery fault matrix、format `1 -> 2` preservation/migration、完整 10M Node / 100M Relationship release workload、10,000-conflict Merge Session、repository-wide quality/CI、final architecture/security review，以及 Linux x64/arm64、macOS x64/arm64、Windows x64/arm64 六目标 hosted release artifact acceptance。
 
 当前 Design 进一步确认了通用版本化状态能力：Commit 保持 immutable；Commit Data 是可修改 JSON sidecar；Tag 是显式可移动但不会随写入自动前进的 named ref；允许显式创建 empty-delta Commit；History 需要 opaque cursor 做 bounded DAG traversal；Native explicit transaction 可以把多个标准 Cypher current-graph execution 组合为一个最终 Commit，并通过 `expectedHead` 提供 transaction-start CAS；Merge 使用 durable Merge Session，把大量 conflict 的分页/逐步 resolution 与最终 Commit/Branch move 分开，并通过 session revision + target-head CAS 支持上层在 finalize 前验证 exact candidate。它们不回开已完成的 Phase 02/05：Phase 05 保持“一次普通 top-level mutating query -> 一个 Commit”的 auto-commit foundation，Phase 08 的 `IN TRANSACTIONS` 继续“每个 mutating batch -> 一个 Commit”，多 execution 单 Commit与 Merge Session 的 version-atomicity completion owner 都是 Phase 09。Phase 09 同时把 storage format 从 development baseline `1` 显式迁移到首个公开 release 的 format `2`；Phase 10 负责 migration/scale/recovery closure。
@@ -53,6 +55,7 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 - Phase 08：`done`；
 - Phase 09：`done`；
 - Phase 10：`done`；
+- Phase 11：`ready`；
 - `docs/development/cypher25-compatibility.md` 当前 capability matrix 已无 unresolved/partial family；Phase 10 已把 compatibility closure 与 scale、recovery、artifact 和 cross-platform release acceptance 合并为完整验收证据。
 
 ## 4. 路线总览
@@ -70,10 +73,13 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 | [08 Search and Data Ingestion](phases/08-search-ingestion.md) | `done` | Full-text、Vector/HNSW、SEARCH、LOAD CSV 并遵守 Graph View | 06–07 |
 | [09 Versioned State Operations](phases/09-version-control-operations.md) | `done` | Native explicit transaction、format 1→2、Commit Data、Tag、explicit Commit、cursor History、branch/time-travel/diff/patch、resumable Merge Session、rebase/squash/reset/revert/gc | 05、07–08 |
 | [10 Compatibility Closure and Release Hardening](phases/10-compatibility-release.md) | `done` | 100% applicable Profile、10M/100M scale、recovery/migration、跨平台 release | 00–09 |
+| [11 Performance Optimization](phases/11-performance-optimization.md) | `ready` | 物理邻接keyset、query-owned Snapshot、persistent Standard Index base/delta、format3迁移及可重复性能门禁 | 00–10 |
 
 关键依赖原则：**Version-aware graph storage 在 Phase 02 建立，不能拖到后期再 retrofit。** Phase 09 在该 immutable history foundation 上完成 transaction -> Commit 行为：增加 Native explicit transaction，把多个 execution 的最终 net delta 写成一个 Layer/Commit；增加 Merge Session，把长时间 conflict resolution 保存在非历史 operational workspace 中并只在 finalize 形成最终 Merge Commit/ref move；同时增加用户级状态 sidecar/ref 与版本操作，并通过显式 `1 -> 2` migration 增加 Commit Data / Tag / Merge Session storage。这不改变 Phase 02 的 Layer / Commit / Snapshot 核心合同，也不要求重开 Phase 02/05。
 
 ## 5. Phase 完成标准
+
+Phase 11 的Feature顺序与量化验收由其独立计划引用Design §17维护；不在路线总表重复一份延迟阈值。性能基线、SQLite证据及已知测量限制见 [Phase 11性能证据](../research/phase11-performance-evidence.md)。
 
 每个 Phase 的具体 acceptance 在对应文件中。所有 Phase 共同要求：
 
@@ -168,8 +174,12 @@ full repository gates
 - [Phase 08](phases/08-search-ingestion.md)
 - [Phase 09](phases/09-version-control-operations.md)
 - [Phase 10](phases/10-compatibility-release.md)
+- [Phase 11](phases/11-performance-optimization.md)
+- [性能证据与测量限制](../research/phase11-performance-evidence.md)
 
 ## 10. 最终产品完成条件
+
+以下保留Phase00–10的首个功能版本完成标准。新增Phase11另需满足其性能验收与Design §17.1–17.3，不能以基础功能版本已经完成代替性能专项完成。
 
 Lithograph 可以宣告首个完整版本完成，只有以下事实同时成立：
 
