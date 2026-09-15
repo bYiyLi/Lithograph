@@ -126,8 +126,35 @@ function Invoke-LithographProbe {
     }
 }
 
+function Invoke-Phase09Regressions {
+    param(
+        [Parameter(Mandatory = $true)]$Runtime
+    )
+    $previousSqlite3 = $env:LITHOGRAPH_SQLITE3
+    $previousLibDir = $env:SQLITE3_LIB_DIR
+    $previousIncludeDir = $env:SQLITE3_INCLUDE_DIR
+    $previousStatic = $env:SQLITE3_STATIC
+    try {
+        $env:LITHOGRAPH_SQLITE3 = $Runtime.Exe
+        $env:SQLITE3_LIB_DIR = $Runtime.LibDir
+        $env:SQLITE3_INCLUDE_DIR = $Runtime.Include
+        $env:SQLITE3_STATIC = "1"
+        & cargo test --release --locked -p lithograph-core --test phase09_version
+        if ($LASTEXITCODE -ne 0) {
+            throw "Phase 09 version regressions failed with $($Runtime.Exe)"
+        }
+    } finally {
+        $env:LITHOGRAPH_SQLITE3 = $previousSqlite3
+        $env:SQLITE3_LIB_DIR = $previousLibDir
+        $env:SQLITE3_INCLUDE_DIR = $previousIncludeDir
+        $env:SQLITE3_STATIC = $previousStatic
+    }
+}
+
 $minimum = Build-SqliteRuntime -Version "3.45.0" -ArchiveVersion "3450000" -Year "2024" -Sha256 "72887d57a1d8f89f52be38ef84a6353ce8c3ed55ada7864eb944abd9a495e436"
 $current = Build-SqliteRuntime -Version "3.53.4" -ArchiveVersion "3530400" -Year "2026" -Sha256 "0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c"
+
+Invoke-Phase09Regressions -Runtime $minimum
 
 foreach ($runtime in @($minimum, $current)) {
     $loadResult = (& $runtime.Exe -batch -noheader -cmd ".load `"$extensionForSqlite`"" ":memory:" "SELECT json_valid(lithograph_version());").Trim()
