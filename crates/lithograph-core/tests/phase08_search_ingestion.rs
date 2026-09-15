@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -22,8 +22,17 @@ fn csv_fixture(name: &str, contents: &str) -> (PathBuf, String) {
         contents.len()
     ));
     fs::write(&path, contents).expect("write csv fixture");
-    let uri = format!("file://{}", path.display());
+    let uri = local_file_uri(&path);
     (path, uri)
+}
+
+fn local_file_uri(path: &Path) -> String {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if cfg!(windows) {
+        format!("file:///{}", normalized.trim_start_matches('/'))
+    } else {
+        format!("file://{normalized}")
+    }
 }
 
 fn one_shot_http_csv(contents: &'static str) -> (String, thread::JoinHandle<()>) {

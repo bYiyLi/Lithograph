@@ -275,16 +275,37 @@ fn open_source(source: &str) -> QueryResult<OpenedCsvSource> {
 }
 
 fn decode_file_url(value: &str) -> QueryResult<PathBuf> {
-    if value.starts_with('/') {
-        return percent_decode_path(value).map(PathBuf::from);
-    }
-    let (host, path) = value.split_once('/').unwrap_or((value, ""));
-    if !host.is_empty() && host != "localhost" {
-        return Err(QueryError::invalid_argument(
-            "LOAD CSV file:// supports only local files",
-        ));
-    }
-    percent_decode_path(&format!("/{path}")).map(PathBuf::from)
+    let decoded = if value.starts_with('/') {
+        percent_decode_path(value)?
+    } else {
+        let (host, path) = value.split_once('/').unwrap_or((value, ""));
+        if !host.is_empty() && host != "localhost" {
+            return Err(QueryError::invalid_argument(
+                "LOAD CSV file:// supports only local files",
+            ));
+        }
+        percent_decode_path(&format!("/{path}"))?
+    };
+    Ok(local_file_url_path(decoded))
+}
+
+#[cfg(windows)]
+fn local_file_url_path(value: String) -> PathBuf {
+    windows_drive_file_url_path(&value)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(value))
+}
+
+#[cfg(not(windows))]
+fn local_file_url_path(value: String) -> PathBuf {
+    PathBuf::from(value)
+}
+
+#[cfg(any(windows, test))]
+fn windows_drive_file_url_path(value: &str) -> Option<&str> {
+    let path = value.strip_prefix('/')?;
+    let bytes = path.as_bytes();
+    (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':').then_some(path)
 }
 
 fn percent_decode_path(value: &str) -> QueryResult<String> {
@@ -328,4 +349,19 @@ fn load_csv_io_error(message: impl Into<String>) -> QueryError {
 
 fn load_csv_error(message: impl Into<String>) -> QueryError {
     QueryError::new(QueryErrorKind::Resource, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::windows_drive_file_url_path;
+
+    #[test]
+    fn windows_drive_file_url_path_strips_only_standard_drive_prefix() {
+        assert_eq!(
+            windows_drive_file_url_path("/D:/work/phase08.csv"),
+            Some("D:/work/phase08.csv")
+        );
+        assert_eq!(windows_drive_file_url_path("/tmp/phase08.csv"), None);
+        assert_eq!(windows_drive_file_url_path("//server/share.csv"), None);
+    }
 }

@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::env;
 use std::error::Error;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 #[derive(Serialize)]
@@ -148,7 +148,7 @@ fn check_rows_rejects_transaction_and_external_io(
 fn check_scalar_load_csv(fixture: &FileDatabaseFixture, load: &str) -> Result<(), Box<dyn Error>> {
     let csv = fixture.directory().join("phase08.csv");
     fs::write(&csv, "name\nAlice\nBob\n")?;
-    let uri = format!("file://{}", csv.display());
+    let uri = local_file_uri(&csv);
     let query =
         format!("LOAD CSV WITH HEADERS FROM '{uri}' AS row RETURN row.name ORDER BY row.name");
     let result = scalar_query(fixture, load, &query)?;
@@ -187,6 +187,15 @@ fn scalar_query(
 
 fn sql_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+fn local_file_uri(path: &Path) -> String {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if cfg!(windows) {
+        format!("file:///{}", normalized.trim_start_matches('/'))
+    } else {
+        format!("file://{normalized}")
+    }
 }
 
 fn require(condition: bool, message: &str) -> Result<(), Box<dyn Error>> {
