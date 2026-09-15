@@ -13,18 +13,45 @@ Lithograph 为 SQLite 提供版本化 Property Graph 数据库能力。
 - **SQLite 原生部署**：作为 loadable extension 使用同一个 SQLite database file，不需要独立数据库 Server。
 - **大规模单机图**：版本感知存储、索引化邻接访问、流式查询执行与 checkpointed history 面向大规模本地图数据设计。
 
-## 示例
+## 本地构建与 Quickstart
 
-```cypher
-CREATE (alice:Person {name: 'Alice'})
-CREATE (company:Company {name: 'OpenAI'})
-CREATE (alice)-[:WORKS_AT]->(company)
+当前仓库尚未发布可用于生产的 Release；本地试用需要 Rust 1.98.1，以及支持 loadable extension 的 SQLite 3.45.0 或更高版本。
+
+先构建 release extension：
+
+```sh
+cargo build --locked --release -p lithograph-extension
 ```
 
-```cypher
-MATCH (person:Person)-[:WORKS_AT]->(company:Company)
-RETURN person.name, company.name
+Cargo 生成的 shared library 位于 `target/release/`：Linux 为 `liblithograph.so`，macOS 为 `liblithograph.dylib`，Windows 为 `lithograph.dll`。下面以 SQLite CLI 为例，先打开一个 database：
+
+```sh
+sqlite3 lithograph-demo.sqlite
 ```
+
+进入 SQLite CLI 后，`<extension>` 替换为当前平台的实际文件路径：
+
+```text
+.load <extension>
+SELECT lithograph_init();
+```
+
+`.load` 只注册 Lithograph API；`lithograph_init()` 才会在当前 SQLite database 中初始化或迁移 Lithograph storage，并建立空图的 Root Commit 与默认 `main` Branch。
+
+通过 `lithograph()` 执行会修改图状态的 Cypher：
+
+```sql
+SELECT lithograph('CREATE (:Person {name: ''Alice''}) FINISH');
+```
+
+只读结果较大时，使用流式的 `lithograph_rows()`：
+
+```sql
+SELECT row
+FROM lithograph_rows('MATCH (p:Person) RETURN p.name');
+```
+
+上述流程已在当前 macOS arm64 release build 上以真实 SQLite CLI 验证；Phase 10 release gate 另外覆盖 SQLite 3.45.0 minimum 与 3.53.4 release-current runtime。其它 host application 需要在目标 SQLite connection 上启用 loadable extension，并通过 SQLite 官方 extension-loading API 加载同一个 shared library。
 
 同一张图可以在不同 Commit 上查询，也可以在不同 Branch 上独立演化，而不需要复制 SQLite 数据库文件。
 

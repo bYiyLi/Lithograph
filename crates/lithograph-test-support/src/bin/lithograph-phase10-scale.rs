@@ -244,19 +244,19 @@ fn install_scale_schema(
     for (name, query) in [
         (
             "property_type_constraint",
-            "CREATE CONSTRAINT scale_id_type FOR (n:ScaleNode) REQUIRE n.scaleId IS :: INTEGER",
+            "CREATE CONSTRAINT scale_id_type IF NOT EXISTS FOR (n:ScaleNode) REQUIRE n.scaleId IS :: INTEGER",
         ),
         (
             "fulltext_index",
-            "CREATE FULLTEXT INDEX scale_text FOR (n:ScaleDocument) ON EACH [n.text]",
+            "CREATE FULLTEXT INDEX scale_text IF NOT EXISTS FOR (n:ScaleDocument) ON EACH [n.text]",
         ),
         (
             "vector_index",
-            "CREATE VECTOR INDEX scale_embedding FOR (n:ScaleDocument) ON (n.embedding) OPTIONS {indexConfig:{`vector.dimensions`:2, `vector.similarity_function`:'cosine'}}",
+            "CREATE VECTOR INDEX scale_embedding IF NOT EXISTS FOR (n:ScaleDocument) ON (n.embedding) OPTIONS {indexConfig:{`vector.dimensions`:2, `vector.similarity_function`:'cosine'}}",
         ),
         (
             "range_index",
-            "CREATE RANGE INDEX scale_id FOR (n:ScaleNode) ON (n.scaleId)",
+            "CREATE RANGE INDEX scale_id IF NOT EXISTS FOR (n:ScaleNode) ON (n.scaleId)",
         ),
     ] {
         let started = Instant::now();
@@ -838,7 +838,7 @@ fn existing_scale_fixture(
     relationship_count: u64,
     requested_hub_relationships: u64,
 ) -> Result<ScaleFixture, Box<dyn Error>> {
-    let commit = branch_head(connection, "main")?;
+    let commit = scale_fixture_checkpoint(connection)?;
     let root = root_commit(connection)?;
     let commit_bytes = commit.as_bytes().as_slice();
     let (first_node, first_relationship) =
@@ -867,6 +867,17 @@ fn existing_scale_fixture(
         link_type,
         hub_outgoing_count,
     })
+}
+
+fn scale_fixture_checkpoint(
+    connection: &Connection,
+) -> Result<lithograph_core::storage::HashId, Box<dyn Error>> {
+    let checkpoint: Vec<u8> = connection.query_row(
+        "SELECT commit_id FROM main._lithograph_checkpoints ORDER BY commit_id LIMIT 1",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(lithograph_core::storage::HashId::from_slice(&checkpoint)?)
 }
 
 fn verify_existing_dimensions(

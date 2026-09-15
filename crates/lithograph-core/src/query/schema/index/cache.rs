@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
-use rusqlite::{Connection, params, types::Value as SqlValue};
+use rusqlite::{Connection, Statement, params, types::Value as SqlValue};
 
 use crate::cypher::{CypherComparison, Value, cypher_compare, cypher_equals};
 use crate::storage::{
@@ -25,6 +25,13 @@ const RANGE_FAMILY_TIME: i64 = 6;
 const RANGE_FAMILY_LOCAL_DATETIME: i64 = 7;
 const RANGE_FAMILY_ZONED_DATETIME: i64 = 8;
 const INDEX_BUILD_PAGE_SIZE: usize = 4_096;
+const CACHE_VALUE_INSERT_SQL: &str = "INSERT OR REPLACE INTO temp._lithograph_standard_index_cache\
+     (snapshot_hash, index_name, owner_kind, owner_id, property_ordinal, token_id, value_blob, equality_blob, text_value,\
+      sort_family, sort_number, sort_a, sort_b, sort_c, sort_text, point_crs, point_x, point_y, point_z)\
+     VALUES(?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)";
+const CACHE_LOOKUP_INSERT_SQL: &str = "INSERT OR REPLACE INTO temp._lithograph_standard_index_cache\
+     (snapshot_hash, index_name, owner_kind, owner_id, property_ordinal, token_id, value_blob, text_value)\
+     VALUES(?1, ?2, ?3, ?4, 0, ?5, NULL, NULL)";
 
 #[derive(Debug, Clone)]
 enum RangeOrderKey {
@@ -404,14 +411,8 @@ fn scan_range_bounds_page(
          WHERE snapshot_hash = ? AND index_name = ? AND owner_kind = ? \
          AND property_ordinal = ? AND owner_id > ? AND sort_family = ?"
         .to_owned();
-    let mut parameters = vec![
-        SqlValue::Blob(snapshot.cache_identity().as_bytes().to_vec()),
-        SqlValue::Text(index_name.to_owned()),
-        SqlValue::Integer(owner_kind),
-        SqlValue::Integer(i64::try_from(ordinal).unwrap_or(i64::MAX)),
-        SqlValue::Integer(after),
-        SqlValue::Integer(RANGE_FAMILY_NUMBER),
-    ];
+    let mut parameters = index_scan_parameters(snapshot, index_name, owner_kind, ordinal, after);
+    parameters.push(SqlValue::Integer(RANGE_FAMILY_NUMBER));
     if let Some((value, inclusive)) = lower {
         sql.push_str(if inclusive {
             " AND sort_number >= ?"
@@ -438,6 +439,22 @@ fn scan_range_bounds_page(
         .then(|| items.last().copied())
         .flatten();
     Ok(Some(ScanPage { items, next_after }))
+}
+
+fn index_scan_parameters(
+    snapshot: &Snapshot<'_>,
+    index_name: &str,
+    owner_kind: i64,
+    ordinal: usize,
+    after: i64,
+) -> Vec<SqlValue> {
+    vec![
+        SqlValue::Blob(snapshot.cache_identity().as_bytes().to_vec()),
+        SqlValue::Text(index_name.to_owned()),
+        SqlValue::Integer(owner_kind),
+        SqlValue::Integer(i64::try_from(ordinal).unwrap_or(i64::MAX)),
+        SqlValue::Integer(after),
+    ]
 }
 
 fn numeric_range_value(value: &Value) -> Option<SqlValue> {
@@ -757,14 +774,8 @@ fn scan_point_distance_candidates(
     let coordinates = center.coordinates();
     let z_lower = coordinates.get(2).map(|value| *value - radius);
     let z_upper = coordinates.get(2).map(|value| *value + radius);
-    let mut parameters = vec![
-        SqlValue::Blob(snapshot.cache_identity().as_bytes().to_vec()),
-        SqlValue::Text(index_name.to_owned()),
-        SqlValue::Integer(owner_kind),
-        SqlValue::Integer(i64::try_from(ordinal).unwrap_or(i64::MAX)),
-        SqlValue::Integer(after),
-        SqlValue::Integer(i64::from(center.srid())),
-    ];
+    let mut parameters = index_scan_parameters(snapshot, index_name, owner_kind, ordinal, after);
+    parameters.push(SqlValue::Integer(i64::from(center.srid())));
     let sql = if center.crs().starts_with("wgs-84") {
         const EARTH_RADIUS_METERS: f64 = 6_378_140.0;
         let minimum_surface_radius = if coordinates.len() == 3 {
@@ -1039,6 +1050,7 @@ fn ensure_index_cache(snapshot: &Snapshot<'_>, index: &IndexDefinition) -> Query
         |row| row.get(0),
     )?;
     if exists == 1 {
+        ensure_cache_indexes(connection)?;
         return Ok(());
     }
     connection.execute(
@@ -1046,7 +1058,9 @@ fn ensure_index_cache(snapshot: &Snapshot<'_>, index: &IndexDefinition) -> Query
          WHERE snapshot_hash = ?1 AND index_name = ?2",
         params![snapshot.cache_identity().as_bytes().as_slice(), index.name],
     )?;
+    drop_cache_indexes(connection)?;
     build_index_cache(snapshot, index)?;
+    ensure_cache_indexes(connection)?;
     connection.execute(
         "INSERT OR REPLACE INTO temp._lithograph_standard_index_cache_meta \
          (snapshot_hash, index_name, complete) VALUES(?1, ?2, 1)",
@@ -1066,8 +1080,14 @@ fn ensure_cache_tables(connection: &Connection) -> QueryResult<()> {
              value_blob BLOB, equality_blob BLOB, text_value TEXT, sort_family INTEGER, sort_number NUMERIC,\
              sort_a INTEGER, sort_b INTEGER, sort_c INTEGER, sort_text TEXT,\
              point_crs INTEGER, point_x REAL, point_y REAL, point_z REAL,\
-             PRIMARY KEY(snapshot_hash, index_name, owner_kind, owner_id, property_ordinal)) WITHOUT ROWID;\
-         CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_value \
+             PRIMARY KEY(snapshot_hash, index_name, owner_kind, owner_id, property_ordinal)) WITHOUT ROWID;",
+    )?;
+    Ok(())
+}
+
+fn ensure_cache_indexes(connection: &Connection) -> QueryResult<()> {
+    connection.execute_batch(
+        "CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_value \
              ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, value_blob, owner_id);\
          CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_equality \
              ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, equality_blob, owner_id);\
@@ -1085,6 +1105,21 @@ fn ensure_cache_tables(connection: &Connection) -> QueryResult<()> {
              ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, point_crs, point_y, point_x, point_z, owner_id);\
          CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_token \
              ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, token_id, owner_id);",
+    )?;
+    Ok(())
+}
+
+fn drop_cache_indexes(connection: &Connection) -> QueryResult<()> {
+    connection.execute_batch(
+        "DROP INDEX IF EXISTS temp._lithograph_standard_index_cache_value;\
+         DROP INDEX IF EXISTS temp._lithograph_standard_index_cache_equality;\
+         DROP INDEX IF EXISTS temp._lithograph_standard_index_cache_text;\
+         DROP INDEX IF EXISTS temp._lithograph_standard_index_cache_range_number;\
+         DROP INDEX IF EXISTS temp._lithograph_standard_index_cache_range_text;\
+         DROP INDEX IF EXISTS temp._lithograph_standard_index_cache_range_tuple;\
+         DROP INDEX IF EXISTS temp._lithograph_standard_index_cache_point_x;\
+         DROP INDEX IF EXISTS temp._lithograph_standard_index_cache_point_y;\
+         DROP INDEX IF EXISTS temp._lithograph_standard_index_cache_token;",
     )?;
     Ok(())
 }
@@ -1107,22 +1142,20 @@ fn build_relationship_lookup_cache(
     snapshot: &Snapshot<'_>,
     index: &IndexDefinition,
 ) -> QueryResult<()> {
+    let mut insert = snapshot
+        .connection_for_query()
+        .prepare(CACHE_LOOKUP_INSERT_SQL)?;
     let mut after = 0_i64;
     loop {
         let page = snapshot.scan_relationships_after(after, INDEX_BUILD_PAGE_SIZE)?;
         for relationship in page.items {
-            snapshot.connection_for_query().execute(
-            "INSERT OR REPLACE INTO temp._lithograph_standard_index_cache\
-             (snapshot_hash, index_name, owner_kind, owner_id, property_ordinal, token_id, value_blob, text_value)\
-             VALUES(?1, ?2, ?3, ?4, 0, ?5, NULL, NULL)",
-            params![
+            insert.execute(params![
                 snapshot.cache_identity().as_bytes().as_slice(),
                 index.name,
                 RELATIONSHIP_OWNER_KIND,
                 relationship.id,
                 relationship.type_id,
-            ],
-            )?;
+            ])?;
         }
         let Some(next_after) = page.next_after else {
             break;
@@ -1144,11 +1177,18 @@ fn build_node_property_cache(
     let Some(keys) = property_key_ids(snapshot, properties)? else {
         return Ok(());
     };
+    let mut insert = snapshot
+        .connection_for_query()
+        .prepare(CACHE_VALUE_INSERT_SQL)?;
     let mut after = 0_i64;
     loop {
-        let page = snapshot.scan_label_after(label_id, after, INDEX_BUILD_PAGE_SIZE)?;
-        for node in page.items {
-            insert_owner_values(snapshot, index, NODE_OWNER_KIND, node, &keys)?;
+        let page =
+            snapshot.label_property_values_after(label_id, &keys, after, INDEX_BUILD_PAGE_SIZE)?;
+        for (node, values) in page.items {
+            let Some(values) = values.into_iter().collect::<Option<Vec<_>>>() else {
+                continue;
+            };
+            insert_owner_cache_values(snapshot, index, NODE_OWNER_KIND, node, values, &mut insert)?;
         }
         let Some(next_after) = page.next_after else {
             break;
@@ -1172,6 +1212,9 @@ fn build_relationship_property_cache(
     let Some(keys) = property_key_ids(snapshot, properties)? else {
         return Ok(());
     };
+    let mut insert = snapshot
+        .connection_for_query()
+        .prepare(CACHE_VALUE_INSERT_SQL)?;
     let mut after = 0_i64;
     loop {
         let page = snapshot.scan_relationships_after(after, INDEX_BUILD_PAGE_SIZE)?;
@@ -1183,6 +1226,7 @@ fn build_relationship_property_cache(
                     RELATIONSHIP_OWNER_KIND,
                     relationship.id,
                     &keys,
+                    &mut insert,
                 )?;
             }
         }
@@ -1215,6 +1259,7 @@ fn insert_owner_values(
     owner_kind: i64,
     owner_id: i64,
     keys: &[i64],
+    insert: &mut Statement<'_>,
 ) -> QueryResult<()> {
     let storage_owner = if owner_kind == NODE_OWNER_KIND {
         OwnerKind::Node
@@ -1226,13 +1271,29 @@ fn insert_owner_values(
         let Some(value) = snapshot.property(storage_owner, owner_id, *key)? else {
             return Ok(());
         };
-        if !cache_value_supported(index.kind, &value) {
-            return Ok(());
-        }
         values.push(value);
     }
+    insert_owner_cache_values(snapshot, index, owner_kind, owner_id, values, insert)
+}
+
+fn insert_owner_cache_values(
+    snapshot: &Snapshot<'_>,
+    index: &IndexDefinition,
+    owner_kind: i64,
+    owner_id: i64,
+    values: Vec<storage::PropertyValue>,
+    insert: &mut Statement<'_>,
+) -> QueryResult<()> {
+    if values
+        .iter()
+        .any(|value| !cache_value_supported(index.kind, value))
+    {
+        return Ok(());
+    }
     for (ordinal, value) in values.into_iter().enumerate() {
-        insert_cache_value(snapshot, index, owner_kind, owner_id, ordinal, value)?;
+        insert_cache_value(
+            snapshot, index, owner_kind, owner_id, ordinal, value, insert,
+        )?;
     }
     Ok(())
 }
@@ -1244,6 +1305,7 @@ fn insert_cache_value(
     owner_id: i64,
     ordinal: usize,
     value: storage::PropertyValue,
+    insert: &mut Statement<'_>,
 ) -> QueryResult<()> {
     let value_blob = value.canonical_bytes()?;
     let equality_blob = property_equality_key(&value)?;
@@ -1293,32 +1355,26 @@ fn insert_cache_value(
         }) => (Some(family), None, Some(a), Some(b), Some(c), Some(text)),
         None => (None, None, None, None, None, None),
     };
-    snapshot.connection_for_query().execute(
-        "INSERT OR REPLACE INTO temp._lithograph_standard_index_cache\
-         (snapshot_hash, index_name, owner_kind, owner_id, property_ordinal, token_id, value_blob, equality_blob, text_value,\
-          sort_family, sort_number, sort_a, sort_b, sort_c, sort_text, point_crs, point_x, point_y, point_z)\
-         VALUES(?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
-        params![
-            snapshot.cache_identity().as_bytes().as_slice(),
-            index.name,
-            owner_kind,
-            owner_id,
-            i64::try_from(ordinal).unwrap_or(i64::MAX),
-            value_blob,
-            equality_blob,
-            text_value,
-            sort_family,
-            sort_number,
-            sort_a,
-            sort_b,
-            sort_c,
-            sort_text,
-            point_crs,
-            point_x,
-            point_y,
-            point_z,
-        ],
-    )?;
+    insert.execute(params![
+        snapshot.cache_identity().as_bytes().as_slice(),
+        index.name,
+        owner_kind,
+        owner_id,
+        i64::try_from(ordinal).unwrap_or(i64::MAX),
+        value_blob,
+        equality_blob,
+        text_value,
+        sort_family,
+        sort_number,
+        sort_a,
+        sort_b,
+        sort_c,
+        sort_text,
+        point_crs,
+        point_x,
+        point_y,
+        point_z,
+    ])?;
     Ok(())
 }
 

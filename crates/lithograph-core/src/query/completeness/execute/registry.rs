@@ -515,24 +515,14 @@ impl ReadExecutor<'_, '_> {
 
     fn current_labels(&self) -> QueryResult<Vec<BTreeMap<String, Value>>> {
         let mut values = BTreeSet::new();
-        let mut after = 0_i64;
-        loop {
-            let page = self.snapshot.scan_nodes_after(after, 4_096)?;
-            for node in page.items {
-                if !self.graph_view.visible_node(&self.snapshot, node)? {
-                    continue;
-                }
-                for label in self.snapshot.labels(node)? {
-                    if let Some(name) = storage::label_name(self.connection, label)? {
-                        values.insert(name);
-                    }
+        self.visit_visible_nodes(|node| {
+            for label in self.snapshot.labels(node)? {
+                if let Some(name) = storage::label_name(self.connection, label)? {
+                    values.insert(name);
                 }
             }
-            let Some(next_after) = page.next_after else {
-                break;
-            };
-            after = next_after;
-        }
+            Ok(())
+        })?;
         Ok(single_column_rows("label", values))
     }
 
@@ -561,29 +551,40 @@ impl ReadExecutor<'_, '_> {
 
     fn current_property_keys(&self) -> QueryResult<Vec<BTreeMap<String, Value>>> {
         let mut values = BTreeSet::new();
-        let mut node_after = 0_i64;
+        self.collect_node_property_keys(&mut values)?;
+        self.collect_relationship_property_keys(&mut values)?;
+        Ok(single_column_rows("propertyKey", values))
+    }
+
+    fn collect_node_property_keys(&self, values: &mut BTreeSet<String>) -> QueryResult<()> {
+        self.visit_visible_nodes(|node| {
+            self.collect_owner_property_keys(OwnerKind::Node, node, values)
+        })
+    }
+
+    fn visit_visible_nodes(
+        &self,
+        mut visit: impl FnMut(i64) -> QueryResult<()>,
+    ) -> QueryResult<()> {
+        let mut after = 0_i64;
         loop {
-            let page = self.snapshot.scan_nodes_after(node_after, 4_096)?;
+            let page = self.snapshot.scan_nodes_after(after, 4_096)?;
             for node in page.items {
-                if !self.graph_view.visible_node(&self.snapshot, node)? {
-                    continue;
-                }
-                for (key, _) in self.snapshot.properties(OwnerKind::Node, node)? {
-                    if let Some(name) = storage::property_key_name(self.connection, key)? {
-                        values.insert(name);
-                    }
+                if self.graph_view.visible_node(&self.snapshot, node)? {
+                    visit(node)?;
                 }
             }
-            let Some(next_after) = page.next_after else {
-                break;
-            };
-            node_after = next_after;
+            match page.next_after {
+                Some(next_after) => after = next_after,
+                None => return Ok(()),
+            }
         }
-        let mut relationship_after = 0_i64;
+    }
+
+    fn collect_relationship_property_keys(&self, values: &mut BTreeSet<String>) -> QueryResult<()> {
+        let mut after = 0_i64;
         loop {
-            let page = self
-                .snapshot
-                .scan_relationships_after(relationship_after, 4_096)?;
+            let page = self.snapshot.scan_relationships_after(after, 4_096)?;
             for relationship in page.items {
                 if !self
                     .graph_view
@@ -591,21 +592,28 @@ impl ReadExecutor<'_, '_> {
                 {
                     continue;
                 }
-                for (key, _) in self
-                    .snapshot
-                    .properties(OwnerKind::Relationship, relationship.id)?
-                {
-                    if let Some(name) = storage::property_key_name(self.connection, key)? {
-                        values.insert(name);
-                    }
-                }
+                self.collect_owner_property_keys(OwnerKind::Relationship, relationship.id, values)?;
             }
             let Some(next_after) = page.next_after else {
                 break;
             };
-            relationship_after = next_after;
+            after = next_after;
         }
-        Ok(single_column_rows("propertyKey", values))
+        Ok(())
+    }
+
+    fn collect_owner_property_keys(
+        &self,
+        owner_kind: OwnerKind,
+        owner_id: i64,
+        values: &mut BTreeSet<String>,
+    ) -> QueryResult<()> {
+        for (key, _) in self.snapshot.properties(owner_kind, owner_id)? {
+            if let Some(name) = storage::property_key_name(self.connection, key)? {
+                values.insert(name);
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn execute_show(&mut self, clause: &AstNode, input: RowSet) -> QueryResult<RowSet> {

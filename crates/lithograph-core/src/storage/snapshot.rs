@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Statement, params};
 
 use super::checkpoint::{SnapshotStatistics, load_checkpoint_statistics};
 use super::layer::{
@@ -11,7 +11,7 @@ use super::layer::{
 use super::property::PropertyColumns;
 use super::{
     HashId, LabelId, NodeId, OwnerKind, PropertyKeyId, PropertyValue, RelationshipId,
-    RelationshipTypeId, SchemaState, StorageError, StorageResult,
+    RelationshipTypeId, ScanPage, SchemaState, StorageError, StorageResult,
 };
 
 #[derive(Clone, Default)]
@@ -271,6 +271,91 @@ impl<'connection> Snapshot<'connection> {
             return Ok(None);
         };
         checkpoint_property(self.connection, checkpoint, owner_kind, owner_id, key_id)
+    }
+
+    /// Returns one bounded label scan page together with the requested visible
+    /// property values while reusing one checkpoint statement for the page.
+    pub(crate) fn label_property_values_after(
+        &self,
+        label_id: LabelId,
+        key_ids: &[PropertyKeyId],
+        after: NodeId,
+        limit: usize,
+    ) -> StorageResult<ScanPage<(NodeId, Vec<Option<PropertyValue>>)>> {
+        let page = self.scan_label_after(label_id, after, limit)?;
+        let mut checkpoint_statement = self
+            .checkpoint
+            .map(|_| {
+                self.connection.prepare(
+                    "SELECT type_tag, int_value, real_value, text_value, blob_value, aux_value \
+                     FROM main._lithograph_cp_properties \
+                     WHERE commit_id = ?1 AND owner_kind = ?2 AND owner_id = ?3 AND key_id = ?4",
+                )
+            })
+            .transpose()?;
+        let mut items = Vec::with_capacity(page.items.len());
+        for node_id in page.items {
+            let values = self.node_property_values_with_statement(
+                node_id,
+                key_ids,
+                checkpoint_statement.as_mut(),
+            )?;
+            items.push((node_id, values));
+        }
+        Ok(ScanPage {
+            items,
+            next_after: page.next_after,
+        })
+    }
+
+    fn node_property_values_with_statement(
+        &self,
+        node_id: NodeId,
+        key_ids: &[PropertyKeyId],
+        mut checkpoint_statement: Option<&mut Statement<'_>>,
+    ) -> StorageResult<Vec<Option<PropertyValue>>> {
+        let mut values = Vec::with_capacity(key_ids.len());
+        for key_id in key_ids {
+            if let Some(delta) = self
+                .overlay
+                .properties
+                .get(&(OwnerKind::Node, node_id, *key_id))
+            {
+                values.push(delta.value.clone());
+                continue;
+            }
+            values.push(self.checkpoint_property_with_statement(
+                node_id,
+                *key_id,
+                checkpoint_statement.as_deref_mut(),
+            )?);
+        }
+        Ok(values)
+    }
+
+    fn checkpoint_property_with_statement(
+        &self,
+        node_id: NodeId,
+        key_id: PropertyKeyId,
+        checkpoint_statement: Option<&mut Statement<'_>>,
+    ) -> StorageResult<Option<PropertyValue>> {
+        let Some(checkpoint) = self.checkpoint else {
+            return Ok(None);
+        };
+        let statement = checkpoint_statement
+            .ok_or_else(|| StorageError::corrupt("checkpoint property statement is unavailable"))?;
+        let columns = statement
+            .query_row(
+                params![
+                    checkpoint.as_bytes().as_slice(),
+                    OwnerKind::Node as i64,
+                    node_id,
+                    key_id,
+                ],
+                property_columns_from_row,
+            )
+            .optional()?;
+        columns.map(|columns| columns.to_value()).transpose()
     }
 
     /// Returns one visible Relationship by database-wide identity.
@@ -1030,19 +1115,21 @@ fn checkpoint_property(
         .query_row(
             "SELECT type_tag, int_value, real_value, text_value, blob_value, aux_value FROM main._lithograph_cp_properties WHERE commit_id = ?1 AND owner_kind = ?2 AND owner_id = ?3 AND key_id = ?4",
             params![checkpoint.as_bytes().as_slice(), owner_kind as i64, owner_id, key_id],
-            |row| {
-                Ok(PropertyColumns {
-                    type_tag: row.get(0)?,
-                    int_value: row.get(1)?,
-                    real_value: row.get(2)?,
-                    text_value: row.get(3)?,
-                    blob_value: row.get(4)?,
-                    aux_value: row.get(5)?,
-                })
-            },
+            property_columns_from_row,
         )
         .optional()?;
     columns.map(|columns| columns.to_value()).transpose()
+}
+
+fn property_columns_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PropertyColumns> {
+    Ok(PropertyColumns {
+        type_tag: row.get(0)?,
+        int_value: row.get(1)?,
+        real_value: row.get(2)?,
+        text_value: row.get(3)?,
+        blob_value: row.get(4)?,
+        aux_value: row.get(5)?,
+    })
 }
 
 impl Overlay {

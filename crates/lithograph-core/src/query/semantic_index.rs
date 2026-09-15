@@ -1075,13 +1075,10 @@ fn validate_query_vector(vector: &[f32], similarity: &str) -> QueryResult<()> {
             "SEARCH query vector must contain finite numeric values",
         ));
     }
-    if similarity == "cosine" {
-        let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
-        if norm == 0.0 || !norm.is_finite() {
-            return Err(QueryError::semantic(
-                "cosine SEARCH query vector must have a finite non-zero norm",
-            ));
-        }
+    if similarity == "cosine" && !has_finite_nonzero_norm(vector) {
+        return Err(QueryError::semantic(
+            "cosine SEARCH query vector must have a finite non-zero norm",
+        ));
     }
     Ok(())
 }
@@ -1094,13 +1091,15 @@ fn stored_vector_valid(vector: &[f32], index: &IndexDefinition) -> QueryResult<b
     if vector.is_empty() || vector.iter().any(|value| !value.is_finite()) {
         return Ok(false);
     }
-    if similarity == "cosine" {
-        let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
-        if norm == 0.0 || !norm.is_finite() {
-            return Ok(false);
-        }
+    if similarity == "cosine" && !has_finite_nonzero_norm(vector) {
+        return Ok(false);
     }
     Ok(true)
+}
+
+fn has_finite_nonzero_norm(vector: &[f32]) -> bool {
+    let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+    norm != 0.0 && norm.is_finite()
 }
 
 fn vector_similarity_numbers(left: &[f32], right: &[f32], similarity: &str) -> QueryResult<f64> {

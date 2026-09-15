@@ -96,23 +96,33 @@ function Build-SqliteRuntime {
         Exe = $sqliteExe
         Obj = $sqliteObj
         Include = $sourceDir
+        LibDir = $runtimeRoot
     }
 }
 
 function Invoke-LithographProbe {
     param(
-        [Parameter(Mandatory = $true)][string]$SqliteExe,
+        [Parameter(Mandatory = $true)]$Runtime,
         [Parameter(Mandatory = $true)][string]$Probe
     )
-    $previous = $env:LITHOGRAPH_SQLITE3
+    $previousSqlite3 = $env:LITHOGRAPH_SQLITE3
+    $previousLibDir = $env:SQLITE3_LIB_DIR
+    $previousIncludeDir = $env:SQLITE3_INCLUDE_DIR
+    $previousStatic = $env:SQLITE3_STATIC
     try {
-        $env:LITHOGRAPH_SQLITE3 = $SqliteExe
+        $env:LITHOGRAPH_SQLITE3 = $Runtime.Exe
+        $env:SQLITE3_LIB_DIR = $Runtime.LibDir
+        $env:SQLITE3_INCLUDE_DIR = $Runtime.Include
+        $env:SQLITE3_STATIC = "1"
         & cargo run --locked --quiet -p lithograph-test-support --bin $Probe -- $extension
         if ($LASTEXITCODE -ne 0) {
-            throw "$Probe failed with $SqliteExe"
+            throw "$Probe failed with $($Runtime.Exe)"
         }
     } finally {
-        $env:LITHOGRAPH_SQLITE3 = $previous
+        $env:LITHOGRAPH_SQLITE3 = $previousSqlite3
+        $env:SQLITE3_LIB_DIR = $previousLibDir
+        $env:SQLITE3_INCLUDE_DIR = $previousIncludeDir
+        $env:SQLITE3_STATIC = $previousStatic
     }
 }
 
@@ -138,7 +148,7 @@ foreach ($probe in @(
     "lithograph-phase08",
     "lithograph-phase09"
 )) {
-    Invoke-LithographProbe -SqliteExe $minimum.Exe -Probe $probe
+    Invoke-LithographProbe -Runtime $minimum -Probe $probe
 }
 foreach ($probe in @(
     "lithograph-sqlite-probe",
@@ -146,20 +156,29 @@ foreach ($probe in @(
     "lithograph-phase04",
     "lithograph-phase05"
 )) {
-    Invoke-LithographProbe -SqliteExe $current.Exe -Probe $probe
+    Invoke-LithographProbe -Runtime $current -Probe $probe
 }
 
 if ($InteropFixture) {
     $fixture = (Resolve-Path $InteropFixture).Path
-    $previous = $env:LITHOGRAPH_SQLITE3
+    $previousSqlite3 = $env:LITHOGRAPH_SQLITE3
+    $previousLibDir = $env:SQLITE3_LIB_DIR
+    $previousIncludeDir = $env:SQLITE3_INCLUDE_DIR
+    $previousStatic = $env:SQLITE3_STATIC
     try {
         $env:LITHOGRAPH_SQLITE3 = $current.Exe
+        $env:SQLITE3_LIB_DIR = $current.LibDir
+        $env:SQLITE3_INCLUDE_DIR = $current.Include
+        $env:SQLITE3_STATIC = "1"
         & cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase10-storage-fixture -- verify $fixture $extension
         if ($LASTEXITCODE -ne 0) {
             throw "cross-platform storage interoperability fixture failed"
         }
     } finally {
-        $env:LITHOGRAPH_SQLITE3 = $previous
+        $env:LITHOGRAPH_SQLITE3 = $previousSqlite3
+        $env:SQLITE3_LIB_DIR = $previousLibDir
+        $env:SQLITE3_INCLUDE_DIR = $previousIncludeDir
+        $env:SQLITE3_STATIC = $previousStatic
     }
 }
 
