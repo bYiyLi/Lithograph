@@ -57,11 +57,11 @@ FROM lithograph_rows('MATCH (p:Person) RETURN p.name');
 
 ## 项目状态
 
-Lithograph 当前已经完成产品与技术设计、开发规范、可执行开发计划，以及 Phase 00–09。现有实现已具备标准 SQLite loadable-extension / Native ABI boundary、version-aware immutable storage、Graph View、Cypher 25 parser/type/value、真实 read planner/executor、mutation/Commit path、versioned Graph Type/Constraint、lookup/range/text/point/full-text/vector index、`SEARCH`、`LOAD CSV`、Cypher transaction batching，以及 Branch/Tag/Commit Data/Diff/Patch/Merge/Rebase/Squash/Reset/Revert/GC 等完整 Version operations。Phase 10 的本地 compatibility、recovery、10M Node / 100M Relationship scale、release artifact runtime 与 architecture/security hardening 已完成；当前仍需完成 Linux/macOS/Windows 六目标 hosted artifact matrix 才能关闭 Phase 10。目前没有可用于生产的 Release。
+Lithograph 当前已经完成产品与技术设计、开发规范、可执行开发计划，以及 Phase 00–10。现有实现已具备标准 SQLite loadable-extension / Native ABI boundary、version-aware immutable storage、Graph View、Cypher 25 parser/type/value、真实 read planner/executor、mutation/Commit path、versioned Graph Type/Constraint、lookup/range/text/point/full-text/vector index、`SEARCH`、`LOAD CSV`、Cypher transaction batching，以及 Branch/Tag/Commit Data/Diff/Patch/Merge/Rebase/Squash/Reset/Revert/GC 等完整 Version operations。Phase 10 已完成 compatibility、recovery/migration、10M Node / 100M Relationship scale、architecture/security hardening，并通过 Linux x64/arm64、macOS x64/arm64、Windows x64/arm64 六目标 hosted release artifact acceptance。当前开发计划 Phase 00–10 全部完成；仓库尚未发布正式 Release。
 
 - [技术设计](docs/design.md)
 - [开发计划](docs/development/README.md)
-- 当前开发阶段：Phase 00–09 `done`，Phase 10 `in_progress`
+- 当前开发阶段：Phase 00–10 `done`
 
 ## 许可
 

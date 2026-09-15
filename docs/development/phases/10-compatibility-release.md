@@ -1,6 +1,6 @@
 # Phase 10：Compatibility Closure and Release Hardening
 
-**状态：`in_progress`**
+**状态：`done`**
 
 ## 1. 目标
 
@@ -144,18 +144,18 @@ Review：
 
 ## 4.1 Current Implementation / Evidence
 
-Phase 10 的本地 compatibility、recovery、scale、release-artifact smoke 与 final review 已闭合；Phase 仍保持 `in_progress`，因为六目标 hosted release artifact matrix 尚未在当前 worktree 上完成：
+Phase 10 的 compatibility、recovery、scale、release-artifact、cross-platform matrix 与 final review 已全部闭合：
 
 - `phase10_hardening` 使用 deterministic generated/property fixtures 覆盖 parser fail-closed、recursive Lithograph JSON value round-trip、Layer canonicalization/hash permutation、`layer_between` replay equivalence、public diff/patch forward+inverse algebra，以及 checkpoint materialization 与 Snapshot equivalence；当前 **6/6** 通过。
 - `phase10_compatibility` 当前 **4/4** 通过：mutating / Version Procedure `EXPLAIN` 完成 validation + logical/physical planning 且不产生 graph/ref side effect；`PROFILE` 与普通 execution 返回相同 rows，并通过 shared serializer 暴露 query-level 与 per-operator `rows` / `dbHits` / time counters；parse/semantic/type/constraint/BUSY taxonomy 与 source position/SQLite primary code 保持稳定。当前 executable inherited openCypher runner 执行 **3,897** 个 scenarios，其中 **3,777/3,777 applicable passed、0 failed**，其余 120 个全部有 machine-readable Cypher-25 supersession 或 product-boundary reason；`CY25-2026.08` matrix 已无 `planned/partial` family。
 - `phase10_recovery` 当前 **10/10** 通过，覆盖 process-death pre/post SQLite COMMIT、Branch CAS fault、checkpoint rebuild fault、Commit Data/Tag rollback/reopen，以及 Merge Session abort/finalize fault rollback；所有 reopen 结果只出现合法 pre/post transaction state。
 - real-extension format `1 -> 2` probe 当前 **6/6** 通过：descendant format-1 history migration 保留 frozen Root/descendant Commit ID、Snapshot 与 parent DAG edge，并覆盖 migration failure rollback、finalize fault rollback、corrupt immutable history refusal、too-new rejection 与 Merge Session restart/adapters。
-- Release runtime gate 固定为 SQLite **3.45.0 minimum + 3.53.4 current**。当前 worktree 的 macOS arm64 release artifact 已重新构建并完成 real `.load`、Phase 01–09 extension probes、artifact/symbol inspection、Native C ABI、SQLite 3.45.0 / 3.51.0 / 3.53.4 runtime smoke 与 storage-format interoperability fixture verification。六目标 GitHub Actions release matrix 已包含 Linux x64/arm64、macOS x64/arm64、Windows x64/arm64；最近一次远端 run 在 `643ee8d` 成功生成 interop fixture 后，于 `actions/upload-artifact@v4` finalize 遭遇 HTTP 403，因而六个目标 artifact job 没有执行。当前 worktree 已把同一个 Linux-generated interoperability fixture 改为 gzip+base64 job output 直接传给各目标 runner，artifact upload 保留为 best-effort 非门禁步骤；本地验证压缩 payload 仅 4,872 chars 且 decode 后 fixture byte-identical，避免 artifact storage 403 再阻断真实 build/load/ABI/interoperability gate。当前 worktree 尚未取得新的 hosted matrix 结果。
+- Release runtime gate 固定为 SQLite **3.45.0 minimum + 3.53.4 current**。commit `5386ddd` 的 GitHub Actions Release Matrix run `34953984529` 已成功完成 shared storage fixture、Linux x64/arm64、macOS x64/arm64、Windows x64/arm64 全部六目标：每个目标构建真实 release artifact，执行 Phase 09 release-mode version regressions、real SQLite `.load`、Phase 01–09 extension probes、artifact/symbol/ABI inspection、Native C ABI、SQLite runtime smoke 与同一个 Linux-generated storage-format interoperability fixture verification；六个目标 artifact 均成功产出。Windows Phase 09 regression 使用 smoke 中按固定 checksum 构建的 SQLite 3.45.0 link/runtime environment，避免依赖 runner 私有 SQLite。对应 CI run `34953984492` 同时通过 repository-wide quality、Linux/macOS/Windows Phase 01 gates。macOS arm64 本地 release closure 另外验证过 SQLite 3.51.0 runtime。
 - Scale hardening 已关闭本轮暴露的 release blocker：Label scan 复用已知存在/Label membership，checkpoint property page 改为 set-based 读取，standard-index TEMP cache 只建立当前 Index kind 需要的 secondary indexes，first-parent Diff 使用 touched Layer 而不是 materialize 整图，empty-delta Commit 不再解析无变化的大图 Snapshot，mutation schema validation 只对 Layer 实际影响的 Graph Type/Constraint domain 执行原有 canonical validation。上述优化都保持 checkpoint/index 为 derived data、Commit/Layer/Schema immutable、Branch CAS 与完整 constraint semantics 不变。
 - 10M Node / 100M Relationship canonical fixture 与 derived checkpoint 已真实生成并完成完整 release workload：checkpoint 包含 **10,000,000 Nodes、100,000,000 Relationships、10,002,000 Properties**，fixture database 约 26GB；label scan、indexed equality/range seek、low/high-degree one-hop、variable path、full-text、vector SEARCH、historical query、Tag、Commit Data、branch Diff、cursor History 与 1,000-Node write/single-Commit 全部正确完成，无 OOM 或 unintended full-graph write validation。最终 baseline 写入本地 generated artifact `target/phase10-scale-release/baseline.json`；该文件不进入仓库真源。
 - 最终 worktree 重新通过 10,000-conflict Merge Session：256/page 共 40 页、40 轮 incremental resolution、candidate inspection、single finalize 与 Tag GC-root preservation；同一 worktree 也在 26GB database 上通过 Native explicit transaction 的两次 staged execution + staged read + exactly-one final Commit。
 - repository-wide `cargo make quality` 已通过，包括 format、all-target/all-feature Clippy、rustdoc、生产代码复杂度、dependency audit、duplication gate、full tests、coverage 与 3,777/3,777 applicable TCK；`scripts/ci.sh` 已通过真实 SQLite `.load`、SQLite 3.45.0 minimum、Phase 01–09 probes、Native ABI 与 artifact inspection。最终 architecture/security diff review 未发现 task-affecting finding：没有 SQLite fork/private API、第二 mutable truth、ABI/Extension surface 或新依赖变更；Graph View 仍在 Snapshot access path 执行；standard-index cache 仍为可删除重建的 TEMP derived data；Commit Data/Tag、Native transaction 与 Merge Session 边界保持既有合同。
-- 因此当前本地 release closure 只剩远端六平台 hosted artifact acceptance 未满足。Phase 10 继续保持 `in_progress`，不能提前描述为完整 Release。
+- Release Acceptance 已全部满足，Phase-level review 没有剩余 task-affecting finding；Phase 10 状态正式关闭为 `done`。该状态表示开发与 release acceptance 完成，不等同于已经执行对外 Release 发布。
 
 ## 5. Release Acceptance
 
@@ -166,12 +166,12 @@ Phase 10 的本地 compatibility、recovery、scale、release-artifact smoke 与
 - [x] fuzz/property suite 无未解决 correctness finding；
 - [x] crash/recovery/migration suite 全通过；
 - [x] format `1 -> 2` migration 保持全部既有 Commit ID、Snapshot 与 history semantics，Commit Data/Tag/Merge Session storage 的 crash/reopen 与 rollback 行为正确；
-- [ ] Tag、Commit Data、explicit empty-delta Commit 与 cursor-based DAG History 的 Phase 09 acceptance 在 release matrix 中回归通过；
-- [ ] Native explicit transaction 的 C ABI/ownership、multi-execution single-Commit、expected-head mismatch、cross-execution Graph View、`LOAD CSV` rejection、execute/callback/cancel/commit/abort/connection-teardown rollback、transaction/statement clock 与 staged-isolation acceptance 在 release matrix 中回归通过；
-- [ ] Merge Session 的 restart recovery、large-conflict pagination、incremental resolution、start expected-head、revision/cursor stale detection、candidate read-only inspection、read-prepare + short-writer finalize、target-head CAS、stale-abort protection、single finalize 与 GC-root acceptance 在 release matrix 中回归通过；
+- [x] Tag、Commit Data、explicit empty-delta Commit 与 cursor-based DAG History 的 Phase 09 acceptance 在 release matrix 中回归通过；
+- [x] Native explicit transaction 的 C ABI/ownership、multi-execution single-Commit、expected-head mismatch、cross-execution Graph View、`LOAD CSV` rejection、execute/callback/cancel/commit/abort/connection-teardown rollback、transaction/statement clock 与 staged-isolation acceptance 在 release matrix 中回归通过；
+- [x] Merge Session 的 restart recovery、large-conflict pagination、incremental resolution、start expected-head、revision/cursor stale detection、candidate read-only inspection、read-prepare + short-writer finalize、target-head CAS、stale-abort protection、single finalize 与 GC-root acceptance 在 release matrix 中回归通过；
 - [x] 10M/100M benchmark gate 通过；
-- [ ] 所有 release artifacts real-load acceptance 通过；
-- [ ] cross-platform storage fixture interoperable；
+- [x] 所有 release artifacts real-load acceptance 通过；
+- [x] cross-platform storage fixture interoperable；
 - [x] final review finding 闭环；
 - [x] docs 与 release behavior 一致；
 - [x] final diff 无 temporary artifact/secret/unrelated change。
