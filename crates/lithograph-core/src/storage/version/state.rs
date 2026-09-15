@@ -122,6 +122,21 @@ pub fn layer_between_commits(
     normalize_touched_layer(connection, base, latest)
 }
 
+pub fn is_first_parent_descendant(
+    connection: &Connection,
+    ancestor: HashId,
+    mut descendant: HashId,
+) -> StorageResult<bool> {
+    while descendant != ancestor {
+        let record = super::history::load_commit(connection, descendant)?;
+        let Some(parent) = record.parent1 else {
+            return Ok(false);
+        };
+        descendant = parent;
+    }
+    Ok(true)
+}
+
 fn normalize_touched_layer(
     connection: &Connection,
     base_commit: HashId,

@@ -13,7 +13,7 @@ pub(crate) use index::{
 };
 pub(crate) use show::show_rows;
 pub(crate) use validate::{
-    validate_snapshot, validate_snapshot_against_commit_schema, validation_conflicts,
+    validate_layer_against_commit_schema, validate_snapshot, validation_conflicts,
 };
 
 pub(crate) fn standard_index_kind_name(kind: crate::storage::StandardIndexKind) -> &'static str {

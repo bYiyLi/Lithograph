@@ -60,12 +60,12 @@ pub use version::{
     active_branch, best_common_ancestors, capture_allocation_state, clear_commit_data,
     collect_garbage, commit_data, create_branch_ref, create_empty_commit, create_merge_session,
     create_tag, delete_branch_ref, delete_merge_session, delete_tag, discard_uncommitted_chain,
-    initialize_connection_state, is_ancestor, layer_between, layer_between_commits, list_branches,
-    list_merge_sessions_after, list_tags, load_commit, load_merge_resolutions, load_merge_session,
-    load_snapshot_state, merge_session_roots, move_branch_ref, move_tag, reachable_child_count,
-    reachable_commits, resolve_version_descriptor, restore_allocation_state,
-    reverse_topological_log, set_active_branch, set_commit_data, update_merge_resolutions,
-    validate_ref_name,
+    initialize_connection_state, is_ancestor, is_first_parent_descendant, layer_between,
+    layer_between_commits, list_branches, list_merge_sessions_after, list_tags, load_commit,
+    load_merge_resolutions, load_merge_session, load_snapshot_state, merge_session_roots,
+    move_branch_ref, move_tag, reachable_child_count, reachable_commits,
+    resolve_version_descriptor, restore_allocation_state, reverse_topological_log,
+    set_active_branch, set_commit_data, update_merge_resolutions, validate_ref_name,
 };
 
 /// Current immutable storage format.

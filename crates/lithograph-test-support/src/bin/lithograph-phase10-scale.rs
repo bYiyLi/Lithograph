@@ -12,8 +12,9 @@ use lithograph_core::query::{
 use lithograph_core::storage::test_support::{ScaleFixture, ScaleFixtureSpec, seed_scale_fixture};
 use lithograph_core::storage::{
     CommitMetadata, branch_head, clear_commit_data, commit_data, create_checkpoint,
-    create_empty_commit, create_storage_schema, create_tag, initialize_connection_state,
-    initialize_root, integrity_check, resolve_version_descriptor, root_commit, set_commit_data,
+    create_empty_commit, create_storage_schema, create_tag, delete_tag,
+    initialize_connection_state, initialize_root, integrity_check, resolve_version_descriptor,
+    root_commit, set_commit_data,
 };
 use rusqlite::Connection;
 use serde::Serialize;
@@ -60,9 +61,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     let config = ScaleConfig::from_env()?;
     fs::create_dir_all(&config.root)?;
     let mut setup = Vec::new();
+    eprintln!(
+        "phase10-scale: opening fixture {}",
+        config.database.display()
+    );
     let (connection, fixture) = open_scale_fixture(&config, &mut setup)?;
+    eprintln!(
+        "phase10-scale: fixture ready commit/{}",
+        fixture.commit.to_hex()
+    );
+    eprintln!("phase10-scale: integrity gate");
     verify_scale_integrity(&connection, &config, &mut setup)?;
+    eprintln!("phase10-scale: workload gate");
     let workloads = run_scale_workloads(&connection, &config, fixture, &mut setup)?;
+    eprintln!("phase10-scale: emitting report");
     emit_scale_report(&connection, &config, fixture, setup, workloads)
 }
 
@@ -259,6 +271,7 @@ fn install_scale_schema(
             "CREATE RANGE INDEX scale_id IF NOT EXISTS FOR (n:ScaleNode) ON (n.scaleId)",
         ),
     ] {
+        eprintln!("phase10-scale: setup {name}");
         let started = Instant::now();
         let (_, summary) = execute(
             connection,
@@ -273,6 +286,7 @@ fn install_scale_schema(
             None,
             "schema ready",
         ));
+        eprintln!("phase10-scale: setup {name} complete");
     }
     Ok(())
 }
@@ -285,17 +299,19 @@ fn run_read_workloads(
     sample_document_count: u64,
     workloads: &mut Vec<Measurement>,
 ) -> Result<(), Box<dyn Error>> {
+    eprintln!("phase10-scale: workload label_scan");
     measure_streamed_rows(
         connection,
         workloads,
         "label_scan",
-        "MATCH (n:ScaleNode) RETURN n.scaleId",
+        "MATCH (:ScaleNode) RETURN 1",
         BTreeMap::new(),
         node_count,
         &["LabelIndexScan"],
     )?;
 
     let target = i64::try_from(node_count / 2 + 1)?;
+    eprintln!("phase10-scale: workload indexed_equality_seek");
     measure_rows(
         connection,
         workloads,
@@ -398,9 +414,13 @@ fn run_version_workloads(
     fixture: ScaleFixture,
     workloads: &mut Vec<Measurement>,
 ) -> Result<(), Box<dyn Error>> {
+    eprintln!("phase10-scale: workload tag_lookup_gc_root");
     measure_tag_lookup(connection, fixture, workloads)?;
+    eprintln!("phase10-scale: workload commit_data_get_set_clear");
     measure_commit_data(connection, fixture, workloads)?;
+    eprintln!("phase10-scale: workload branch_diff");
     measure_branch_diff(connection, workloads)?;
+    eprintln!("phase10-scale: workload cursor_commit_dag_history");
     measure_cursor_history(connection, workloads)
 }
 
@@ -410,6 +430,7 @@ fn measure_tag_lookup(
     workloads: &mut Vec<Measurement>,
 ) -> Result<(), Box<dyn Error>> {
     let started = Instant::now();
+    delete_tag(connection, "phase10-scale")?;
     create_tag(connection, "phase10-scale", fixture.commit)?;
     let resolved = resolve_version_descriptor(connection, "tag/phase10-scale")?;
     if resolved != fixture.commit {
@@ -450,6 +471,7 @@ fn measure_branch_diff(
     workloads: &mut Vec<Measurement>,
 ) -> Result<(), Box<dyn Error>> {
     let baseline = branch_head(connection, "main")?;
+    delete_tag(connection, "phase10-diff-base")?;
     create_tag(connection, "phase10-diff-base", baseline)?;
     execute(
         connection,
@@ -505,6 +527,12 @@ fn measure_cursor_history(
                 committed_at: 10_000 + index,
             },
         )?;
+        if (index + 1) % 64 == 0 {
+            eprintln!(
+                "phase10-scale: cursor history seeded {}/256 commits",
+                index + 1
+            );
+        }
     }
     let started = Instant::now();
     let mut cursor: Option<String> = None;
@@ -549,6 +577,7 @@ fn run_write_workload(
     connection: &Connection,
     workloads: &mut Vec<Measurement>,
 ) -> Result<(), Box<dyn Error>> {
+    eprintln!("phase10-scale: workload write_batch_commit");
     let started = Instant::now();
     let (_, summary) = execute(
         connection,

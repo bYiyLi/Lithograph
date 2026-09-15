@@ -8,17 +8,25 @@ on:
 jobs:
   storage-fixture:
     runs-on: ubuntu-24.04
+    outputs:
+      sqlite_gzip_base64: ${{ steps.fixture.outputs.sqlite_gzip_base64 }}
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.98.1 --profile minimal
       - name: Create cross-platform storage fixture
+        id: fixture
         run: |
           mkdir -p target/phase10-interop
           cargo run --locked --quiet -p lithograph-test-support \
             --bin lithograph-phase10-storage-fixture -- \
             create target/phase10-interop/interop.sqlite
-      - uses: actions/upload-artifact@v4
+          printf 'sqlite_gzip_base64=' >> "$GITHUB_OUTPUT"
+          gzip -c target/phase10-interop/interop.sqlite | base64 -w 0 >> "$GITHUB_OUTPUT"
+          printf '\n' >> "$GITHUB_OUTPUT"
+      - name: Upload storage fixture for debugging
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
         with:
           name: phase10-storage-fixture
           path: target/phase10-interop/interop.sqlite
@@ -60,17 +68,21 @@ jobs:
         run: echo "LITHOGRAPH_SQLITE3=$(brew --prefix sqlite)/bin/sqlite3" >> "$GITHUB_ENV"
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.98.1 --profile minimal
-      - uses: actions/download-artifact@v4
-        with:
-          name: phase10-storage-fixture
-          path: target/phase10-interop
+      - name: Restore cross-platform storage fixture
+        env:
+          PHASE10_FIXTURE_GZIP_BASE64: ${{ needs.storage-fixture.outputs.sqlite_gzip_base64 }}
+        run: |
+          mkdir -p target/phase10-interop
+          python3 -c 'import base64,gzip,os,pathlib; pathlib.Path("target/phase10-interop/interop.sqlite").write_bytes(gzip.decompress(base64.b64decode(os.environ["PHASE10_FIXTURE_GZIP_BASE64"])))'
       - name: Build release artifact
         run: |
           cargo build --release --locked -p lithograph-extension
           cp "${{ matrix.built }}" "${{ matrix.artifact }}"
       - name: Run release load, ABI, runtime, and interoperability gates
         run: scripts/release-artifact-smoke.sh "${{ matrix.artifact }}" target/phase10-interop/interop.sqlite
-      - uses: actions/upload-artifact@v4
+      - name: Upload release artifact
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
         with:
           name: lithograph-${{ matrix.name }}
           path: ${{ matrix.artifact }}
@@ -91,16 +103,34 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.98.1 --profile minimal
-      - uses: actions/download-artifact@v4
-        with:
-          name: phase10-storage-fixture
-          path: target/phase10-interop
+      - name: Restore cross-platform storage fixture
+        shell: pwsh
+        env:
+          PHASE10_FIXTURE_GZIP_BASE64: ${{ needs.storage-fixture.outputs.sqlite_gzip_base64 }}
+        run: |
+          New-Item -ItemType Directory -Force -Path target/phase10-interop | Out-Null
+          $compressed = [Convert]::FromBase64String($env:PHASE10_FIXTURE_GZIP_BASE64)
+          $inputStream = [IO.MemoryStream]::new($compressed)
+          $gzipStream = [IO.Compression.GZipStream]::new(
+            $inputStream,
+            [IO.Compression.CompressionMode]::Decompress
+          )
+          $outputStream = [IO.File]::Create('target/phase10-interop/interop.sqlite')
+          try {
+            $gzipStream.CopyTo($outputStream)
+          } finally {
+            $outputStream.Dispose()
+            $gzipStream.Dispose()
+            $inputStream.Dispose()
+          }
       - name: Build release artifact
         run: cargo build --release --locked -p lithograph-extension
       - name: Run release load, ABI, runtime, and interoperability gates
         shell: pwsh
         run: ./scripts/windows-release-smoke.ps1 -ExtensionPath target/release/lithograph.dll -InteropFixture target/phase10-interop/interop.sqlite
-      - uses: actions/upload-artifact@v4
+      - name: Upload release artifact
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
         with:
           name: lithograph-${{ matrix.name }}
           path: target/release/lithograph.dll

@@ -183,10 +183,11 @@ fn finish_transaction_mutation(
         transaction.base_commit,
         &final_layer,
     )?;
-    crate::query::schema::validate_snapshot_against_commit_schema(
+    crate::query::schema::validate_layer_against_commit_schema(
         transaction.connection,
         transaction.base_commit,
         &final_snapshot,
+        &final_layer,
     )?;
     check_interrupted(transaction.is_interrupted)?;
     let commit = if commit_mutation {
@@ -965,10 +966,11 @@ fn finish_program(
     let counters = context.delta.counters()?;
     let final_snapshot =
         Snapshot::resolve_with_layer(context.connection, context.base_commit, &final_layer)?;
-    crate::query::schema::validate_snapshot_against_commit_schema(
+    crate::query::schema::validate_layer_against_commit_schema(
         context.connection,
         context.base_commit,
         &final_snapshot,
+        &final_layer,
     )?;
     let rows = if program.public_result {
         validate_executed_columns(&program.columns, &result.columns)?;

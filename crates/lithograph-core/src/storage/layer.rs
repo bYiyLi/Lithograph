@@ -77,8 +77,35 @@ pub struct LayerDeltaCounts {
 }
 
 impl LayerBuilder {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+            && self.labels.is_empty()
+            && self.relationships.is_empty()
+            && self.properties.is_empty()
+    }
+
     pub(crate) fn is_property_only(&self) -> bool {
         self.nodes.is_empty() && self.labels.is_empty() && self.relationships.is_empty()
+    }
+
+    pub(crate) fn node_changes(&self) -> impl Iterator<Item = (NodeId, bool)> + '_ {
+        self.nodes
+            .iter()
+            .map(|(node_id, op)| (*node_id, *op == DeltaOp::Add))
+    }
+
+    pub(crate) fn label_changes(&self) -> impl Iterator<Item = (NodeId, LabelId, bool)> + '_ {
+        self.labels
+            .iter()
+            .map(|((node_id, label_id), op)| (*node_id, *label_id, *op == DeltaOp::Add))
+    }
+
+    pub(crate) fn relationship_changes(
+        &self,
+    ) -> impl Iterator<Item = (RelationshipRecord, bool)> + '_ {
+        self.relationships
+            .values()
+            .map(|delta| (delta.record, delta.op == DeltaOp::Add))
     }
 
     pub(crate) fn property_changes(

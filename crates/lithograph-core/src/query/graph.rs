@@ -48,8 +48,28 @@ impl ResolvedGraphView {
         if self.required_unknown || !snapshot.node_exists(node_id)? {
             return Ok(false);
         }
+        self.visible_existing_node(snapshot, node_id, None)
+    }
+
+    pub(crate) fn visible_existing_node(
+        &self,
+        snapshot: &Snapshot<'_>,
+        node_id: i64,
+        known_label: Option<LabelId>,
+    ) -> QueryResult<bool> {
+        if self.required_unknown {
+            return Ok(false);
+        }
         if self.required.is_empty() && self.excluded.is_empty() {
             return Ok(true);
+        }
+        if let Some(label) = known_label {
+            if self.excluded.contains(&label) {
+                return Ok(false);
+            }
+            if self.excluded.is_empty() && self.required.iter().all(|required| *required == label) {
+                return Ok(true);
+            }
         }
         let labels = snapshot.labels(node_id)?;
         Ok(self

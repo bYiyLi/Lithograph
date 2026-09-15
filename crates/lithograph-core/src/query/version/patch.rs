@@ -63,9 +63,14 @@ pub(crate) fn diff_commits(
     before_commit: HashId,
     after_commit: HashId,
 ) -> QueryResult<Value> {
-    let before = storage::load_snapshot_state(connection, before_commit)?;
-    let after = storage::load_snapshot_state(connection, after_commit)?;
-    let operations = diff_states(connection, &before, &after)?;
+    let operations =
+        if storage::is_first_parent_descendant(connection, before_commit, after_commit)? {
+            diff_first_parent_commits(connection, before_commit, after_commit)?
+        } else {
+            let before = storage::load_snapshot_state(connection, before_commit)?;
+            let after = storage::load_snapshot_state(connection, after_commit)?;
+            diff_states(connection, &before, &after)?
+        };
     let database_id: String = connection
         .query_row(
             "SELECT database_id FROM main._lithograph_meta WHERE id = 1",
@@ -82,6 +87,42 @@ pub(crate) fn diff_commits(
     ])))
 }
 
+fn diff_first_parent_commits(
+    connection: &Connection,
+    before_commit: HashId,
+    after_commit: HashId,
+) -> QueryResult<Vec<Value>> {
+    let layer = storage::layer_between_commits(connection, before_commit, after_commit)?;
+    let before_snapshot = Snapshot::resolve(connection, before_commit)?;
+    let mut operations = Vec::new();
+
+    for (node_id, added) in layer.node_changes() {
+        append_node_operation(&mut operations, node_id, added);
+    }
+    for (node_id, label_id, added) in layer.label_changes() {
+        append_label_operation(connection, &mut operations, node_id, label_id, added)?;
+    }
+    for (relationship, added) in layer.relationship_changes() {
+        append_relationship_operation(connection, &mut operations, relationship, added)?;
+    }
+    for (owner, owner_id, key_id, next) in layer.property_changes() {
+        let previous = before_snapshot.property(owner, owner_id, key_id)?;
+        append_property_operation(
+            connection,
+            &mut operations,
+            (owner, owner_id, key_id),
+            previous.as_ref(),
+            next,
+        )?;
+    }
+
+    let before_schema = SchemaState::load(connection, before_commit)?;
+    let after_schema = SchemaState::load(connection, after_commit)?;
+    append_schema_operations(&before_schema, &after_schema, &mut operations)?;
+    operations.sort_by_key(canonical_operation_key);
+    Ok(operations)
+}
+
 pub(crate) fn diff_states(
     connection: &Connection,
     before: &storage::SnapshotState,
@@ -96,6 +137,102 @@ pub(crate) fn diff_states(
     Ok(operations)
 }
 
+fn append_node_operation(operations: &mut Vec<Value>, node_id: i64, added: bool) {
+    let (op, before, after) = if added {
+        ("AddNode", Value::Null, Value::Boolean(true))
+    } else {
+        ("DeleteNode", Value::Boolean(true), Value::Null)
+    };
+    operations.push(operation(
+        op,
+        format!("node/{node_id}"),
+        [
+            ("elementId", Value::String(format!("n:{node_id}"))),
+            ("before", before),
+            ("after", after),
+        ],
+    ));
+}
+
+fn append_label_operation(
+    connection: &Connection,
+    operations: &mut Vec<Value>,
+    node_id: i64,
+    label_id: i64,
+    added: bool,
+) -> QueryResult<()> {
+    let label = label_name(connection, label_id)?;
+    operations.push(operation(
+        if added { "AddLabel" } else { "RemoveLabel" },
+        format!("node/{node_id}/label/{label}"),
+        [
+            ("elementId", Value::String(format!("n:{node_id}"))),
+            ("label", Value::String(label)),
+            ("before", Value::Boolean(!added)),
+            ("after", Value::Boolean(added)),
+        ],
+    ));
+    Ok(())
+}
+
+fn append_relationship_operation(
+    connection: &Connection,
+    operations: &mut Vec<Value>,
+    relationship: RelationshipRecord,
+    added: bool,
+) -> QueryResult<()> {
+    let value = relationship_value(connection, relationship)?;
+    operations.push(operation(
+        if added {
+            "AddRelationship"
+        } else {
+            "DeleteRelationship"
+        },
+        format!("relationship/{}", relationship.id),
+        [
+            ("elementId", Value::String(format!("r:{}", relationship.id))),
+            ("before", if added { Value::Null } else { value.clone() }),
+            ("after", if added { value } else { Value::Null }),
+        ],
+    ));
+    Ok(())
+}
+
+fn append_property_operation(
+    connection: &Connection,
+    operations: &mut Vec<Value>,
+    slot: (OwnerKind, i64, i64),
+    before: Option<&PropertyValue>,
+    after: Option<&PropertyValue>,
+) -> QueryResult<()> {
+    let key = storage::property_key_name(connection, slot.2)?.ok_or_else(|| {
+        QueryError::new(
+            QueryErrorKind::Storage,
+            format!("PropertyKeyId {} is missing", slot.2),
+        )
+    })?;
+    let owner = match slot.0 {
+        OwnerKind::Node => format!("node/{}", slot.1),
+        OwnerKind::Relationship => format!("relationship/{}", slot.1),
+    };
+    let mut extra = BTreeMap::from([
+        ("owner".to_owned(), Value::String(owner.clone())),
+        ("key".to_owned(), Value::String(key.clone())),
+        ("before".to_owned(), property_state(before)?),
+        ("after".to_owned(), property_state(after)?),
+    ]);
+    operations.push(operation_map(
+        if after.is_some() {
+            "SetProperty"
+        } else {
+            "RemoveProperty"
+        },
+        format!("{owner}/property/{key}"),
+        &mut extra,
+    ));
+    Ok(())
+}
+
 fn append_node_and_label_operations(
     connection: &Connection,
     before: &storage::SnapshotState,
@@ -103,52 +240,16 @@ fn append_node_and_label_operations(
     operations: &mut Vec<Value>,
 ) -> QueryResult<()> {
     for node in before.nodes.difference(&after.nodes) {
-        operations.push(operation(
-            "DeleteNode",
-            format!("node/{node}"),
-            [
-                ("elementId", Value::String(format!("n:{node}"))),
-                ("before", Value::Boolean(true)),
-                ("after", Value::Null),
-            ],
-        ));
+        append_node_operation(operations, *node, false);
     }
     for node in after.nodes.difference(&before.nodes) {
-        operations.push(operation(
-            "AddNode",
-            format!("node/{node}"),
-            [
-                ("elementId", Value::String(format!("n:{node}"))),
-                ("before", Value::Null),
-                ("after", Value::Boolean(true)),
-            ],
-        ));
+        append_node_operation(operations, *node, true);
     }
     for (node, label) in before.labels.difference(&after.labels) {
-        let label_name = label_name(connection, *label)?;
-        operations.push(operation(
-            "RemoveLabel",
-            format!("node/{node}/label/{label_name}"),
-            [
-                ("elementId", Value::String(format!("n:{node}"))),
-                ("label", Value::String(label_name)),
-                ("before", Value::Boolean(true)),
-                ("after", Value::Boolean(false)),
-            ],
-        ));
+        append_label_operation(connection, operations, *node, *label, false)?;
     }
     for (node, label) in after.labels.difference(&before.labels) {
-        let label_name = label_name(connection, *label)?;
-        operations.push(operation(
-            "AddLabel",
-            format!("node/{node}/label/{label_name}"),
-            [
-                ("elementId", Value::String(format!("n:{node}"))),
-                ("label", Value::String(label_name)),
-                ("before", Value::Boolean(false)),
-                ("after", Value::Boolean(true)),
-            ],
-        ));
+        append_label_operation(connection, operations, *node, *label, true)?;
     }
     Ok(())
 }
@@ -161,32 +262,12 @@ fn append_relationship_operations(
 ) -> QueryResult<()> {
     for (id, relationship) in &before.relationships {
         if !after.relationships.contains_key(id) {
-            let value = relationship_value(connection, *relationship)?;
-            operations.push(operation(
-                "DeleteRelationship",
-                format!("relationship/{id}"),
-                [
-                    ("elementId", Value::String(format!("r:{id}"))),
-                    ("before", value),
-                    ("after", Value::Null),
-                ],
-            ));
+            append_relationship_operation(connection, operations, *relationship, false)?;
         }
     }
     for (id, relationship) in &after.relationships {
         match before.relationships.get(id) {
-            None => {
-                let value = relationship_value(connection, *relationship)?;
-                operations.push(operation(
-                    "AddRelationship",
-                    format!("relationship/{id}"),
-                    [
-                        ("elementId", Value::String(format!("r:{id}"))),
-                        ("before", Value::Null),
-                        ("after", value),
-                    ],
-                ));
-            }
+            None => append_relationship_operation(connection, operations, *relationship, true)?,
             Some(previous) if previous != relationship => {
                 return Err(QueryError::new(
                     QueryErrorKind::Storage,
@@ -214,31 +295,7 @@ fn append_property_operations(
         if previous == next {
             continue;
         }
-        let key = storage::property_key_name(connection, slot.2)?.ok_or_else(|| {
-            QueryError::new(
-                QueryErrorKind::Storage,
-                format!("PropertyKeyId {} is missing", slot.2),
-            )
-        })?;
-        let owner = match slot.0 {
-            OwnerKind::Node => format!("node/{}", slot.1),
-            OwnerKind::Relationship => format!("relationship/{}", slot.1),
-        };
-        let mut extra = BTreeMap::from([
-            ("owner".to_owned(), Value::String(owner.clone())),
-            ("key".to_owned(), Value::String(key.clone())),
-            ("before".to_owned(), property_state(previous)?),
-            ("after".to_owned(), property_state(next)?),
-        ]);
-        operations.push(operation_map(
-            if next.is_some() {
-                "SetProperty"
-            } else {
-                "RemoveProperty"
-            },
-            format!("{owner}/property/{key}"),
-            &mut extra,
-        ));
+        append_property_operation(connection, operations, slot, previous, next)?;
     }
     Ok(())
 }

@@ -17,8 +17,8 @@ pub use refs::{
     resolve_version_descriptor, set_active_branch, validate_ref_name,
 };
 pub use state::{
-    AllocationState, SnapshotState, capture_allocation_state, layer_between, layer_between_commits,
-    load_snapshot_state, restore_allocation_state,
+    AllocationState, SnapshotState, capture_allocation_state, is_first_parent_descendant,
+    layer_between, layer_between_commits, load_snapshot_state, restore_allocation_state,
 };
 
 pub use session::{

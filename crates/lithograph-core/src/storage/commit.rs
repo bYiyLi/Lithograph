@@ -132,7 +132,9 @@ fn commit_change_inner(
         require_commit(connection, parent)?;
     }
     require_schema(connection, schema_hash)?;
-    Snapshot::resolve(connection, expected_head)?.validate_layer_invariants(layer)?;
+    if !layer.is_empty() {
+        Snapshot::resolve(connection, expected_head)?.validate_layer_invariants(layer)?;
+    }
     let (layer_id, layer_hash) = persist_layer(connection, layer)?;
     let commit = commit_hash(
         super::STORAGE_FORMAT,

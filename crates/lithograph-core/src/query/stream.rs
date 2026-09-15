@@ -4,20 +4,22 @@ use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 
 use crate::cypher::{ExecutionMode, Value};
-use crate::storage::{HashId, RelationshipRecord, Snapshot};
+use crate::storage::{HashId, LabelId, RelationshipRecord, Snapshot};
 
 use super::completeness::PreparedProgram;
 use super::expression::{self, BindingRow, BindingValue};
 use super::graph::ResolvedGraphView;
-use super::plan::{Direction, MatchStep, NodeSpec, PatternPart, PreparedQuery, RelationshipSpec};
+use super::plan::{Direction, MatchStep, PatternPart, PreparedQuery, RelationshipSpec};
 use super::spill::{
     DistinctSpill, SortSpill, SpillOutput, drop_temp_table, open_spill_connection, read_output_row,
 };
 use super::{QueryError, QueryResult};
 
+mod node_match;
 mod profile;
 mod project;
 mod write;
+use node_match::{node_matches, node_matches_scanned};
 pub use profile::{OperatorRuntimeMetrics, QueryMetrics};
 use project::{order_values, project_row};
 
@@ -324,6 +326,7 @@ struct PartCursor {
     base: BindingRow,
     start_after: i64,
     start_buffer: Vec<i64>,
+    start_known_label: Option<LabelId>,
     start_index: usize,
     start_done: bool,
     current_start: Option<i64>,
@@ -346,6 +349,7 @@ impl PartCursor {
             base,
             start_after: 0,
             start_buffer: Vec::new(),
+            start_known_label: None,
             start_index: 0,
             start_done: false,
             current_start: None,
@@ -613,7 +617,14 @@ impl PartCursor {
             while self.start_index < self.start_buffer.len() {
                 let id = self.start_buffer[self.start_index];
                 self.start_index += 1;
-                if node_matches(snapshot, graph_view, &self.part.start, id, metrics)? {
+                if node_matches_scanned(
+                    snapshot,
+                    graph_view,
+                    &self.part.start,
+                    id,
+                    self.start_known_label,
+                    metrics,
+                )? {
                     return Ok(Some(id));
                 }
             }
@@ -623,6 +634,7 @@ impl PartCursor {
             let page = if let Some(seek) = &self.part.start.index_seek
                 && seek.kind != crate::storage::StandardIndexKind::Lookup
             {
+                self.start_known_label = None;
                 super::schema::scan_node_index_after(
                     snapshot,
                     seek,
@@ -636,8 +648,10 @@ impl PartCursor {
                     .scan_label
                     .or_else(|| graph_view.scan_label());
                 if let Some(label) = scan_label {
+                    self.start_known_label = Some(label);
                     snapshot.scan_label_after(label, self.start_after, PIPELINE_BATCH)?
                 } else {
+                    self.start_known_label = None;
                     snapshot.scan_nodes_after(self.start_after, PIPELINE_BATCH)?
                 }
             };
@@ -747,28 +761,6 @@ fn relationship_already_bound(row: &BindingRow, spec: &RelationshipSpec, id: i64
         .as_deref()
         .and_then(|name| row.values.get(name))
         .is_some_and(|value| matches!(value, BindingValue::Relationship(rel) if rel.id == id))
-}
-
-fn node_matches(
-    snapshot: &Snapshot<'_>,
-    graph_view: &ResolvedGraphView,
-    spec: &NodeSpec,
-    node_id: i64,
-    metrics: &mut QueryMetrics,
-) -> QueryResult<bool> {
-    if !graph_view.visible_node(snapshot, node_id)? {
-        return Ok(false);
-    }
-    metrics.record_db_hits(1);
-    if spec.labels.is_empty() {
-        return Ok(true);
-    }
-    let labels = snapshot.labels(node_id)?;
-    metrics.record_db_hits(1);
-    Ok(spec
-        .labels
-        .iter()
-        .all(|label| labels.binary_search(label).is_ok()))
 }
 
 fn bind_node(

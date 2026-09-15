@@ -143,8 +143,8 @@ fn sparse_merge_base(
         return Ok(None);
     }
     let base_commit = bases[0];
-    if !is_first_parent_descendant(connection, base_commit, ours_commit)?
-        || !is_first_parent_descendant(connection, base_commit, theirs_commit)?
+    if !storage::is_first_parent_descendant(connection, base_commit, ours_commit)?
+        || !storage::is_first_parent_descendant(connection, base_commit, theirs_commit)?
     {
         return Ok(None);
     }
@@ -246,21 +246,6 @@ fn sparse_property_slots(
         );
     }
     Ok(slots)
-}
-
-fn is_first_parent_descendant(
-    connection: &Connection,
-    ancestor: HashId,
-    mut descendant: HashId,
-) -> QueryResult<bool> {
-    while descendant != ancestor {
-        let record = storage::load_commit(connection, descendant)?;
-        let Some(parent) = record.parent1 else {
-            return Ok(false);
-        };
-        descendant = parent;
-    }
-    Ok(true)
 }
 
 fn sparse_property_changes(

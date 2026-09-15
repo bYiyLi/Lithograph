@@ -1050,7 +1050,7 @@ fn ensure_index_cache(snapshot: &Snapshot<'_>, index: &IndexDefinition) -> Query
         |row| row.get(0),
     )?;
     if exists == 1 {
-        ensure_cache_indexes(connection)?;
+        ensure_cache_indexes(connection, index.kind)?;
         return Ok(());
     }
     connection.execute(
@@ -1060,7 +1060,7 @@ fn ensure_index_cache(snapshot: &Snapshot<'_>, index: &IndexDefinition) -> Query
     )?;
     drop_cache_indexes(connection)?;
     build_index_cache(snapshot, index)?;
-    ensure_cache_indexes(connection)?;
+    ensure_cache_indexes(connection, index.kind)?;
     connection.execute(
         "INSERT OR REPLACE INTO temp._lithograph_standard_index_cache_meta \
          (snapshot_hash, index_name, complete) VALUES(?1, ?2, 1)",
@@ -1085,27 +1085,36 @@ fn ensure_cache_tables(connection: &Connection) -> QueryResult<()> {
     Ok(())
 }
 
-fn ensure_cache_indexes(connection: &Connection) -> QueryResult<()> {
-    connection.execute_batch(
-        "CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_value \
-             ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, value_blob, owner_id);\
-         CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_equality \
+fn ensure_cache_indexes(connection: &Connection, kind: StandardIndexKind) -> QueryResult<()> {
+    let sql = match kind {
+        StandardIndexKind::Lookup => {
+            "CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_token \
+             ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, token_id, owner_id);"
+        }
+        StandardIndexKind::Range => {
+            "CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_equality ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, equality_blob, owner_id);\
+             CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_range_number ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, sort_family, sort_number, owner_id);\
+             CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_range_text ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, sort_family, sort_text, owner_id);\
+             CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_range_tuple \
+             ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, sort_family, sort_a, sort_b, sort_c, sort_text, owner_id);"
+        }
+        StandardIndexKind::Text => {
+            "CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_equality \
              ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, equality_blob, owner_id);\
-         CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_text \
-             ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, text_value, owner_id);\
-         CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_range_number \
-             ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, sort_family, sort_number, owner_id);\
-         CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_range_text \
-             ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, sort_family, sort_text, owner_id);\
-         CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_range_tuple \
-             ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, sort_family, sort_a, sort_b, sort_c, sort_text, owner_id);\
-         CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_point_x \
+             CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_text \
+             ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, text_value, owner_id);"
+        }
+        StandardIndexKind::Point => {
+            "CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_equality \
+             ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, equality_blob, owner_id);\
+             CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_point_x \
              ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, point_crs, point_x, point_y, point_z, owner_id);\
-         CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_point_y \
-             ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, point_crs, point_y, point_x, point_z, owner_id);\
-         CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_token \
-             ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, token_id, owner_id);",
-    )?;
+             CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_point_y \
+             ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, point_crs, point_y, point_x, point_z, owner_id);"
+        }
+        StandardIndexKind::FullText | StandardIndexKind::Vector => return Ok(()),
+    };
+    connection.execute_batch(sql)?;
     Ok(())
 }
 

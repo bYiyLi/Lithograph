@@ -162,10 +162,11 @@ fn finish_write(
     let counters = context.delta.counters()?;
     let final_snapshot =
         Snapshot::resolve_with_layer(context.connection, context.base_commit, &final_layer)?;
-    crate::query::schema::validate_snapshot_against_commit_schema(
+    crate::query::schema::validate_layer_against_commit_schema(
         context.connection,
         context.base_commit,
         &final_snapshot,
+        &final_layer,
     )?;
     let output = match &prepared.projection {
         Some(projection) => project_rows(&final_snapshot, context.params, rows, projection)?,

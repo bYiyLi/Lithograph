@@ -1,10 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rusqlite::Connection;
 
 use crate::storage::{
     self, ConstraintDefinition, ConstraintDefinitionKind, GraphNodeType, GraphRelationshipType,
-    HashId, OwnerKind, PropertyRule, PropertyValue, SchemaState, SchemaTarget, Snapshot,
+    HashId, LayerBuilder, OwnerKind, PropertyRule, PropertyValue, SchemaState, SchemaTarget,
+    Snapshot,
 };
 
 use super::super::{QueryError, QueryErrorKind, QueryResult};
@@ -12,13 +13,171 @@ use super::equality::property_equality_key;
 
 const CONSTRAINT_VALIDATION_PAGE_SIZE: usize = 4_096;
 
-pub(crate) fn validate_snapshot_against_commit_schema(
+pub(crate) fn validate_layer_against_commit_schema(
     connection: &Connection,
     commit: HashId,
     snapshot: &Snapshot<'_>,
+    layer: &LayerBuilder,
 ) -> QueryResult<()> {
+    if layer.is_empty() {
+        return Ok(());
+    }
     let schema = SchemaState::load(connection, commit)?;
-    validate_snapshot(connection, &schema, snapshot)
+    if schema.graph_nodes.is_empty()
+        && schema.graph_relationships.is_empty()
+        && schema.constraints.is_empty()
+    {
+        return Ok(());
+    }
+    let impact = LayerSchemaImpact::resolve(snapshot, layer)?;
+    validate_impacted_graph_nodes(connection, &schema, snapshot, &impact)?;
+    validate_impacted_graph_relationships(connection, &schema, snapshot, &impact)?;
+    validate_impacted_constraints(connection, &schema, snapshot, &impact)
+}
+
+fn validate_impacted_graph_nodes(
+    connection: &Connection,
+    schema: &SchemaState,
+    snapshot: &Snapshot<'_>,
+    impact: &LayerSchemaImpact,
+) -> QueryResult<()> {
+    for definition in schema.graph_nodes.values() {
+        let Some(label_id) = storage::find_label(connection, &definition.label)? else {
+            continue;
+        };
+        if impact.node_has_label(label_id) {
+            validate_graph_node_type(connection, definition, snapshot)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_impacted_graph_relationships(
+    connection: &Connection,
+    schema: &SchemaState,
+    snapshot: &Snapshot<'_>,
+    impact: &LayerSchemaImpact,
+) -> QueryResult<()> {
+    for definition in schema.graph_relationships.values() {
+        let Some(type_id) =
+            storage::find_relationship_type(connection, &definition.relationship_type)?
+        else {
+            continue;
+        };
+        let source_label_changed = changed_optional_label(
+            connection,
+            definition.source_label.as_deref(),
+            &impact.changed_labels,
+        )?;
+        let target_label_changed = changed_optional_label(
+            connection,
+            definition.target_label.as_deref(),
+            &impact.changed_labels,
+        )?;
+        if impact.relationship_types.contains(&type_id)
+            || source_label_changed
+            || target_label_changed
+        {
+            validate_graph_relationship_type(connection, definition, snapshot)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_impacted_constraints(
+    connection: &Connection,
+    schema: &SchemaState,
+    snapshot: &Snapshot<'_>,
+    impact: &LayerSchemaImpact,
+) -> QueryResult<()> {
+    for constraint in schema.constraints.values() {
+        let affected = match &constraint.target {
+            SchemaTarget::Node { label } => storage::find_label(connection, label)?
+                .is_some_and(|label_id| impact.node_has_label(label_id)),
+            SchemaTarget::Relationship { relationship_type } => {
+                storage::find_relationship_type(connection, relationship_type)?
+                    .is_some_and(|type_id| impact.relationship_types.contains(&type_id))
+            }
+        };
+        if affected {
+            validate_constraint(connection, constraint, snapshot)?;
+        }
+    }
+    Ok(())
+}
+
+struct LayerSchemaImpact {
+    node_labels: Vec<Vec<i64>>,
+    relationship_types: BTreeSet<i64>,
+    changed_labels: BTreeSet<i64>,
+}
+
+impl LayerSchemaImpact {
+    fn resolve(snapshot: &Snapshot<'_>, layer: &LayerBuilder) -> QueryResult<Self> {
+        let mut touched_nodes = BTreeSet::new();
+        let mut touched_relationships = BTreeSet::new();
+        let mut relationship_types = BTreeSet::new();
+        let mut changed_labels = BTreeSet::new();
+
+        for (node_id, _) in layer.node_changes() {
+            touched_nodes.insert(node_id);
+        }
+        for (node_id, label_id, _) in layer.label_changes() {
+            touched_nodes.insert(node_id);
+            changed_labels.insert(label_id);
+        }
+        for (relationship, added) in layer.relationship_changes() {
+            if added {
+                relationship_types.insert(relationship.type_id);
+            }
+            touched_relationships.insert(relationship.id);
+        }
+        for (owner, owner_id, _, _) in layer.property_changes() {
+            match owner {
+                OwnerKind::Node => {
+                    touched_nodes.insert(owner_id);
+                }
+                OwnerKind::Relationship => {
+                    touched_relationships.insert(owner_id);
+                }
+            }
+        }
+
+        let mut node_labels = Vec::with_capacity(touched_nodes.len());
+        for node_id in touched_nodes {
+            if snapshot.node_exists(node_id)? {
+                node_labels.push(snapshot.labels(node_id)?);
+            }
+        }
+        for relationship_id in touched_relationships {
+            if let Some(relationship) = snapshot.relationship(relationship_id)? {
+                relationship_types.insert(relationship.type_id);
+            }
+        }
+        Ok(Self {
+            node_labels,
+            relationship_types,
+            changed_labels,
+        })
+    }
+
+    fn node_has_label(&self, label_id: i64) -> bool {
+        self.node_labels
+            .iter()
+            .any(|labels| labels.binary_search(&label_id).is_ok())
+    }
+}
+
+fn changed_optional_label(
+    connection: &Connection,
+    label: Option<&str>,
+    changed_labels: &BTreeSet<i64>,
+) -> QueryResult<bool> {
+    let Some(label) = label else {
+        return Ok(false);
+    };
+    Ok(storage::find_label(connection, label)?
+        .is_some_and(|label_id| changed_labels.contains(&label_id)))
 }
 
 pub(crate) fn validate_snapshot(

@@ -283,6 +283,13 @@ impl<'connection> Snapshot<'connection> {
         limit: usize,
     ) -> StorageResult<ScanPage<(NodeId, Vec<Option<PropertyValue>>)>> {
         let page = self.scan_label_after(label_id, after, limit)?;
+        if self.checkpoint.is_some()
+            && self.overlay.nodes.is_empty()
+            && self.overlay.labels.is_empty()
+            && self.overlay.properties.is_empty()
+        {
+            return self.checkpoint_label_property_values(label_id, key_ids, after, page);
+        }
         let mut checkpoint_statement = self
             .checkpoint
             .map(|_| {
@@ -306,6 +313,110 @@ impl<'connection> Snapshot<'connection> {
             items,
             next_after: page.next_after,
         })
+    }
+
+    fn checkpoint_label_property_values(
+        &self,
+        label_id: LabelId,
+        key_ids: &[PropertyKeyId],
+        after: NodeId,
+        page: ScanPage<NodeId>,
+    ) -> StorageResult<ScanPage<(NodeId, Vec<Option<PropertyValue>>)>> {
+        let Some(checkpoint) = self.checkpoint else {
+            return Err(StorageError::corrupt(
+                "checkpoint label/property page requested without a checkpoint",
+            ));
+        };
+        if page.items.is_empty() || key_ids.is_empty() {
+            return Ok(ScanPage {
+                items: page
+                    .items
+                    .into_iter()
+                    .map(|node_id| (node_id, Vec::new()))
+                    .collect(),
+                next_after: page.next_after,
+            });
+        }
+
+        let last = *page
+            .items
+            .last()
+            .ok_or_else(|| StorageError::corrupt("checkpoint label page unexpectedly empty"))?;
+        let mut values_by_key = Vec::with_capacity(key_ids.len());
+        for key_id in key_ids {
+            values_by_key.push(self.checkpoint_label_property_key_values(
+                checkpoint, label_id, *key_id, after, last,
+            )?);
+        }
+
+        let items = page
+            .items
+            .into_iter()
+            .map(|node_id| {
+                let values = values_by_key
+                    .iter()
+                    .map(|by_node| by_node.get(&node_id).cloned())
+                    .collect();
+                (node_id, values)
+            })
+            .collect();
+        Ok(ScanPage {
+            items,
+            next_after: page.next_after,
+        })
+    }
+
+    fn checkpoint_label_property_key_values(
+        &self,
+        checkpoint: HashId,
+        label_id: LabelId,
+        key_id: PropertyKeyId,
+        after: NodeId,
+        last: NodeId,
+    ) -> StorageResult<BTreeMap<NodeId, PropertyValue>> {
+        let mut statement = self.connection.prepare(
+            "SELECT labels.node_id, properties.type_tag, properties.int_value, \
+                    properties.real_value, properties.text_value, properties.blob_value, \
+                    properties.aux_value \
+             FROM main._lithograph_cp_labels AS labels \
+             JOIN main._lithograph_cp_properties AS properties \
+               ON properties.commit_id = labels.commit_id \
+              AND properties.owner_kind = ?3 \
+              AND properties.owner_id = labels.node_id \
+              AND properties.key_id = ?4 \
+             WHERE labels.commit_id = ?1 AND labels.label_id = ?2 \
+               AND labels.node_id > ?5 AND labels.node_id <= ?6 \
+             ORDER BY labels.node_id",
+        )?;
+        let rows = statement.query_map(
+            params![
+                checkpoint.as_bytes().as_slice(),
+                label_id,
+                OwnerKind::Node as i64,
+                key_id,
+                after,
+                last,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, NodeId>(0)?,
+                    PropertyColumns {
+                        type_tag: row.get(1)?,
+                        int_value: row.get(2)?,
+                        real_value: row.get(3)?,
+                        text_value: row.get(4)?,
+                        blob_value: row.get(5)?,
+                        aux_value: row.get(6)?,
+                    },
+                ))
+            },
+        )?;
+        let mut values = BTreeMap::new();
+        for row in rows {
+            let (node_id, columns) = row?;
+            values.insert(node_id, columns.to_value()?);
+        }
+        Ok(values)
     }
 
     fn node_property_values_with_statement(
