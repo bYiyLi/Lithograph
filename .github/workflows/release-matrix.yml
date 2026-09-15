@@ -78,6 +78,8 @@ jobs:
         run: |
           cargo build --release --locked -p lithograph-extension
           cp "${{ matrix.built }}" "${{ matrix.artifact }}"
+      - name: Run Phase 09 version regressions
+        run: cargo test --release --locked -p lithograph-core --test phase09_version
       - name: Run release load, ABI, runtime, and interoperability gates
         run: scripts/release-artifact-smoke.sh "${{ matrix.artifact }}" target/phase10-interop/interop.sqlite
       - name: Upload release artifact
@@ -125,6 +127,8 @@ jobs:
           }
       - name: Build release artifact
         run: cargo build --release --locked -p lithograph-extension
+      - name: Run Phase 09 version regressions
+        run: cargo test --release --locked -p lithograph-core --test phase09_version
       - name: Run release load, ABI, runtime, and interoperability gates
         shell: pwsh
         run: ./scripts/windows-release-smoke.ps1 -ExtensionPath target/release/lithograph.dll -InteropFixture target/phase10-interop/interop.sqlite
