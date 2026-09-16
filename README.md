@@ -13,9 +13,24 @@ Lithograph 为 SQLite 提供版本化 Property Graph 数据库能力。
 - **SQLite 原生部署**：作为 loadable extension 使用同一个 SQLite database file，不需要独立数据库 Server。
 - **大规模单机图**：版本感知存储、索引化邻接访问、流式查询执行与 checkpointed history 面向大规模本地图数据设计。
 
-## 本地构建与 Quickstart
+## 安装与 Quickstart
 
-当前仓库尚未发布可用于生产的 Release；本地试用需要 Rust 1.98.1，以及支持 loadable extension 的 SQLite 3.45.0 或更高版本。
+当前正式版本是 **v0.1.0**。GitHub Releases 提供 Linux x64/arm64、macOS x64/arm64、Windows x64/arm64 六个平台的预编译 extension；运行时需要支持 loadable extension 的 SQLite 3.45.0 或更高版本。
+
+稳定下载地址：
+
+| 平台 | Release Asset |
+| --- | --- |
+| Linux x64 | `https://github.com/bYiyLi/Lithograph/releases/latest/download/lithograph-linux-x64.tar.gz` |
+| Linux arm64 | `https://github.com/bYiyLi/Lithograph/releases/latest/download/lithograph-linux-arm64.tar.gz` |
+| macOS x64 | `https://github.com/bYiyLi/Lithograph/releases/latest/download/lithograph-macos-x64.tar.gz` |
+| macOS arm64 | `https://github.com/bYiyLi/Lithograph/releases/latest/download/lithograph-macos-arm64.tar.gz` |
+| Windows x64 | `https://github.com/bYiyLi/Lithograph/releases/latest/download/lithograph-windows-x64.zip` |
+| Windows arm64 | `https://github.com/bYiyLi/Lithograph/releases/latest/download/lithograph-windows-arm64.zip` |
+
+每个包包含对应平台的 `lithograph.so` / `lithograph.dylib` / `lithograph.dll`、`README.md`、`LICENSE`、`COMMERCIAL-LICENSE.md` 与 `VERSION`。Release 同时提供 `SHA256SUMS` 用于校验下载内容。
+
+如果需要从源码构建，需要 Rust 1.98.1：
 
 先构建 release extension：
 
@@ -51,13 +66,15 @@ SELECT row
 FROM lithograph_rows('MATCH (p:Person) RETURN p.name');
 ```
 
-上述流程已在当前 macOS arm64 release build 上以真实 SQLite CLI 验证；Phase 10 release gate 另外覆盖 SQLite 3.45.0 minimum 与 3.53.4 release-current runtime。其它 host application 需要在目标 SQLite connection 上启用 loadable extension，并通过 SQLite 官方 extension-loading API 加载同一个 shared library。
+上述流程已由 release gate 在 Linux x64/arm64、macOS x64/arm64、Windows x64/arm64 六个平台验证；运行时 gate 覆盖 SQLite 3.45.0 minimum 与 3.53.4 release-current runtime。其它 host application 需要在目标 SQLite connection 上启用 loadable extension，并通过 SQLite 官方 extension-loading API 加载同一个 shared library。
 
 同一张图可以在不同 Commit 上查询，也可以在不同 Branch 上独立演化，而不需要复制 SQLite 数据库文件。
 
 ## 项目状态
 
-Lithograph 当前已经完成 Phase 00–11 的实现与验收。现有实现已具备标准 SQLite loadable-extension / Native ABI boundary、version-aware immutable storage、Graph View、Cypher 25 parser/type/value、真实 read planner/executor、mutation/Commit path、versioned Graph Type/Constraint、lookup/range/text/point/full-text/vector index、`SEARCH`、`LOAD CSV`、Cypher transaction batching，以及 Branch/Tag/Commit Data/Diff/Patch/Merge/Rebase/Squash/Reset/Revert/GC 等 Version operations。Phase 10 已完成 compatibility、recovery/migration、10M Node / 100M Relationship scale、architecture/security hardening。Phase 11 在此基础上完成 storage format 3、persistent Standard Index、物理邻接 keyset、query-owned resolved state/read guard、增量 index overlay 与实测性能热点优化；固定性能机的10M Node / 100M Relationship、1M/100K Search、10K-conflict Merge、1/4/8-reader 30分钟压力以及 repository-wide quality/coverage/真实 SQLite CI 均已通过。实现提交 `4695ebbd5887b7fcafa2dd64d9886c4a066bfd05` 的 hosted Release Matrix 已在 Linux x64/arm64、macOS x64/arm64、Windows x64/arm64 六目标全部通过并生成对应 artifact。仓库尚未发布正式 Release。
+Lithograph 当前已经完成 Phase 00–11 的实现与验收，首个公开版本为 **v0.1.0**。现有实现已具备标准 SQLite loadable-extension / Native ABI boundary、version-aware immutable storage、Graph View、Cypher 25 parser/type/value、真实 read planner/executor、mutation/Commit path、versioned Graph Type/Constraint、lookup/range/text/point/full-text/vector index、`SEARCH`、`LOAD CSV`、Cypher transaction batching，以及 Branch/Tag/Commit Data/Diff/Patch/Merge/Rebase/Squash/Reset/Revert/GC 等 Version operations。Phase 10 已完成 compatibility、recovery/migration、10M Node / 100M Relationship scale、architecture/security hardening。Phase 11 在此基础上完成 storage format 3、persistent Standard Index、物理邻接 keyset、query-owned resolved state/read guard、增量 index overlay 与实测性能热点优化；固定性能机的10M Node / 100M Relationship、1M/100K Search、10K-conflict Merge、1/4/8-reader 30分钟压力以及 repository-wide quality/coverage/真实 SQLite CI 均已通过。
+
+v0.1.0 属于 pre-1.0 版本：后续 minor release 仍可能调整公开 API、ABI 或 storage compatibility contract。升级已有数据库前应保留完整备份；format 3 没有自动 downgrade。详见 [CHANGELOG](CHANGELOG.md) 与 [v0.1.0 Release Notes](docs/releases/v0.1.0.md)。
 
 - [技术设计](docs/design.md)
 - [开发计划](docs/development/README.md)

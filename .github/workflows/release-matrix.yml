@@ -12,6 +12,15 @@ jobs:
       sqlite_gzip_base64: ${{ steps.fixture.outputs.sqlite_gzip_base64 }}
     steps:
       - uses: actions/checkout@v4
+      - name: Validate release metadata
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
+          test -n "$version"
+          test -f "docs/releases/v${version}.md"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            test "$GITHUB_REF_NAME" = "v${version}"
+          fi
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.98.1 --profile minimal
       - name: Create cross-platform storage fixture
@@ -82,12 +91,25 @@ jobs:
         run: cargo test --release --locked -p lithograph-core --test phase09_version
       - name: Run release load, ABI, runtime, and interoperability gates
         run: scripts/release-artifact-smoke.sh "${{ matrix.artifact }}" target/phase10-interop/interop.sqlite
+      - name: Package distributable release asset
+        run: |
+          python3 scripts/package-release.py \
+            --tag "v$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)" \
+            --binary "${{ matrix.artifact }}" \
+            --output "target/release/lithograph-${{ matrix.name }}.tar.gz"
       - name: Upload release artifact
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: lithograph-${{ matrix.name }}
           path: ${{ matrix.artifact }}
+          if-no-files-found: error
+      - name: Upload distributable release package
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.name }}
+          path: target/release/lithograph-${{ matrix.name }}.tar.gz
           if-no-files-found: error
 
   windows-artifacts:
@@ -130,6 +152,14 @@ jobs:
       - name: Run Phase 09, release load, ABI, runtime, and interoperability gates
         shell: pwsh
         run: ./scripts/windows-release-smoke.ps1 -ExtensionPath target/release/lithograph.dll -InteropFixture target/phase10-interop/interop.sqlite
+      - name: Package distributable release asset
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"').Matches[0].Groups[1].Value
+          python scripts/package-release.py `
+            --tag "v$version" `
+            --binary target/release/lithograph.dll `
+            --output "target/release/lithograph-${{ matrix.name }}.zip"
       - name: Upload release artifact
         continue-on-error: true
         uses: actions/upload-artifact@v4
@@ -137,3 +167,69 @@ jobs:
           name: lithograph-${{ matrix.name }}
           path: target/release/lithograph.dll
           if-no-files-found: error
+      - name: Upload distributable release package
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.name }}
+          path: target/release/lithograph-${{ matrix.name }}.zip
+          if-no-files-found: error
+
+  publish-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - unix-artifacts
+      - windows-artifacts
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download distributable release packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Verify release package set and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=(
+            lithograph-linux-x64.tar.gz
+            lithograph-linux-arm64.tar.gz
+            lithograph-macos-x64.tar.gz
+            lithograph-macos-arm64.tar.gz
+            lithograph-windows-x64.zip
+            lithograph-windows-arm64.zip
+          )
+          for asset in "${expected[@]}"; do
+            test -s "dist/$asset"
+          done
+          test "$(find dist -maxdepth 1 -type f -name 'lithograph-*' | wc -l | tr -d ' ')" = "6"
+          (
+            cd dist
+            sha256sum "${expected[@]}" | sort -k2 > SHA256SUMS
+            sha256sum -c SHA256SUMS
+          )
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes="docs/releases/${GITHUB_REF_NAME}.md"
+          test -f "$notes"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft')
+            test "$draft" = "true"
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --draft \
+              --verify-tag \
+              --title "Lithograph $GITHUB_REF_NAME" \
+              --notes-file "$notes"
+          fi
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          gh release edit "$GITHUB_REF_NAME" --draft=false
+          test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft')" = "false"
