@@ -2,7 +2,7 @@
 
 本文是 Lithograph 的产品与技术设计真源。开发计划、阶段状态和验收记录位于 `docs/development/`。
 
-Phase 00–10 是已实现的功能与 release-hardening 基线；本文新增的 Phase 11 性能专项设计尚待实现。第 7.8、8.3.1、11.7、14.3.1、17.1–17.3 节定义目标行为，不表示当前代码已经具备该优化。实现顺序和实际状态见 [Phase 11](development/phases/11-performance-optimization.md)。
+Phase 00–11 均已实现并完成对应验收。Phase 11 已将第 7.8、8.3.1、11.7、14.3.1、17.1–17.3 节定义的性能合同落入当前实现；实施顺序、量化证据与完成状态见 [Phase 11](development/phases/11-performance-optimization.md)。
 
 ## 1. 产品定义
 
@@ -1603,7 +1603,7 @@ Storage format version 记录在 `_lithograph_meta`。升级迁移必须：
 
 ### 14.3.1 Performance Storage Format 3（Phase 11）
 
-Phase 10 的 format `2` 保持已实现历史基线。Phase 11 实现后 current format 为 `3`，仅为第 11.7 节持久 derived index 增加固定 table/index inventory，不重写 Node/Relationship/Layer 的 canonical 编码。
+Phase 10 的 format `2` 保持已实现历史基线。Phase 11 已完成实现，current format 为 `3`，仅为第 11.7 节持久 derived index 增加固定 table/index inventory，不重写 Node/Relationship/Layer 的 canonical 编码。
 
 - Fresh database 的显式 `lithograph_init()` 创建 format `3`；format `2` 的显式 init 原子执行 `2 -> 3`，format `1` 的 init 在同一外层 migration transaction 完成 `1 -> 2 -> 3`。任何一步失败回到原格式及原 schema/metadata，而非留下半升级的 format `2`。
 - 保留 `databaseId`、全部旧 Commit ID/各自 `format_version`、Layer hash、Schema hash、parents、Branch/Tag、Commit Data 与 open Merge Session/resolutions。新 Commit 使用新 engine 的 format `3` hash input；旧 Commit 仍按原1/2编码验证，不能全库 rehash。

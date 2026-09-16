@@ -89,11 +89,11 @@ SEARCH _lithograph_cp_relationships USING PRIMARY KEY
 
 E1–E3足以驱动邻接keyset、query-owned state、持久derived index的设计；E4只允许按新profiling选择局部优化。原始SQL prototype、旧单次计时、Phase10逻辑plan名称都不替代Phase11端到端与物理工作量验收。
 
-本文未引入新的benchmark结果，也未执行Phase11实现。原始大fixture、完整generated report和临时trace不进入Git；后续正式性能结果必须保存足以重现的fixture manifest、测试命令、Git tree identity与统计摘要，且标明哪些大型原始artifact在本地或CI留存。
+本节以上记录的是Phase 11实施前的研究约束；下节追加实际实现后的验收证据。原始大fixture、完整generated report和临时trace不进入Git；正式性能结果保存足以重现的fixture manifest、测试命令、Git tree identity与统计摘要，并标明哪些大型原始artifact只在本地或CI留存。
 
-## 5. 2026-09-16 Phase 11 当前工作树实测证据
+## 5. 2026-09-16 Phase 11 实测与验收证据
 
-本节追加Phase 11实现后的本地证据，不改写前文的优化前观察。测试机仍为Apple M2、8 CPU、16 GiB RAM；当前Git `HEAD` 为 `da9445f2552d6b98de7f1275f69521e9099b7653`，Phase 11改动仍在dirty worktree，尚未commit/push。大型数据库、JSON report、resource trace继续只保存在ignored `target/`，不进入Git。由于当前改动没有远端ref，本节**不**把Phase 10旧的hosted Release Matrix结果冒充为Phase 11当前代码的六平台结果。
+本节追加Phase 11实现后的验收证据，不改写前文的优化前观察。测试机仍为Apple M2、8 CPU、16 GiB RAM；性能实现对应提交为 `4695ebbd5887b7fcafa2dd64d9886c4a066bfd05`，已推送到 `origin/main`。大型数据库、JSON report、resource trace继续只保存在ignored `target/`，不进入Git。该实现提交使用自己的hosted Release Matrix结果，不借用Phase 10旧matrix。
 
 ### 5.1 10M/100M ready-read与Standard Index
 
@@ -137,11 +137,12 @@ FLOAT32 cosine corpus在midpoint存在大量exact cutoff同分项。原先按det
 
 每档都包含Tag move、GC与persistent Index rebuild；最终WAL回收为0，未观察reader snapshot漂移、writer BUSY或failure。
 
-### 5.4 Repository gate与未完成外部门禁
+### 5.4 Repository gate与hosted closure
 
-当前worktree最终 `cargo make quality` exit 0；`cargo make quality-coverage` exit 0，TOTAL coverage为regions 83.26%、functions 84.41%、lines 85.28%；applicable inherited openCypher TCK为3,777/3,777。最终 `scripts/ci.sh` exit 0，覆盖当前SQLite真实 `.load`、Phase 01–09 real-extension probes、artifact inspection、Native ABI smoke、compatibility harness/inventory与TCK inventory。Compatibility Profile与waiver本期未改变，因此 `docs/development/cypher25-compatibility.md` 不需要新增能力条目。
+最终 `cargo make quality` exit 0；TOTAL coverage为regions 83.25%、functions 84.40%、lines 85.27%；applicable inherited openCypher TCK为3,777/3,777。最终 `scripts/ci.sh` exit 0，覆盖当前SQLite真实 `.load`、最低SQLite 3.45.0、Phase 01–09 real-extension probes、artifact inspection、Native ABI smoke、compatibility harness/inventory与TCK inventory。Compatibility Profile与waiver本期未改变，因此 `docs/development/cypher25-compatibility.md` 不需要新增能力条目。
 
-仍有两个必须明确的边界：
+实现提交 `4695ebbd5887b7fcafa2dd64d9886c4a066bfd05` 的GitHub Release Matrix run `35091276800` 已成功完成：storage fixture及Linux x64/arm64、macOS x64/arm64、Windows x64/arm64六个平台job全部 `success`；六个平台artifact均存在且未过期。同期CI run `35091276893` 也为 `success`。这关闭了Phase 11最后一个外部门禁。
+
+仍有一个必须明确的边界：
 
 1. 在旧26 GiB format2大fixture上，`lithograph_init()` 的完整integrity migration曾超过1小时外层测试窗口并被终止；savepoint完整回滚，`storage_format`仍为2。Phase 11没有冻结大库migration latency目标，本期验证的是migration correctness/rollback与ready-query性能，**不声明**旧26 GiB数据库的migration已具备低延迟。
-2. 当前Phase 11改动尚未commit/push，因此Linux x64/arm64、macOS x64/arm64、Windows x64/arm64六目标hosted Release Matrix还没有对应当前代码的远端ref与真实artifact结果。Phase状态必须继续为`in_progress`，直到该外部门禁真实通过。

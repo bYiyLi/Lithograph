@@ -1,6 +1,6 @@
 # Phase 11：Performance Optimization
 
-**状态：`in_progress`**
+**状态：`done`**
 
 ## 1. 目标与范围
 
@@ -14,13 +14,13 @@ Phase10保持 `done`，其原始证据作为历史保留。后续调查发现的
 
 ## 2. 依赖与Design Inputs
 
-- Phase00–10全部 `done`；Phase 11 的优化前测量基线来自 `cccb760` / storage format 2，当前工作树已进入storage format 3实现与验收，不能把before基线描述成当前实现。
+- Phase00–10全部 `done`；Phase 11 的优化前测量基线来自 `cccb760` / storage format 2，Phase 11实现提交使用storage format 3，不能把before基线描述成当前实现。
 - [Design](../../design.md) §4.1–4.4、§7.8、§8.3.1、§11.7、§14.3.1、§17.1–17.3、D12/D13。
 - [性能证据](../../research/phase11-performance-evidence.md)：E1–E4区分已观察问题、代码证据与未证实热点。
 - [Compatibility inventory](../cypher25-compatibility.md)：继续冻结 `CY25-2026.08`，性能优化不增加waiver。
 - [Phase10](10-compatibility-release.md)：继承correctness/recovery/release基础，不把旧单次计时当新P95。
 
-Design、前置Phase与验收已具备，当前正在按11.1→11.8实施和验收，因此状态为 `in_progress`。只有实现、量化验收、完整门禁、review finding与文档同步全部闭合后才能更新为 `done`。
+Design与前置Phase已具备，11.1→11.8的实现、量化验收、完整门禁、review finding与文档同步现已全部闭合，因此状态为 `done`。
 
 ## 3. Feature顺序与职责
 
@@ -144,9 +144,9 @@ Proof允许时复用起点、批量终点检查、有预算visibility cache、�
 
 ## 4. Implementation/Evidence状态
 
-当前工作树已经实现并完成targeted验证的范围包括：11.1性能harness/物理counter、11.2邻接keyset、11.3 query-owned resolved state/read guard、11.4 format3/persistent Standard Index/rebuild、11.5 ancestor/staged changed-owner overlay，以及11.6基于实测暴露的Range/new-connection/HNSW热点修复。固定性能机上的10M Node / 100M Relationship验收已证明邻接、Range seek、1000-row Range、1000-owner delta、SQL rows/Native streaming与RSS目标满足Design §17.2；1M×128、100K×1536 Vector与1M全文语料已保存cold/warm、historical/Graph View和tie-aware recall证据，10K-conflict Merge已保存prepare/writer-wait/writer-hold拆分。
+Phase 11实现提交已经实现并完成targeted验证的范围包括：11.1性能harness/物理counter、11.2邻接keyset、11.3 query-owned resolved state/read guard、11.4 format3/persistent Standard Index/rebuild、11.5 ancestor/staged changed-owner overlay，以及11.6基于实测暴露的Range/new-connection/HNSW热点修复。固定性能机上的10M Node / 100M Relationship验收已证明邻接、Range seek、1000-row Range、1000-owner delta、SQL rows/Native streaming与RSS目标满足Design §17.2；1M×128、100K×1536 Vector与1M全文语料已保存cold/warm、historical/Graph View和tie-aware recall证据，10K-conflict Merge已保存prepare/writer-wait/writer-hold拆分。
 
-Phase仍为 `in_progress`，但本地范围已经闭合：1/4/8-reader三档mixed workload均各运行30分钟并通过；Search、10K Merge、10M/100M定量门禁、最终repository-wide regression/quality/coverage、real-load与当前SQLite CI均通过。当前唯一尚未完成的Phase acceptance是**这份Phase 11改动对应的六目标hosted Release Matrix**。工作树仍未commit/push，因而没有可供GitHub hosted runners检出的当前ref；在真实六平台结果产生前不得把Phase标为 `done`。
+Phase 11现已闭合：1/4/8-reader三档mixed workload均各运行30分钟并通过；Search、10K Merge、10M/100M定量门禁、最终repository-wide regression/quality/coverage、real-load与当前SQLite CI均通过。实现提交 `4695ebbd5887b7fcafa2dd64d9886c4a066bfd05` 已推送到 `origin/main`，GitHub hosted Release Matrix run `35091276800` 的Linux x64/arm64、macOS x64/arm64、Windows x64/arm64六个平台job全部 `success`，并分别生成 `lithograph-linux-x64`、`lithograph-linux-arm64`、`lithograph-macos-x64`、`lithograph-macos-arm64`、`lithograph-windows-x64`、`lithograph-windows-arm64` artifact。同期CI run `35091276893` 也为 `success`。
 
 ## 5. Requirement追溯
 
@@ -215,9 +215,9 @@ Targeted至少覆盖现有 `phase02_storage`、`phase02_checkpoint_integrity`、
 - [x] P11-STRESS：Search规模与tie-aware recall、10K Merge、Native事务、1/4/8-reader每种并发配置30分钟压力全部通过。
 - [x] P11-LATENCY：Design §17.2全部目标和6.2结构gate通过，已有Version/write无性能回退。
 - [x] 全部applicable compatibility、`cargo make quality`、coverage、真实SQLite/ABI probes与`scripts/ci.sh`通过。
-- [ ] 当前Phase 11改动的Linux x64/arm64、macOS x64/arm64、Windows x64/arm64六平台hosted Release Matrix真实artifact/interop通过；未commit/push前没有对应远端ref，不能借用Phase 10旧matrix结果。
-- [x] Design/README/Development/compatibility/vlog与实际状态一致，证据显式保留旧26GiB migration慢路径与未运行hosted matrix，没有隐藏失败样本。
-- [x] 最终本地review无scope内未解决finding；`git diff --check`、link/status/hygiene/secret检查通过，diff无数据库、benchmark report、临时trace或无关改动。hosted matrix作为独立未完成acceptance保留在上一项。
+- [x] 当前Phase 11实现提交的Linux x64/arm64、macOS x64/arm64、Windows x64/arm64六平台hosted Release Matrix真实artifact/interop通过；run `35091276800` 的六个平台job与artifact均确认成功。
+- [x] Design/README/Development/compatibility/vlog与实际状态一致，证据显式保留旧26GiB migration慢路径与hosted matrix结果，没有隐藏失败样本。
+- [x] 最终review无scope内未解决finding；`git diff --check`、link/status/hygiene/secret检查通过，diff无数据库、benchmark report、临时trace或无关改动；hosted matrix已作为独立远端acceptance闭合。
 
 ## 8. 完成定义
 
