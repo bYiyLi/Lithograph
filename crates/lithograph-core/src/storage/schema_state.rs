@@ -393,6 +393,31 @@ impl ConstraintDefinition {
     }
 }
 
+impl IndexDefinition {
+    pub(crate) fn canonical_identity_blob(&self) -> StorageResult<Vec<u8>> {
+        encode_schema_object(SchemaObject::Index {
+            definition: self.clone(),
+        })
+    }
+
+    pub(crate) fn from_canonical_identity_blob(blob: &[u8]) -> StorageResult<Self> {
+        let object: SchemaObject = serde_json::from_slice(blob).map_err(|error| {
+            StorageError::corrupt(format!("invalid persistent Index definition JSON: {error}"))
+        })?;
+        let SchemaObject::Index { definition } = object else {
+            return Err(StorageError::corrupt(
+                "persistent Index definition blob is not an Index Schema object",
+            ));
+        };
+        if definition.canonical_identity_blob()? != blob {
+            return Err(StorageError::corrupt(
+                "persistent Index definition blob is not canonical",
+            ));
+        }
+        Ok(definition)
+    }
+}
+
 pub fn graph_node_slot(label: &str) -> String {
     format!("graph/node/{label}")
 }
@@ -411,18 +436,21 @@ fn insert_logical_object(
     slot: String,
     object: SchemaObject,
 ) -> StorageResult<()> {
-    let value = serde_json::to_value(object).map_err(|error| {
-        StorageError::corrupt(format!("failed to encode Schema object: {error}"))
-    })?;
-    let bytes = serde_json::to_vec(&canonical_json(value)).map_err(|error| {
-        StorageError::corrupt(format!("failed to encode Schema object: {error}"))
-    })?;
+    let bytes = encode_schema_object(object)?;
     if objects.insert(slot.clone(), bytes).is_some() {
         return Err(StorageError::corrupt(format!(
             "duplicate canonical Schema slot {slot:?}"
         )));
     }
     Ok(())
+}
+
+fn encode_schema_object(object: SchemaObject) -> StorageResult<Vec<u8>> {
+    let value = serde_json::to_value(object).map_err(|error| {
+        StorageError::corrupt(format!("failed to encode Schema object: {error}"))
+    })?;
+    serde_json::to_vec(&canonical_json(value))
+        .map_err(|error| StorageError::corrupt(format!("failed to encode Schema object: {error}")))
 }
 
 fn canonical_json(value: JsonValue) -> JsonValue {

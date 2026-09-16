@@ -3,6 +3,7 @@ use super::*;
 pub(super) struct AdapterExecution {
     cursor: query::QueryCursor,
     columns: Vec<String>,
+    read_guard: Option<MainReadGuard>,
 }
 
 impl AdapterExecution {
@@ -12,16 +13,24 @@ impl AdapterExecution {
         params_text: &str,
         options_text: &str,
     ) -> LithographResult<Self> {
-        require_initialized(connection)?;
+        let metadata = require_initialized(connection)?;
+        let mut read_guard = Some(MainReadGuard::acquire(connection)?);
         let params = cypher::decode_parameters_text(params_text)
             .map_err(|error| LithographError::invalid_argument(error.message))?;
         let options = query::ExecutionOptions::parse_text(options_text).map_err(map_query_error)?;
         let prepared =
             query::prepare(connection, query_text, params, options).map_err(map_query_error)?;
         let columns = prepared.columns.clone();
+        let cursor = query::QueryCursor::new(prepared);
+        if cursor.is_write() {
+            read_guard.take();
+            require_no_active_readers(connection)?;
+            require_current_storage_format(&metadata)?;
+        }
         Ok(Self {
-            cursor: query::QueryCursor::new(prepared),
+            cursor,
             columns,
+            read_guard,
         })
     }
 
@@ -71,7 +80,9 @@ impl AdapterExecution {
     }
 
     pub(super) fn cancel(&mut self, connection: &Connection) -> LithographResult<()> {
-        self.cursor.cancel(connection).map_err(map_query_error)
+        let result = self.cursor.cancel(connection).map_err(map_query_error);
+        self.read_guard.take();
+        result
     }
 
     pub(super) fn complete(
@@ -83,9 +94,12 @@ impl AdapterExecution {
         // the loadable-extension API table.
         let db = unsafe { connection.handle() };
         let is_interrupted = || host_is_interrupted(db);
-        self.cursor
+        let result = self
+            .cursor
             .complete_with_interrupt(connection, &is_interrupted)
-            .map_err(map_query_error)
+            .map_err(map_query_error);
+        self.read_guard.take();
+        result
     }
 }
 

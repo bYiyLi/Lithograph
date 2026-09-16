@@ -1,23 +1,20 @@
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
-use rusqlite::Connection;
-
 use crate::cypher::{Value, VectorCoordinateType};
 use crate::storage::{
-    ConstraintDefinitionKind, HashId, IndexDefinition, IndexTarget, PropertyType, SchemaState,
+    ConstraintDefinitionKind, IndexDefinition, IndexTarget, PropertyType, SchemaState,
     SchemaTarget, StandardIndexKind,
 };
 
-use super::super::QueryResult;
 use super::super::expression::{BinaryOp, Expr, UnaryOp};
 use super::super::plan::MatchStep;
 
 mod cache;
+mod persistent;
 
-pub(crate) use cache::{
-    ensure_standard_indexes_for_commit, scan_node_index_after, scan_relationship_index_after,
-};
+pub(crate) use cache::{StandardIndexCursor, scan_node_index_page, scan_relationship_index_page};
+pub(crate) use persistent::{build_persistent_generation, ensure_standard_indexes_for_commit};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct StandardIndexSeek {
@@ -53,20 +50,10 @@ pub(crate) enum StandardIndexPredicate {
 }
 
 pub(crate) fn select_standard_index_seeks(
-    connection: &Connection,
-    commit: HashId,
-    schema_override: Option<&SchemaState>,
+    schema: &SchemaState,
     matches: &mut [MatchStep],
     params: &BTreeMap<String, Value>,
-) -> QueryResult<()> {
-    let loaded_schema;
-    let schema = match schema_override {
-        Some(schema) => schema,
-        None => {
-            loaded_schema = SchemaState::load(connection, commit)?;
-            &loaded_schema
-        }
-    };
+) {
     for step in matches {
         let candidates = step
             .predicate
@@ -90,7 +77,6 @@ pub(crate) fn select_standard_index_seeks(
             }
         }
     }
-    Ok(())
 }
 
 fn choose_node_seek(

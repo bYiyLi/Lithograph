@@ -21,7 +21,9 @@ impl PlannerStatistics {
         need_nodes: bool,
         need_relationships: bool,
     ) -> QueryResult<Self> {
-        let Some(snapshot_statistics) = snapshot.statistics()? else {
+        let Some(snapshot_statistics) =
+            snapshot.statistics(labels, relationship_types, need_nodes, need_relationships)?
+        else {
             return Ok(Self::default());
         };
         let node_count = if need_nodes {

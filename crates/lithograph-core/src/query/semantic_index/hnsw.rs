@@ -20,6 +20,63 @@ struct VectorCacheMeta {
     entry_count: usize,
 }
 
+struct SqlVectorCache<'connection, 'key> {
+    connection: &'connection Connection,
+    cache_key: &'key str,
+    loaded: BTreeMap<i64, VectorCacheEntry>,
+}
+
+impl SqlVectorCache<'_, '_> {
+    fn entry(&mut self, owner_id: i64) -> QueryResult<Option<VectorCacheEntry>> {
+        if let Some(entry) = self.loaded.get(&owner_id) {
+            return Ok(Some(entry.clone()));
+        }
+        #[cfg(feature = "test-support")]
+        let load_started = std::time::Instant::now();
+        let row = self
+            .connection
+            .query_row(
+                "SELECT vector_json, level, neighbors_json \
+                 FROM temp._lithograph_vector_cache \
+                 WHERE cache_key = ?1 AND owner_id = ?2",
+                rusqlite::params![self.cache_key, owner_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((vector_json, level, neighbors_json)) = row else {
+            return Ok(None);
+        };
+        let Ok(vector) = serde_json::from_str::<Vec<f32>>(&vector_json) else {
+            return Ok(None);
+        };
+        let Ok(neighbors) = serde_json::from_str::<Vec<Vec<i64>>>(&neighbors_json) else {
+            return Ok(None);
+        };
+        let Ok(level) = usize::try_from(level) else {
+            return Ok(None);
+        };
+        if vector.is_empty() || neighbors.len() != level.saturating_add(1) {
+            return Ok(None);
+        }
+        let entry = VectorCacheEntry {
+            owner_id,
+            vector,
+            level,
+            neighbors,
+        };
+        self.loaded.insert(owner_id, entry.clone());
+        #[cfg(feature = "test-support")]
+        crate::performance::record_vector_cache_entry_load(load_started.elapsed().as_micros());
+        Ok(Some(entry))
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct VectorQueueItem {
     owner_id: i64,
@@ -51,6 +108,12 @@ impl Ord for VectorQueueItem {
 struct HnswLayerResult {
     items: Vec<VectorQueueItem>,
     visited_count: usize,
+}
+
+struct SqlSearchState {
+    visited: BTreeSet<i64>,
+    candidates: BinaryHeap<VectorQueueItem>,
+    nearest: BinaryHeap<Reverse<VectorQueueItem>>,
 }
 
 fn vector_cache_key(
@@ -128,46 +191,69 @@ pub(super) fn query_vector_cache(
     ensure_vector_cache_tables(connection)?;
     let query_vector = vector_numbers(query)?;
     let cache_key = vector_cache_key(snapshot, index, query_vector.len())?;
-    let Some((meta, entries)) = load_valid_vector_cache(connection, &cache_key)? else {
+    let Some(meta) = vector_cache_meta(connection, &cache_key)? else {
         return Ok(None);
     };
-    if entries.is_empty() {
+    if meta.entry_count == 0 {
+        if meta.entry_owner_id.is_some() || meta.max_level != 0 {
+            invalidate_vector_cache(connection, &cache_key)?;
+            return Ok(None);
+        }
         return Ok(Some(VectorCandidateResult {
             hits: Vec::new(),
             exhaustive: true,
         }));
     }
+    let Some(mut cache) = open_sql_vector_cache(connection, &cache_key, meta, query_vector.len())?
+    else {
+        return Ok(None);
+    };
     let similarity = vector_configuration(index)?.1;
     let input = VectorSearchInput {
         query: &query_vector,
         similarity,
     };
-    search_vector_cache(
+    #[cfg(feature = "test-support")]
+    let search_started = std::time::Instant::now();
+    let result = search_vector_cache(
         snapshot,
         graph_view,
         index,
         &input,
-        &entries,
+        &mut cache,
         meta,
         candidate_limit,
-        connection,
-        &cache_key,
         is_interrupted,
-    )
+    );
+    #[cfg(feature = "test-support")]
+    crate::performance::record_vector_cache_search(search_started.elapsed().as_micros());
+    result
 }
 
-fn load_valid_vector_cache(
-    connection: &Connection,
-    cache_key: &str,
-) -> QueryResult<Option<(VectorCacheMeta, BTreeMap<i64, VectorCacheEntry>)>> {
-    let Some(meta) = vector_cache_meta(connection, cache_key)? else {
-        return Ok(None);
-    };
-    let Some(entries) = load_vector_cache_entries(connection, cache_key, meta)? else {
+fn open_sql_vector_cache<'connection, 'key>(
+    connection: &'connection Connection,
+    cache_key: &'key str,
+    meta: VectorCacheMeta,
+    query_dimension: usize,
+) -> QueryResult<Option<SqlVectorCache<'connection, 'key>>> {
+    let Some(entry_owner_id) = meta.entry_owner_id else {
         invalidate_vector_cache(connection, cache_key)?;
         return Ok(None);
     };
-    Ok(Some((meta, entries)))
+    let mut cache = SqlVectorCache {
+        connection,
+        cache_key,
+        loaded: BTreeMap::new(),
+    };
+    let Some(entry) = cache.entry(entry_owner_id)? else {
+        invalidate_vector_cache(connection, cache_key)?;
+        return Ok(None);
+    };
+    if entry.level != meta.max_level || entry.vector.len() != query_dimension {
+        invalidate_vector_cache(connection, cache_key)?;
+        return Ok(None);
+    }
+    Ok(Some(cache))
 }
 
 #[allow(
@@ -179,90 +265,46 @@ fn search_vector_cache(
     graph_view: &ResolvedGraphView,
     index: &IndexDefinition,
     input: &VectorSearchInput<'_>,
-    entries: &BTreeMap<i64, VectorCacheEntry>,
+    cache: &mut SqlVectorCache<'_, '_>,
     meta: VectorCacheMeta,
     candidate_limit: usize,
-    connection: &Connection,
-    cache_key: &str,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<Option<VectorCandidateResult>> {
     let entry_owner_id = meta
         .entry_owner_id
         .ok_or_else(|| QueryError::internal("validated HNSW cache is missing its entry point"))?;
-    let desired = candidate_limit.max(1).min(entries.len());
+    let desired = candidate_limit.max(1).min(meta.entry_count);
     let mut ef_search = desired;
     loop {
-        let layer = hnsw_search(
-            entries,
+        let Some(layer) = hnsw_search_sql(
+            cache,
             entry_owner_id,
             meta.max_level,
             input.query,
             input.similarity,
             ef_search,
             is_interrupted,
-        )?;
-        let exhaustive = ef_search >= entries.len() && layer.visited_count == entries.len();
+        )?
+        else {
+            invalidate_vector_cache(cache.connection, cache.cache_key)?;
+            return Ok(None);
+        };
+        let exhaustive = ef_search >= meta.entry_count && layer.visited_count == meta.entry_count;
         let mut hits = semantic_hits_from_cache(snapshot, graph_view, index, input, &layer.items)?;
         sort_semantic_hits(&mut hits);
         if hits.len() >= desired || exhaustive {
             return Ok(Some(VectorCandidateResult { hits, exhaustive }));
         }
-        if ef_search == entries.len() {
-            invalidate_vector_cache(connection, cache_key)?;
+        if ef_search == meta.entry_count {
+            invalidate_vector_cache(cache.connection, cache.cache_key)?;
             return Ok(None);
         }
         let next = ef_search.saturating_mul(2).max(ef_search.saturating_add(1));
-        ef_search = next.min(entries.len());
+        ef_search = next.min(meta.entry_count);
     }
 }
 
-fn load_vector_cache_entries(
-    connection: &Connection,
-    cache_key: &str,
-    meta: VectorCacheMeta,
-) -> QueryResult<Option<BTreeMap<i64, VectorCacheEntry>>> {
-    let mut statement = connection.prepare(
-        "SELECT owner_id, vector_json, level, neighbors_json FROM temp._lithograph_vector_cache \
-         WHERE cache_key = ?1 ORDER BY owner_id",
-    )?;
-    let mut rows = statement.query([cache_key])?;
-    let mut entries = BTreeMap::new();
-    while let Some(row) = rows.next()? {
-        let owner_id = row.get::<_, i64>(0)?;
-        let vector_json = row.get::<_, String>(1)?;
-        let level = row.get::<_, i64>(2)?;
-        let neighbors_json = row.get::<_, String>(3)?;
-        let Ok(vector) = serde_json::from_str::<Vec<f32>>(&vector_json) else {
-            return Ok(None);
-        };
-        let Ok(neighbors) = serde_json::from_str::<Vec<Vec<i64>>>(&neighbors_json) else {
-            return Ok(None);
-        };
-        let Ok(level) = usize::try_from(level) else {
-            return Ok(None);
-        };
-        if vector.is_empty() || neighbors.len() != level.saturating_add(1) {
-            return Ok(None);
-        }
-        entries.insert(
-            owner_id,
-            VectorCacheEntry {
-                owner_id,
-                vector,
-                level,
-                neighbors,
-            },
-        );
-    }
-    if entries.len() != meta.entry_count {
-        return Ok(None);
-    }
-    if !vector_cache_graph_valid(&entries, meta) {
-        return Ok(None);
-    }
-    Ok(Some(entries))
-}
-
+#[cfg(test)]
 fn vector_cache_graph_valid(
     entries: &BTreeMap<i64, VectorCacheEntry>,
     meta: VectorCacheMeta,
@@ -309,6 +351,177 @@ fn vector_cache_graph_valid(
     reachable.len() == entries.len()
 }
 
+fn hnsw_search_sql(
+    cache: &mut SqlVectorCache<'_, '_>,
+    entry_owner_id: i64,
+    max_level: usize,
+    query: &[f32],
+    similarity: &str,
+    ef_search: usize,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<Option<HnswLayerResult>> {
+    let mut current = entry_owner_id;
+    for level in (1..=max_level).rev() {
+        let Some(result) = hnsw_search_layer_sql(
+            cache,
+            &[current],
+            query,
+            similarity,
+            level,
+            1,
+            is_interrupted,
+        )?
+        else {
+            return Ok(None);
+        };
+        if let Some(best) = result.items.first() {
+            current = best.owner_id;
+        }
+    }
+    hnsw_search_layer_sql(
+        cache,
+        &[current],
+        query,
+        similarity,
+        0,
+        ef_search.max(1),
+        is_interrupted,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "lazy HNSW traversal keeps cache, graph layer, query, similarity, search width and cancellation explicit"
+)]
+fn hnsw_search_layer_sql(
+    cache: &mut SqlVectorCache<'_, '_>,
+    entry_points: &[i64],
+    query: &[f32],
+    similarity: &str,
+    level: usize,
+    ef: usize,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<Option<HnswLayerResult>> {
+    let ef = ef.max(1);
+    let Some(mut state) = initialize_sql_search(cache, entry_points, query, similarity, level)?
+    else {
+        return Ok(None);
+    };
+    while let Some(candidate) = state.candidates.pop() {
+        if is_interrupted() {
+            return Err(QueryError::interrupted());
+        }
+        if state.nearest.len() >= ef
+            && state
+                .nearest
+                .peek()
+                .is_some_and(|Reverse(worst)| candidate < *worst)
+        {
+            break;
+        }
+        if !expand_sql_candidate(cache, candidate, query, similarity, level, ef, &mut state)? {
+            return Ok(None);
+        }
+    }
+    let mut items = state
+        .nearest
+        .into_iter()
+        .map(|Reverse(item)| item)
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| right.cmp(left));
+    Ok(Some(HnswLayerResult {
+        items,
+        visited_count: state.visited.len(),
+    }))
+}
+
+fn initialize_sql_search(
+    cache: &mut SqlVectorCache<'_, '_>,
+    entry_points: &[i64],
+    query: &[f32],
+    similarity: &str,
+    level: usize,
+) -> QueryResult<Option<SqlSearchState>> {
+    let mut state = SqlSearchState {
+        visited: BTreeSet::new(),
+        candidates: BinaryHeap::new(),
+        nearest: BinaryHeap::new(),
+    };
+    for owner_id in entry_points {
+        let Some(entry) = cache.entry(*owner_id)? else {
+            return Ok(None);
+        };
+        if entry.level < level {
+            continue;
+        }
+        if entry.vector.len() != query.len() {
+            return Ok(None);
+        }
+        if state.visited.insert(*owner_id) {
+            let item = VectorQueueItem {
+                owner_id: *owner_id,
+                score: vector_similarity_numbers(&entry.vector, query, similarity)?,
+            };
+            state.candidates.push(item);
+            state.nearest.push(Reverse(item));
+        }
+    }
+    Ok(Some(state))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one lazy HNSW candidate expansion keeps graph layer, query, search width and state explicit"
+)]
+fn expand_sql_candidate(
+    cache: &mut SqlVectorCache<'_, '_>,
+    candidate: VectorQueueItem,
+    query: &[f32],
+    similarity: &str,
+    level: usize,
+    ef: usize,
+    state: &mut SqlSearchState,
+) -> QueryResult<bool> {
+    let Some(entry) = cache.entry(candidate.owner_id)? else {
+        return Ok(false);
+    };
+    let Some(neighbors) = entry.neighbors.get(level) else {
+        return Ok(false);
+    };
+    for neighbor_id in neighbors {
+        if *neighbor_id == candidate.owner_id {
+            return Ok(false);
+        }
+        if !state.visited.insert(*neighbor_id) {
+            continue;
+        }
+        let Some(neighbor) = cache.entry(*neighbor_id)? else {
+            return Ok(false);
+        };
+        if neighbor.level < level || neighbor.vector.len() != query.len() {
+            return Ok(false);
+        }
+        let item = VectorQueueItem {
+            owner_id: *neighbor_id,
+            score: vector_similarity_numbers(&neighbor.vector, query, similarity)?,
+        };
+        let should_keep = state.nearest.len() < ef
+            || state
+                .nearest
+                .peek()
+                .is_none_or(|Reverse(worst)| item > *worst);
+        if should_keep {
+            state.candidates.push(item);
+            state.nearest.push(Reverse(item));
+            if state.nearest.len() > ef {
+                state.nearest.pop();
+            }
+        }
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
 fn hnsw_search(
     entries: &BTreeMap<i64, VectorCacheEntry>,
     entry_owner_id: i64,
@@ -475,11 +688,18 @@ pub(super) fn build_vector_cache(
     if vector_cache_meta(connection, &cache_key)?.is_some() {
         return Ok(());
     }
+    #[cfg(feature = "test-support")]
+    let build_started = std::time::Instant::now();
     invalidate_vector_cache(connection, &cache_key)?;
     let mut entries =
         collect_vector_cache_entries(connection, snapshot, index, query_dimension, is_interrupted)?;
     build_hnsw_graph(index, &mut entries, is_interrupted)?;
-    persist_vector_cache(connection, &cache_key, &entries)
+    let result = persist_vector_cache(connection, &cache_key, &entries);
+    #[cfg(feature = "test-support")]
+    if result.is_ok() {
+        crate::performance::record_vector_cache_build(build_started.elapsed().as_micros());
+    }
+    result
 }
 
 fn collect_vector_cache_entries(
@@ -734,6 +954,11 @@ fn connect_hnsw_entry(
         .map(|entry| entry.neighbors.clone())
         .ok_or_else(|| QueryError::internal("new HNSW entry disappeared during construction"))?;
     for (level, neighbors) in selected.into_iter().enumerate() {
+        let layer_maximum = if level == 0 {
+            maximum.saturating_mul(2)
+        } else {
+            maximum
+        };
         for neighbor_id in neighbors {
             if is_interrupted() {
                 return Err(QueryError::interrupted());
@@ -749,7 +974,8 @@ fn connect_hnsw_entry(
             if !layer.contains(&owner_id) {
                 layer.push(owner_id);
             }
-            let pruned = prune_hnsw_neighbors(graph, neighbor_id, level, similarity, maximum)?;
+            let pruned =
+                prune_hnsw_neighbors(graph, neighbor_id, level, similarity, layer_maximum)?;
             graph
                 .get_mut(&neighbor_id)
                 .and_then(|entry| entry.neighbors.get_mut(level))

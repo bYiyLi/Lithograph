@@ -7,16 +7,20 @@
 
 use rusqlite::{Connection, Statement, params};
 
+#[cfg(test)]
+use super::STORAGE_FORMAT;
 use super::encoding::RecordHasher;
+use super::fixture_support::{
+    checked_fixture_identity, finalize_fixture_commit, hash_fixture_label, hash_fixture_node,
+    insert_fixture_property, report_fixture_progress,
+};
 use super::identity::allocate_layer_id;
 use super::layer::DeltaOp;
-use super::property::PropertyColumns;
-use super::schema::{commit_hash, schema_hash_for_commit};
+use super::schema::commit_hash;
 use super::{
-    CommitMetadata, HashId, OwnerKind, PropertyValue, RelationshipRecord, STORAGE_FORMAT,
-    StorageError, StorageResult, VectorCoordinateType, VectorValue, allocate_node_id_range,
-    allocate_relationship_id_range, branch_head, intern_label, intern_property_key,
-    intern_relationship_type, root_commit,
+    CommitMetadata, HashId, PropertyValue, RelationshipRecord, StorageError, StorageResult,
+    VectorCoordinateType, VectorValue, allocate_node_id_range, allocate_relationship_id_range,
+    branch_head, intern_label, intern_property_key, intern_relationship_type, root_commit,
 };
 
 /// Deterministic Phase 10 scale fixture dimensions.
@@ -42,6 +46,61 @@ pub struct ScaleFixture {
     pub hub_label: i64,
     pub link_type: i64,
     pub hub_outgoing_count: u64,
+}
+
+/// Rewrites a disposable single-Root fixture so its Root Commit is canonical
+/// for an earlier storage format. This exists only for migration acceptance
+/// tests; production migration never rewrites Commit identities.
+pub fn rewrite_single_root_format(
+    connection: &Connection,
+    format_version: i64,
+) -> StorageResult<HashId> {
+    if format_version <= 0 {
+        return Err(StorageError::corrupt(
+            "fixture storage format must be positive",
+        ));
+    }
+    let old_root = root_commit(connection)?;
+    let commit_count: i64 =
+        connection.query_row("SELECT count(*) FROM main._lithograph_commits", [], |row| {
+            row.get(0)
+        })?;
+    if commit_count != 1 {
+        return Err(StorageError::corrupt(
+            "single-Root fixture rewrite requires exactly one Commit",
+        ));
+    }
+    let (layer_hash, schema_hash): (Vec<u8>, Vec<u8>) = connection.query_row(
+        "SELECT layers.hash, commits.schema_hash \
+         FROM main._lithograph_commits AS commits \
+         JOIN main._lithograph_layers AS layers ON layers.id = commits.layer_id \
+         WHERE commits.id = ?1 AND commits.parent1 IS NULL AND commits.parent2 IS NULL",
+        [old_root.as_bytes().as_slice()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let layer_hash = HashId::from_slice(&layer_hash)?;
+    let schema_hash = HashId::from_slice(&schema_hash)?;
+    let new_root = commit_hash(
+        format_version,
+        None,
+        None,
+        layer_hash,
+        schema_hash,
+        &CommitMetadata::root(),
+    );
+    connection.execute(
+        "UPDATE main._lithograph_commits SET id = ?2, format_version = ?3 WHERE id = ?1",
+        params![
+            old_root.as_bytes().as_slice(),
+            new_root.as_bytes().as_slice(),
+            format_version
+        ],
+    )?;
+    connection.execute(
+        "UPDATE main._lithograph_branches SET commit_id = ?2 WHERE name = 'main' AND commit_id = ?1",
+        params![old_root.as_bytes().as_slice(), new_root.as_bytes().as_slice()],
+    )?;
+    Ok(new_root)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -390,11 +449,6 @@ fn finalize_scale_commit(
     spec: ScaleFixtureSpec,
     layer_hash: HashId,
 ) -> StorageResult<HashId> {
-    connection.execute(
-        "INSERT INTO main._lithograph_layers(id, hash) VALUES(?1, ?2)",
-        params![layer_id, layer_hash.as_bytes().as_slice()],
-    )?;
-    let schema_hash = schema_hash_for_commit(connection, root)?;
     let metadata = CommitMetadata {
         author: Some("phase10-scale".to_owned()),
         message: Some(format!(
@@ -403,35 +457,7 @@ fn finalize_scale_commit(
         )),
         committed_at: 1,
     };
-    let commit = commit_hash(
-        STORAGE_FORMAT,
-        Some(root),
-        None,
-        layer_hash,
-        schema_hash,
-        &metadata,
-    );
-    connection.execute(
-        "INSERT INTO main._lithograph_commits(id, format_version, parent1, parent2, layer_id, schema_hash, author, message, committed_at) VALUES(?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8)",
-        params![
-            commit.as_bytes().as_slice(),
-            STORAGE_FORMAT,
-            root.as_bytes().as_slice(),
-            layer_id,
-            schema_hash.as_bytes().as_slice(),
-            metadata.author,
-            metadata.message,
-            metadata.committed_at,
-        ],
-    )?;
-    let changed = connection.execute(
-        "UPDATE main._lithograph_branches SET commit_id = ?2 WHERE name = 'main' AND commit_id = ?1",
-        params![root.as_bytes().as_slice(), commit.as_bytes().as_slice()],
-    )?;
-    if changed != 1 {
-        return Err(StorageError::BranchHeadMoved);
-    }
-    Ok(commit)
+    finalize_fixture_commit(connection, layer_id, root, layer_hash, &metadata)
 }
 
 fn insert_property(
@@ -442,55 +468,15 @@ fn insert_property(
     key_id: i64,
     value: PropertyValue,
 ) -> StorageResult<()> {
-    let columns = PropertyColumns::from_value(&value)?;
-    statement.execute(params![
-        layer_id,
-        owner_id,
-        key_id,
-        columns.type_tag,
-        columns.int_value,
-        columns.real_value,
-        columns.text_value.as_deref(),
-        columns.blob_value.as_deref(),
-        columns.aux_value.as_deref(),
-    ])?;
-    let owner_kind = (OwnerKind::Node as i64).to_le_bytes();
-    let owner_id = owner_id.to_le_bytes();
-    let key_id = key_id.to_le_bytes();
-    let op = (DeltaOp::Add as i64).to_le_bytes();
-    let type_tag = value.type_tag().to_le_bytes();
-    let mut optional_type = [0_u8; 9];
-    optional_type[0] = 1;
-    optional_type[1..].copy_from_slice(&type_tag);
-    let canonical = value.canonical_bytes()?;
-    let mut optional_value = Vec::with_capacity(canonical.len() + 1);
-    optional_value.push(1);
-    optional_value.extend_from_slice(&canonical);
-    hasher.record_field(
-        "PROPERTY",
-        &[
-            &owner_kind,
-            &owner_id,
-            &key_id,
-            &op,
-            &optional_type,
-            &optional_value,
-        ],
-    );
-    Ok(())
+    insert_fixture_property(statement, hasher, layer_id, owner_id, key_id, value)
 }
 
 fn hash_node_record(hasher: &mut RecordHasher, node_id: i64) {
-    let node_id = node_id.to_le_bytes();
-    let op = (DeltaOp::Add as i64).to_le_bytes();
-    hasher.record_field("NODE", &[&node_id, &op]);
+    hash_fixture_node(hasher, node_id);
 }
 
 fn hash_label_record(hasher: &mut RecordHasher, node_id: i64, label_id: i64) {
-    let node_id = node_id.to_le_bytes();
-    let label_id = label_id.to_le_bytes();
-    let op = (DeltaOp::Add as i64).to_le_bytes();
-    hasher.record_field("LABEL", &[&node_id, &label_id, &op]);
+    hash_fixture_label(hasher, node_id, label_id);
 }
 
 fn hash_relationship_record(hasher: &mut RecordHasher, record: RelationshipRecord) {
@@ -503,23 +489,7 @@ fn hash_relationship_record(hasher: &mut RecordHasher, record: RelationshipRecor
 }
 
 fn checked_identity(first: i64, offset: u64, name: &str) -> StorageResult<i64> {
-    let offset = i64::try_from(offset)
-        .map_err(|_| StorageError::corrupt(format!("{name} offset exceeds INTEGER64")))?;
-    first
-        .checked_add(offset)
-        .ok_or_else(|| StorageError::corrupt(format!("{name} exceeds INTEGER64")))
-}
-
-fn report_progress(
-    progress: &mut impl FnMut(&str, u64, u64),
-    phase: &str,
-    current: u64,
-    total: u64,
-    interval: u64,
-) {
-    if current == total || (interval > 0 && current.is_multiple_of(interval)) {
-        progress(phase, current, total);
-    }
+    checked_fixture_identity(first, offset, name)
 }
 
 fn report_seed_progress(
@@ -529,7 +499,7 @@ fn report_seed_progress(
     total: u64,
     interval: u64,
 ) {
-    report_progress(progress, phase, offset + 1, total, interval);
+    report_fixture_progress(progress, phase, offset, total, interval);
 }
 
 #[cfg(test)]
@@ -553,11 +523,16 @@ mod tests {
                      magic TEXT NOT NULL,\
                      database_id TEXT NOT NULL,\
                      storage_format INTEGER NOT NULL\
-                 );\
-                 INSERT INTO main._lithograph_meta(id, magic, database_id, storage_format)\
-                 VALUES(1, 'lithograph-format-v1', '00000000-0000-4000-8000-000000000010', 2);",
+                 );",
             )
             .expect("metadata");
+        connection
+            .execute(
+                "INSERT INTO main._lithograph_meta(id, magic, database_id, storage_format) \
+                 VALUES(1, 'lithograph-format-v1', '00000000-0000-4000-8000-000000000010', ?1)",
+                [STORAGE_FORMAT],
+            )
+            .expect("metadata marker");
         create_storage_schema(&connection).expect("storage schema");
         initialize_root(&connection).expect("root");
         initialize_connection_state(&connection).expect("connection state");

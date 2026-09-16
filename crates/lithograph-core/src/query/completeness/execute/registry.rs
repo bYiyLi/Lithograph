@@ -98,6 +98,7 @@ fn version_argument_range(name: &str) -> Option<(usize, usize)> {
         | "lithograph.tag.create"
         | "lithograph.tag.move"
         | "lithograph.diff"
+        | "lithograph.index.rebuild"
         | "lithograph.merge.finalize"
         | "lithograph.merge.abort" => (2, 2),
         "lithograph.log" => (0, 3),
@@ -316,6 +317,7 @@ impl ReadExecutor<'_, '_> {
                 args,
                 options,
                 pinned_commit,
+                self.is_interrupted,
             )?;
             if mutation {
                 self.version_mutated = true;

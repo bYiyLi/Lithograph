@@ -13,7 +13,7 @@ use super::plan::{Direction, MatchStep, PatternPart, PreparedQuery, Relationship
 use super::spill::{
     DistinctSpill, SortSpill, SpillOutput, drop_temp_table, open_spill_connection, read_output_row,
 };
-use super::{QueryError, QueryResult};
+use super::{QueryError, QueryResult, check_interrupted};
 
 mod node_match;
 mod profile;
@@ -325,6 +325,7 @@ struct PartCursor {
     part: PatternPart,
     base: BindingRow,
     start_after: i64,
+    start_index_cursor: Option<super::schema::StandardIndexCursor>,
     start_buffer: Vec<i64>,
     start_known_label: Option<LabelId>,
     start_index: usize,
@@ -332,10 +333,10 @@ struct PartCursor {
     current_start: Option<i64>,
     relationships: Vec<RelationshipRecord>,
     relationship_index: usize,
-    relationship_after: i64,
+    relationship_cursor: Option<crate::storage::AdjacencyCursor>,
     relationship_done: bool,
     bound_start_emitted: bool,
-    indexed_relationship_after: i64,
+    indexed_relationship_cursor: Option<super::schema::StandardIndexCursor>,
     indexed_relationship_ids: Vec<i64>,
     indexed_relationship_index: usize,
     indexed_relationship_done: bool,
@@ -348,6 +349,7 @@ impl PartCursor {
             part,
             base,
             start_after: 0,
+            start_index_cursor: None,
             start_buffer: Vec::new(),
             start_known_label: None,
             start_index: 0,
@@ -355,10 +357,10 @@ impl PartCursor {
             current_start: None,
             relationships: Vec::new(),
             relationship_index: 0,
-            relationship_after: 0,
+            relationship_cursor: None,
             relationship_done: false,
             bound_start_emitted: false,
-            indexed_relationship_after: 0,
+            indexed_relationship_cursor: None,
             indexed_relationship_ids: Vec::new(),
             indexed_relationship_index: 0,
             indexed_relationship_done: false,
@@ -419,12 +421,16 @@ impl PartCursor {
             if let Some(start) = self.current_start
                 && !self.relationship_done
             {
-                let page =
-                    self.load_relationship_page(snapshot, start, self.relationship_after, metrics)?;
+                let page = self.load_relationship_page(
+                    snapshot,
+                    start,
+                    self.relationship_cursor,
+                    metrics,
+                )?;
                 self.relationships = page.items;
                 self.relationship_index = 0;
-                if let Some(after) = page.next_after {
-                    self.relationship_after = after;
+                if let Some(cursor) = page.next_cursor {
+                    self.relationship_cursor = Some(cursor);
                 } else {
                     self.relationship_done = true;
                 }
@@ -438,7 +444,7 @@ impl PartCursor {
             self.current_start = Some(start);
             self.relationships.clear();
             self.relationship_index = 0;
-            self.relationship_after = 0;
+            self.relationship_cursor = None;
             self.relationship_done = false;
         }
     }
@@ -498,18 +504,18 @@ impl PartCursor {
             let Some(seek) = spec.index_seek.as_ref() else {
                 return Ok(None);
             };
-            let page = super::schema::scan_relationship_index_after(
+            let page = super::schema::scan_relationship_index_page(
                 snapshot,
                 seek,
                 spec.type_id,
-                self.indexed_relationship_after,
+                self.indexed_relationship_cursor.as_ref(),
                 PIPELINE_BATCH,
             )?;
             metrics.record_db_hits(page.items.len() as u64);
             self.indexed_relationship_ids = page.items;
             self.indexed_relationship_index = 0;
-            if let Some(after) = page.next_after {
-                self.indexed_relationship_after = after;
+            if let Some(cursor) = page.next_cursor {
+                self.indexed_relationship_cursor = Some(cursor);
             } else {
                 self.indexed_relationship_done = true;
             }
@@ -631,37 +637,42 @@ impl PartCursor {
             if self.start_done {
                 return Ok(None);
             }
-            let page = if let Some(seek) = &self.part.start.index_seek
+            if let Some(seek) = &self.part.start.index_seek
                 && seek.kind != crate::storage::StandardIndexKind::Lookup
             {
-                self.start_known_label = None;
-                super::schema::scan_node_index_after(
+                self.start_known_label = self.part.start.scan_label;
+                let page = super::schema::scan_node_index_page(
                     snapshot,
                     seek,
-                    self.start_after,
+                    self.start_index_cursor.as_ref(),
                     PIPELINE_BATCH,
-                )?
+                )?;
+                metrics.record_db_hits(page.items.len() as u64);
+                self.start_buffer = page.items;
+                self.start_index = 0;
+                self.start_index_cursor = page.next_cursor;
+                self.start_done = self.start_index_cursor.is_none();
             } else {
                 let scan_label = self
                     .part
                     .start
                     .scan_label
                     .or_else(|| graph_view.scan_label());
-                if let Some(label) = scan_label {
+                let page = if let Some(label) = scan_label {
                     self.start_known_label = Some(label);
                     snapshot.scan_label_after(label, self.start_after, PIPELINE_BATCH)?
                 } else {
                     self.start_known_label = None;
                     snapshot.scan_nodes_after(self.start_after, PIPELINE_BATCH)?
+                };
+                metrics.record_db_hits(page.items.len() as u64);
+                self.start_buffer = page.items;
+                self.start_index = 0;
+                if let Some(after) = page.next_after {
+                    self.start_after = after;
+                } else {
+                    self.start_done = true;
                 }
-            };
-            metrics.record_db_hits(page.items.len() as u64);
-            self.start_buffer = page.items;
-            self.start_index = 0;
-            if let Some(after) = page.next_after {
-                self.start_after = after;
-            } else {
-                self.start_done = true;
             }
         }
     }
@@ -670,24 +681,24 @@ impl PartCursor {
         &self,
         snapshot: &Snapshot<'_>,
         start: i64,
-        after: i64,
+        cursor: Option<crate::storage::AdjacencyCursor>,
         metrics: &mut QueryMetrics,
-    ) -> QueryResult<crate::storage::ScanPage<RelationshipRecord>> {
+    ) -> QueryResult<crate::storage::AdjacencyScanPage> {
         let Some(spec) = &self.part.relationship else {
-            return Ok(crate::storage::ScanPage {
+            return Ok(crate::storage::AdjacencyScanPage {
                 items: Vec::new(),
-                next_after: None,
+                next_cursor: None,
             });
         };
         let page = match spec.direction {
             Direction::Outgoing => {
-                snapshot.scan_outgoing_after(start, spec.type_id, after, PIPELINE_BATCH)?
+                snapshot.scan_outgoing_page(start, spec.type_id, cursor, PIPELINE_BATCH)?
             }
             Direction::Incoming => {
-                snapshot.scan_incoming_after(start, spec.type_id, after, PIPELINE_BATCH)?
+                snapshot.scan_incoming_page(start, spec.type_id, cursor, PIPELINE_BATCH)?
             }
             Direction::Undirected => {
-                snapshot.scan_incident_after(start, spec.type_id, after, PIPELINE_BATCH)?
+                snapshot.scan_incident_page(start, spec.type_id, cursor, PIPELINE_BATCH)?
             }
         };
         metrics.record_db_hits(page.items.len() as u64);
@@ -855,6 +866,9 @@ fn prepared_snapshot<'connection>(
     connection: &'connection Connection,
     prepared: &PreparedQuery,
 ) -> QueryResult<Snapshot<'connection>> {
+    if let Some(state) = prepared.resolved_state.as_ref() {
+        return Ok(Snapshot::from_resolved_state(connection, state));
+    }
     match prepared.candidate.as_ref() {
         Some(candidate) => Ok(Snapshot::resolve_with_layer_and_schema(
             connection,
@@ -1370,13 +1384,5 @@ impl QueryCursor {
             counters: QueryCounters::default(),
             metrics: self.metrics.clone(),
         }
-    }
-}
-
-fn check_interrupted(is_interrupted: &dyn Fn() -> bool) -> QueryResult<()> {
-    if is_interrupted() {
-        Err(QueryError::interrupted())
-    } else {
-        Ok(())
     }
 }

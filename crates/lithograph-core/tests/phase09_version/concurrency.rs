@@ -19,11 +19,16 @@ fn create_file_storage(path: &std::path::Path) -> Connection {
                  magic TEXT NOT NULL,\
                  database_id TEXT NOT NULL,\
                  storage_format INTEGER NOT NULL\
-             );\
-             INSERT INTO main._lithograph_meta(id, magic, database_id, storage_format)\
-             VALUES(1, 'lithograph-format-v1', '00000000-0000-4000-8000-000000000099', 2);",
+             );",
         )
         .expect("metadata");
+    connection
+        .execute(
+            "INSERT INTO main._lithograph_meta(id, magic, database_id, storage_format) \
+             VALUES(1, 'lithograph-format-v1', '00000000-0000-4000-8000-000000000099', ?1)",
+            [STORAGE_FORMAT],
+        )
+        .expect("metadata marker");
     create_storage_schema(&connection).expect("storage schema");
     initialize_root(&connection).expect("root");
     initialize_connection_state(&connection).expect("connection state");

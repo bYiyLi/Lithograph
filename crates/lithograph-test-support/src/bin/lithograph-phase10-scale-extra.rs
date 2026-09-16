@@ -4,10 +4,11 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use lithograph_core::cypher::Value;
+use lithograph_core::performance;
 use lithograph_core::query::{ExecutionOptions, QueryCursor, prepare};
 use lithograph_core::storage::{
-    branch_head, collect_garbage, create_branch, create_tag, delete_branch_ref, load_commit,
-    resolve_version_descriptor,
+    branch_head, collect_garbage, create_branch, create_tag, delete_branch_ref, delete_tag,
+    load_commit, resolve_version_descriptor,
 };
 use rusqlite::Connection;
 use serde::Serialize;
@@ -22,6 +23,9 @@ struct ExtraScaleReport {
     resolution_millis: u128,
     candidate_inspection_millis: u128,
     finalize_millis: u128,
+    finalize_prepare_micros: u64,
+    finalize_writer_wait_micros: u64,
+    finalize_writer_hold_micros: u64,
     conflict_pages_seen: u64,
     resolution_rounds: u64,
     finalized_commit: String,
@@ -59,7 +63,8 @@ fn run_large_merge_and_gc(
     let (revision, resolution_rounds, resolution_millis) =
         resolve_all_conflicts(connection, &session, revision, page_size)?;
     let candidate_inspection_millis = inspect_candidate(connection, &session, revision)?;
-    let (finalized_commit, finalize_millis) = finalize_merge(connection, &session, revision)?;
+    let (finalized_commit, finalize_millis, finalize_counters) =
+        finalize_merge(connection, &session, revision)?;
     let (gc_root_millis, gc_root_preserved) = verify_tag_gc_root(connection)?;
 
     Ok(ExtraScaleReport {
@@ -71,6 +76,9 @@ fn run_large_merge_and_gc(
         resolution_millis,
         candidate_inspection_millis,
         finalize_millis,
+        finalize_prepare_micros: finalize_counters.merge_finalize_prepare_micros,
+        finalize_writer_wait_micros: finalize_counters.merge_finalize_writer_wait_micros,
+        finalize_writer_hold_micros: finalize_counters.merge_finalize_writer_hold_micros,
         conflict_pages_seen,
         resolution_rounds,
         finalized_commit,
@@ -90,6 +98,7 @@ fn seed_merge_conflicts(
         ExecutionOptions::default(),
     )?;
     let base = branch_head(connection, "main")?;
+    let _ = delete_branch_ref(connection, "phase10-scale-merge-source");
     create_branch(connection, "phase10-scale-merge-source", base)?;
 
     execute(
@@ -214,11 +223,13 @@ fn finalize_merge(
     connection: &Connection,
     session: &str,
     revision: i64,
-) -> Result<(String, u128), Box<dyn Error>> {
+) -> Result<(String, u128, performance::PerformanceCounters), Box<dyn Error>> {
     let commit_count_before: i64 =
         connection.query_row("SELECT count(*) FROM main._lithograph_commits", [], |row| {
             row.get(0)
         })?;
+    performance::reset();
+    performance::set_enabled(true);
     let started = Instant::now();
     let finalized = execute(
         connection,
@@ -228,6 +239,8 @@ fn finalize_merge(
         ExecutionOptions::default(),
     )?;
     let finalize_millis = started.elapsed().as_millis();
+    let counters = performance::snapshot();
+    performance::set_enabled(false);
     let finalized_row = finalized.first().ok_or("merge.finalize returned no row")?;
     if string(finalized_row.first(), "finalize status")? != "merged" {
         return Err(format!("merge.finalize status differs: {finalized_row:?}").into());
@@ -244,12 +257,14 @@ fn finalize_merge(
         )
         .into());
     }
-    Ok((finalized_commit, finalize_millis))
+    Ok((finalized_commit, finalize_millis, counters))
 }
 
 fn verify_tag_gc_root(connection: &Connection) -> Result<(u128, bool), Box<dyn Error>> {
     let started = Instant::now();
     let gc_base = branch_head(connection, "main")?;
+    let _ = delete_branch_ref(connection, "phase10-scale-gc");
+    let _ = delete_tag(connection, "phase10-scale-gc-root");
     create_branch(connection, "phase10-scale-gc", gc_base)?;
     execute(
         connection,

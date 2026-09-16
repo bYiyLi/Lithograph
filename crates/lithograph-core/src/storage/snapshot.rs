@@ -1,20 +1,24 @@
 //! Snapshot resolution over a checkpoint plus first-parent Layer overlay.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
+use std::sync::Arc;
 
 use rusqlite::{Connection, OptionalExtension, Statement, params};
 
-use super::checkpoint::{SnapshotStatistics, load_checkpoint_statistics};
-use super::layer::{
-    DeltaOp, LayerBuilder, PropertyDelta, RelationshipDelta, RelationshipRecord, load_layer,
+use super::layer::{DeltaOp, LayerBuilder, PropertyDelta, RelationshipDelta, RelationshipRecord};
+use super::layer_read::{
+    visit_label_deltas, visit_node_deltas, visit_property_deltas, visit_relationship_deltas,
 };
 use super::property::PropertyColumns;
+use super::snapshot_lineage::resolve_lineage;
 use super::{
     HashId, LabelId, NodeId, OwnerKind, PropertyKeyId, PropertyValue, RelationshipId,
     RelationshipTypeId, ScanPage, SchemaState, StorageError, StorageResult,
 };
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub(super) struct Overlay {
     pub(super) nodes: BTreeMap<NodeId, DeltaOp>,
     pub(super) labels: BTreeMap<(NodeId, LabelId), DeltaOp>,
@@ -30,6 +34,24 @@ pub(super) struct Overlay {
     pub(super) properties: BTreeMap<(OwnerKind, i64, PropertyKeyId), PropertyDelta>,
 }
 
+/// Connection-independent graph state resolved once for one query execution.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedSnapshotState {
+    commit: HashId,
+    cache_identity: HashId,
+    checkpoint: Option<HashId>,
+    overlay: Arc<Overlay>,
+    pub(super) property_cache: Rc<RefCell<PropertyCache>>,
+    query_local_layer: Option<Arc<LayerBuilder>>,
+    schema_override: Option<Arc<SchemaState>>,
+}
+
+impl ResolvedSnapshotState {
+    pub(crate) fn query_schema_state(&self) -> Option<&SchemaState> {
+        self.schema_override.as_deref()
+    }
+}
+
 /// Commit-pinned graph snapshot.
 #[derive(Clone)]
 pub struct Snapshot<'connection> {
@@ -37,14 +59,58 @@ pub struct Snapshot<'connection> {
     pub(super) commit: HashId,
     pub(super) cache_identity: HashId,
     pub(super) checkpoint: Option<HashId>,
-    pub(super) overlay: Overlay,
-    pub(super) schema_override: Option<SchemaState>,
+    pub(super) overlay: Arc<Overlay>,
+    pub(super) property_cache: Rc<RefCell<PropertyCache>>,
+    pub(super) query_local_layer: Option<Arc<LayerBuilder>>,
+    pub(super) schema_override: Option<Arc<SchemaState>>,
 }
+
+pub(super) type PropertyCache = BTreeMap<(OwnerKind, i64, PropertyKeyId), Option<PropertyValue>>;
 
 impl<'connection> Snapshot<'connection> {
     /// Resolves a Commit-pinned snapshot.
     pub fn resolve(connection: &'connection Connection, commit: HashId) -> StorageResult<Self> {
-        Self::resolve_with_checkpoint_skip(connection, commit, None)
+        let state = Self::resolve_state_with_checkpoint_skip(connection, commit, None)?;
+        Ok(Self::from_resolved_state(connection, &state))
+    }
+
+    pub(crate) fn resolve_query_state(
+        connection: &Connection,
+        commit: HashId,
+    ) -> StorageResult<ResolvedSnapshotState> {
+        let mut state = Self::resolve_state_with_checkpoint_skip(connection, commit, None)?;
+        state.schema_override = Some(Arc::new(SchemaState::load(connection, commit)?));
+        Ok(state)
+    }
+
+    pub(crate) fn resolve_query_state_with_layer_and_schema(
+        connection: &Connection,
+        commit: HashId,
+        layer: &LayerBuilder,
+        schema: SchemaState,
+    ) -> StorageResult<ResolvedSnapshotState> {
+        let mut state = Self::resolve_state_with_checkpoint_skip(connection, commit, None)?;
+        Arc::make_mut(&mut state.overlay).apply(layer.clone());
+        state.query_local_layer = Some(Arc::new(layer.clone()));
+        state.cache_identity = query_local_cache_identity(commit, layer, Some(&schema))?;
+        state.schema_override = Some(Arc::new(schema));
+        Ok(state)
+    }
+
+    pub(crate) fn from_resolved_state(
+        connection: &'connection Connection,
+        state: &ResolvedSnapshotState,
+    ) -> Self {
+        Self {
+            connection,
+            commit: state.commit,
+            cache_identity: state.cache_identity,
+            checkpoint: state.checkpoint,
+            overlay: state.overlay.clone(),
+            property_cache: state.property_cache.clone(),
+            query_local_layer: state.query_local_layer.clone(),
+            schema_override: state.schema_override.clone(),
+        }
     }
 
     /// Resolves a Commit-pinned snapshot and overlays one query-local staged Layer.
@@ -57,12 +123,23 @@ impl<'connection> Snapshot<'connection> {
         layer: &super::layer::LayerBuilder,
     ) -> StorageResult<Self> {
         let mut snapshot = Self::resolve(connection, commit)?;
-        snapshot.overlay.apply(layer.clone());
+        Arc::make_mut(&mut snapshot.overlay).apply(layer.clone());
+        snapshot.query_local_layer = Some(Arc::new(layer.clone()));
+        snapshot.cache_identity = query_local_cache_identity(commit, layer, None)?;
         Ok(snapshot)
     }
 
-    pub(crate) fn apply_layer(&mut self, layer: &LayerBuilder) {
-        self.overlay.apply(layer.clone());
+    pub(crate) fn apply_layer(&mut self, layer: &LayerBuilder) -> StorageResult<()> {
+        let layer_hash = layer.content_hash()?;
+        let previous_identity = self.cache_identity;
+        Arc::make_mut(&mut self.overlay).apply(layer.clone());
+        let local = self
+            .query_local_layer
+            .get_or_insert_with(|| Arc::new(LayerBuilder::default()));
+        let local = Arc::make_mut(local);
+        merge_query_local_layer(local, layer);
+        self.cache_identity = advance_query_local_cache_identity(previous_identity, layer_hash);
+        Ok(())
     }
 
     pub(crate) fn resolve_with_layer_and_schema(
@@ -72,33 +149,32 @@ impl<'connection> Snapshot<'connection> {
         schema: SchemaState,
     ) -> StorageResult<Self> {
         let mut snapshot = Self::resolve(connection, commit)?;
-        snapshot.overlay.apply(layer.clone());
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"LITHOGRAPH_QUERY_LOCAL_SNAPSHOT_V1");
-        hasher.update(commit.as_bytes());
-        hasher.update(layer.content_hash()?.as_bytes());
-        hasher.update(&schema.canonical_blob()?);
-        snapshot.cache_identity = HashId::from_bytes(*hasher.finalize().as_bytes());
-        snapshot.schema_override = Some(schema);
+        Arc::make_mut(&mut snapshot.overlay).apply(layer.clone());
+        snapshot.query_local_layer = Some(Arc::new(layer.clone()));
+        snapshot.cache_identity = query_local_cache_identity(commit, layer, Some(&schema))?;
+        snapshot.schema_override = Some(Arc::new(schema));
         Ok(snapshot)
     }
 
-    fn resolve_with_checkpoint_skip(
-        connection: &'connection Connection,
+    fn resolve_state_with_checkpoint_skip(
+        connection: &Connection,
         commit: HashId,
         skip_checkpoint: Option<HashId>,
-    ) -> StorageResult<Self> {
+    ) -> StorageResult<ResolvedSnapshotState> {
         let (checkpoint, layer_ids) = resolve_lineage(connection, commit, skip_checkpoint)?;
+        #[cfg(feature = "test-support")]
+        crate::performance::record_resolved_state(layer_ids.len());
         let mut overlay = Overlay::default();
         for layer_id in layer_ids.into_iter().rev() {
-            overlay.apply(load_layer(connection, layer_id)?);
+            overlay.apply_persisted_layer(connection, layer_id)?;
         }
-        Ok(Self {
-            connection,
+        Ok(ResolvedSnapshotState {
             commit,
             cache_identity: commit,
             checkpoint,
-            overlay,
+            overlay: Arc::new(overlay),
+            property_cache: Rc::new(RefCell::new(BTreeMap::new())),
+            query_local_layer: None,
             schema_override: None,
         })
     }
@@ -112,98 +188,19 @@ impl<'connection> Snapshot<'connection> {
         self.cache_identity
     }
 
+    pub(crate) fn query_local_layer(&self) -> Option<&LayerBuilder> {
+        self.query_local_layer.as_deref()
+    }
+
     pub(crate) fn schema_state(&self) -> StorageResult<SchemaState> {
         match &self.schema_override {
-            Some(schema) => Ok(schema.clone()),
+            Some(schema) => Ok((**schema).clone()),
             None => SchemaState::load(self.connection, self.commit),
         }
     }
 
     pub(crate) fn connection_for_query(&self) -> &'connection Connection {
         self.connection
-    }
-
-    pub(crate) fn statistics(&self) -> StorageResult<Option<SnapshotStatistics>> {
-        let mut statistics = match self.checkpoint {
-            Some(checkpoint) => {
-                let Some(statistics) = load_checkpoint_statistics(self.connection, checkpoint)?
-                else {
-                    return Ok(None);
-                };
-                statistics
-            }
-            None => SnapshotStatistics::default(),
-        };
-        for (&node_id, &op) in &self.overlay.nodes {
-            let before = self.checkpoint_node_exists(node_id)?;
-            adjust_count(&mut statistics.node_count, before, op == DeltaOp::Add);
-        }
-        for (&(node_id, label_id), &op) in &self.overlay.labels {
-            let before = self.checkpoint_label_exists(node_id, label_id)?;
-            let count = statistics.label_counts.entry(label_id).or_default();
-            adjust_count(count, before, op == DeltaOp::Add);
-        }
-        for (&relationship_id, delta) in &self.overlay.relationships {
-            let before_type = self.checkpoint_relationship_type(relationship_id)?;
-            let after_type = (delta.op == DeltaOp::Add).then_some(delta.record.type_id);
-            adjust_count(
-                &mut statistics.relationship_count,
-                before_type.is_some(),
-                after_type.is_some(),
-            );
-            if before_type != after_type {
-                if let Some(type_id) = before_type {
-                    let count = statistics.type_counts.entry(type_id).or_default();
-                    *count = count.saturating_sub(1);
-                }
-                if let Some(type_id) = after_type {
-                    let count = statistics.type_counts.entry(type_id).or_default();
-                    *count = count.saturating_add(1);
-                }
-            }
-        }
-        Ok(Some(statistics))
-    }
-
-    fn checkpoint_node_exists(&self, node_id: NodeId) -> StorageResult<bool> {
-        let Some(checkpoint) = self.checkpoint else {
-            return Ok(false);
-        };
-        let exists: i64 = self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM main._lithograph_cp_nodes WHERE commit_id = ?1 AND node_id = ?2)",
-            params![checkpoint.as_bytes().as_slice(), node_id],
-            |row| row.get(0),
-        )?;
-        Ok(exists == 1)
-    }
-
-    fn checkpoint_label_exists(&self, node_id: NodeId, label_id: LabelId) -> StorageResult<bool> {
-        let Some(checkpoint) = self.checkpoint else {
-            return Ok(false);
-        };
-        let exists: i64 = self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM main._lithograph_cp_labels WHERE commit_id = ?1 AND node_id = ?2 AND label_id = ?3)",
-            params![checkpoint.as_bytes().as_slice(), node_id, label_id],
-            |row| row.get(0),
-        )?;
-        Ok(exists == 1)
-    }
-
-    fn checkpoint_relationship_type(
-        &self,
-        relationship_id: RelationshipId,
-    ) -> StorageResult<Option<RelationshipTypeId>> {
-        let Some(checkpoint) = self.checkpoint else {
-            return Ok(None);
-        };
-        self.connection
-            .query_row(
-                "SELECT type_id FROM main._lithograph_cp_relationships WHERE commit_id = ?1 AND relationship_id = ?2",
-                params![checkpoint.as_bytes().as_slice(), relationship_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(StorageError::from)
     }
 
     /// Returns whether a Node is visible in this snapshot.
@@ -214,11 +211,13 @@ impl<'connection> Snapshot<'connection> {
         let Some(checkpoint) = self.checkpoint else {
             return Ok(false);
         };
-        let exists: i64 = self.connection.query_row(
+        let mut statement = self.connection.prepare(
             "SELECT EXISTS(SELECT 1 FROM main._lithograph_cp_nodes WHERE commit_id = ?1 AND node_id = ?2)",
-            params![checkpoint.as_bytes().as_slice(), node_id],
-            |row| row.get(0),
         )?;
+        let exists: i64 = statement
+            .query_row(params![checkpoint.as_bytes().as_slice(), node_id], |row| {
+                row.get(0)
+            })?;
         Ok(exists == 1)
     }
 
@@ -266,6 +265,10 @@ impl<'connection> Snapshot<'connection> {
     ) -> StorageResult<Option<PropertyValue>> {
         if let Some(delta) = self.overlay.properties.get(&(owner_kind, owner_id, key_id)) {
             return Ok(delta.value.clone());
+        }
+        let cache_key = (owner_kind, owner_id, key_id);
+        if let Some(value) = self.property_cache.borrow().get(&cache_key) {
+            return Ok(value.clone());
         }
         let Some(checkpoint) = self.checkpoint else {
             return Ok(None);
@@ -1045,6 +1048,36 @@ impl<'connection> Snapshot<'connection> {
     }
 }
 
+fn merge_query_local_layer(target: &mut LayerBuilder, source: &LayerBuilder) {
+    target.nodes.extend(source.nodes.clone());
+    target.labels.extend(source.labels.clone());
+    target.relationships.extend(source.relationships.clone());
+    target.properties.extend(source.properties.clone());
+}
+
+fn query_local_cache_identity(
+    commit: HashId,
+    layer: &LayerBuilder,
+    schema: Option<&SchemaState>,
+) -> StorageResult<HashId> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"LITHOGRAPH_QUERY_LOCAL_SNAPSHOT_V1");
+    hasher.update(commit.as_bytes());
+    hasher.update(layer.content_hash()?.as_bytes());
+    if let Some(schema) = schema {
+        hasher.update(&schema.canonical_blob()?);
+    }
+    Ok(HashId::from_bytes(*hasher.finalize().as_bytes()))
+}
+
+fn advance_query_local_cache_identity(previous: HashId, layer_hash: HashId) -> HashId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"LITHOGRAPH_QUERY_LOCAL_SNAPSHOT_STEP_V1");
+    hasher.update(previous.as_bytes());
+    hasher.update(layer_hash.as_bytes());
+    HashId::from_bytes(*hasher.finalize().as_bytes())
+}
+
 #[derive(Clone, Copy)]
 enum Direction {
     Outgoing,
@@ -1222,10 +1255,17 @@ fn checkpoint_property(
     owner_id: i64,
     key_id: PropertyKeyId,
 ) -> StorageResult<Option<PropertyValue>> {
-    let columns = connection
+    let mut statement = connection.prepare(
+        "SELECT type_tag, int_value, real_value, text_value, blob_value, aux_value FROM main._lithograph_cp_properties WHERE commit_id = ?1 AND owner_kind = ?2 AND owner_id = ?3 AND key_id = ?4",
+    )?;
+    let columns = statement
         .query_row(
-            "SELECT type_tag, int_value, real_value, text_value, blob_value, aux_value FROM main._lithograph_cp_properties WHERE commit_id = ?1 AND owner_kind = ?2 AND owner_id = ?3 AND key_id = ?4",
-            params![checkpoint.as_bytes().as_slice(), owner_kind as i64, owner_id, key_id],
+            params![
+                checkpoint.as_bytes().as_slice(),
+                owner_kind as i64,
+                owner_id,
+                key_id
+            ],
             property_columns_from_row,
         )
         .optional()?;
@@ -1244,46 +1284,72 @@ fn property_columns_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Proper
 }
 
 impl Overlay {
-    fn apply(&mut self, layer: super::layer::LayerBuilder) {
+    fn apply(&mut self, layer: LayerBuilder) {
         self.nodes.extend(layer.nodes);
         for ((node_id, label_id), op) in layer.labels {
             self.labels.insert((node_id, label_id), op);
             self.labels_by_label.insert((label_id, node_id), op);
         }
         for (relationship_id, delta) in layer.relationships {
-            if let Some(previous) = self.relationships.get(&relationship_id) {
-                self.outgoing.remove(&outgoing_key(previous.record));
-                self.incoming.remove(&incoming_key(previous.record));
-                self.outgoing_by_id
-                    .remove(&(previous.record.source, relationship_id));
-                self.incoming_by_id
-                    .remove(&(previous.record.target, relationship_id));
-                self.incident_by_id
-                    .remove(&(previous.record.source, relationship_id));
-                self.incident_by_id
-                    .remove(&(previous.record.target, relationship_id));
-            }
-            self.outgoing.insert(outgoing_key(delta.record), delta);
-            self.incoming.insert(incoming_key(delta.record), delta);
-            self.outgoing_by_id
-                .insert((delta.record.source, relationship_id), delta);
-            self.incoming_by_id
-                .insert((delta.record.target, relationship_id), delta);
-            self.incident_by_id
-                .insert((delta.record.source, relationship_id), delta);
-            self.incident_by_id
-                .insert((delta.record.target, relationship_id), delta);
-            self.relationships.insert(relationship_id, delta);
+            self.apply_relationship_delta(relationship_id, delta);
         }
         self.properties.extend(layer.properties);
     }
-}
 
-fn adjust_count(count: &mut u64, before: bool, after: bool) {
-    match (before, after) {
-        (false, true) => *count = count.saturating_add(1),
-        (true, false) => *count = count.saturating_sub(1),
-        _ => {}
+    fn apply_persisted_layer(
+        &mut self,
+        connection: &Connection,
+        layer_id: i64,
+    ) -> StorageResult<()> {
+        visit_node_deltas(connection, layer_id, |node_id, op| {
+            self.nodes.insert(node_id, op);
+            Ok(())
+        })?;
+        visit_label_deltas(connection, layer_id, |node_id, label_id, op| {
+            self.labels.insert((node_id, label_id), op);
+            self.labels_by_label.insert((label_id, node_id), op);
+            Ok(())
+        })?;
+        visit_relationship_deltas(connection, layer_id, |record, op| {
+            self.apply_relationship_delta(record.id, RelationshipDelta { op, record });
+            Ok(())
+        })?;
+        visit_property_deltas(
+            connection,
+            layer_id,
+            |owner_kind, owner_id, key_id, delta| {
+                self.properties
+                    .insert((owner_kind, owner_id, key_id), delta);
+                Ok(())
+            },
+        )?;
+        Ok(())
+    }
+
+    fn apply_relationship_delta(&mut self, relationship_id: i64, delta: RelationshipDelta) {
+        if let Some(previous) = self.relationships.get(&relationship_id) {
+            self.outgoing.remove(&outgoing_key(previous.record));
+            self.incoming.remove(&incoming_key(previous.record));
+            self.outgoing_by_id
+                .remove(&(previous.record.source, relationship_id));
+            self.incoming_by_id
+                .remove(&(previous.record.target, relationship_id));
+            self.incident_by_id
+                .remove(&(previous.record.source, relationship_id));
+            self.incident_by_id
+                .remove(&(previous.record.target, relationship_id));
+        }
+        self.outgoing.insert(outgoing_key(delta.record), delta);
+        self.incoming.insert(incoming_key(delta.record), delta);
+        self.outgoing_by_id
+            .insert((delta.record.source, relationship_id), delta);
+        self.incoming_by_id
+            .insert((delta.record.target, relationship_id), delta);
+        self.incident_by_id
+            .insert((delta.record.source, relationship_id), delta);
+        self.incident_by_id
+            .insert((delta.record.target, relationship_id), delta);
+        self.relationships.insert(relationship_id, delta);
     }
 }
 
@@ -1293,55 +1359,4 @@ fn outgoing_key(record: RelationshipRecord) -> (i64, i64, i64, i64) {
 
 fn incoming_key(record: RelationshipRecord) -> (i64, i64, i64, i64) {
     (record.target, record.type_id, record.source, record.id)
-}
-
-fn resolve_lineage(
-    connection: &Connection,
-    commit: HashId,
-    skip_checkpoint: Option<HashId>,
-) -> StorageResult<(Option<HashId>, Vec<i64>)> {
-    let mut current = commit;
-    let mut layers = Vec::new();
-    let mut visited = BTreeSet::new();
-    loop {
-        if !visited.insert(current) {
-            return Err(StorageError::corrupt(
-                "Commit first-parent lineage contains a cycle",
-            ));
-        }
-        if Some(current) != skip_checkpoint && checkpoint_exists(connection, current)? {
-            return Ok((Some(current), layers));
-        }
-        let (parent, layer_id) = commit_parent_and_layer(connection, current)?;
-        layers.push(layer_id);
-        let Some(parent) = parent else {
-            return Ok((None, layers));
-        };
-        current = parent;
-    }
-}
-
-fn checkpoint_exists(connection: &Connection, commit: HashId) -> StorageResult<bool> {
-    let exists: i64 = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM main._lithograph_checkpoints WHERE commit_id = ?1)",
-        [commit.as_bytes().as_slice()],
-        |row| row.get(0),
-    )?;
-    Ok(exists == 1)
-}
-
-fn commit_parent_and_layer(
-    connection: &Connection,
-    commit: HashId,
-) -> StorageResult<(Option<HashId>, i64)> {
-    let row = connection
-        .query_row(
-            "SELECT parent1, layer_id FROM main._lithograph_commits WHERE id = ?1",
-            [commit.as_bytes().as_slice()],
-            |row| Ok((row.get::<_, Option<Vec<u8>>>(0)?, row.get::<_, i64>(1)?)),
-        )
-        .optional()?
-        .ok_or_else(|| StorageError::not_found(format!("Commit {}", commit.to_hex())))?;
-    let parent = row.0.as_deref().map(HashId::from_slice).transpose()?;
-    Ok((parent, row.1))
 }

@@ -63,7 +63,7 @@ impl<'connection, 'query> MutationContext<'connection, 'query> {
         } else {
             layer.remove_node(id)?;
         }
-        self.staged.apply_layer(&layer);
+        self.staged.apply_layer(&layer)?;
         Ok(())
     }
 
@@ -76,7 +76,7 @@ impl<'connection, 'query> MutationContext<'connection, 'query> {
         } else {
             layer.remove_label(node_id, label_id)?;
         }
-        self.staged.apply_layer(&layer);
+        self.staged.apply_layer(&layer)?;
         Ok(())
     }
 
@@ -96,7 +96,7 @@ impl<'connection, 'query> MutationContext<'connection, 'query> {
                 }
             }
         }
-        self.staged.apply_layer(&layer);
+        self.staged.apply_layer(&layer)?;
         Ok(())
     }
 
@@ -114,7 +114,7 @@ impl<'connection, 'query> MutationContext<'connection, 'query> {
             Some(value) => layer.set_property(owner_kind, owner_id, key_id, value)?,
             None => layer.remove_property(owner_kind, owner_id, key_id)?,
         }
-        self.staged.apply_layer(&layer);
+        self.staged.apply_layer(&layer)?;
         Ok(())
     }
 

@@ -439,6 +439,15 @@ const PROCEDURES: &[ProcedureDefinition] = &[
         outputs: &["commit"],
     },
     ProcedureDefinition {
+        name: "lithograph.index.rebuild",
+        description: "Rebuilds one persistent Standard Index generation at an explicit version.",
+        mode: "WRITE",
+        works_on_system: false,
+        signature: "lithograph.index.rebuild(name :: STRING, version :: STRING) :: (name :: STRING, commit :: STRING, indexedEntities :: INTEGER)",
+        admin: false,
+        outputs: &["name", "commit", "indexedEntities"],
+    },
+    ProcedureDefinition {
         name: "lithograph.gc",
         description: "Lithograph versioned-state procedure.",
         mode: "WRITE",

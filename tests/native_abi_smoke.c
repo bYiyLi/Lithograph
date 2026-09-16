@@ -25,6 +25,8 @@ typedef int (*tx_abort_fn)(sqlite3 *, char **);
 typedef void (*free_fn)(void *);
 
 static int64_t commit_count(sqlite3 *db);
+static void check_same_connection_read_guard(sqlite3 *db);
+static void check_reader_snapshot_survives_writer_ref_move_and_gc(const char *path);
 
 #ifdef _WIN32
 typedef HMODULE library_handle;
@@ -740,6 +742,253 @@ static int64_t commit_count(sqlite3 *db) {
     int64_t count = sqlite3_column_int64(statement, 0);
     sqlite3_finalize(statement);
     return count;
+}
+
+static void check_same_connection_read_guard(sqlite3 *db) {
+    char *error = NULL;
+    require(
+        sqlite3_exec(
+            db,
+            "SELECT lithograph('CREATE (:ReadGuard {value:1}), (:ReadGuard {value:2}) FINISH');",
+            NULL,
+            NULL,
+            &error
+        ) == SQLITE_OK,
+        error == NULL ? "failed to seed read-guard fixture" : error
+    );
+    sqlite3_free(error);
+    int64_t before = commit_count(db);
+
+    const char *read_sql =
+        "SELECT row FROM lithograph_rows('MATCH (n:ReadGuard) RETURN n.value ORDER BY n.value')";
+    sqlite3_stmt *first = NULL;
+    sqlite3_stmt *second = NULL;
+    require(sqlite3_prepare_v2(db, read_sql, -1, &first, NULL) == SQLITE_OK, "failed to prepare first read guard cursor");
+    require(sqlite3_step(first) == SQLITE_ROW, "first read guard cursor returned no row");
+    require(sqlite3_prepare_v2(db, read_sql, -1, &second, NULL) == SQLITE_OK, "failed to prepare second read guard cursor");
+    require(sqlite3_step(second) == SQLITE_ROW, "second read guard cursor returned no row");
+
+    error = NULL;
+    int rc = sqlite3_exec(
+        db,
+        "SELECT lithograph('CREATE (:BlockedByReadGuard) FINISH');",
+        NULL,
+        NULL,
+        &error
+    );
+    require(rc != SQLITE_OK, "same-connection mutation must be rejected while read cursors are active");
+    require(
+        error != NULL && strstr(error, "TRANSACTION_BOUNDARY_REQUIRED") != NULL,
+        "active read cursor mutation rejection must be TRANSACTION_BOUNDARY_REQUIRED"
+    );
+    sqlite3_free(error);
+    require(commit_count(db) == before, "rejected same-connection mutation created a Commit");
+
+    error = NULL;
+    rc = sqlite3_exec(
+        db,
+        "SELECT lithograph('CALL lithograph.gc() YIELD commits RETURN commits');",
+        NULL,
+        NULL,
+        &error
+    );
+    require(rc != SQLITE_OK, "same-connection GC must be rejected while read cursors are active");
+    require(
+        error != NULL && strstr(error, "TRANSACTION_BOUNDARY_REQUIRED") != NULL,
+        "active read cursor GC rejection must be TRANSACTION_BOUNDARY_REQUIRED"
+    );
+    sqlite3_free(error);
+
+    require(sqlite3_reset(first) == SQLITE_OK, "failed to reset first read guard cursor");
+    require(sqlite3_step(first) == SQLITE_ROW, "rescanned read guard cursor returned no row");
+    sqlite3_finalize(first);
+
+    error = NULL;
+    rc = sqlite3_exec(
+        db,
+        "SELECT lithograph('CREATE (:StillBlockedByReadGuard) FINISH');",
+        NULL,
+        NULL,
+        &error
+    );
+    require(rc != SQLITE_OK, "second active reader must keep same-connection write blocked");
+    require(
+        error != NULL && strstr(error, "TRANSACTION_BOUNDARY_REQUIRED") != NULL,
+        "remaining read cursor rejection must be TRANSACTION_BOUNDARY_REQUIRED"
+    );
+    sqlite3_free(error);
+    sqlite3_finalize(second);
+
+    error = NULL;
+    require(
+        sqlite3_exec(
+            db,
+            "SELECT lithograph('CREATE (:AfterReadGuard) FINISH');",
+            NULL,
+            NULL,
+            &error
+        ) == SQLITE_OK,
+        error == NULL ? "write after read-guard release failed" : error
+    );
+    sqlite3_free(error);
+    require(commit_count(db) == before + 1, "read-guard release did not restore same-connection writes");
+
+    sqlite3_stmt *eof = NULL;
+    require(
+        sqlite3_prepare_v2(db, "SELECT row FROM lithograph_rows('RETURN 1')", -1, &eof, NULL) == SQLITE_OK,
+        "failed to prepare EOF read-guard cursor"
+    );
+    require(sqlite3_step(eof) == SQLITE_ROW, "EOF read-guard cursor returned no row");
+    require(sqlite3_step(eof) == SQLITE_DONE, "EOF read-guard cursor did not terminate");
+    before = commit_count(db);
+    error = NULL;
+    require(
+        sqlite3_exec(
+            db,
+            "SELECT lithograph('CREATE (:AfterReadGuardEof) FINISH');",
+            NULL,
+            NULL,
+            &error
+        ) == SQLITE_OK,
+        error == NULL ? "write after read-guard EOF failed" : error
+    );
+    sqlite3_free(error);
+    require(commit_count(db) == before + 1, "EOF did not release the read guard before xClose");
+    sqlite3_finalize(eof);
+}
+
+static void check_reader_snapshot_survives_writer_ref_move_and_gc(const char *path) {
+    char database_path[1024];
+#ifdef _WIN32
+    char temp_directory[MAX_PATH];
+    DWORD temp_length = GetTempPathA(MAX_PATH, temp_directory);
+    require(temp_length > 0 && temp_length < MAX_PATH, "failed to resolve Windows temporary directory");
+    int written = snprintf(
+        database_path,
+        sizeof(database_path),
+        "%slithograph-read-guard-%lu.db",
+        temp_directory,
+        (unsigned long)GetCurrentProcessId()
+    );
+#else
+    const char *temp_directory = getenv("TMPDIR");
+    if (temp_directory == NULL || temp_directory[0] == '\0') {
+        temp_directory = "/tmp";
+    }
+    int written = snprintf(
+        database_path,
+        sizeof(database_path),
+        "%s/lithograph-read-guard-%lu.db",
+        temp_directory,
+        (unsigned long)getpid()
+    );
+#endif
+    require(written > 0 && (size_t)written < sizeof(database_path), "read-guard database path is too long");
+    (void)remove(database_path);
+
+    sqlite3 *reader = NULL;
+    sqlite3 *writer = NULL;
+    require(sqlite3_open(database_path, &reader) == SQLITE_OK, "failed to open read-guard reader");
+    require(sqlite3_open(database_path, &writer) == SQLITE_OK, "failed to open read-guard writer");
+    load_extension(reader, path);
+    load_extension(writer, path);
+    char *error = NULL;
+    require(
+        sqlite3_exec(writer, "PRAGMA journal_mode=WAL; SELECT lithograph_init();", NULL, NULL, &error) == SQLITE_OK,
+        error == NULL ? "failed to initialize WAL read-guard fixture" : error
+    );
+    sqlite3_free(error);
+    error = NULL;
+    require(
+        sqlite3_exec(
+            writer,
+            "SELECT lithograph('CREATE (:StableRead {value:1}), (:StableRead {value:2}) FINISH');",
+            NULL,
+            NULL,
+            &error
+        ) == SQLITE_OK,
+        error == NULL ? "failed to seed WAL read-guard fixture" : error
+    );
+    sqlite3_free(error);
+
+    sqlite3_stmt *root_stmt = NULL;
+    require(
+        sqlite3_prepare_v2(
+            writer,
+            "SELECT lower(hex(id)) FROM main._lithograph_commits WHERE parent1 IS NULL",
+            -1,
+            &root_stmt,
+            NULL
+        ) == SQLITE_OK,
+        "failed to prepare Root Commit lookup"
+    );
+    require(sqlite3_step(root_stmt) == SQLITE_ROW, "Root Commit lookup returned no row");
+    const unsigned char *root_text = sqlite3_column_text(root_stmt, 0);
+    require(root_text != NULL, "Root Commit lookup returned NULL");
+    char root[65];
+    require(strlen((const char *)root_text) == 64, "Root Commit text length is invalid");
+    memcpy(root, root_text, 65);
+    sqlite3_finalize(root_stmt);
+
+    sqlite3_stmt *statement = NULL;
+    require(
+        sqlite3_prepare_v2(
+            reader,
+            "SELECT row FROM lithograph_rows('MATCH (n:StableRead) RETURN n.value ORDER BY n.value')",
+            -1,
+            &statement,
+            NULL
+        ) == SQLITE_OK,
+        "failed to prepare stable reader"
+    );
+    require(sqlite3_step(statement) == SQLITE_ROW, "stable reader returned no first row");
+    require(
+        strcmp((const char *)sqlite3_column_text(statement, 0), "[1]") == 0,
+        "stable reader first row is wrong"
+    );
+
+    char maintenance[1024];
+    written = snprintf(
+        maintenance,
+        sizeof(maintenance),
+        "SELECT lithograph('CALL lithograph.reset(''commit/%s'') YIELD to RETURN to');"
+        "SELECT lithograph('CALL lithograph.gc() YIELD commits RETURN commits');",
+        root
+    );
+    require(written > 0 && (size_t)written < sizeof(maintenance), "read-guard maintenance SQL overflow");
+    error = NULL;
+    require(
+        sqlite3_exec(writer, maintenance, NULL, NULL, &error) == SQLITE_OK,
+        error == NULL ? "writer reset/GC failed while reader was active" : error
+    );
+    sqlite3_free(error);
+
+    require(sqlite3_step(statement) == SQLITE_ROW, "stable reader lost second row after writer GC");
+    require(
+        strcmp((const char *)sqlite3_column_text(statement, 0), "[2]") == 0,
+        "stable reader second row changed after writer GC"
+    );
+    require(sqlite3_step(statement) == SQLITE_DONE, "stable reader produced extra rows after writer GC");
+    sqlite3_finalize(statement);
+
+    sqlite3_stmt *fresh = NULL;
+    require(
+        sqlite3_prepare_v2(
+            reader,
+            "SELECT json_extract(lithograph('MATCH (n:StableRead) RETURN count(n)'), '$.rows[0][0]')",
+            -1,
+            &fresh,
+            NULL
+        ) == SQLITE_OK,
+        "failed to prepare fresh reader after reset"
+    );
+    require(sqlite3_step(fresh) == SQLITE_ROW, "fresh reader after reset returned no row");
+    require(sqlite3_column_int64(fresh, 0) == 0, "fresh execution did not observe reset Branch state");
+    sqlite3_finalize(fresh);
+
+    sqlite3_close(writer);
+    sqlite3_close(reader);
+    (void)remove(database_path);
 }
 
 static void check_native_write_cancel(
@@ -1701,6 +1950,8 @@ static void make_format1_root_fixture(sqlite3 *db) {
     int written = snprintf(
         sql,
         sizeof(sql),
+        "DROP TABLE main._lithograph_index_entries;"
+        "DROP TABLE main._lithograph_index_generations;"
         "DROP TABLE main._lithograph_merge_resolutions;"
         "DROP TABLE main._lithograph_merge_sessions;"
         "DROP TABLE main._lithograph_tags;"
@@ -1764,7 +2015,7 @@ static void check_format1_migration_preserves_history(const char *path) {
     require(
         sqlite3_prepare_v2(
             db,
-            "SELECT storage_format, lower(hex((SELECT id FROM _lithograph_commits WHERE parent1 IS NULL))), (SELECT count(*) FROM _lithograph_tags), (SELECT count(*) FROM _lithograph_commit_data), json_extract(lithograph_integrity_check(),'$.ok') FROM _lithograph_meta WHERE id=1",
+            "SELECT storage_format, lower(hex((SELECT id FROM _lithograph_commits WHERE parent1 IS NULL))), (SELECT count(*) FROM _lithograph_tags), (SELECT count(*) FROM _lithograph_commit_data), (SELECT count(*) FROM _lithograph_index_generations), (SELECT count(*) FROM _lithograph_index_entries), json_extract(lithograph_integrity_check(),'$.ok') FROM _lithograph_meta WHERE id=1",
             -1,
             &statement,
             NULL
@@ -1772,7 +2023,7 @@ static void check_format1_migration_preserves_history(const char *path) {
         "failed to prepare migration verification"
     );
     require(sqlite3_step(statement) == SQLITE_ROW, "migration verification returned no row");
-    require(sqlite3_column_int(statement, 0) == 2, "format1 migration did not advance to format2");
+    require(sqlite3_column_int(statement, 0) == 3, "format1 migration did not advance to format3");
     require(
         strcmp(
             (const char *)sqlite3_column_text(statement, 1),
@@ -1782,7 +2033,9 @@ static void check_format1_migration_preserves_history(const char *path) {
     );
     require(sqlite3_column_int(statement, 2) == 0, "migration must start with no Tags");
     require(sqlite3_column_int(statement, 3) == 0, "migration must start with no Commit Data");
-    require(sqlite3_column_int(statement, 4) == 1, "migrated database failed integrity check");
+    require(sqlite3_column_int(statement, 4) == 0, "migration must not build index generations");
+    require(sqlite3_column_int(statement, 5) == 0, "migration must not build index entries");
+    require(sqlite3_column_int(statement, 6) == 1, "migrated database failed integrity check");
     sqlite3_finalize(statement);
     sqlite3_close(db);
 }
@@ -1844,6 +2097,8 @@ static void check_registered_native_surfaces(
     rc = validate(db, query, strlen(query), &error_json);
     require(rc == SQLITE_OK, "frontend validate must succeed after init");
     require(error_json == NULL, "successful native validation must not allocate error_json");
+
+    check_same_connection_read_guard(db);
 
     const char *invalid_query = "MATCH (n) RETURN n,";
     error_json = NULL;
@@ -2009,6 +2264,7 @@ int main(int argc, char **argv) {
     check_full_rollback_fault_discards_connection(path);
     check_release_fault_aborts_outer_transaction(path);
     check_busy_error_contract(path);
+    check_reader_snapshot_survives_writer_ref_move_and_gc(path);
     check_format1_migration_preserves_history(path);
     close_library(library);
     return 0;

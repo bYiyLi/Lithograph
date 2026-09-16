@@ -10,6 +10,7 @@ struct CursorWriteOutcome {
     commit: crate::storage::HashId,
     counters: QueryCounters,
     query_type: QueryType,
+    suppress_commit: bool,
 }
 
 impl QueryCursor {
@@ -124,6 +125,7 @@ impl QueryCursor {
                 commit: outcome.commit,
                 counters: schema_query_counters(outcome.counters),
                 query_type: QueryType::Schema,
+                suppress_commit: false,
             });
         }
         let Some(program) = self.prepared.program.as_ref() else {
@@ -146,6 +148,9 @@ impl QueryCursor {
                 commit,
                 counters: QueryCounters::default(),
                 query_type: QueryType::Version,
+                suppress_commit: super::super::completeness::suppress_version_summary_commit(
+                    program,
+                ),
             });
         }
         super::super::mutation::execute_program(
@@ -169,7 +174,7 @@ impl QueryCursor {
             outcome.commit,
             outcome.counters,
             &self.metrics,
-            self.suppress_summary_commit,
+            self.suppress_summary_commit || outcome.suppress_commit,
         );
         self.write_state = WriteState::Active {
             savepoint,
@@ -348,6 +353,7 @@ fn write_cursor_outcome(outcome: super::super::mutation::WriteOutcome) -> Cursor
         commit: outcome.commit,
         counters: query_counters(outcome.counters),
         query_type: QueryType::Write,
+        suppress_commit: false,
     }
 }
 

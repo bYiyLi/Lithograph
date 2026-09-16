@@ -16,12 +16,14 @@ use crate::cypher::{
 pub(crate) mod execute;
 mod path;
 mod validation;
+mod version;
 
 use execute::execute_read_snapshot;
 pub(crate) use execute::execute_version_program;
 use validation::{
     has_graph_expression, query_body_has_public_result, validate_static_property_accesses,
 };
+pub(crate) use version::{retry_version_busy, suppress_version_summary_commit};
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedProgram {
@@ -253,19 +255,8 @@ pub(crate) fn prepare_program(
     let public_result = query_body_has_public_result(&ast.root);
     let columns = output_columns(&ast.root, source, public_result)?;
     let writes = contains_mutation(&ast.root);
-    let version_operation = contains_version_procedure(&ast.root);
-    let version_mutation = contains_version_mutation(&ast.root);
-    let checkout_operation = contains_named_procedure(&ast.root, "lithograph.branch.checkout");
-    if writes && version_operation {
-        return Err(QueryError::invalid_argument(
-            "graph mutation and Version Procedures cannot share one query",
-        ));
-    }
-    if version_operation && !options.graph_view.is_full_graph() {
-        return Err(QueryError::invalid_argument(
-            "Version Procedures cannot execute with options.graphView",
-        ));
-    }
+    let version =
+        version::validate_version_program(&ast.root, options, writes, transaction_owning)?;
     let write_options = writes
         .then(|| program_write_options(connection, options))
         .transpose()?;
@@ -283,9 +274,9 @@ pub(crate) fn prepare_program(
         columns,
         public_result,
         writes,
-        version_operation,
-        version_mutation,
-        checkout_operation,
+        version_operation: version.version_operation,
+        version_mutation: version.version_mutation,
+        checkout_operation: version.checkout_operation,
         options: options.clone(),
         logical: LogicalPlan {
             operators: logical_operators,
@@ -417,49 +408,6 @@ fn validate_surface_expressions(root: &AstNode) -> QueryResult<()> {
         compile_expression(expression)?;
     }
     Ok(())
-}
-
-fn contains_named_procedure(root: &AstNode, name: &str) -> bool {
-    root.descendants()
-        .filter(|node| node.kind == AstKind::FunctionName)
-        .filter_map(|node| node.text.as_deref())
-        .any(|value| value.eq_ignore_ascii_case(name))
-}
-
-fn contains_version_procedure(root: &AstNode) -> bool {
-    root.descendants()
-        .filter(|node| node.kind == AstKind::FunctionName)
-        .filter_map(|node| node.text.as_deref())
-        .any(super::registry::is_version_procedure)
-}
-
-fn contains_version_mutation(root: &AstNode) -> bool {
-    root.descendants()
-        .filter(|node| node.kind == AstKind::FunctionName)
-        .filter_map(|node| node.text.as_deref())
-        .any(super::registry::is_version_mutation)
-}
-
-pub(crate) fn retry_version_busy(program: &PreparedProgram) -> bool {
-    if program.writes || !program.version_mutation {
-        return false;
-    }
-    let mut procedures = program
-        .root
-        .descendants()
-        .filter(|node| node.kind == AstKind::FunctionName)
-        .filter_map(|node| node.text.as_deref())
-        .filter(|name| super::registry::is_version_procedure(name));
-    let Some(name) = procedures.next() else {
-        return false;
-    };
-    if procedures.next().is_some() {
-        return false;
-    }
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "lithograph.merge.resolve" | "lithograph.merge.finalize" | "lithograph.merge.abort"
-    )
 }
 
 pub(crate) fn contains_mutation(root: &AstNode) -> bool {

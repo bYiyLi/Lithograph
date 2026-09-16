@@ -38,7 +38,7 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 
 ## 3. 当前基线
 
-**状态分界：Phase 00–10 `done`；Phase 11 Performance Optimization `ready`。** Phase 11 是在已完成的基础功能/规模验收之上增加的性能专项，不回开Phase 10，也不把Phase 10单次scale通过解释成全场景低延迟保证。第11阶段的目标行为写入Design，代码尚未实现；当前storage format仍为2，计划中的format3和persistent index不能当作现有能力使用。
+**状态分界：Phase 00–10 `done`；Phase 11 Performance Optimization `in_progress`。** Phase 11 是在已完成的基础功能/规模验收之上增加的性能专项，不回开Phase 10，也不把Phase 10单次scale通过解释成全场景低延迟保证。当前工作树已经完成format3、persistent Standard Index、邻接keyset、query-owned resolved state/read guard、增量index overlay、实测热点优化以及固定性能机/并发/本地repository gate；`cargo make quality`、coverage与真实SQLite `scripts/ci.sh`均通过。Phase 11仍未完成的唯一门禁是当前工作树对应的六目标hosted Release Matrix；由于这些改动尚未commit/push，不能把Phase状态提前改为`done`。
 
 当前仓库已经完成 Phase 00 Engineering Foundation、Phase 01 SQLite Extension Boundary、Phase 02 Version-aware Storage Core、Phase 03 Cypher Frontend and Value Semantics、Phase 04 Read Query Engine、Phase 05 Mutation, Transaction and Commit、Phase 06 Cypher 25 Query Completeness、Phase 07 Schema, Constraint and Standard Indexes、Phase 08 Search and Data Ingestion、Phase 09 Versioned State Operations 与 Phase 10 Compatibility Closure and Release Hardening。现有 current-graph engine 已闭合 query composition、aggregation、advanced path、expression/function/value、mutation、versioned Graph Type/Constraint、lookup/range/text/point/full-text/vector index、`SEARCH`、`LOAD CSV` 与 Cypher transaction batching，并在同一 Graph View、version-aware storage、Commit/savepoint 与 SQL Bridge/Native 边界上执行。Phase 10 已完成 deterministic generated/property hardening、EXPLAIN/PROFILE/error compatibility、3,777/3,777 applicable inherited openCypher TCK、crash/recovery fault matrix、format `1 -> 2` preservation/migration、完整 10M Node / 100M Relationship release workload、10,000-conflict Merge Session、repository-wide quality/CI、final architecture/security review，以及 Linux x64/arm64、macOS x64/arm64、Windows x64/arm64 六目标 hosted release artifact acceptance。
 
@@ -55,7 +55,7 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 - Phase 08：`done`；
 - Phase 09：`done`；
 - Phase 10：`done`；
-- Phase 11：`ready`；
+- Phase 11：`in_progress`；
 - `docs/development/cypher25-compatibility.md` 当前 capability matrix 已无 unresolved/partial family；Phase 10 已把 compatibility closure 与 scale、recovery、artifact 和 cross-platform release acceptance 合并为完整验收证据。
 
 ## 4. 路线总览
@@ -73,7 +73,7 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 | [08 Search and Data Ingestion](phases/08-search-ingestion.md) | `done` | Full-text、Vector/HNSW、SEARCH、LOAD CSV 并遵守 Graph View | 06–07 |
 | [09 Versioned State Operations](phases/09-version-control-operations.md) | `done` | Native explicit transaction、format 1→2、Commit Data、Tag、explicit Commit、cursor History、branch/time-travel/diff/patch、resumable Merge Session、rebase/squash/reset/revert/gc | 05、07–08 |
 | [10 Compatibility Closure and Release Hardening](phases/10-compatibility-release.md) | `done` | 100% applicable Profile、10M/100M scale、recovery/migration、跨平台 release | 00–09 |
-| [11 Performance Optimization](phases/11-performance-optimization.md) | `ready` | 物理邻接keyset、query-owned Snapshot、persistent Standard Index base/delta、format3迁移及可重复性能门禁 | 00–10 |
+| [11 Performance Optimization](phases/11-performance-optimization.md) | `in_progress` | 本地实现、性能/压力/quality/CI已闭合；等待当前改动六目标hosted Release Matrix | 00–10 |
 
 关键依赖原则：**Version-aware graph storage 在 Phase 02 建立，不能拖到后期再 retrofit。** Phase 09 在该 immutable history foundation 上完成 transaction -> Commit 行为：增加 Native explicit transaction，把多个 execution 的最终 net delta 写成一个 Layer/Commit；增加 Merge Session，把长时间 conflict resolution 保存在非历史 operational workspace 中并只在 finalize 形成最终 Merge Commit/ref move；同时增加用户级状态 sidecar/ref 与版本操作，并通过显式 `1 -> 2` migration 增加 Commit Data / Tag / Merge Session storage。这不改变 Phase 02 的 Layer / Commit / Snapshot 核心合同，也不要求重开 Phase 02/05。
 

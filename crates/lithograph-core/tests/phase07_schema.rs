@@ -905,12 +905,7 @@ fn standard_index_seeks_match_scans_and_rebuild_after_cache_loss() {
     .expect("view-filtered range seek");
     assert_eq!(visible, vec![vec![Value::String("Bob".to_owned())]]);
 
-    connection
-        .execute_batch(
-            "DROP TABLE temp._lithograph_standard_index_cache;\
-             DROP TABLE temp._lithograph_standard_index_cache_meta;",
-        )
-        .expect("delete derived cache");
+    drop_query_local_standard_index_cache(&connection);
     let (rebuilt, _) = execute(
         &connection,
         "MATCH (n:Person) WHERE n.age = 2 RETURN n.name ORDER BY n.name",
@@ -918,6 +913,17 @@ fn standard_index_seeks_match_scans_and_rebuild_after_cache_loss() {
     )
     .expect("rebuild range cache");
     assert_eq!(rebuilt, range_scan);
+}
+
+fn drop_query_local_standard_index_cache(connection: &Connection) {
+    connection
+        .execute_batch(
+            "DROP VIEW temp._lithograph_standard_index_cache;\
+             DROP TABLE temp._lithograph_standard_index_cache_local;\
+             DROP TABLE temp._lithograph_standard_index_cache_meta;\
+             DROP TABLE temp._lithograph_standard_index_cache_config;",
+        )
+        .expect("delete derived cache");
 }
 
 fn assert_basic_standard_index_plans(

@@ -10,8 +10,8 @@ use crate::cypher::{
 use crate::storage::{self, HashId, Snapshot};
 
 use super::completeness::execute::{
-    ConditionalBranchQuery, RowSet, conditional_branch_query, execute_read_clause, rows_for_next,
-    select_conditional_branch,
+    ConditionalBranchQuery, RowSet, conditional_branch_query, execute_read_clause,
+    materialize_rows, rows_for_next, select_conditional_branch,
 };
 use super::completeness::{
     PreparedProgram, TransactionProgramOptions, composed_query_parts, executable_query,
@@ -27,7 +27,9 @@ use super::mutation::{
     execute_program_suffix_transaction, execute_transaction_batch,
 };
 use super::spill::{BindingSpill, open_spill_connection};
-use super::{QueryCounters, QueryError, QueryErrorKind, QueryMetrics, QueryResult};
+use super::{
+    QueryCounters, QueryError, QueryErrorKind, QueryMetrics, QueryResult, check_interrupted,
+};
 
 pub(crate) struct TransactionProgramOutcome {
     pub(crate) rows: Vec<Vec<Value>>,
@@ -261,25 +263,6 @@ fn execute_transaction_conditional(
     })
 }
 
-fn materialize_rows(snapshot: &Snapshot<'_>, result: RowSet) -> QueryResult<Vec<Vec<Value>>> {
-    result
-        .rows
-        .into_iter()
-        .map(|row| {
-            result
-                .columns
-                .iter()
-                .map(|column| {
-                    expression::binding_value(
-                        snapshot,
-                        row.values.get(column).unwrap_or(&BindingValue::Null),
-                    )
-                })
-                .collect::<QueryResult<Vec<_>>>()
-        })
-        .collect()
-}
-
 fn execute_single_from(
     runtime: &mut TransactionRuntime<'_>,
     single: &AstNode,
@@ -375,14 +358,6 @@ fn find_next_transaction_call(single: &AstNode, start: usize) -> Option<usize> {
             (node.kind == AstKind::Clause(ClauseKind::Call) && transaction_subquery(node).is_some())
                 .then_some(index)
         })
-}
-
-fn check_interrupted(is_interrupted: &dyn Fn() -> bool) -> QueryResult<()> {
-    if is_interrupted() {
-        Err(QueryError::interrupted())
-    } else {
-        Ok(())
-    }
 }
 
 fn transaction_spec(subquery: &AstNode) -> QueryResult<TransactionSpec> {

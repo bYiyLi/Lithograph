@@ -179,6 +179,7 @@ pub(crate) fn execute_procedure(
     args: Vec<Value>,
     options: &ExecutionOptions,
     pinned_commit: HashId,
+    is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<ProcedureOutcome> {
     validate_options(name, options)?;
     let normalized = name.to_ascii_lowercase();
@@ -209,6 +210,7 @@ pub(crate) fn execute_procedure(
         "lithograph.squash" => operations::squash(connection, args, options, pinned_commit),
         "lithograph.reset" => operations::reset(connection, args, options, pinned_commit),
         "lithograph.revert" => operations::revert(connection, args, options, pinned_commit),
+        "lithograph.index.rebuild" => index_rebuild(connection, args, is_interrupted),
         "lithograph.gc" => operations::gc(connection),
         _ => Err(QueryError::internal(format!(
             "Version Procedure {name} is registered but not implemented"
@@ -277,6 +279,49 @@ fn procedure_commit_field(rows: &[ProcedureRow], field: &str) -> QueryResult<Opt
             "Version Procedure returned non-Commit {field}"
         ))),
     }
+}
+
+fn index_rebuild(
+    connection: &Connection,
+    args: Vec<Value>,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<Vec<ProcedureRow>> {
+    if args.len() != 2 {
+        return Err(QueryError::invalid_argument(
+            "lithograph.index.rebuild requires exactly name and version",
+        ));
+    }
+    let name = string_arg(&args, 0, "name")?;
+    let version = string_arg(&args, 1, "version")?;
+    if name.is_empty() || version.is_empty() {
+        return Err(QueryError::invalid_argument(
+            "lithograph.index.rebuild arguments must be non-empty strings",
+        ));
+    }
+    let target = storage::resolve_version_descriptor(connection, version)?;
+    let schema = storage::SchemaState::load(connection, target)?;
+    let index = schema.indexes.get(name).ok_or_else(|| {
+        QueryError::invalid_argument(format!(
+            "Standard Index {name:?} was not found at {version}"
+        ))
+    })?;
+    if matches!(
+        index.kind,
+        storage::StandardIndexKind::FullText | storage::StandardIndexKind::Vector
+    ) || matches!(index.target, storage::IndexTarget::NodeLookup)
+    {
+        return Err(QueryError::invalid_argument(format!(
+            "Standard Index {name:?} does not support persistent rebuild"
+        )));
+    }
+    let snapshot = storage::Snapshot::resolve(connection, target)?;
+    let (_, indexed_entities) =
+        super::schema::build_persistent_generation(&snapshot, index, is_interrupted)?;
+    Ok(vec![row([
+        ("name", Value::String(name.to_owned())),
+        ("commit", commit_value(target)),
+        ("indexedEntities", Value::Integer(indexed_entities)),
+    ])])
 }
 
 fn validate_options(name: &str, options: &ExecutionOptions) -> QueryResult<()> {

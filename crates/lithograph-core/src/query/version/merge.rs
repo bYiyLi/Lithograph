@@ -269,24 +269,35 @@ pub(super) fn finalize(
     args: Vec<Value>,
     options: &ExecutionOptions,
 ) -> QueryResult<Vec<ProcedureRow>> {
+    #[cfg(feature = "test-support")]
+    let prepare_started = std::time::Instant::now();
     let (id, expected_revision, session, action) = prepare_finalize(connection, &args)?;
-    lock_finalize_target(connection, &id, expected_revision, &session)?;
+    #[cfg(feature = "test-support")]
+    crate::performance::record_merge_finalize_prepare(prepare_started.elapsed().as_micros());
+    #[cfg(feature = "test-support")]
+    let wait_started = std::time::Instant::now();
+    acquire_finalize_writer(connection, &id, expected_revision)?;
+    #[cfg(feature = "test-support")]
+    crate::performance::record_merge_finalize_writer_wait(wait_started.elapsed().as_micros());
+    #[cfg(feature = "test-support")]
+    let hold_started = std::time::Instant::now();
+    ensure_finalize_branch_head(connection, &session)?;
     let (status, commit) = apply_finalize_action(connection, &session, action, options)?;
     if !storage::delete_merge_session(connection, &id, expected_revision)
         .map_err(|error| map_session_cas_error(connection, &id, error))?
     {
         return Err(session_not_found(&id));
     }
+    #[cfg(feature = "test-support")]
+    crate::performance::record_merge_finalize_writer_hold(hold_started.elapsed().as_micros());
     Ok(vec![row([
         ("status", Value::String(status.to_owned())),
         ("commit", commit_value(commit)),
     ])])
 }
 
-fn prepare_finalize(
-    connection: &Connection,
-    args: &[Value],
-) -> QueryResult<(String, i64, MergeSessionRecord, FinalizeAction)> {
+type PreparedFinalize = (String, i64, MergeSessionRecord, FinalizeAction);
+fn prepare_finalize(connection: &Connection, args: &[Value]) -> QueryResult<PreparedFinalize> {
     let id = string_arg(args, 0, "session")?.to_owned();
     let expected_revision = integer_arg(args, 1, "expectedRevision")?;
     let session = require_session(connection, &id)?;
@@ -348,15 +359,20 @@ fn ready_finalize_action(
     })
 }
 
-fn lock_finalize_target(
+fn acquire_finalize_writer(
     connection: &Connection,
     id: &str,
     expected_revision: i64,
-    session: &MergeSessionRecord,
 ) -> QueryResult<()> {
-    // Acquire SQLite writer ownership and CAS the Session revision before any canonical action.
     storage::update_merge_resolutions(connection, id, expected_revision, &BTreeMap::new(), false)
         .map_err(|error| map_session_cas_error(connection, id, error))?;
+    Ok(())
+}
+
+fn ensure_finalize_branch_head(
+    connection: &Connection,
+    session: &MergeSessionRecord,
+) -> QueryResult<()> {
     let branch_head =
         storage::branch_head(connection, &session.target_branch).map_err(|error| match error {
             storage::StorageError::NotFound(_) => branch_not_found(&session.target_branch),

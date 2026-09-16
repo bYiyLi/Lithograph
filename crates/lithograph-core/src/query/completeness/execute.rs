@@ -92,6 +92,28 @@ pub(crate) fn validate_executed_columns(expected: &[String], actual: &[String]) 
     )))
 }
 
+pub(crate) fn materialize_rows(
+    snapshot: &Snapshot<'_>,
+    result: RowSet,
+) -> QueryResult<Vec<Vec<Value>>> {
+    result
+        .rows
+        .into_iter()
+        .map(|row| {
+            result
+                .columns
+                .iter()
+                .map(|column| {
+                    binding_value(
+                        snapshot,
+                        row.values.get(column).unwrap_or(&BindingValue::Null),
+                    )
+                })
+                .collect::<QueryResult<Vec<_>>>()
+        })
+        .collect()
+}
+
 pub(crate) fn restore_global_bindings(mut rows: RowSet, globals: &BindingRow) -> RowSet {
     for name in &globals.order {
         if !rows.columns.contains(name) {
@@ -339,22 +361,7 @@ fn execute_read_snapshot_with_version_summary(
     let result = executor.execute_query_body(&program.root, RowSet::seed())?;
     let rows = if program.public_result {
         validate_executed_columns(&program.columns, &result.columns)?;
-        result
-            .rows
-            .into_iter()
-            .map(|row| {
-                result
-                    .columns
-                    .iter()
-                    .map(|column| {
-                        binding_value(
-                            &executor.snapshot,
-                            row.values.get(column).unwrap_or(&BindingValue::Null),
-                        )
-                    })
-                    .collect::<QueryResult<Vec<_>>>()
-            })
-            .collect::<QueryResult<Vec<_>>>()?
+        materialize_rows(&executor.snapshot, result)?
     } else {
         Vec::new()
     };

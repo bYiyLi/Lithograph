@@ -68,14 +68,9 @@ pub fn layer_between(before: &SnapshotState, after: &SnapshotState) -> StorageRe
     Ok(layer)
 }
 
-/// Computes the net Layer from `base` to a first-parent descendant without
-/// materializing either complete Snapshot into Rust memory.
-///
-/// Only logical slots touched by the descendant chain are retained. Each slot
-/// is normalized against the base Snapshot through point lookups so create /
-/// delete or remove / restore sequences that cancel within the chain disappear
-/// from the resulting Layer.
-pub fn layer_between_commits(
+/// Collects the latest touched logical slots from `base` to a first-parent
+/// descendant without resolving the base Snapshot.
+pub(crate) fn touched_layer_between_commits(
     connection: &Connection,
     base: HashId,
     descendant: HashId,
@@ -119,6 +114,17 @@ pub fn layer_between_commits(
             })?;
     }
 
+    Ok(latest)
+}
+
+/// Computes the net Layer from `base` to a first-parent descendant without
+/// materializing either complete Snapshot into Rust memory.
+pub fn layer_between_commits(
+    connection: &Connection,
+    base: HashId,
+    descendant: HashId,
+) -> StorageResult<LayerBuilder> {
+    let latest = touched_layer_between_commits(connection, base, descendant)?;
     normalize_touched_layer(connection, base, latest)
 }
 

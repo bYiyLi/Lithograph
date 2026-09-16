@@ -16,6 +16,7 @@ pub use refs::{
     initialize_connection_state, list_branches, list_tags, move_branch_ref, move_tag,
     resolve_version_descriptor, set_active_branch, validate_ref_name,
 };
+pub(crate) use state::touched_layer_between_commits;
 pub use state::{
     AllocationState, SnapshotState, capture_allocation_state, is_first_parent_descendant,
     layer_between, layer_between_commits, load_snapshot_state, restore_allocation_state,

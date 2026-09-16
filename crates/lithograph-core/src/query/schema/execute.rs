@@ -3,7 +3,7 @@ use rusqlite::Connection;
 
 use crate::storage::{self, CommitMetadata, HashId, SchemaState, Snapshot};
 
-use super::super::{QueryError, QueryResult};
+use super::super::{QueryResult, check_interrupted};
 use super::command::{PreparedSchema, SchemaCounters};
 use super::validate::validate_schema_transition;
 
@@ -48,12 +48,4 @@ pub(crate) fn execute_schema(
         commit,
         counters: prepared.counters.clone(),
     })
-}
-
-fn check_interrupted(is_interrupted: &dyn Fn() -> bool) -> QueryResult<()> {
-    if is_interrupted() {
-        Err(QueryError::interrupted())
-    } else {
-        Ok(())
-    }
 }

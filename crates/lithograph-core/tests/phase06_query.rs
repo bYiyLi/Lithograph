@@ -1046,7 +1046,7 @@ fn composable_show_preserves_input_rows_and_scope() {
 fn show_procedures_uses_the_complete_registry_column_contract() {
     let connection = fresh_storage();
     let default_columns = rows(&connection, "SHOW PROCEDURES");
-    assert_eq!(default_columns.len(), 32);
+    assert_eq!(default_columns.len(), 33);
     for row in default_columns {
         assert_eq!(row.len(), 4);
         assert!(matches!(&row[2], Value::String(mode) if mode == "READ" || mode == "WRITE"));
@@ -1064,7 +1064,7 @@ fn show_procedures_uses_the_complete_registry_column_contract() {
             Value::Boolean(false),
         )]))
     );
-    assert_eq!(rows(&connection, "SHOW PROCEDURE").len(), 32);
+    assert_eq!(rows(&connection, "SHOW PROCEDURE").len(), 33);
     assert!(!query_error(&connection, "SHOW PROCEDURES YIELD category").is_empty());
 }
 

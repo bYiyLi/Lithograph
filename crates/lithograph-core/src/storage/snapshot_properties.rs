@@ -3,6 +3,8 @@
 use std::collections::{BTreeMap, btree_map};
 use std::iter::Peekable;
 
+use rusqlite::{params_from_iter, types::Value as SqlValue};
+
 use super::layer::{DeltaOp, PropertyDelta};
 use super::property::PropertyColumns;
 use super::snapshot::Snapshot;
@@ -12,6 +14,90 @@ type PropertyKey = (OwnerKind, i64, PropertyKeyId);
 type PropertyOverlayIter<'a> = Peekable<btree_map::Iter<'a, PropertyKey, PropertyDelta>>;
 
 impl Snapshot<'_> {
+    /// Prefetches canonical checkpoint properties for one bounded owner page.
+    /// Overlay values remain authoritative because `property()` checks them first.
+    pub(crate) fn prefetch_properties(
+        &self,
+        owner_kind: OwnerKind,
+        owner_ids: &[i64],
+        key_ids: &[PropertyKeyId],
+    ) -> StorageResult<()> {
+        let Some(checkpoint) = self.checkpoint else {
+            return Ok(());
+        };
+        if owner_ids.is_empty() || key_ids.is_empty() {
+            return Ok(());
+        }
+        // This is a pipeline-page cache, not retained query state. Clearing it
+        // here keeps large Index scans bounded by the current page while
+        // `property()` still observes Overlay values before checkpoint data.
+        self.property_cache.borrow_mut().clear();
+        for owners in owner_ids.chunks(128) {
+            for keys in key_ids.chunks(16) {
+                self.prefetch_property_chunk(checkpoint, owner_kind, owners, keys)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn prefetch_property_chunk(
+        &self,
+        checkpoint: super::HashId,
+        owner_kind: OwnerKind,
+        owner_ids: &[i64],
+        key_ids: &[PropertyKeyId],
+    ) -> StorageResult<()> {
+        let needs_query = {
+            let cache = self.property_cache.borrow();
+            owner_ids.iter().any(|owner_id| {
+                key_ids
+                    .iter()
+                    .any(|key_id| !cache.contains_key(&(owner_kind, *owner_id, *key_id)))
+            })
+        };
+        if !needs_query {
+            return Ok(());
+        }
+        {
+            let mut cache = self.property_cache.borrow_mut();
+            for owner_id in owner_ids {
+                for key_id in key_ids {
+                    cache
+                        .entry((owner_kind, *owner_id, *key_id))
+                        .or_insert(None);
+                }
+            }
+        }
+        let owner_parameters = vec!["?"; owner_ids.len()].join(",");
+        let key_parameters = vec!["?"; key_ids.len()].join(",");
+        let sql = format!(
+            "SELECT owner_id, key_id, type_tag, int_value, real_value, text_value, blob_value, aux_value \
+             FROM main._lithograph_cp_properties \
+             WHERE commit_id = ? AND owner_kind = ? \
+               AND owner_id IN ({owner_parameters}) AND key_id IN ({key_parameters})"
+        );
+        let mut parameters = Vec::with_capacity(2 + owner_ids.len() + key_ids.len());
+        parameters.push(SqlValue::Blob(checkpoint.as_bytes().to_vec()));
+        parameters.push(SqlValue::Integer(owner_kind as i64));
+        parameters.extend(owner_ids.iter().copied().map(SqlValue::Integer));
+        parameters.extend(key_ids.iter().copied().map(SqlValue::Integer));
+        let mut statement = self.connection.prepare(&sql)?;
+        let rows = statement.query_map(params_from_iter(parameters), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                property_columns_from_row_offset(row, 2)?,
+            ))
+        })?;
+        for row in rows {
+            let (owner_id, key_id, columns) = row?;
+            self.property_cache
+                .borrow_mut()
+                .insert((owner_kind, owner_id, key_id), Some(columns.to_value()?));
+        }
+        Ok(())
+    }
+
     /// Returns all visible properties for one graph element in PropertyKeyId order.
     /// This is a direct owner lookup and never scans unrelated property owners.
     pub fn properties(

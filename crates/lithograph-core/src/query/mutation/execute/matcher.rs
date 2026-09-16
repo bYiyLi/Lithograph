@@ -158,7 +158,7 @@ fn path_relationship_candidates(
     let Some(type_id) = storage::find_relationship_type(context.connection, &names[0])? else {
         return Ok(Vec::new());
     };
-    let mut after = 0;
+    let mut cursor = None;
     let mut output = Vec::new();
     loop {
         check_interrupted(context.is_interrupted)?;
@@ -166,34 +166,24 @@ fn path_relationship_candidates(
             Direction::Outgoing => {
                 context
                     .snapshot
-                    .scan_outgoing_after(current, Some(type_id), after, SCAN_BATCH)?
+                    .scan_outgoing_page(current, Some(type_id), cursor, SCAN_BATCH)?
             }
             Direction::Incoming => {
                 context
                     .snapshot
-                    .scan_incoming_after(current, Some(type_id), after, SCAN_BATCH)?
+                    .scan_incoming_page(current, Some(type_id), cursor, SCAN_BATCH)?
             }
             Direction::Undirected => {
-                let mut records = context
+                context
                     .snapshot
-                    .scan_outgoing_after(current, Some(type_id), 0, usize::MAX)?
-                    .items;
-                records.extend(
-                    context
-                        .snapshot
-                        .scan_incoming_after(current, Some(type_id), 0, usize::MAX)?
-                        .items,
-                );
-                records.sort_by_key(|record| record.id);
-                records.dedup_by_key(|record| record.id);
-                return Ok(records);
+                    .scan_incident_page(current, Some(type_id), cursor, SCAN_BATCH)?
             }
         };
         output.extend(page.items);
-        let Some(next) = page.next_after else {
+        let Some(next) = page.next_cursor else {
             return Ok(output);
         };
-        after = next;
+        cursor = Some(next);
     }
 }
 

@@ -1,6 +1,6 @@
 # Phase 11：Performance Optimization
 
-**状态：`ready`**
+**状态：`in_progress`**
 
 ## 1. 目标与范围
 
@@ -14,13 +14,13 @@ Phase10保持 `done`，其原始证据作为历史保留。后续调查发现的
 
 ## 2. 依赖与Design Inputs
 
-- Phase00–10全部 `done`；当前实现基线为 `cccb760`，storage format仍为2。
+- Phase00–10全部 `done`；Phase 11 的优化前测量基线来自 `cccb760` / storage format 2，当前工作树已进入storage format 3实现与验收，不能把before基线描述成当前实现。
 - [Design](../../design.md) §4.1–4.4、§7.8、§8.3.1、§11.7、§14.3.1、§17.1–17.3、D12/D13。
 - [性能证据](../../research/phase11-performance-evidence.md)：E1–E4区分已观察问题、代码证据与未证实热点。
 - [Compatibility inventory](../cypher25-compatibility.md)：继续冻结 `CY25-2026.08`，性能优化不增加waiver。
 - [Phase10](10-compatibility-release.md)：继承correctness/recovery/release基础，不把旧单次计时当新P95。
 
-Design、前置Phase与验收已具备，因此状态为 `ready`；尚未开始编码，开始执行实现任务时再更新为 `in_progress`，不能提前标为 `done`。
+Design、前置Phase与验收已具备，当前正在按11.1→11.8实施和验收，因此状态为 `in_progress`。只有实现、量化验收、完整门禁、review finding与文档同步全部闭合后才能更新为 `done`。
 
 ## 3. Feature顺序与职责
 
@@ -144,7 +144,9 @@ Proof允许时复用起点、批量终点检查、有预算visibility cache、�
 
 ## 4. Implementation/Evidence状态
 
-本次仅完成设计与开发计划；Feature11.1–11.8均未实现/验收。已有代码、baseline与来源已核对，具体观察见性能研究记录。不存在需要用户裁决的未定产品合同；实际性能达标与平台结果尚未验证，不能把 `ready` 描述为性能已经改善。
+当前工作树已经实现并完成targeted验证的范围包括：11.1性能harness/物理counter、11.2邻接keyset、11.3 query-owned resolved state/read guard、11.4 format3/persistent Standard Index/rebuild、11.5 ancestor/staged changed-owner overlay，以及11.6基于实测暴露的Range/new-connection/HNSW热点修复。固定性能机上的10M Node / 100M Relationship验收已证明邻接、Range seek、1000-row Range、1000-owner delta、SQL rows/Native streaming与RSS目标满足Design §17.2；1M×128、100K×1536 Vector与1M全文语料已保存cold/warm、historical/Graph View和tie-aware recall证据，10K-conflict Merge已保存prepare/writer-wait/writer-hold拆分。
+
+Phase仍为 `in_progress`，但本地范围已经闭合：1/4/8-reader三档mixed workload均各运行30分钟并通过；Search、10K Merge、10M/100M定量门禁、最终repository-wide regression/quality/coverage、real-load与当前SQLite CI均通过。当前唯一尚未完成的Phase acceptance是**这份Phase 11改动对应的六目标hosted Release Matrix**。工作树仍未commit/push，因而没有可供GitHub hosted runners检出的当前ref；在真实六平台结果产生前不得把Phase标为 `done`。
 
 ## 5. Requirement追溯
 
@@ -195,7 +197,7 @@ Proof允许时复用起点、批量终点检查、有预算visibility cache、�
 
 ### 6.4 Regression命令与平台
 
-现有命令继续有效；新增以下入口由11.1/各Feature实现，**当前尚不存在**：Core integration targets `phase11_performance`、`phase11_cache`、`phase11_recovery`，test-support binary `lithograph-phase11-performance`。其usage/help、fixture生成与单case重跑方式在实现时与README/test说明同步，不能把计划命令列为已运行结果。
+现有命令继续有效。Phase11当前新增并实际使用：Core integration target `phase11_cache`；test-support binaries `lithograph-phase11-performance`、`lithograph-phase11-search`、`lithograph-phase11-delta`；以及 `phase11-adapter-bench.sh`、`phase11-stream-bench.sh`、`phase11-mixed-stress.sh` 的真实SQLite/Native C harness。Format3/recovery仍由现有 `phase10_recovery`、Phase09 real-load probe与Native ABI smoke覆盖，不为了Phase编号复制第二套recovery测试。
 
 Targeted至少覆盖现有 `phase02_storage`、`phase02_checkpoint_integrity`、`phase04_query`、`phase05_mutation`、`phase06_query`、`phase07_schema`、`phase08_search_ingestion`、`phase09_version` 以及Phase10 hardening/compatibility/recovery；按受影响Feature选择，11.8执行全部。Core tests与loadable-extension probe继续独立Cargo invocation，避免feature-unification误把host ABI模式带入Standalone测试。
 
@@ -203,18 +205,19 @@ Targeted至少覆盖现有 `phase02_storage`、`phase02_checkpoint_integrity`、
 
 ## 7. Phase Acceptance
 
-- [ ] P11-MEASURE：11.1基线/原始样本、缓存口径、adapter、计时拆分及物理counter完整。
-- [ ] P11-ADJ：所有邻接方向/type/overlay/path调用通过语义与物理访问gate。
-- [ ] P11-STATE：一次resolve与read guard、并发GC、staged/candidate revision、全部清理路径通过。
-- [ ] P11-CACHE：所有本期Standard Index跨connection复用与delta/eviction/rebuild正确，无每Commit全域重建。
-- [ ] P11-API/P11-SAFETY：rebuild入口、options/errors/readonly/SHOW/EXPLAIN和内部schema防线通过。
-- [ ] P11-FORMAT：fresh3、legacy reads、1/2→3、rollback/crash/mixed-format history与旧Engine拒绝通过。
-- [ ] 11.6完成实测热点review；必要优化有收益与完整语义回归，不需要的重构有明确不采用证据。
-- [ ] P11-STRESS：Search规模与recall、10K Merge、Native事务、每种并发配置30分钟压力全部通过。
-- [ ] P11-LATENCY：Design §17.2全部目标和6.2结构gate通过，已有Version/write无性能回退。
-- [ ] 全部applicable compatibility、`cargo make quality`、`scripts/ci.sh`与六平台真实artifact/interop通过。
-- [ ] Design/README/Development/compatibility/vlog与实际状态一致，证据没有隐藏慢路径或失败样本。
-- [ ] 最终review无scope内未解决finding；diff无secret、数据库、临时trace或无关改动。
+- [x] P11-MEASURE：11.1基线/原始样本、缓存口径、adapter、计时拆分及物理counter完整。
+- [x] P11-ADJ：所有邻接方向/type/overlay/path调用通过语义与物理访问gate。
+- [x] P11-STATE：一次resolve与read guard、并发GC、staged/candidate revision、全部清理路径通过。
+- [x] P11-CACHE：所有本期Standard Index跨connection复用与delta/eviction/rebuild正确，无每Commit全域重建。
+- [x] P11-API/P11-SAFETY：rebuild入口、options/errors/readonly/SHOW/EXPLAIN和内部schema防线通过。
+- [x] P11-FORMAT：fresh3、legacy reads、1/2→3、rollback/crash/mixed-format history与旧Engine拒绝通过。
+- [x] 11.6完成实测热点review；必要优化有收益与完整语义回归，不需要的重构有明确不采用证据。
+- [x] P11-STRESS：Search规模与tie-aware recall、10K Merge、Native事务、1/4/8-reader每种并发配置30分钟压力全部通过。
+- [x] P11-LATENCY：Design §17.2全部目标和6.2结构gate通过，已有Version/write无性能回退。
+- [x] 全部applicable compatibility、`cargo make quality`、coverage、真实SQLite/ABI probes与`scripts/ci.sh`通过。
+- [ ] 当前Phase 11改动的Linux x64/arm64、macOS x64/arm64、Windows x64/arm64六平台hosted Release Matrix真实artifact/interop通过；未commit/push前没有对应远端ref，不能借用Phase 10旧matrix结果。
+- [x] Design/README/Development/compatibility/vlog与实际状态一致，证据显式保留旧26GiB migration慢路径与未运行hosted matrix，没有隐藏失败样本。
+- [x] 最终本地review无scope内未解决finding；`git diff --check`、link/status/hygiene/secret检查通过，diff无数据库、benchmark report、临时trace或无关改动。hosted matrix作为独立未完成acceptance保留在上一项。
 
 ## 8. 完成定义
 

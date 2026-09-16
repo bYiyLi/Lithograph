@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use lithograph_core::cypher::{Value, decode_json, encode_json, parse};
 use lithograph_core::query::{ExecutionOptions, QueryCursor, prepare};
 use lithograph_core::storage::{
-    CommitMetadata, HashId, LayerBuilder, OwnerKind, PropertyValue, SnapshotState,
+    CommitMetadata, HashId, LayerBuilder, OwnerKind, PropertyValue, STORAGE_FORMAT, SnapshotState,
     allocate_node_id, branch_head, commit_layer, create_branch, create_checkpoint,
     create_storage_schema, delete_checkpoint, initialize_connection_state, initialize_root,
     intern_label, intern_property_key, layer_between, load_snapshot_state,
@@ -41,11 +41,16 @@ fn fresh_storage() -> Connection {
                  magic TEXT NOT NULL,\
                  database_id TEXT NOT NULL,\
                  storage_format INTEGER NOT NULL\
-             );\
-             INSERT INTO main._lithograph_meta(id, magic, database_id, storage_format)\
-             VALUES(1, 'lithograph-format-v1', '00000000-0000-4000-8000-000000000010', 2);",
+             );",
         )
         .expect("metadata");
+    connection
+        .execute(
+            "INSERT INTO main._lithograph_meta(id, magic, database_id, storage_format) \
+             VALUES(1, 'lithograph-format-v1', '00000000-0000-4000-8000-000000000010', ?1)",
+            [STORAGE_FORMAT],
+        )
+        .expect("metadata marker");
     create_storage_schema(&connection).expect("storage schema");
     initialize_root(&connection).expect("root");
     initialize_connection_state(&connection).expect("connection state");

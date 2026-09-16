@@ -6,10 +6,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use lithograph_core::query::{ExecutionOptions, QueryCursor, QueryError, prepare};
 use lithograph_core::storage::{
-    CommitMetadata, HashId, LayerBuilder, allocate_node_id, branch_head, capture_allocation_state,
-    clear_commit_data, commit_data, commit_exists, commit_layer, create_branch_ref,
-    create_checkpoint, create_merge_session, create_storage_schema, create_tag, delete_tag,
-    initialize_connection_state, initialize_root, integrity_check, list_tags,
+    CommitMetadata, HashId, LayerBuilder, STORAGE_FORMAT, allocate_node_id, branch_head,
+    capture_allocation_state, clear_commit_data, commit_data, commit_exists, commit_layer,
+    create_branch_ref, create_checkpoint, create_merge_session, create_storage_schema, create_tag,
+    delete_tag, initialize_connection_state, initialize_root, integrity_check, list_tags,
     load_merge_resolutions, load_merge_session, move_tag, set_commit_data,
     update_merge_resolutions,
 };
@@ -35,11 +35,16 @@ fn initialize_file_database(path: &PathBuf) -> Connection {
                  magic TEXT NOT NULL,\
                  database_id TEXT NOT NULL,\
                  storage_format INTEGER NOT NULL\
-             );\
-             INSERT INTO main._lithograph_meta(id, magic, database_id, storage_format)\
-             VALUES(1, 'lithograph-format-v1', '00000000-0000-4000-8000-000000000011', 2);",
+             );",
         )
         .expect("metadata");
+    connection
+        .execute(
+            "INSERT INTO main._lithograph_meta(id, magic, database_id, storage_format) \
+             VALUES(1, 'lithograph-format-v1', '00000000-0000-4000-8000-000000000011', ?1)",
+            [STORAGE_FORMAT],
+        )
+        .expect("metadata marker");
     create_storage_schema(&connection).expect("storage schema");
     initialize_root(&connection).expect("root");
     initialize_connection_state(&connection).expect("connection state");

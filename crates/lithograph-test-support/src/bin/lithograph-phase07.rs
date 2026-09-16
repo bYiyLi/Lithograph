@@ -51,6 +51,8 @@ fn run() -> Result<ProbeResult, Box<dyn Error>> {
     checks.push("constraint-rollback");
     check_standard_indexes_and_graph_view(&fixture, &load)?;
     checks.push("standard-index-graph-view");
+    check_persistent_index_rebuild(&fixture, &load)?;
+    checks.push("persistent-index-rebuild");
     check_graph_view_rejects_schema_ddl(&fixture, &load)?;
     checks.push("schema-ddl-graph-view-rollback");
 
@@ -191,6 +193,38 @@ fn check_graph_view_rejects_schema_ddl(
     require(
         branch_head(&Connection::open(fixture.path())?, "main")? == before,
         "rejected Schema DDL must not move the Branch head",
+    )
+}
+
+fn check_persistent_index_rebuild(
+    fixture: &FileDatabaseFixture,
+    load: &str,
+) -> Result<(), Box<dyn Error>> {
+    let before = branch_head(&Connection::open(fixture.path())?, "main")?;
+    let rebuilt = scalar_query(
+        fixture,
+        load,
+        "CALL lithograph.index.rebuild('person_age', 'branch/main') \
+         YIELD name, commit, indexedEntities RETURN name, commit, indexedEntities",
+        "{}",
+    )?;
+    require(
+        rebuilt["rows"][0][0] == "person_age"
+            && rebuilt["rows"][0][1]
+                .as_str()
+                .is_some_and(|commit| commit.starts_with("commit/"))
+            && rebuilt["rows"][0][2]
+                .as_i64()
+                .is_some_and(|count| count >= 2),
+        "persistent Index rebuild must return name, pinned Commit and indexed entity count",
+    )?;
+    require(
+        rebuilt["summary"]["queryType"] == "version" && rebuilt["summary"]["commit"].is_null(),
+        "persistent Index rebuild must be a Version maintenance operation without a new Commit",
+    )?;
+    require(
+        branch_head(&Connection::open(fixture.path())?, "main")? == before,
+        "persistent Index rebuild must not move the Branch head",
     )
 }
 

@@ -41,3 +41,11 @@ pub(crate) fn now_micros() -> QueryResult<i64> {
     i64::try_from(elapsed.as_micros())
         .map_err(|_| QueryError::internal("system clock exceeds supported Commit timestamp range"))
 }
+
+pub(crate) fn check_interrupted(is_interrupted: &dyn Fn() -> bool) -> QueryResult<()> {
+    if is_interrupted() {
+        Err(QueryError::interrupted())
+    } else {
+        Ok(())
+    }
+}

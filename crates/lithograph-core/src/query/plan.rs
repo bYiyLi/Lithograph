@@ -256,6 +256,7 @@ pub(crate) struct ProjectionPlan {
 pub struct PreparedQuery {
     pub(crate) commit: HashId,
     pub(crate) candidate: Option<super::version::CandidateContext>,
+    pub(crate) resolved_state: Option<storage::ResolvedSnapshotState>,
     pub(crate) graph_view: ResolvedGraphView,
     pub(crate) matches: Vec<MatchStep>,
     pub(crate) projections: Vec<Projection>,
@@ -437,6 +438,7 @@ fn prepare_write_query(
     Ok(PreparedQuery {
         commit: context.commit,
         candidate: context.candidate,
+        resolved_state: None,
         graph_view: context.graph_view,
         matches: Vec::new(),
         projections: Vec::new(),
@@ -472,24 +474,22 @@ fn prepare_read_query(
         distinct,
     } = lower_projection(return_clause, query, &context.params)?;
     let aggregate = validate_aggregation(&projections)?;
-    let statistics = planner_statistics(
-        connection,
-        context.commit,
-        context.candidate.as_ref(),
-        &context.graph_view,
-        &matches,
-    )?;
+    let resolved_state = match context.candidate.as_ref() {
+        Some(candidate) => storage::Snapshot::resolve_query_state_with_layer_and_schema(
+            connection,
+            context.commit,
+            &candidate.layer,
+            candidate.schema.clone(),
+        )?,
+        None => storage::Snapshot::resolve_query_state(connection, context.commit)?,
+    };
+    let snapshot = storage::Snapshot::from_resolved_state(connection, &resolved_state);
+    let statistics = planner_statistics(&snapshot, &context.graph_view, &matches)?;
     optimize_node_scans(&mut matches, &statistics);
-    super::schema::select_standard_index_seeks(
-        connection,
-        context.commit,
-        context
-            .candidate
-            .as_ref()
-            .map(|candidate| &candidate.schema),
-        &mut matches,
-        &context.params,
-    )?;
+    let schema = resolved_state.query_schema_state().ok_or_else(|| {
+        QueryError::internal("read query resolved state is missing its versioned Schema")
+    })?;
+    super::schema::select_standard_index_seeks(schema, &mut matches, &context.params);
     let columns = output_columns(context.mode, &projections);
     let logical = build_logical(
         &matches,
@@ -503,6 +503,7 @@ fn prepare_read_query(
     Ok(PreparedQuery {
         commit: context.commit,
         candidate: context.candidate,
+        resolved_state: Some(resolved_state),
         graph_view: context.graph_view,
         matches,
         projections,
@@ -589,6 +590,7 @@ fn empty_prepared_query(
     PreparedQuery {
         commit,
         candidate,
+        resolved_state: None,
         graph_view,
         matches: Vec::new(),
         projections: Vec::new(),
@@ -722,16 +724,14 @@ fn validate_aggregation(projections: &[Projection]) -> QueryResult<bool> {
 }
 
 fn planner_statistics(
-    connection: &Connection,
-    commit: HashId,
-    candidate: Option<&super::version::CandidateContext>,
+    snapshot: &storage::Snapshot<'_>,
     graph_view: &ResolvedGraphView,
     matches: &[MatchStep],
 ) -> QueryResult<PlannerStatistics> {
     if matches.is_empty() || graph_view.is_empty() {
         Ok(PlannerStatistics::default())
     } else {
-        collect_statistics(connection, commit, candidate, matches)
+        collect_statistics(snapshot, matches)
     }
 }
 
@@ -1153,9 +1153,7 @@ fn constant_usize(
 }
 
 fn collect_statistics(
-    connection: &Connection,
-    commit: HashId,
-    candidate: Option<&super::version::CandidateContext>,
+    snapshot: &storage::Snapshot<'_>,
     matches: &[MatchStep],
 ) -> QueryResult<PlannerStatistics> {
     let mut labels = BTreeSet::new();
@@ -1175,17 +1173,8 @@ fn collect_statistics(
             }
         }
     }
-    let snapshot = match candidate {
-        Some(candidate) => storage::Snapshot::resolve_with_layer_and_schema(
-            connection,
-            commit,
-            &candidate.layer,
-            candidate.schema.clone(),
-        )?,
-        None => storage::Snapshot::resolve(connection, commit)?,
-    };
     PlannerStatistics::collect(
-        &snapshot,
+        snapshot,
         &labels,
         &relationship_types,
         true,

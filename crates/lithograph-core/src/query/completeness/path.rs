@@ -10,7 +10,7 @@ use super::super::expression::{
     self, BindingRow, BindingValue, Expr, binding_value, compile_expression,
 };
 use super::super::graph::ResolvedGraphView;
-use super::super::{QueryError, QueryErrorKind, QueryMetrics, QueryResult};
+use super::super::{QueryError, QueryErrorKind, QueryMetrics, QueryResult, check_interrupted};
 
 #[derive(Debug, Clone)]
 struct PatternPartSpec {
@@ -1369,14 +1369,6 @@ fn apply_selector(states: Vec<PathState>, selector: PathSelector) -> Vec<PathSta
         }
     }
     output
-}
-
-fn check_interrupted(is_interrupted: &dyn Fn() -> bool) -> QueryResult<()> {
-    if is_interrupted() {
-        Err(QueryError::interrupted())
-    } else {
-        Ok(())
-    }
 }
 
 #[cfg(test)]

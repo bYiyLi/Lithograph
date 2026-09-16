@@ -1345,7 +1345,7 @@ Format 3 固定增加两张 `main` derived table，逻辑字段如下；实现�
 
 ```text
 _lithograph_index_generations
-  generation_id INTEGER PRIMARY KEY                -- internal identity
+  generation_id INTEGER PRIMARY KEY AUTOINCREMENT  -- database-local, never-reused internal identity
   anchor_commit BLOB(32), definition_hash BLOB(32)
   definition_blob BLOB, encoding_version INTEGER
   complete INTEGER(0|1), indexed_entities INTEGER, entry_count INTEGER
@@ -1361,6 +1361,8 @@ _lithograph_index_entries
   point_crs INTEGER NULL, point_x REAL NULL, point_y REAL NULL, point_z REAL NULL
   PRIMARY KEY(generation_id, owner_kind, owner_id, property_ordinal)
 ```
+
+`generation_id` 只标识derived generation，不参与canonical Commit/Layer/Schema hash；但它在同一个SQLite database内一经分配即不得复用。长寿命read guard、query-local binding与分页continuation因此能区分“同一anchor/definition被maintenance替换前后的两个物理generation”。Format 3使用SQLite `AUTOINCREMENT` 保留已删除generation的high-water mark，不依赖普通`INTEGER PRIMARY KEY`在删除最大row后可能复用rowid的行为。
 
 范围/编码合法性、manifest 与 entries 的对应关系由 storage primitives 验证，不依赖宿主 `foreign_keys` 开关。Key encoding 沿用第 5.3、11.4 节的语义；`value_blob` 保留必要的精确 recheck 值。索引前缀固定是 generation + owner kind + property ordinal，后接 equality、typed range、text 或 spatial key，并以 owner identity 处理同值重复。Relationship Lookup 使用 generation + owner kind + token + owner identity。采用固定、按非空 key family 过滤的 partial secondary indexes，避免给不适用 family 填入大量全 NULL key；相关 SQL 必须包含匹配 predicate，并经真实 plan 验证。构建一个 generation 不得 DROP 或重建其它 generation 正在使用的全部 secondary indexes。
 
@@ -1705,7 +1707,7 @@ Benchmark 报告至少保存：Git commit 与 dirty-tree digest、fixture seed/v
 
 Phase 11 必须增加相互独立的100K与1M Search corpus，不能把“大图里1000个 sample documents”写成百万向量压测。固定并记录 document 长度、vector dimensions/coordinate type、seed、similarity、HNSW build/search 参数、top-k、过滤选择性及历史/staged状态。至少有100K×1536和1M×128维向量场景；不同维度不比较成同一个延迟曲线。另有1M全文文档场景。10M向量可作为容量探索，不是本轮强制范围，也不得在未测前宣传支持该规模的低延迟。
 
-Vector 用确定的 query sample 对 exact top-k oracle 报告 recall@k、分数/排序与 visible filtering；oracle construction 单独计时。ANN参数/数据相同条件下 recall@10 不得低于优化前，验收最低均值为0.95；不能降低 recall 换延迟。全文结果与相同语义 oracle 比较。报告 index build/加载/查询、cold/warm/new connection、peak RSS/磁盘以及历史 correctness；若这些新增场景暴露架构或 OOM 问题，完成最小必要设计修订后修复，不预先重写 FTS/HNSW。
+Vector 用确定的 query sample 对 exact top-k oracle 报告 recall@k、分数/排序与 visible filtering；oracle construction 单独计时。若 exact top-k 的第 `k` 名与更多候选在实际 coordinate type / similarity 计算后具有完全相同的 cutoff score，则这些 cutoff tie candidate 在 recall@k 中等价，不能仅因 deterministic ID tie-break 选择了另一组同分结果而判为 miss；仍必须逐项验证返回 score、去重以及稳定的 score/identity 排序。ANN参数/数据相同条件下 recall@10 不得低于优化前，验收最低均值为0.95；不能降低 recall 换延迟。全文结果与相同语义 oracle 比较。报告 index build/加载/查询、cold/warm/new connection、peak RSS/磁盘以及历史 correctness；若这些新增场景暴露架构或 OOM 问题，完成最小必要设计修订后修复，不预先重写 FTS/HNSW。
 
 Mixed-workload 验证覆盖1/4/8个 reader与一个 writer、不同 Graph View、Branch/Tag移动、GC、cache eviction/rebuild；每种并发配置持续压力至少30分钟，记录吞吐、P95、BUSY/retry、失败数、writer持锁、WAL与资源回收。WAL reader pin 不得让返回值跨 Snapshot 漂移；不能为提高吞吐忽略冲突/CAS。10K-conflict Merge 仍分40轮并保持 revision/candidate/finalize语义，先测热点再优化 resolution，不改变公众冲突协议。
 

@@ -14,5 +14,8 @@
 pub const CYPHER_PROFILE: &str = "CY25-2026.08";
 
 pub mod cypher;
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod performance;
 pub mod query;
 pub mod storage;

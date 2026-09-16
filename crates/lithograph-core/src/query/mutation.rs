@@ -21,7 +21,7 @@ use super::plan::{
     append_pattern_operators, lower_match, lower_projection,
 };
 use super::stream::{QueryMetrics, materialize_match_step};
-use super::{QueryError, QueryErrorKind, QueryResult, now_micros};
+use super::{QueryError, QueryErrorKind, QueryResult, check_interrupted, now_micros};
 use crate::cypher::unescape_identifier;
 
 const SCAN_BATCH: usize = 256;
@@ -180,14 +180,6 @@ struct LoweredClause {
     projection: Option<WriteProjection>,
     logical: Vec<LogicalOperator>,
     explain_match: Option<MatchStep>,
-}
-
-fn check_interrupted(is_interrupted: &dyn Fn() -> bool) -> QueryResult<()> {
-    if is_interrupted() {
-        Err(QueryError::interrupted())
-    } else {
-        Ok(())
-    }
 }
 
 pub(crate) fn prepare_write(

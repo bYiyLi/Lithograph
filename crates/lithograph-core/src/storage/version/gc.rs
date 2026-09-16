@@ -23,7 +23,8 @@ pub fn collect_garbage(connection: &Connection) -> StorageResult<GcCounters> {
         return Ok(GcCounters::default());
     }
     let mut counters = GcCounters::default();
-    delete_unreachable_commits(connection, &unreachable, &mut counters)?;
+    let persistent_indexes = has_persistent_index_storage(connection)?;
+    delete_unreachable_commits(connection, &unreachable, persistent_indexes, &mut counters)?;
     delete_orphan_layers(connection, &mut counters)?;
     counters.schemas += connection.execute(
         "DELETE FROM main._lithograph_schema_objects WHERE NOT EXISTS(SELECT 1 FROM main._lithograph_commits WHERE schema_hash = _lithograph_schema_objects.hash)",
@@ -49,10 +50,14 @@ fn unreachable_commits(connection: &Connection) -> StorageResult<Vec<HashId>> {
 fn delete_unreachable_commits(
     connection: &Connection,
     unreachable: &[HashId],
+    persistent_indexes: bool,
     counters: &mut GcCounters,
 ) -> StorageResult<()> {
     for commit in unreachable {
         let bytes = commit.as_bytes().as_slice();
+        if persistent_indexes {
+            delete_commit_index_generations(connection, *commit)?;
+        }
         let (checkpoints, commit_data) = delete_commit_auxiliary(connection, *commit)?;
         counters.checkpoints += checkpoints;
         counters.commit_data += commit_data;
@@ -61,6 +66,31 @@ fn delete_unreachable_commits(
             [bytes],
         )?;
     }
+    Ok(())
+}
+
+fn has_persistent_index_storage(connection: &Connection) -> StorageResult<bool> {
+    let exists: i64 = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema \
+         WHERE type = 'table' AND name = '_lithograph_index_generations')",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(exists == 1)
+}
+
+fn delete_commit_index_generations(connection: &Connection, commit: HashId) -> StorageResult<()> {
+    let commit = commit.as_bytes().as_slice();
+    connection.execute(
+        "DELETE FROM main._lithograph_index_entries WHERE generation_id IN (\
+             SELECT generation_id FROM main._lithograph_index_generations WHERE anchor_commit = ?1\
+         )",
+        [commit],
+    )?;
+    connection.execute(
+        "DELETE FROM main._lithograph_index_generations WHERE anchor_commit = ?1",
+        [commit],
+    )?;
     Ok(())
 }
 

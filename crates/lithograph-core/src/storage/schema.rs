@@ -4,11 +4,24 @@ use super::encoding::{hash, i64_bytes, optional_bytes, optional_string, record};
 use super::layer::{LayerBuilder, persist_layer};
 use super::{CommitMetadata, HashId, RootInfo, STORAGE_FORMAT, StorageError, StorageResult};
 
-const FORMAT2_SCHEMA_STATEMENTS: &[&str] = &[
+pub(crate) const FORMAT2_SCHEMA_STATEMENTS: &[&str] = &[
     "CREATE TABLE main._lithograph_commit_data(commit_id BLOB NOT NULL CHECK(length(commit_id) = 32), data_json TEXT NOT NULL, PRIMARY KEY(commit_id)) WITHOUT ROWID",
     "CREATE TABLE main._lithograph_tags(name TEXT NOT NULL, commit_id BLOB NOT NULL CHECK(length(commit_id) = 32), PRIMARY KEY(name)) WITHOUT ROWID",
     "CREATE TABLE main._lithograph_merge_sessions(id TEXT NOT NULL, target_branch TEXT NOT NULL, ours_commit BLOB NOT NULL CHECK(length(ours_commit) = 32), theirs_commit BLOB NOT NULL CHECK(length(theirs_commit) = 32), revision INTEGER NOT NULL CHECK(revision > 0), created_at INTEGER NOT NULL, PRIMARY KEY(id)) WITHOUT ROWID",
     "CREATE TABLE main._lithograph_merge_resolutions(session_id TEXT NOT NULL, conflict_id BLOB NOT NULL CHECK(length(conflict_id) = 32), resolution_json TEXT NOT NULL, PRIMARY KEY(session_id, conflict_id)) WITHOUT ROWID",
+];
+
+pub(crate) const FORMAT3_SCHEMA_STATEMENTS: &[&str] = &[
+    "CREATE TABLE main._lithograph_index_generations(generation_id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(generation_id > 0), anchor_commit BLOB NOT NULL CHECK(length(anchor_commit) = 32), definition_hash BLOB NOT NULL CHECK(length(definition_hash) = 32), definition_blob BLOB NOT NULL, encoding_version INTEGER NOT NULL CHECK(encoding_version > 0), complete INTEGER NOT NULL CHECK(complete IN (0, 1)), indexed_entities INTEGER NOT NULL CHECK(indexed_entities >= 0), entry_count INTEGER NOT NULL CHECK(entry_count >= 0), created_at INTEGER NOT NULL, UNIQUE(anchor_commit, definition_hash, encoding_version))",
+    "CREATE TABLE main._lithograph_index_entries(generation_id INTEGER NOT NULL CHECK(generation_id > 0), owner_kind INTEGER NOT NULL CHECK(owner_kind IN (1, 2)), owner_id INTEGER NOT NULL CHECK(owner_id > 0), property_ordinal INTEGER NOT NULL CHECK(property_ordinal >= 0), token_id INTEGER NULL, value_blob BLOB NULL, equality_blob BLOB NULL, text_value TEXT NULL, sort_family INTEGER NULL, sort_number NUMERIC NULL, sort_a INTEGER NULL, sort_b INTEGER NULL, sort_c INTEGER NULL, sort_text TEXT NULL, point_crs INTEGER NULL, point_x REAL NULL, point_y REAL NULL, point_z REAL NULL, PRIMARY KEY(generation_id, owner_kind, owner_id, property_ordinal)) WITHOUT ROWID",
+    "CREATE INDEX main._lithograph_index_entries_token ON _lithograph_index_entries(generation_id, owner_kind, token_id, owner_id) WHERE token_id IS NOT NULL",
+    "CREATE INDEX main._lithograph_index_entries_equality ON _lithograph_index_entries(generation_id, owner_kind, property_ordinal, equality_blob, owner_id) WHERE equality_blob IS NOT NULL",
+    "CREATE INDEX main._lithograph_index_entries_text ON _lithograph_index_entries(generation_id, owner_kind, property_ordinal, text_value, owner_id) WHERE text_value IS NOT NULL",
+    "CREATE INDEX main._lithograph_index_entries_range_number ON _lithograph_index_entries(generation_id, owner_kind, property_ordinal, sort_family, sort_number, owner_id) WHERE sort_number IS NOT NULL",
+    "CREATE INDEX main._lithograph_index_entries_range_text ON _lithograph_index_entries(generation_id, owner_kind, property_ordinal, sort_family, sort_text, owner_id) WHERE sort_text IS NOT NULL",
+    "CREATE INDEX main._lithograph_index_entries_range_tuple ON _lithograph_index_entries(generation_id, owner_kind, property_ordinal, sort_family, sort_a, sort_b, sort_c, sort_text, owner_id) WHERE sort_a IS NOT NULL",
+    "CREATE INDEX main._lithograph_index_entries_point_x ON _lithograph_index_entries(generation_id, owner_kind, property_ordinal, point_crs, point_x, point_y, point_z, owner_id) WHERE point_crs IS NOT NULL",
+    "CREATE INDEX main._lithograph_index_entries_point_y ON _lithograph_index_entries(generation_id, owner_kind, property_ordinal, point_crs, point_y, point_x, point_z, owner_id) WHERE point_crs IS NOT NULL",
 ];
 
 pub(crate) const STORAGE_SCHEMA_STATEMENTS: &[&str] = &[
@@ -44,6 +57,16 @@ pub(crate) const STORAGE_SCHEMA_STATEMENTS: &[&str] = &[
     FORMAT2_SCHEMA_STATEMENTS[1],
     FORMAT2_SCHEMA_STATEMENTS[2],
     FORMAT2_SCHEMA_STATEMENTS[3],
+    FORMAT3_SCHEMA_STATEMENTS[0],
+    FORMAT3_SCHEMA_STATEMENTS[1],
+    FORMAT3_SCHEMA_STATEMENTS[2],
+    FORMAT3_SCHEMA_STATEMENTS[3],
+    FORMAT3_SCHEMA_STATEMENTS[4],
+    FORMAT3_SCHEMA_STATEMENTS[5],
+    FORMAT3_SCHEMA_STATEMENTS[6],
+    FORMAT3_SCHEMA_STATEMENTS[7],
+    FORMAT3_SCHEMA_STATEMENTS[8],
+    FORMAT3_SCHEMA_STATEMENTS[9],
 ];
 
 pub fn create_storage_schema(connection: &Connection) -> StorageResult<()> {
@@ -62,6 +85,14 @@ pub fn create_storage_schema(connection: &Connection) -> StorageResult<()> {
 /// Adds only the storage-format-2 sidecar/session tables to a format-1 database.
 pub fn create_format2_schema(connection: &Connection) -> StorageResult<()> {
     for statement in FORMAT2_SCHEMA_STATEMENTS {
+        connection.execute_batch(statement)?;
+    }
+    Ok(())
+}
+
+/// Adds only the storage-format-3 persistent Standard Index structures.
+pub fn create_format3_schema(connection: &Connection) -> StorageResult<()> {
+    for statement in FORMAT3_SCHEMA_STATEMENTS {
         connection.execute_batch(statement)?;
     }
     Ok(())

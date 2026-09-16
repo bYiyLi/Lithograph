@@ -1,40 +1,49 @@
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
-use rusqlite::{Connection, Statement, params, types::Value as SqlValue};
+use rusqlite::{params, types::Value as SqlValue};
 
 use crate::cypher::{CypherComparison, Value, cypher_compare, cypher_equals};
-use crate::storage::{
-    self, HashId, IndexDefinition, IndexTarget, OwnerKind, ScanPage, SchemaState, Snapshot,
-    StandardIndexKind,
-};
+use crate::storage::{self, ScanPage, Snapshot, StandardIndexKind};
 
 use super::super::super::mutation::property_from_value;
 use super::super::super::{QueryError, QueryResult};
 use super::super::equality::property_equality_key;
 use super::{StandardIndexPredicate, StandardIndexSeek};
 
-const NODE_OWNER_KIND: i64 = 0;
-const RELATIONSHIP_OWNER_KIND: i64 = 1;
+mod range;
+
+use range::{numeric_range_bounds, scan_persistent_numeric_range_page, scan_range_bounds_page};
+
+pub(super) const NODE_OWNER_KIND: i64 = 1;
+pub(super) const RELATIONSHIP_OWNER_KIND: i64 = 2;
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum StandardIndexCursor {
+    Owner(i64),
+    NumericRange {
+        generation_id: i64,
+        sort_number: SqlValue,
+        owner_id: i64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct StandardIndexPage {
+    pub(crate) items: Vec<i64>,
+    pub(crate) next_cursor: Option<StandardIndexCursor>,
+}
+
 const RANGE_FAMILY_BOOLEAN: i64 = 1;
-const RANGE_FAMILY_NUMBER: i64 = 2;
-const RANGE_FAMILY_STRING: i64 = 3;
+pub(super) const RANGE_FAMILY_NUMBER: i64 = 2;
+pub(super) const RANGE_FAMILY_STRING: i64 = 3;
 const RANGE_FAMILY_DATE: i64 = 4;
 const RANGE_FAMILY_LOCAL_TIME: i64 = 5;
 const RANGE_FAMILY_TIME: i64 = 6;
 const RANGE_FAMILY_LOCAL_DATETIME: i64 = 7;
 const RANGE_FAMILY_ZONED_DATETIME: i64 = 8;
-const INDEX_BUILD_PAGE_SIZE: usize = 4_096;
-const CACHE_VALUE_INSERT_SQL: &str = "INSERT OR REPLACE INTO temp._lithograph_standard_index_cache\
-     (snapshot_hash, index_name, owner_kind, owner_id, property_ordinal, token_id, value_blob, equality_blob, text_value,\
-      sort_family, sort_number, sort_a, sort_b, sort_c, sort_text, point_crs, point_x, point_y, point_z)\
-     VALUES(?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)";
-const CACHE_LOOKUP_INSERT_SQL: &str = "INSERT OR REPLACE INTO temp._lithograph_standard_index_cache\
-     (snapshot_hash, index_name, owner_kind, owner_id, property_ordinal, token_id, value_blob, text_value)\
-     VALUES(?1, ?2, ?3, ?4, 0, ?5, NULL, NULL)";
-
 #[derive(Debug, Clone)]
-enum RangeOrderKey {
+pub(super) enum RangeOrderKey {
     Number(SqlValue),
     Text(String),
     Tuple {
@@ -46,7 +55,7 @@ enum RangeOrderKey {
     },
 }
 
-fn range_order_key(value: &Value) -> Option<RangeOrderKey> {
+pub(super) fn range_order_key(value: &Value) -> Option<RangeOrderKey> {
     match value {
         Value::Boolean(value) => Some(RangeOrderKey::Tuple {
             family: RANGE_FAMILY_BOOLEAN,
@@ -110,43 +119,108 @@ fn range_order_key(value: &Value) -> Option<RangeOrderKey> {
     }
 }
 
-pub(crate) fn scan_node_index_after(
+pub(crate) fn scan_node_index_page(
     snapshot: &Snapshot<'_>,
     seek: &StandardIndexSeek,
-    after: i64,
+    cursor: Option<&StandardIndexCursor>,
     limit: usize,
-) -> QueryResult<ScanPage<i64>> {
+) -> QueryResult<StandardIndexPage> {
     if seek.kind == StandardIndexKind::Lookup {
         return Err(QueryError::internal(
             "node lookup Index seeks must use the canonical label access path",
         ));
     }
-    scan_property_index_after(snapshot, seek, NODE_OWNER_KIND, after, limit)
+    scan_property_index_page(snapshot, seek, NODE_OWNER_KIND, cursor, limit)
 }
 
-pub(crate) fn scan_relationship_index_after(
+pub(crate) fn scan_relationship_index_page(
     snapshot: &Snapshot<'_>,
     seek: &StandardIndexSeek,
     relationship_type_id: Option<i64>,
-    after: i64,
+    cursor: Option<&StandardIndexCursor>,
     limit: usize,
-) -> QueryResult<ScanPage<i64>> {
+) -> QueryResult<StandardIndexPage> {
     if seek.kind == StandardIndexKind::Lookup {
         let Some(type_id) = relationship_type_id else {
-            return Ok(ScanPage {
+            return Ok(StandardIndexPage {
                 items: Vec::new(),
-                next_after: None,
+                next_cursor: None,
             });
         };
-        return scan_relationship_lookup_after(snapshot, seek, type_id, after, limit);
+        let page = scan_relationship_lookup_after(
+            snapshot,
+            seek,
+            type_id,
+            owner_cursor_after(cursor)?,
+            limit,
+        )?;
+        return Ok(owner_scan_page(page));
     }
-    scan_property_index_after(snapshot, seek, RELATIONSHIP_OWNER_KIND, after, limit)
+    scan_property_index_page(snapshot, seek, RELATIONSHIP_OWNER_KIND, cursor, limit)
+}
+
+fn scan_property_index_page(
+    snapshot: &Snapshot<'_>,
+    seek: &StandardIndexSeek,
+    owner_kind: i64,
+    cursor: Option<&StandardIndexCursor>,
+    limit: usize,
+) -> QueryResult<StandardIndexPage> {
+    let index = ensure_planned_index_cache(snapshot, seek)?;
+    if seek.kind == StandardIndexKind::Range
+        && seek.predicates.len() == 1
+        && let (ordinal, StandardIndexPredicate::Bounds { lower, upper }) = &seek.predicates[0]
+        && let Some(bounds) = numeric_range_bounds(lower, upper)
+    {
+        if let Some(page) = scan_persistent_numeric_range_page(
+            snapshot,
+            &seek.index_name,
+            owner_kind,
+            *ordinal,
+            cursor,
+            limit,
+            &bounds,
+        )? {
+            prefetch_index_properties(snapshot, &index, owner_kind, &page.items)?;
+            return Ok(page);
+        }
+        if matches!(cursor, Some(StandardIndexCursor::NumericRange { .. })) {
+            return Err(QueryError::internal(
+                "persistent Range Index generation changed during paginated scan",
+            ));
+        }
+    }
+    let page = scan_property_index_after(
+        snapshot,
+        seek,
+        owner_kind,
+        owner_cursor_after(cursor)?,
+        limit,
+    )?;
+    Ok(owner_scan_page(page))
+}
+
+fn owner_cursor_after(cursor: Option<&StandardIndexCursor>) -> QueryResult<i64> {
+    match cursor {
+        None => Ok(0),
+        Some(StandardIndexCursor::Owner(owner_id)) => Ok(*owner_id),
+        Some(StandardIndexCursor::NumericRange { .. }) => Err(QueryError::internal(
+            "numeric Range cursor reached an owner-ordered Index scan",
+        )),
+    }
+}
+
+fn owner_scan_page(page: ScanPage<i64>) -> StandardIndexPage {
+    StandardIndexPage {
+        items: page.items,
+        next_cursor: page.next_after.map(StandardIndexCursor::Owner),
+    }
 }
 
 fn ensure_planned_index_cache(
     snapshot: &Snapshot<'_>,
     seek: &StandardIndexSeek,
-) -> QueryResult<()> {
+) -> QueryResult<storage::IndexDefinition> {
     let schema = snapshot.schema_state()?;
     let index = schema.indexes.get(&seek.index_name).ok_or_else(|| {
         QueryError::internal(format!(
@@ -154,7 +228,8 @@ fn ensure_planned_index_cache(
             seek.index_name
         ))
     })?;
-    ensure_index_cache(snapshot, index)
+    ensure_index_cache(snapshot, index)?;
+    Ok(index.clone())
 }
 
 fn scan_relationship_lookup_after(
@@ -197,7 +272,7 @@ fn scan_property_index_after(
     after: i64,
     limit: usize,
 ) -> QueryResult<ScanPage<i64>> {
-    ensure_planned_index_cache(snapshot, seek)?;
+    let index = ensure_planned_index_cache(snapshot, seek)?;
 
     if seek.kind == StandardIndexKind::Range
         && seek.predicates.len() == 1
@@ -213,6 +288,7 @@ fn scan_property_index_after(
             upper,
         )?
     {
+        prefetch_index_properties(snapshot, &index, owner_kind, &page.items)?;
         return Ok(page);
     }
 
@@ -244,7 +320,38 @@ fn scan_property_index_after(
     let next_after = (items.len() == limit)
         .then(|| items.last().copied())
         .flatten();
+    prefetch_index_properties(snapshot, &index, owner_kind, &items)?;
     Ok(ScanPage { items, next_after })
+}
+
+fn prefetch_index_properties(
+    snapshot: &Snapshot<'_>,
+    index: &storage::IndexDefinition,
+    owner_kind: i64,
+    owner_ids: &[i64],
+) -> QueryResult<()> {
+    let properties = match &index.target {
+        storage::IndexTarget::NodeProperties { properties, .. }
+        | storage::IndexTarget::RelationshipProperties { properties, .. } => properties,
+        storage::IndexTarget::NodeLookup | storage::IndexTarget::RelationshipLookup => {
+            return Ok(());
+        }
+    };
+    let storage_owner = if owner_kind == NODE_OWNER_KIND {
+        storage::OwnerKind::Node
+    } else {
+        storage::OwnerKind::Relationship
+    };
+    let mut key_ids = Vec::with_capacity(properties.len());
+    for property in properties {
+        let Some(key_id) = storage::find_property_key(snapshot.connection_for_query(), property)?
+        else {
+            return Ok(());
+        };
+        key_ids.push(key_id);
+    }
+    snapshot.prefetch_properties(storage_owner, owner_ids, &key_ids)?;
+    Ok(())
 }
 
 fn scan_predicate_candidates(
@@ -373,72 +480,6 @@ fn scan_range_predicate_candidates(
         _ => return Ok(None),
     };
     Ok(Some(candidates))
-}
-
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the bounded Range cache helper keeps the complete indexed bound/page contract explicit"
-)]
-fn scan_range_bounds_page(
-    snapshot: &Snapshot<'_>,
-    index_name: &str,
-    owner_kind: i64,
-    ordinal: usize,
-    after: i64,
-    limit: usize,
-    lower: &Option<(Value, bool)>,
-    upper: &Option<(Value, bool)>,
-) -> QueryResult<Option<ScanPage<i64>>> {
-    let lower = match lower {
-        Some((value, inclusive)) => match numeric_range_value(value) {
-            Some(value) => Some((value, *inclusive)),
-            None => return Ok(None),
-        },
-        None => None,
-    };
-    let upper = match upper {
-        Some((value, inclusive)) => match numeric_range_value(value) {
-            Some(value) => Some((value, *inclusive)),
-            None => return Ok(None),
-        },
-        None => None,
-    };
-    if lower.is_none() && upper.is_none() {
-        return Ok(None);
-    }
-
-    let mut sql = "SELECT owner_id FROM temp._lithograph_standard_index_cache \
-         WHERE snapshot_hash = ? AND index_name = ? AND owner_kind = ? \
-         AND property_ordinal = ? AND owner_id > ? AND sort_family = ?"
-        .to_owned();
-    let mut parameters = index_scan_parameters(snapshot, index_name, owner_kind, ordinal, after);
-    parameters.push(SqlValue::Integer(RANGE_FAMILY_NUMBER));
-    if let Some((value, inclusive)) = lower {
-        sql.push_str(if inclusive {
-            " AND sort_number >= ?"
-        } else {
-            " AND sort_number > ?"
-        });
-        parameters.push(value);
-    }
-    if let Some((value, inclusive)) = upper {
-        sql.push_str(if inclusive {
-            " AND sort_number <= ?"
-        } else {
-            " AND sort_number < ?"
-        });
-        parameters.push(value);
-    }
-    sql.push_str(" ORDER BY owner_id LIMIT ?");
-    parameters.push(SqlValue::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
-
-    let mut statement = snapshot.connection_for_query().prepare(&sql)?;
-    let rows = statement.query_map(rusqlite::params_from_iter(parameters), |row| row.get(0))?;
-    let items = rows.collect::<Result<Vec<i64>, _>>()?;
-    let next_after = (items.len() == limit)
-        .then(|| items.last().copied())
-        .flatten();
-    Ok(Some(ScanPage { items, next_after }))
 }
 
 fn index_scan_parameters(
@@ -1014,386 +1055,7 @@ fn ordering_matches(
     })
 }
 
-pub(crate) fn ensure_standard_indexes_for_commit(
-    connection: &Connection,
-    commit: HashId,
-    previous: &SchemaState,
-    schema: &SchemaState,
-    is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<()> {
-    let snapshot = Snapshot::resolve(connection, commit)?;
-    for (name, index) in &schema.indexes {
-        if previous.indexes.get(name) == Some(index) {
-            continue;
-        }
-        if is_interrupted() {
-            return Err(QueryError::interrupted());
-        }
-        if !matches!(
-            index.kind,
-            StandardIndexKind::FullText | StandardIndexKind::Vector
-        ) && !matches!(index.target, IndexTarget::NodeLookup)
-        {
-            ensure_index_cache(&snapshot, index)?;
-        }
-    }
-    Ok(())
-}
+use super::persistent::ensure_index_cache;
 
-fn ensure_index_cache(snapshot: &Snapshot<'_>, index: &IndexDefinition) -> QueryResult<()> {
-    let connection = snapshot.connection_for_query();
-    ensure_cache_tables(connection)?;
-    let exists: i64 = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM temp._lithograph_standard_index_cache_meta \
-         WHERE snapshot_hash = ?1 AND index_name = ?2 AND complete = 1)",
-        params![snapshot.cache_identity().as_bytes().as_slice(), index.name],
-        |row| row.get(0),
-    )?;
-    if exists == 1 {
-        ensure_cache_indexes(connection, index.kind)?;
-        return Ok(());
-    }
-    connection.execute(
-        "DELETE FROM temp._lithograph_standard_index_cache \
-         WHERE snapshot_hash = ?1 AND index_name = ?2",
-        params![snapshot.cache_identity().as_bytes().as_slice(), index.name],
-    )?;
-    drop_cache_indexes(connection)?;
-    build_index_cache(snapshot, index)?;
-    ensure_cache_indexes(connection, index.kind)?;
-    connection.execute(
-        "INSERT OR REPLACE INTO temp._lithograph_standard_index_cache_meta \
-         (snapshot_hash, index_name, complete) VALUES(?1, ?2, 1)",
-        params![snapshot.cache_identity().as_bytes().as_slice(), index.name],
-    )?;
-    Ok(())
-}
-
-fn ensure_cache_tables(connection: &Connection) -> QueryResult<()> {
-    connection.execute_batch(
-        "CREATE TEMP TABLE IF NOT EXISTS _lithograph_standard_index_cache_meta(\
-             snapshot_hash BLOB NOT NULL, index_name TEXT NOT NULL, complete INTEGER NOT NULL,\
-             PRIMARY KEY(snapshot_hash, index_name)) WITHOUT ROWID;\
-         CREATE TEMP TABLE IF NOT EXISTS _lithograph_standard_index_cache(\
-             snapshot_hash BLOB NOT NULL, index_name TEXT NOT NULL, owner_kind INTEGER NOT NULL,\
-             owner_id INTEGER NOT NULL, property_ordinal INTEGER NOT NULL, token_id INTEGER,\
-             value_blob BLOB, equality_blob BLOB, text_value TEXT, sort_family INTEGER, sort_number NUMERIC,\
-             sort_a INTEGER, sort_b INTEGER, sort_c INTEGER, sort_text TEXT,\
-             point_crs INTEGER, point_x REAL, point_y REAL, point_z REAL,\
-             PRIMARY KEY(snapshot_hash, index_name, owner_kind, owner_id, property_ordinal)) WITHOUT ROWID;",
-    )?;
-    Ok(())
-}
-
-fn ensure_cache_indexes(connection: &Connection, kind: StandardIndexKind) -> QueryResult<()> {
-    let sql = match kind {
-        StandardIndexKind::Lookup => {
-            "CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_token \
-             ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, token_id, owner_id);"
-        }
-        StandardIndexKind::Range => {
-            "CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_equality ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, equality_blob, owner_id);\
-             CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_range_number ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, sort_family, sort_number, owner_id);\
-             CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_range_text ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, sort_family, sort_text, owner_id);\
-             CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_range_tuple \
-             ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, sort_family, sort_a, sort_b, sort_c, sort_text, owner_id);"
-        }
-        StandardIndexKind::Text => {
-            "CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_equality \
-             ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, equality_blob, owner_id);\
-             CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_text \
-             ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, text_value, owner_id);"
-        }
-        StandardIndexKind::Point => {
-            "CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_equality \
-             ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, equality_blob, owner_id);\
-             CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_point_x \
-             ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, point_crs, point_x, point_y, point_z, owner_id);\
-             CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_point_y \
-             ON _lithograph_standard_index_cache(snapshot_hash, index_name, owner_kind, property_ordinal, point_crs, point_y, point_x, point_z, owner_id);"
-        }
-        StandardIndexKind::FullText | StandardIndexKind::Vector => return Ok(()),
-    };
-    connection.execute_batch(sql)?;
-    Ok(())
-}
-
-fn drop_cache_indexes(connection: &Connection) -> QueryResult<()> {
-    connection.execute_batch(
-        "DROP INDEX IF EXISTS temp._lithograph_standard_index_cache_value;\
-         DROP INDEX IF EXISTS temp._lithograph_standard_index_cache_equality;\
-         DROP INDEX IF EXISTS temp._lithograph_standard_index_cache_text;\
-         DROP INDEX IF EXISTS temp._lithograph_standard_index_cache_range_number;\
-         DROP INDEX IF EXISTS temp._lithograph_standard_index_cache_range_text;\
-         DROP INDEX IF EXISTS temp._lithograph_standard_index_cache_range_tuple;\
-         DROP INDEX IF EXISTS temp._lithograph_standard_index_cache_point_x;\
-         DROP INDEX IF EXISTS temp._lithograph_standard_index_cache_point_y;\
-         DROP INDEX IF EXISTS temp._lithograph_standard_index_cache_token;",
-    )?;
-    Ok(())
-}
-
-fn build_index_cache(snapshot: &Snapshot<'_>, index: &IndexDefinition) -> QueryResult<()> {
-    match &index.target {
-        IndexTarget::NodeLookup => Ok(()),
-        IndexTarget::RelationshipLookup => build_relationship_lookup_cache(snapshot, index),
-        IndexTarget::NodeProperties { label, properties } => {
-            build_node_property_cache(snapshot, index, label, properties)
-        }
-        IndexTarget::RelationshipProperties {
-            relationship_type,
-            properties,
-        } => build_relationship_property_cache(snapshot, index, relationship_type, properties),
-    }
-}
-
-fn build_relationship_lookup_cache(
-    snapshot: &Snapshot<'_>,
-    index: &IndexDefinition,
-) -> QueryResult<()> {
-    let mut insert = snapshot
-        .connection_for_query()
-        .prepare(CACHE_LOOKUP_INSERT_SQL)?;
-    let mut after = 0_i64;
-    loop {
-        let page = snapshot.scan_relationships_after(after, INDEX_BUILD_PAGE_SIZE)?;
-        for relationship in page.items {
-            insert.execute(params![
-                snapshot.cache_identity().as_bytes().as_slice(),
-                index.name,
-                RELATIONSHIP_OWNER_KIND,
-                relationship.id,
-                relationship.type_id,
-            ])?;
-        }
-        let Some(next_after) = page.next_after else {
-            break;
-        };
-        after = next_after;
-    }
-    Ok(())
-}
-
-fn build_node_property_cache(
-    snapshot: &Snapshot<'_>,
-    index: &IndexDefinition,
-    label: &str,
-    properties: &[String],
-) -> QueryResult<()> {
-    let Some(label_id) = storage::find_label(snapshot.connection_for_query(), label)? else {
-        return Ok(());
-    };
-    let Some(keys) = property_key_ids(snapshot, properties)? else {
-        return Ok(());
-    };
-    let mut insert = snapshot
-        .connection_for_query()
-        .prepare(CACHE_VALUE_INSERT_SQL)?;
-    let mut after = 0_i64;
-    loop {
-        let page =
-            snapshot.label_property_values_after(label_id, &keys, after, INDEX_BUILD_PAGE_SIZE)?;
-        for (node, values) in page.items {
-            let Some(values) = values.into_iter().collect::<Option<Vec<_>>>() else {
-                continue;
-            };
-            insert_owner_cache_values(snapshot, index, NODE_OWNER_KIND, node, values, &mut insert)?;
-        }
-        let Some(next_after) = page.next_after else {
-            break;
-        };
-        after = next_after;
-    }
-    Ok(())
-}
-
-fn build_relationship_property_cache(
-    snapshot: &Snapshot<'_>,
-    index: &IndexDefinition,
-    relationship_type: &str,
-    properties: &[String],
-) -> QueryResult<()> {
-    let Some(type_id) =
-        storage::find_relationship_type(snapshot.connection_for_query(), relationship_type)?
-    else {
-        return Ok(());
-    };
-    let Some(keys) = property_key_ids(snapshot, properties)? else {
-        return Ok(());
-    };
-    let mut insert = snapshot
-        .connection_for_query()
-        .prepare(CACHE_VALUE_INSERT_SQL)?;
-    let mut after = 0_i64;
-    loop {
-        let page = snapshot.scan_relationships_after(after, INDEX_BUILD_PAGE_SIZE)?;
-        for relationship in page.items {
-            if relationship.type_id == type_id {
-                insert_owner_values(
-                    snapshot,
-                    index,
-                    RELATIONSHIP_OWNER_KIND,
-                    relationship.id,
-                    &keys,
-                    &mut insert,
-                )?;
-            }
-        }
-        let Some(next_after) = page.next_after else {
-            break;
-        };
-        after = next_after;
-    }
-    Ok(())
-}
-
-fn property_key_ids(
-    snapshot: &Snapshot<'_>,
-    properties: &[String],
-) -> QueryResult<Option<Vec<i64>>> {
-    let mut keys = Vec::with_capacity(properties.len());
-    for property in properties {
-        let Some(key) = storage::find_property_key(snapshot.connection_for_query(), property)?
-        else {
-            return Ok(None);
-        };
-        keys.push(key);
-    }
-    Ok(Some(keys))
-}
-
-fn insert_owner_values(
-    snapshot: &Snapshot<'_>,
-    index: &IndexDefinition,
-    owner_kind: i64,
-    owner_id: i64,
-    keys: &[i64],
-    insert: &mut Statement<'_>,
-) -> QueryResult<()> {
-    let storage_owner = if owner_kind == NODE_OWNER_KIND {
-        OwnerKind::Node
-    } else {
-        OwnerKind::Relationship
-    };
-    let mut values = Vec::with_capacity(keys.len());
-    for key in keys {
-        let Some(value) = snapshot.property(storage_owner, owner_id, *key)? else {
-            return Ok(());
-        };
-        values.push(value);
-    }
-    insert_owner_cache_values(snapshot, index, owner_kind, owner_id, values, insert)
-}
-
-fn insert_owner_cache_values(
-    snapshot: &Snapshot<'_>,
-    index: &IndexDefinition,
-    owner_kind: i64,
-    owner_id: i64,
-    values: Vec<storage::PropertyValue>,
-    insert: &mut Statement<'_>,
-) -> QueryResult<()> {
-    if values
-        .iter()
-        .any(|value| !cache_value_supported(index.kind, value))
-    {
-        return Ok(());
-    }
-    for (ordinal, value) in values.into_iter().enumerate() {
-        insert_cache_value(
-            snapshot, index, owner_kind, owner_id, ordinal, value, insert,
-        )?;
-    }
-    Ok(())
-}
-
-fn insert_cache_value(
-    snapshot: &Snapshot<'_>,
-    index: &IndexDefinition,
-    owner_kind: i64,
-    owner_id: i64,
-    ordinal: usize,
-    value: storage::PropertyValue,
-    insert: &mut Statement<'_>,
-) -> QueryResult<()> {
-    let value_blob = value.canonical_bytes()?;
-    let equality_blob = property_equality_key(&value)?;
-    let text_value = match &value {
-        storage::PropertyValue::String(value) => Some(value.as_str()),
-        _ => None,
-    };
-    let order_key = if index.kind == StandardIndexKind::Range {
-        Some(super::super::super::graph::property_value(value.clone())?)
-            .as_ref()
-            .and_then(range_order_key)
-    } else {
-        None
-    };
-    let (point_crs, point_x, point_y, point_z) = match &value {
-        storage::PropertyValue::Point(point) => (
-            Some(point.crs),
-            point.coordinates.first().copied(),
-            point.coordinates.get(1).copied(),
-            point.coordinates.get(2).copied(),
-        ),
-        _ => (None, None, None, None),
-    };
-    let (sort_family, sort_number, sort_a, sort_b, sort_c, sort_text) = match order_key {
-        Some(RangeOrderKey::Number(number)) => (
-            Some(RANGE_FAMILY_NUMBER),
-            Some(number),
-            None,
-            None,
-            None,
-            None,
-        ),
-        Some(RangeOrderKey::Text(text)) => (
-            Some(RANGE_FAMILY_STRING),
-            None,
-            None,
-            None,
-            None,
-            Some(text),
-        ),
-        Some(RangeOrderKey::Tuple {
-            family,
-            a,
-            b,
-            c,
-            text,
-        }) => (Some(family), None, Some(a), Some(b), Some(c), Some(text)),
-        None => (None, None, None, None, None, None),
-    };
-    insert.execute(params![
-        snapshot.cache_identity().as_bytes().as_slice(),
-        index.name,
-        owner_kind,
-        owner_id,
-        i64::try_from(ordinal).unwrap_or(i64::MAX),
-        value_blob,
-        equality_blob,
-        text_value,
-        sort_family,
-        sort_number,
-        sort_a,
-        sort_b,
-        sort_c,
-        sort_text,
-        point_crs,
-        point_x,
-        point_y,
-        point_z,
-    ])?;
-    Ok(())
-}
-
-fn cache_value_supported(kind: StandardIndexKind, value: &storage::PropertyValue) -> bool {
-    match kind {
-        StandardIndexKind::Lookup | StandardIndexKind::FullText | StandardIndexKind::Vector => {
-            false
-        }
-        StandardIndexKind::Text => matches!(value, storage::PropertyValue::String(_)),
-        StandardIndexKind::Point => matches!(value, storage::PropertyValue::Point(_)),
-        StandardIndexKind::Range => true,
-    }
-}
+#[cfg(test)]
+mod tests;

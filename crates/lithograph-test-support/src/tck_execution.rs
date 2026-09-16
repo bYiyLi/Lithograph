@@ -7,8 +7,8 @@ use lithograph_core::query::{
     ExecutionOptions, QueryCursor, QueryError, QueryErrorKind, QuerySummary, prepare,
 };
 use lithograph_core::storage::{
-    Snapshot, active_branch, branch_head, create_storage_schema, initialize_connection_state,
-    initialize_root, label_name,
+    STORAGE_FORMAT, Snapshot, active_branch, branch_head, create_storage_schema,
+    initialize_connection_state, initialize_root, label_name,
 };
 use rusqlite::Connection;
 use serde::Serialize;
@@ -331,9 +331,14 @@ fn fresh_storage() -> Result<Connection, String> {
                  magic TEXT NOT NULL,
                  database_id TEXT NOT NULL,
                  storage_format INTEGER NOT NULL
-             );
-             INSERT INTO main._lithograph_meta(id, magic, database_id, storage_format)
-             VALUES(1, 'lithograph-format-v1', '00000000-0000-4000-8000-000000000010', 2);"#,
+             );"#,
+        )
+        .map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "INSERT INTO main._lithograph_meta(id, magic, database_id, storage_format) \
+             VALUES(1, 'lithograph-format-v1', '00000000-0000-4000-8000-000000000010', ?1)",
+            [STORAGE_FORMAT],
         )
         .map_err(|error| error.to_string())?;
     create_storage_schema(&connection).map_err(|error| error.to_string())?;

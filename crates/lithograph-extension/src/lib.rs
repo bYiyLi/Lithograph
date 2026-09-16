@@ -36,8 +36,8 @@ use serde_json::{Value, json};
 
 const ABI_VERSION: u32 = 1;
 const STORAGE_FORMAT_MIN: i64 = 1;
-const STORAGE_FORMAT_MAX: i64 = 2;
-const STORAGE_FORMAT_CURRENT: i64 = 2;
+const STORAGE_FORMAT_MAX: i64 = 3;
+const STORAGE_FORMAT_CURRENT: i64 = 3;
 const SQLITE_MIN_VERSION_NUMBER: c_int = 3_045_000;
 const META_TABLE: &str = "_lithograph_meta";
 const INTERNAL_PREFIX: &str = "_lithograph_";
@@ -46,6 +46,7 @@ const ROWS_MODULE_NAME: &CStr = c"lithograph_rows";
 
 static NEXT_SAVEPOINT: AtomicU64 = AtomicU64::new(1);
 static REGISTERED_CONNECTIONS: OnceLock<Mutex<HashMap<usize, usize>>> = OnceLock::new();
+static ACTIVE_READERS: OnceLock<Mutex<HashMap<usize, usize>>> = OnceLock::new();
 const EXPLICIT_TRANSACTION_CLIENTDATA_KEY: &CStr = c"lithograph.explicit-transaction.v1";
 
 type SqliteIsInterrupted = unsafe extern "C" fn(*mut ffi::sqlite3) -> c_int;
@@ -69,6 +70,11 @@ static SQLITE_GET_CLIENTDATA: OnceLock<SqliteGetClientdata> = OnceLock::new();
 static SQLITE_SET_CLIENTDATA: OnceLock<SqliteSetClientdata> = OnceLock::new();
 
 struct ConnectionRegistration {
+    handle: usize,
+}
+
+struct MainReadGuard {
+    statement: *mut ffi::sqlite3_stmt,
     handle: usize,
 }
 
@@ -114,6 +120,96 @@ impl Drop for ConnectionRegistration {
 
 fn registered_connections() -> &'static Mutex<HashMap<usize, usize>> {
     REGISTERED_CONNECTIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn active_readers() -> &'static Mutex<HashMap<usize, usize>> {
+    ACTIVE_READERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+impl MainReadGuard {
+    fn acquire(connection: &Connection) -> LithographResult<Self> {
+        // SAFETY: this guard borrows the live connection for the lifetime of
+        // the owning adapter execution. It never closes the connection.
+        let db = unsafe { connection.handle() };
+        let mut statement = ptr::null_mut();
+        // Keep the statement positioned on SQLITE_ROW so SQLite retains the
+        // main-database read transaction until the guard is finalized.
+        let sql = c"SELECT database_id FROM main._lithograph_meta WHERE id=1";
+        // SAFETY: `db` is live, `sql` is a static NUL-terminated string, and
+        // SQLite initializes `statement` on success.
+        let prepare_code = unsafe {
+            ffi::sqlite3_prepare_v2(db, sql.as_ptr(), -1, &mut statement, ptr::null_mut())
+        };
+        if prepare_code != ffi::SQLITE_OK {
+            return Err(map_sqlite_error(
+                SqliteError::SqliteFailure(ffi::Error::new(prepare_code), None),
+                "failed to establish Lithograph read guard",
+            ));
+        }
+        // SAFETY: `statement` was prepared successfully above.
+        let step_code = unsafe { ffi::sqlite3_step(statement) };
+        if step_code != ffi::SQLITE_ROW {
+            // SAFETY: successful prepare owns this statement even when step fails.
+            unsafe { ffi::sqlite3_finalize(statement) };
+            let code = if step_code == ffi::SQLITE_DONE {
+                ffi::SQLITE_CORRUPT
+            } else {
+                step_code
+            };
+            return Err(map_sqlite_error(
+                SqliteError::SqliteFailure(ffi::Error::new(code), None),
+                "failed to pin Lithograph main-database read view",
+            ));
+        }
+        let handle = db as usize;
+        let mut readers = active_readers()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *readers.entry(handle).or_insert(0) += 1;
+        Ok(Self { statement, handle })
+    }
+}
+
+impl Drop for MainReadGuard {
+    fn drop(&mut self) {
+        if !self.statement.is_null() {
+            // SAFETY: this guard uniquely owns the prepared statement.
+            unsafe { ffi::sqlite3_finalize(self.statement) };
+            self.statement = ptr::null_mut();
+        }
+        let mut readers = active_readers()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(count) = readers.get_mut(&self.handle) {
+            if *count <= 1 {
+                readers.remove(&self.handle);
+            } else {
+                *count -= 1;
+            }
+        }
+    }
+}
+
+fn active_reader_count(connection: &Connection) -> usize {
+    // SAFETY: reading the handle does not extend the connection lifetime.
+    let handle = unsafe { connection.handle() } as usize;
+    active_readers()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&handle)
+        .copied()
+        .unwrap_or(0)
+}
+
+fn require_no_active_readers(connection: &Connection) -> LithographResult<()> {
+    if active_reader_count(connection) != 0 {
+        return Err(LithographError::new(
+            ErrorCategory::TransactionBoundaryRequired,
+            "connection has an active Lithograph read cursor",
+            ffi::SQLITE_ERROR,
+        ));
+    }
+    Ok(())
 }
 
 fn explicit_transaction_state(handle: *mut ffi::sqlite3) -> Option<ExplicitTransactionState> {
@@ -498,10 +594,9 @@ fn initialize(connection: &Connection) -> LithographResult<Value> {
 
 fn initialize_existing(connection: &Connection, mut metadata: Metadata) -> LithographResult<Value> {
     ensure_supported_format(&metadata)?;
-    let bootstrapped = migrate_phase01_bootstrap(connection)?;
-    if metadata.storage_format == 1 {
-        migrate_storage_format_1_to_2(connection, bootstrapped)?;
-        metadata.storage_format = 2;
+    if metadata.storage_format < STORAGE_FORMAT_CURRENT {
+        migrate_storage_to_current(connection, metadata.storage_format)?;
+        metadata.storage_format = STORAGE_FORMAT_CURRENT;
     }
     ensure_current_metadata_integrity(connection)?;
     let root = storage::root_commit(connection)
@@ -511,48 +606,66 @@ fn initialize_existing(connection: &Connection, mut metadata: Metadata) -> Litho
     Ok(init_json(&metadata, root))
 }
 
-fn migrate_phase01_bootstrap(connection: &Connection) -> LithographResult<bool> {
-    if !is_phase01_metadata_bootstrap(connection)? {
-        return Ok(false);
-    }
+fn migrate_storage_to_current(connection: &Connection, source_format: i64) -> LithographResult<()> {
+    with_savepoint(connection, |connection| {
+        if is_phase01_metadata_bootstrap(connection)? {
+            return migrate_phase01_bootstrap(connection, source_format);
+        }
+        migrate_versioned_storage(connection, source_format)
+    })
+}
+
+fn migrate_phase01_bootstrap(connection: &Connection, source_format: i64) -> LithographResult<()> {
     storage::create_storage_schema(connection).map_err(|error| {
         map_storage_error(error, "failed to migrate Phase 01 storage bootstrap")
     })?;
     storage::initialize_root(connection).map_err(|error| {
         map_storage_error(error, "failed to initialize Root Commit during migration")
     })?;
-    Ok(true)
+    advance_storage_format(connection, source_format, STORAGE_FORMAT_CURRENT)?;
+    ensure_current_metadata_integrity(connection)
 }
 
-fn migrate_storage_format_1_to_2(
-    connection: &Connection,
-    sidecars_already_created: bool,
-) -> LithographResult<()> {
-    with_savepoint(connection, |connection| {
-        if !sidecars_already_created {
-            storage::create_format2_schema(connection).map_err(|error| {
-                map_storage_error(error, "failed to create storage-format-2 schema")
-            })?;
-        }
-        let changed = connection
-            .execute(
-                "UPDATE main._lithograph_meta SET storage_format = 2 WHERE id = 1 AND storage_format = 1",
-                [],
-            )
-            .map_err(|error| {
-                map_sqlite_error(error, "failed to advance Lithograph storage format")
-            })?;
-        if changed != 1 {
-            return Err(LithographError::storage(
-                "storage-format-1 migration lost the metadata compare-and-swap",
-            ));
-        }
-        // Validate the fully materialized target format before releasing the
-        // migration savepoint. A corrupt immutable history must fail closed
-        // without leaving the database partially or permanently upgraded.
+fn migrate_versioned_storage(connection: &Connection, source_format: i64) -> LithographResult<()> {
+    let mut current = source_format;
+    if current == 1 {
+        storage::create_format2_schema(connection).map_err(|error| {
+            map_storage_error(error, "failed to create storage-format-2 schema")
+        })?;
+        advance_storage_format(connection, 1, 2)?;
         ensure_current_metadata_integrity(connection)?;
+        current = 2;
+    }
+    if current == 2 {
+        storage::create_format3_schema(connection).map_err(|error| {
+            map_storage_error(error, "failed to create storage-format-3 schema")
+        })?;
+        advance_storage_format(connection, 2, 3)?;
+        ensure_current_metadata_integrity(connection)?;
+        current = 3;
+    }
+    if current == STORAGE_FORMAT_CURRENT {
         Ok(())
-    })
+    } else {
+        Err(LithographError::storage(format!(
+            "storage migration stopped at unexpected format {current}"
+        )))
+    }
+}
+
+fn advance_storage_format(connection: &Connection, from: i64, to: i64) -> LithographResult<()> {
+    let changed = connection
+        .execute(
+            "UPDATE main._lithograph_meta SET storage_format = ?2 WHERE id = 1 AND storage_format = ?1",
+            rusqlite::params![from, to],
+        )
+        .map_err(|error| map_sqlite_error(error, "failed to advance Lithograph storage format"))?;
+    if changed != 1 {
+        return Err(LithographError::storage(
+            "storage migration lost the metadata compare-and-swap",
+        ));
+    }
+    Ok(())
 }
 
 fn initialize_fresh(connection: &Connection) -> LithographResult<Value> {
@@ -689,6 +802,16 @@ fn require_initialized(connection: &Connection) -> LithographResult<Metadata> {
     Ok(metadata)
 }
 
+fn require_current_storage_format(metadata: &Metadata) -> LithographResult<()> {
+    if metadata.storage_format != STORAGE_FORMAT_CURRENT {
+        return Err(LithographError::storage(format!(
+            "database storage format {} is read-only with this Engine; run lithograph_init() to migrate to format {} before writing",
+            metadata.storage_format, STORAGE_FORMAT_CURRENT
+        )));
+    }
+    Ok(())
+}
+
 fn ensure_supported_format(metadata: &Metadata) -> LithographResult<()> {
     if metadata.storage_format > STORAGE_FORMAT_MAX {
         return Err(format_too_new_error(metadata.storage_format));
@@ -769,6 +892,7 @@ fn with_savepoint<T>(
     connection: &Connection,
     operation: impl FnOnce(&Connection) -> LithographResult<T>,
 ) -> LithographResult<T> {
+    require_no_active_readers(connection)?;
     let ordinal = NEXT_SAVEPOINT.fetch_add(1, Ordering::Relaxed);
     let savepoint = format!("lithograph_invocation_{ordinal}");
     connection

@@ -349,6 +349,7 @@ dependencies = [
 name = "lithograph-test-support"
 version = "0.0.0"
 dependencies = [
+ "blake3",
  "lithograph-core",
  "rusqlite",
  "serde",

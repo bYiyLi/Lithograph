@@ -42,10 +42,10 @@ Phase 09 Versioned State Operations
 Phase 10 Compatibility / Scale / Release Closure
         |
         v
-Phase 11 Performance Optimization (ready)
+Phase 11 Performance Optimization (in_progress: hosted release matrix pending)
 ```
 
-Phase 00–10保留已完成状态；Phase 11是追加的性能专项。产品目标行为仍由Design定义，实际执行/验收见 [Phase 11计划](phases/11-performance-optimization.md)。
+Phase 00–10保留已完成状态；Phase 11的本地实现、固定性能机验收、并发压力、repository quality/coverage与真实SQLite CI已经闭合，当前仅等待这份改动对应的六目标hosted Release Matrix。产品目标行为仍由Design定义，实际执行/验收见 [Phase 11计划](phases/11-performance-optimization.md)。
 
 ## 2. 为什么 Version Storage 必须早于 Cypher Engine
 

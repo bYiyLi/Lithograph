@@ -458,7 +458,9 @@ unsafe fn native_tx_begin_impl(
     // without ownership transfer.
     let connection = unsafe { Connection::from_handle(db) }
         .map_err(|error| map_sqlite_error(error, "invalid SQLite connection"))?;
-    require_initialized(&connection)?;
+    let metadata = require_initialized(&connection)?;
+    require_current_storage_format(&metadata)?;
+    require_no_active_readers(&connection)?;
     if !connection.is_autocommit() {
         return Err(transaction_boundary_error(
             "Native explicit transaction requires SQLite autocommit mode",
@@ -573,14 +575,8 @@ unsafe fn native_tx_execute_impl(
     callback: LithographEventCallbackV1,
     user_data: *mut c_void,
 ) -> LithographResult<()> {
-    require_native_db(db)?;
-    require_native_connection_registered(db)?;
-    let state = explicit_transaction_state(db)
-        .ok_or_else(|| transaction_misuse("no active explicit Lithograph transaction"))?;
-    // SAFETY: registration proves this is a live SQLite connection borrowed
-    // without ownership transfer.
-    let connection = unsafe { Connection::from_handle(db) }
-        .map_err(|error| map_sqlite_error(error, "invalid SQLite connection"))?;
+    // SAFETY: the Native ABI caller owns `db` for this invocation.
+    let (state, connection) = unsafe { explicit_transaction_context(db)? };
 
     // SAFETY: all Native buffers and callback remain valid for this invocation.
     let execution_result = unsafe {
@@ -690,14 +686,8 @@ pub unsafe extern "C" fn lithograph_v1_tx_commit(
 }
 
 unsafe fn native_tx_commit_impl(db: *mut ffi::sqlite3) -> LithographResult<String> {
-    require_native_db(db)?;
-    require_native_connection_registered(db)?;
-    let state = explicit_transaction_state(db)
-        .ok_or_else(|| transaction_misuse("no active explicit Lithograph transaction"))?;
-    // SAFETY: registration proves this is a live SQLite connection borrowed
-    // without ownership transfer.
-    let connection = unsafe { Connection::from_handle(db) }
-        .map_err(|error| map_sqlite_error(error, "invalid SQLite connection"))?;
+    // SAFETY: the Native ABI caller owns `db` for this invocation.
+    let (state, connection) = unsafe { explicit_transaction_context(db)? };
 
     let result = finalize_explicit_transaction(&connection, &state);
     let result = match result {
@@ -713,6 +703,20 @@ unsafe fn native_tx_commit_impl(db: *mut ffi::sqlite3) -> LithographResult<Strin
     }
     clear_explicit_transaction_state(db);
     Ok(result)
+}
+
+unsafe fn explicit_transaction_context(
+    db: *mut ffi::sqlite3,
+) -> LithographResult<(ExplicitTransactionState, Connection)> {
+    require_native_db(db)?;
+    require_native_connection_registered(db)?;
+    let state = explicit_transaction_state(db)
+        .ok_or_else(|| transaction_misuse("no active explicit Lithograph transaction"))?;
+    // SAFETY: registration proves this is a live SQLite connection borrowed
+    // without ownership transfer.
+    let connection = unsafe { Connection::from_handle(db) }
+        .map_err(|error| map_sqlite_error(error, "invalid SQLite connection"))?;
+    Ok((state, connection))
 }
 
 /// Aborts the active explicit transaction.

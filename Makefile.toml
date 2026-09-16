@@ -58,8 +58,9 @@ command = "cargo"
 args = ["doc", "--locked", "--workspace", "--all-features", "--no-deps"]
 
 [tasks.quality-complexity-production]
-command = "lizard"
+command = "python3"
 args = [
+    "-m", "lizard",
     "-l", "rust",
     "-C", "15",
     "-L", "100",
@@ -71,8 +72,9 @@ args = [
 ]
 
 [tasks.quality-complexity-support]
-command = "lizard"
+command = "python3"
 args = [
+    "-m", "lizard",
     "-l", "rust",
     "-C", "20",
     "-L", "150",
@@ -82,8 +84,18 @@ args = [
 ]
 
 [tasks.quality-complexity-c-smoke]
-command = "lizard"
-args = ["-C", "20", "-L", "150", "-a", "10", "tests/native_abi_smoke.c", "-w"]
+command = "python3"
+args = [
+    "-m", "lizard",
+    "-C", "20",
+    "-L", "150",
+    "-a", "10",
+    "tests/native_abi_smoke.c",
+    "tests/phase11_adapter_bench.c",
+    "tests/phase11_mixed_stress.c",
+    "tests/phase11_stream_bench.c",
+    "-w",
+]
 
 [tasks.quality-duplicates]
 command = "jscpd"
@@ -165,6 +177,14 @@ cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase06 -
 cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase07 -- "$extension"
 cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase08 -- "$extension"
 cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase09 -- "$extension"
+rm -rf "$CARGO_TARGET_DIR/phase11-search-coverage"
+LITHOGRAPH_PHASE11_SEARCH_DIR="$CARGO_TARGET_DIR/phase11-search-coverage" \
+LITHOGRAPH_PHASE11_SEARCH_DOCUMENTS=512 \
+LITHOGRAPH_PHASE11_SEARCH_HIGH_DIM_DOCUMENTS=64 \
+LITHOGRAPH_PHASE11_SEARCH_LOW_DIMENSION=8 \
+LITHOGRAPH_PHASE11_SEARCH_HIGH_DIMENSION=16 \
+LITHOGRAPH_PHASE11_SEARCH_PROGRESS=256 \
+  cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase11-search
 cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase10-tck
 scripts/native-abi-smoke.sh "$extension"
 

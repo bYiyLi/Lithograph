@@ -351,16 +351,16 @@ fn all_incident(
     node_id: i64,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<Vec<RelationshipRecord>> {
-    let mut after = 0;
+    let mut cursor = None;
     let mut output = Vec::new();
     loop {
         check_interrupted(is_interrupted)?;
-        let page = snapshot.scan_incident_after(node_id, None, after, SCAN_BATCH)?;
+        let page = snapshot.scan_incident_page(node_id, None, cursor, SCAN_BATCH)?;
         output.extend(page.items);
-        let Some(next) = page.next_after else {
+        let Some(next) = page.next_cursor else {
             break;
         };
-        after = next;
+        cursor = Some(next);
     }
     Ok(output)
 }

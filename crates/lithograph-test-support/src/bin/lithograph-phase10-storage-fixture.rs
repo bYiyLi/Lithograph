@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use lithograph_core::cypher::Value;
 use lithograph_core::query::{ExecutionOptions, QueryCursor, prepare};
 use lithograph_core::storage::{
-    branch_head, commit_data, create_checkpoint, create_storage_schema, create_tag,
+    STORAGE_FORMAT, branch_head, commit_data, create_checkpoint, create_storage_schema, create_tag,
     initialize_connection_state, initialize_root, integrity_check, resolve_version_descriptor,
     set_commit_data,
 };
@@ -67,9 +67,12 @@ fn create_fixture(path: &Path) -> Result<(), Box<dyn Error>> {
              magic TEXT NOT NULL,\
              database_id TEXT NOT NULL,\
              storage_format INTEGER NOT NULL\
-         );\
-         INSERT INTO main._lithograph_meta(id, magic, database_id, storage_format)\
-         VALUES(1, 'lithograph-format-v1', '00000000-0000-4000-8000-000000001010', 2);",
+         );",
+    )?;
+    connection.execute(
+        "INSERT INTO main._lithograph_meta(id, magic, database_id, storage_format) \
+         VALUES(1, 'lithograph-format-v1', '00000000-0000-4000-8000-000000001010', ?1)",
+        [STORAGE_FORMAT],
     )?;
     create_storage_schema(&connection)?;
     initialize_root(&connection)?;
@@ -129,8 +132,10 @@ fn verify_extension_output(output: &str) -> Result<(), Box<dyn Error>> {
         return Err(format!("interoperability fixture returned {} lines", lines.len()).into());
     }
     let init: JsonValue = serde_json::from_str(lines[0])?;
-    if init["storageFormat"] != 2 {
-        return Err("interoperability fixture storage format is not 2".into());
+    if init["storageFormat"] != STORAGE_FORMAT {
+        return Err(
+            format!("interoperability fixture storage format is not {STORAGE_FORMAT}").into(),
+        );
     }
     let nodes: JsonValue = serde_json::from_str(lines[1])?;
     if nodes["rows"] != json!([["alpha", 1], ["beta", 2]]) {

@@ -1,8 +1,10 @@
-//! Immutable version-aware graph storage for storage format 2.
+//! Immutable version-aware graph storage for the current Lithograph storage format.
 
 mod checkpoint;
 mod commit;
 mod encoding;
+#[cfg(feature = "test-support")]
+mod fixture_support;
 mod identity;
 mod integrity;
 mod integrity_graph;
@@ -12,10 +14,14 @@ mod layer_read;
 mod property;
 mod schema;
 mod schema_state;
+#[cfg(feature = "test-support")]
+mod search_test_support;
 mod snapshot;
 mod snapshot_labels;
+mod snapshot_lineage;
 mod snapshot_properties;
 mod snapshot_scan;
+mod snapshot_stats;
 mod snapshot_stream;
 mod value;
 mod version;
@@ -44,8 +50,8 @@ pub use identity::{allocate_node_id_range, allocate_relationship_id_range};
 pub use integrity::{IntegrityIssue, integrity_check, structural_integrity_issues};
 pub use layer::{LayerBuilder, LayerDeltaCounts, RelationshipRecord};
 pub use schema::{
-    create_format2_schema, create_storage_schema, initialize_root, load_schema_blob,
-    persist_schema_blob, root_commit, schema_hash_for_commit,
+    create_format2_schema, create_format3_schema, create_storage_schema, initialize_root,
+    load_schema_blob, persist_schema_blob, root_commit, schema_hash_for_commit,
 };
 pub use schema_state::{
     ConstraintDefinition, ConstraintDefinitionKind, GraphNodeType, GraphRelationshipType,
@@ -53,8 +59,15 @@ pub use schema_state::{
     SchemaState, SchemaTarget, StandardIndexKind, constraint_slot, graph_node_slot,
     graph_relationship_slot, index_slot,
 };
+#[cfg(feature = "test-support")]
+pub use search_test_support::{
+    SearchScaleFixture, SearchScaleFixtureSpec, seed_search_scale_fixture,
+};
+pub(crate) use snapshot::ResolvedSnapshotState;
 pub use snapshot::Snapshot;
+pub(crate) use snapshot_scan::{AdjacencyCursor, AdjacencyScanPage};
 pub use value::{PointValue, PropertyValue, VectorCoordinateType, VectorValue, ZonedDateTimeValue};
+pub(crate) use version::touched_layer_between_commits;
 pub use version::{
     AllocationState, CommitRecord, GcCounters, MergeSessionRecord, NamedRef, SnapshotState,
     active_branch, best_common_ancestors, capture_allocation_state, clear_commit_data,
@@ -69,7 +82,9 @@ pub use version::{
 };
 
 /// Current immutable storage format.
-pub const STORAGE_FORMAT: i64 = 2;
+pub const STORAGE_FORMAT: i64 = 3;
+/// Physical encoding version for persistent Standard Index generations.
+pub const STANDARD_INDEX_ENCODING_VERSION: i64 = 1;
 
 /// Positive database-wide node identifier.
 pub type NodeId = i64;

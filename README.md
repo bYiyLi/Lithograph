@@ -57,12 +57,12 @@ FROM lithograph_rows('MATCH (p:Person) RETURN p.name');
 
 ## 项目状态
 
-Lithograph 当前已经完成 Phase 00–10 的基础功能与 release-hardening 验收。现有实现已具备标准 SQLite loadable-extension / Native ABI boundary、version-aware immutable storage、Graph View、Cypher 25 parser/type/value、真实 read planner/executor、mutation/Commit path、versioned Graph Type/Constraint、lookup/range/text/point/full-text/vector index、`SEARCH`、`LOAD CSV`、Cypher transaction batching，以及 Branch/Tag/Commit Data/Diff/Patch/Merge/Rebase/Squash/Reset/Revert/GC 等 Version operations。Phase 10 已完成 compatibility、recovery/migration、10M Node / 100M Relationship scale、architecture/security hardening，并通过 Linux x64/arm64、macOS x64/arm64、Windows x64/arm64 六目标 hosted release artifact acceptance。规模验收不等同于所有查询都达到低延迟目标；新增 Phase 11 性能优化专项的设计与计划已就绪，尚未实现。当前实现的 storage format 仍为2；仓库尚未发布正式 Release。
+Lithograph 当前已经完成 Phase 00–10 的基础功能与 release-hardening 验收，Phase 11 Performance Optimization 保持 `in_progress`。现有实现已具备标准 SQLite loadable-extension / Native ABI boundary、version-aware immutable storage、Graph View、Cypher 25 parser/type/value、真实 read planner/executor、mutation/Commit path、versioned Graph Type/Constraint、lookup/range/text/point/full-text/vector index、`SEARCH`、`LOAD CSV`、Cypher transaction batching，以及 Branch/Tag/Commit Data/Diff/Patch/Merge/Rebase/Squash/Reset/Revert/GC 等 Version operations。Phase 10 已完成 compatibility、recovery/migration、10M Node / 100M Relationship scale、architecture/security hardening，并通过 Linux x64/arm64、macOS x64/arm64、Windows x64/arm64 六目标 hosted release artifact acceptance。Phase 11 当前工作树已经实现 storage format 3、persistent Standard Index、物理邻接 keyset、query-owned resolved state/read guard、增量 index overlay 与本期性能优化；固定性能机的10M Node / 100M Relationship、1M/100K Search、10K-conflict Merge、1/4/8-reader 30分钟压力以及 repository-wide quality/coverage/真实 SQLite CI 均已通过。当前改动尚未 commit/push，因此无法对这份工作树执行新的六目标 hosted Release Matrix；该远端 acceptance 是 Phase 11 仍未标 `done` 的唯一剩余门禁。仓库尚未发布正式 Release。
 
 - [技术设计](docs/design.md)
 - [开发计划](docs/development/README.md)
 - [Phase 11 性能优化计划](docs/development/phases/11-performance-optimization.md)
-- 当前开发阶段：Phase 00–10 `done`；Phase 11 `ready`
+- 当前开发阶段：Phase 00–10 `done`；Phase 11 `in_progress`
 
 ## 许可
 

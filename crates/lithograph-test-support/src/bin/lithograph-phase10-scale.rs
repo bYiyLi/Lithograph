@@ -11,7 +11,7 @@ use lithograph_core::query::{
 };
 use lithograph_core::storage::test_support::{ScaleFixture, ScaleFixtureSpec, seed_scale_fixture};
 use lithograph_core::storage::{
-    CommitMetadata, branch_head, clear_commit_data, commit_data, create_checkpoint,
+    CommitMetadata, STORAGE_FORMAT, branch_head, clear_commit_data, commit_data, create_checkpoint,
     create_empty_commit, create_storage_schema, create_tag, delete_tag,
     initialize_connection_state, initialize_root, integrity_check, resolve_version_descriptor,
     root_commit, set_commit_data,
@@ -169,9 +169,12 @@ fn initialize_scale_database(connection: &Connection) -> Result<(), Box<dyn Erro
              magic TEXT NOT NULL,\
              database_id TEXT NOT NULL,\
              storage_format INTEGER NOT NULL\
-         );\
-         INSERT INTO main._lithograph_meta(id, magic, database_id, storage_format)\
-         VALUES(1, 'lithograph-format-v1', '00000000-0000-4000-8000-000000000010', 2);",
+         );",
+    )?;
+    connection.execute(
+        "INSERT INTO main._lithograph_meta(id, magic, database_id, storage_format) \
+         VALUES(1, 'lithograph-format-v1', '00000000-0000-4000-8000-000000000010', ?1)",
+        [STORAGE_FORMAT],
     )?;
     create_storage_schema(connection)?;
     initialize_root(connection)?;
