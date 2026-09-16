@@ -15,7 +15,9 @@ Lithograph 为 SQLite 提供版本化 Property Graph 数据库能力。
 
 ## 安装与 Quickstart
 
-当前正式版本是 **v0.1.0**。GitHub Releases 提供 Linux x64/arm64、macOS x64/arm64、Windows x64/arm64 六个平台的预编译 extension；运行时需要支持 loadable extension 的 SQLite 3.45.0 或更高版本。
+当前正式版本是 **v0.1.0**。GitHub Releases 提供 Linux x64/arm64、macOS x64/arm64、Windows x64/arm64 六个平台的预编译 extension；运行时需要支持 loadable extension 与 FTS5 的 SQLite 3.45.0 或更高版本。
+
+首次接入从 [Lithograph v0.1.0 Developer Documentation](docs/guide/README.md) 开始。手册提供固定 v0.1.0 下载地址、校验、可执行教程和实际发布行为；下面的 `latest` 地址会随未来 release 更新。
 
 稳定下载地址：
 
@@ -69,6 +71,21 @@ FROM lithograph_rows('MATCH (p:Person) RETURN p.name');
 上述流程已由 release gate 在 Linux x64/arm64、macOS x64/arm64、Windows x64/arm64 六个平台验证；运行时 gate 覆盖 SQLite 3.45.0 minimum 与 3.53.4 release-current runtime。其它 host application 需要在目标 SQLite connection 上启用 loadable extension，并通过 SQLite 官方 extension-loading API 加载同一个 shared library。
 
 同一张图可以在不同 Commit 上查询，也可以在不同 Branch 上独立演化，而不需要复制 SQLite 数据库文件。
+
+## 开发者文档
+
+完整入口：**[Lithograph v0.1.0 Developer Documentation](docs/guide/README.md)**。面向把 Lithograph 嵌入其他产品的开发者，不要求先阅读内部技术设计。
+
+| 任务 | 文档 |
+| --- | --- |
+| 安装并完成第一次图查询与历史读取 | [安装](docs/guide/installation.md) · [快速入门](docs/guide/getting-started.md) |
+| 数据建模、约束、索引与检索 | [Graph/Cypher](docs/guide/graph-and-cypher.md) · [Schema/Index](docs/guide/schema-and-indexes.md) · [Search/CSV](docs/guide/search.md) |
+| 版本控制与逐步解决合并冲突 | [版本管理](docs/guide/versioning.md) · [Merge Session](docs/guide/merge.md) |
+| Python/Native 接入、事务与子图边界 | [应用集成](docs/guide/integration.md) · [事务](docs/guide/transactions.md) · [Graph View](docs/guide/graph-views.md) |
+| 参数、返回值、函数、Procedure 与兼容范围 | [API Reference](docs/reference/README.md) |
+| 备份、升级、性能诊断与错误恢复 | [部署维护](docs/guide/operations.md) · [排障](docs/guide/troubleshooting.md) |
+
+可执行示例和实际验证范围见 [Examples](docs/guide/examples/README.md)。文档验证发现的 v0.1.0 adapter / introspection 差异及规避方法见 [Known Issues](docs/reference/known-issues.md)；公开接口登记与 release gate 通过不表示所有边界都没有缺陷。
 
 ## 项目状态
 
