@@ -9,6 +9,8 @@
 
 Profile 由 Neo4j Cypher 25 current-graph Manual + 2026.08 已公开 Cypher additions 冻结。未来 Cypher 25 新功能建立新的 Profile，不回写本 Profile 的 acceptance meaning。
 
+Phase 12 的 FTS5 provider binding 不是新增 Cypher grammar 或新的语言 Profile。其非可移植 analyzer 取值、破坏升级和新增验收按 [Design §11.5](../design.md#115-full-text) 与下文 supplemental inventory 单列；已有 `done` 只代表对应已执行基线，不代表任意 tokenizer 或所有 analyzer 组合已通过。
+
 ## 2. Status Semantics
 
 | 状态 | 含义 |
@@ -80,7 +82,7 @@ Phase 03 已交付 parser/AST/scope/type/value frontend foundation；Phase 04/05
 | Range index | DDL、SHOW、seek/ordering semantics | `done` | 07 |
 | Text index | DDL、SHOW、text seek semantics | `done` | 07 |
 | Point index | DDL、SHOW、spatial seek semantics | `done` | 07 |
-| Full-text index | DDL、analyzer/config、queryNodes/queryRelationships、score/options | `done` | 08 |
+| Full-text index | DDL、analyzer/config、queryNodes/queryRelationships、score/options；query-time analyzer 组合语义待 Phase 12 修复，旧通过证据见下文 | `partial` | 08、12 |
 | Vector index | DDL、dimension/similarity/quantization/filter properties、SHOW | `done` | 08 |
 | SEARCH | MATCH/OPTIONAL MATCH vector ANN subclause、filter、LIMIT、SCORE | `done` | 08 |
 | LOAD CSV | headers、field parsing、URI source、periodic transaction composition | `done` | 08 |
@@ -90,6 +92,21 @@ Phase 03 已交付 parser/AST/scope/type/value frontend foundation；Phase 04/05
 | PROFILE | execution + operator runtime counters | `done` | 04, 10 |
 | SHOW current graph surfaces | functions/procedures/indexes/constraints/current graph type | `done` | 06–08 |
 | Error compatibility | syntax position、semantic/type/constraint failures、transaction errors | `done` | 03–10 |
+
+### Phase 12 FTS5 provider supplemental inventory
+
+**Supplemental inventory 当前全部 `planned`；Phase 12 设计/依赖齐备，开发状态 `ready`。** 以下是后续 backend binding 与其影响面的验收，不向冻结 Cypher 语言 coverage 分母混入 SQLite 专属 tokenizer。Phase 08 的 `done` 和实际测试历史继续保留；但当前 override 路径使用词集合近似，不能保留 QUERY mode 和短语/布尔组合，因此 Full-text family 的当前状态标为 `partial`，修复 owner 为 Phase 12。不能用历史通过记录覆盖新发现的缺口。
+
+| 验收面 | Acceptance 映射 | 状态 | Owner |
+| --- | --- | --- | --- |
+| 原生 specification、默认值、取消两个名称的特殊映射 | FT12-01–04 | `planned` | 12.1–12.2 |
+| 构造验证、失败原子性、planning/no-op 边界 | FT12-05–06 | `planned` | 12.2、12.5 |
+| Node/Relationship、完整定义、cache/history/connection | FT12-07–11 | `planned` | 12.3、12.5 |
+| Query-time analyzer、表达式/flags/synonym、score/pagination/lifetime | FT12-12–17 | `planned` | 12.4 |
+| 真实 SQLite 双 extension、Native/staged/SQL parity | FT12-18 | `planned` | 12.5 |
+| Cypher/Vector/version regression、完整 gates 与文档同步 | FT12-19–20 | `planned` | 12.6 |
+
+映射的完整场景及证据要求见 [Phase 12 acceptance](phases/12-fulltext-tokenizer.md#4-acceptance-matrix)。Cypher grammar、scope、type/null、Graph View-before-pagination 和事务语义按原有语言/执行规则验证；tokenizer/参数以直接 SQLite FTS5 + synthetic tokenizer 作 oracle。不得把 `porter unicode61` 称作 Neo4j `english` 等价实现，也不得为了使新 binding 通过而静默改写 Neo4j 语言 fixture。固定 v0.1.0 的两个 analyzer 测试属于旧 binding 证据；新 binding 的旧名称失败/原生行为由 FT12-01 明确替代并记录，而不是未解释 skip。
 
 ### Phase 03 frontend evidence
 
@@ -143,7 +160,7 @@ Phase 09 的 46 个 targeted version scenarios 覆盖 Branch/Tag/Commit Data/exp
 
 Phase 10 的 release-level compatibility evidence 已闭合三个最终 family：mutating query 与 Version Procedure 的 `EXPLAIN` 都执行 semantic validation + logical/physical planning 而不产生 graph/ref side effect；`PROFILE` 与普通 execution 返回相同 rows，并通过 public serializer 暴露 query-level 与 per-operator `rows` / `dbHits` / time counters，targeted regression 同时校验 operator totals 与 query metrics 一致；parse/semantic/type error 保留 source line/column、constraint failure 保持 `CONSTRAINT_ERROR`，SQLite `BUSY/LOCKED` 在 Core public `QueryErrorKind` 与 Extension public category 都映射为 `BUSY` 并保留 primary SQLite code，adapter 继续隐藏底层 storage detail。
 
-最终 executable inherited openCypher TCK runner 在当前 worktree 上执行 3,897 个 scenarios：3,777 个 applicable scenarios 全部通过、0 failure；其余 120 个全部由显式 machine-readable reason 分类为当前产品面之外或已被 Cypher 25 语义取代，没有 unexplained skip。Phase 10 targeted compatibility suite 4/4、hardening 6/6、recovery 10/10 同时通过。因此 `EXPLAIN`、`PROFILE` 与 Error compatibility 三行由 `partial` 正式提升为 `done`；当前 matrix 已不存在 unresolved/partial capability family。
+Phase 10 完成时，最终 executable inherited openCypher TCK runner 在当时 worktree 上执行 3,897 个 scenarios：3,777 个 applicable scenarios 全部通过、0 failure；其余 120 个全部由显式 machine-readable reason 分类为产品面之外或已被 Cypher 25 语义取代，没有 unexplained skip。Phase 10 targeted compatibility suite 4/4、hardening 6/6、recovery 10/10 同时通过。因此 `EXPLAIN`、`PROFILE` 与 Error compatibility 三行当时由 `partial` 提升为 `done`，当时 matrix 已无 partial family。该历史报告不覆盖后续发现；当前 Full-text family 的待修复项和新 provider 验收见 Phase 12 supplemental inventory。
 
 ## 5. 2025.06+ Cypher 25 Delta Inventory
 

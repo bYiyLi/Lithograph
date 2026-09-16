@@ -96,7 +96,8 @@ v0.1.0 属于 pre-1.0 版本：后续 minor release 仍可能调整公开 API、
 - [技术设计](docs/design.md)
 - [开发计划](docs/development/README.md)
 - [Phase 11 性能优化计划](docs/development/phases/11-performance-optimization.md)
-- 当前开发阶段：Phase 00–11 `done`
+- [Phase 12 全文 Tokenizer 扩展计划](docs/development/phases/12-fulltext-tokenizer.md)
+- 当前开发阶段：Phase 00–11 `done`；Phase 12 `ready`，仅设计与计划就绪，尚未实现，不属于 v0.1.0 已发布能力。
 
 ## 许可
 

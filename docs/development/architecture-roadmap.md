@@ -43,9 +43,14 @@ Phase 10 Compatibility / Scale / Release Closure
         |
         v
 Phase 11 Performance Optimization (done)
+        |
+        v
+Phase 12 Full-text / FTS5 Tokenizer (ready)
 ```
 
 Phase 00–11均已完成。Phase 11的实现、固定性能机验收、并发压力、repository quality/coverage、真实SQLite CI以及Linux x64/arm64、macOS x64/arm64、Windows x64/arm64六目标hosted Release Matrix都已闭合。产品目标行为仍由Design定义，实际执行/验收见 [Phase 11计划](phases/11-performance-optimization.md)。
+
+Phase 12 的目标已由 Design §11.5 定义，目前只完成设计与计划，没有实现/验收证据；依赖 Phase 08/09/11，不重开已完成 Phase。具体顺序见 [Phase 12计划](phases/12-fulltext-tokenizer.md)。
 
 ## 2. 为什么 Version Storage 必须早于 Cypher Engine
 
@@ -123,6 +128,28 @@ reproducible before + physical-work counters
 不因增加持久cache重新设计canonical history，不以性能为由改变Cypher类型/错误、Constraint或Native transaction合同。只读query不写main的cache，迁移与显式rebuild的副作用由其独立boundary承担。
 
 每个复杂子系统先形成最小真实纵向闭环，再扩 coverage。
+
+### Phase 12 Full-text 扩展纵向闭环
+
+```text
+FTS5 specification / synthetic native tokenizer oracle
+ -> versioned configuration / DDL / SHOW
+ -> current + historical TEMP cache / connection lifecycle
+ -> query-time analyzer native delegation / result semantics
+ -> Version + Native + SQL cross-surface closure
+ -> compatibility / quality / documentation evidence
+```
+
+| 追加变更 | 首次基线 | Phase 12 owner |
+| --- | --- | --- |
+| Specification 安全边界与真实 tokenizer fixture | 08 | 12.1 |
+| Versioned 配置、DDL constructor 验证与 introspection | 07/08 | 12.2 |
+| FTS cache、历史和 connection 注册边界 | 08/11 | 12.3 |
+| Query analyzer override、score/Graph View/pagination | 08 | 12.4 |
+| Schema 发布入口、Native staged 与 SQL adapters | 09 | 12.5 |
+| 全部新验收与原有 regression / gates | 10/11 | 12.6 |
+
+行为和取舍只由 Design §11.5 定义，不把本表当第二份配置合同；FTS/HNSW 共享辅助代码的改动需要回归 Vector，但不据此扩大 Vector 设计范围。
 
 ### Cypher vertical slice
 
