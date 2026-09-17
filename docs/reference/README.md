@@ -1,6 +1,6 @@
-# Lithograph v0.1.0 Reference
+# Lithograph Reference
 
-本目录用于查找准确接口，不替代 [入门与任务指南](../guide/README.md)。范围固定为 v0.1.0 / `CY25-2026.08` / Native ABI 1 / storage format 3；实现缺陷单独记录，不把缺陷改写成新的设计合同。
+本目录用于查找准确接口，不替代 [入门与任务指南](../guide/README.md)。v0.1.1 继续使用 `CY25-2026.08` / Native ABI 1 / storage format 3；大部分页面保留 v0.1.0 已验证基线，Phase 12 修改过的 [Procedures](procedures.md) 与 [Limits](limits.md) 明确标记为 v0.1.1。实现缺陷单独记录，不把缺陷改写成新的设计合同。
 
 | 需要查找 | 页面 |
 | --- | --- |
@@ -16,4 +16,4 @@
 | 名称、类型、索引配置与运行限制 | [Limits](limits.md) |
 | v0.1.0 发布制品与设计之间的已知差异 | [Known Issues](known-issues.md) |
 
-Inventory 来自真实 v0.1.0 `SHOW FUNCTIONS YIELD *` / `SHOW PROCEDURES YIELD *`，不是根据 Neo4j 当前文档推测。重新生成方法见 [示例验证说明](../guide/examples/README.md)。这些 introspection 结果含兼容字段，不表示 Lithograph 实现了 Neo4j 的账号、角色、system database 或权限系统。
+Inventory 仍来自真实 v0.1.0 `SHOW FUNCTIONS YIELD *` / `SHOW PROCEDURES YIELD *`；v0.1.1 没有改变公开函数/Procedure inventory，只改变 Full-text tokenizer provider binding。重新生成方法见 [示例验证说明](../guide/examples/README.md)。这些 introspection 结果含兼容字段，不表示 Lithograph 实现了 Neo4j 的账号、角色、system database 或权限系统。

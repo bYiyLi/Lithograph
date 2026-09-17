@@ -1,6 +1,6 @@
 # Procedure Reference
 
-**版本：v0.1.0。** 所有 33 个公开签名、mode 和输出列见 [Inventory](procedure-inventory.md)。本页补充参数语义、默认值、Commit 效果及限制；名称不省略 `lithograph.` / `db.` 前缀。
+**版本：v0.1.1。** 所有 33 个公开签名、mode 和输出列见 [Inventory](procedure-inventory.md)。本页补充参数语义、默认值、Commit 效果及限制；名称不省略 `lithograph.` / `db.` 前缀。
 
 Procedure 通过 Cypher `CALL name(...)` 调用，返回行可接 `YIELD` / `RETURN`。本页的方括号表示可选位置参数，不是实际调用字符。可选参数通常通过省略提供默认值，不应把 null 当作任意可选参数的默认值。
 
@@ -25,7 +25,7 @@ Procedure 通过 Cypher `CALL name(...)` 调用，返回行可接 `YIELD` / `RET
 | `lithograph.branch.create(name[,from])` | from 为 Descriptor，省略从 active Branch head 创建；返回 name,commit；不切换 active Branch |
 | `lithograph.branch.list()` | 返回 name,commit,active，按名称排序 |
 | `lithograph.branch.delete(name)` | 返回 name,previousCommit；不能删除 main 或 connection active Branch |
-| `lithograph.branch.checkout(name)` | 设计上改变 connection active Branch，要求 autocommit；**v0.1.0 SQL / Native adapter 均有已知执行缺陷，使用 query options.branch** |
+| `lithograph.branch.checkout(name)` | 设计上改变 connection active Branch，要求 autocommit；**v0.1.0–v0.1.1 SQL / Native adapter 均有已知执行缺陷，使用 query options.branch** |
 | `lithograph.tag.create(name,target)` | target 为 Descriptor，返回 name,commit |
 | `lithograph.tag.list()` | 返回 name,commit |
 | `lithograph.tag.move(name,target)` | 显式移动已有 Tag，返回 name,previousCommit,commit |
@@ -93,7 +93,7 @@ Rebase resolutions 使用 conflicts 返回的 conflictId，并根据槽位选择
 
 ## 返回值类型与 introspection 注意事项
 
-v0.1.0 的 `SHOW PROCEDURES.returnDescription[*].type` 把所有输出写成 STRING，`argumentDescription` 也未提供实际参数清单；见 [DOC-V010-03](known-issues.md)。不要把这些字段用于自动转换结果，或据空 argumentDescription 判断 procedure 没有参数。
+v0.1.0–v0.1.1 的 `SHOW PROCEDURES.returnDescription[*].type` 把所有输出写成 STRING，`argumentDescription` 也未提供实际参数清单；见 [DOC-V010-03](known-issues.md)。不要把这些字段用于自动转换结果，或据空 argumentDescription 判断 procedure 没有参数。
 
 | 字段 / 对象 | 实际值类型 |
 | --- | --- |

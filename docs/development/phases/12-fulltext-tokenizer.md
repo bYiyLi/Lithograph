@@ -147,13 +147,13 @@ git diff --check
 
 本次不是性能专项重跑：用小型固定 corpus 证明默认 warm 不重建和 override 有界资源生命周期；仅当本次改动或失败证据影响既有规模合同才扩大性能验证。不因配置优化默认再跑 10M/100M 或修改 Vector benchmark contract。
 
-本次完成证据（2026-09-17 UTC，HEAD `463fb7c5f372c097d7dae776d271936f8b25b68a` + 当前未提交 worktree）：
+本次完成证据（2026-09-17 UTC；Phase 12 实现提交 `ec3be9ae26f0d756135cb838008971b1eeb5a4ff`，CI follow-up `a76fdbcfb26bfd811c2845a1039b11be88bcae56`）：
 
 - `cargo test --locked -p lithograph-fts5`：4/4；`cargo test --locked -p lithograph-core --test phase12_fulltext_tokenizer`：11/11。
 - `cargo make quality`：exit 0；production duplication 0.99%；coverage regions/functions/lines 为 83.26% / 84.35% / 85.26%。
 - `scripts/ci.sh`：exit 0；当前 host SQLite 3.51.0、最低 SQLite 3.45.0 和冻结 SQLite 3.53.4 的真实 `.load`/Phase probes 均通过，3.45/3.53 都实际执行 Phase 12 synthetic tokenizer 与 Native ABI smoke。
 - executable inherited openCypher TCK 继续保持 3,777/3,777 applicable scenarios 通过、0 failure；120 个非 applicable scenario 仍全部有 machine-readable reason，没有为 Phase 12 修改语言 oracle。
-- hosted six-platform Release Matrix 本 Phase 未重新运行，也未声明新版本已发布；Phase 12 的跨平台发布验收仍在未来实际 release 流程执行。
+- 推送后 hosted repository CI 的 quality/Linux/macOS/Windows jobs 全部成功；六平台 Release Matrix 的 Linux x64/arm64、macOS x64/arm64、Windows x64/arm64 六目标全部成功并生成 artifact。
 
 最终 continuation review 额外闭合了三项问题：修正 `fts5_api` 获取路径中由 SQLite 写入的 output pointer，避免通过共享引用地址承接外部写；把 FTS5 constructor C string helper 收紧为 `unsafe` 且立即复制成 owned `String`，不再暴露无约束借用生命周期；扩展真实 `lithograph-phase12` probe，端到端断言 query-time analyzer 的复杂参数透传、QUERY/PREFIX 生命周期平衡与 colocated synonym 行为。修复后重新执行 `cargo make quality` 和原始 `scripts/ci.sh` 均 exit 0，未发现新的本 Phase finding。
 
@@ -163,4 +163,4 @@ Review 必须交叉核对 Design、全部配置消费者、Schema/版本发布�
 
 每轮发现记录准确场景、位置和修复；重跑受影响的 checks，再继续 review。没有剩余本次范围内的 finding、FT12-01–20 全部有通过证据、文档与实现一致且 final diff 已检查，才完成本 Phase。不以“设计已评审”“可以开始开发”或旧 Phase 的 green report 替代实现验收。
 
-**当前结果：Phase 12 实现、FT12-01–20、targeted/integration/compatibility/quality/CI 与多轮 Phase-level review 均已闭合；当前 reviewed scope 无剩余 task-affecting finding。代码尚未 commit/push，也未发布新版本。**
+**当前结果：Phase 12 实现、FT12-01–20、targeted/integration/compatibility/quality/CI、多轮 Phase-level review 与 hosted 六平台 release gate 均已闭合；当前 reviewed scope 无剩余 task-affecting finding。实现已 commit/push，并从 v0.1.1 起进入发布基线。**

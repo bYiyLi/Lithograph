@@ -15,9 +15,9 @@ Lithograph 为 SQLite 提供版本化 Property Graph 数据库能力。
 
 ## 安装与 Quickstart
 
-当前正式版本是 **v0.1.0**。GitHub Releases 提供 Linux x64/arm64、macOS x64/arm64、Windows x64/arm64 六个平台的预编译 extension；运行时需要支持 loadable extension 与 FTS5 的 SQLite 3.45.0 或更高版本。
+当前正式版本是 **v0.1.1**。GitHub Releases 提供 Linux x64/arm64、macOS x64/arm64、Windows x64/arm64 六个平台的预编译 extension；运行时需要支持 loadable extension 与 FTS5 的 SQLite 3.45.0 或更高版本。
 
-首次接入从 [Lithograph v0.1.0 Developer Documentation](docs/guide/README.md) 开始。手册提供固定 v0.1.0 下载地址、校验、可执行教程和实际发布行为；下面的 `latest` 地址会随未来 release 更新。
+基础接入从 [Developer Documentation](docs/guide/README.md) 开始。当前文档以 v0.1.0 已验证接口为基线，并对 v0.1.1 的 Phase 12 Full-text tokenizer binding 单独标注增量；v0.1.1 保持 Native ABI 1、`CY25-2026.08` 与 storage format 3。版本变化见 [Release Notes](docs/releases/v0.1.1.md) 与 [Search 指南](docs/guide/search.md)；下面的 `latest` 地址会随未来 release 更新。
 
 稳定下载地址：
 
@@ -74,7 +74,7 @@ FROM lithograph_rows('MATCH (p:Person) RETURN p.name');
 
 ## 开发者文档
 
-完整入口：**[Lithograph v0.1.0 Developer Documentation](docs/guide/README.md)**。面向把 Lithograph 嵌入其他产品的开发者，不要求先阅读内部技术设计。
+完整入口：**[Lithograph Developer Documentation](docs/guide/README.md)**。文档明确区分 v0.1.0 基线与 v0.1.1 Full-text tokenizer 增量；不会把固定 v0.1.0 的示例、已知问题或历史证据静默改写成新版本事实。
 
 | 任务 | 文档 |
 | --- | --- |
@@ -89,15 +89,15 @@ FROM lithograph_rows('MATCH (p:Person) RETURN p.name');
 
 ## 项目状态
 
-Lithograph 当前已经完成 Phase 00–12 的实现与开发验收，首个公开版本为 **v0.1.0**。现有开发版本已具备标准 SQLite loadable-extension / Native ABI boundary、version-aware immutable storage、Graph View、Cypher 25 parser/type/value、真实 read planner/executor、mutation/Commit path、versioned Graph Type/Constraint、lookup/range/text/point/full-text/vector index、`SEARCH`、`LOAD CSV`、Cypher transaction batching，以及 Branch/Tag/Commit Data/Diff/Patch/Merge/Rebase/Squash/Reset/Revert/GC 等 Version operations。Phase 10 已完成 compatibility、recovery/migration、10M Node / 100M Relationship scale、architecture/security hardening。Phase 11 在此基础上完成 storage format 3、persistent Standard Index、物理邻接 keyset、query-owned resolved state/read guard、增量 index overlay 与实测性能热点优化；固定性能机的10M Node / 100M Relationship、1M/100K Search、10K-conflict Merge、1/4/8-reader 30分钟压力以及 repository-wide quality/coverage/真实 SQLite CI 均已通过。Phase 12 进一步完成宿主 FTS5 tokenizer specification、历史/cache、query-time analyzer、失败原子性与 SQL/Native 集成；该能力尚未作为新版本发布。
+Lithograph 当前已经完成 Phase 00–12 的实现与开发验收，当前发布版本为 **v0.1.1**。现有实现已具备标准 SQLite loadable-extension / Native ABI boundary、version-aware immutable storage、Graph View、Cypher 25 parser/type/value、真实 read planner/executor、mutation/Commit path、versioned Graph Type/Constraint、lookup/range/text/point/full-text/vector index、`SEARCH`、`LOAD CSV`、Cypher transaction batching，以及 Branch/Tag/Commit Data/Diff/Patch/Merge/Rebase/Squash/Reset/Revert/GC 等 Version operations。Phase 10 已完成 compatibility、recovery/migration、10M Node / 100M Relationship scale、architecture/security hardening。Phase 11 在此基础上完成 storage format 3、persistent Standard Index、物理邻接 keyset、query-owned resolved state/read guard、增量 index overlay 与实测性能热点优化；固定性能机的10M Node / 100M Relationship、1M/100K Search、10K-conflict Merge、1/4/8-reader 30分钟压力以及 repository-wide quality/coverage/真实 SQLite CI 均已通过。Phase 12 进一步完成宿主 FTS5 tokenizer specification、历史/cache、query-time analyzer、失败原子性与 SQL/Native 集成，并从 v0.1.1 起进入发布基线。
 
-v0.1.0 属于 pre-1.0 版本：后续 minor release 仍可能调整公开 API、ABI 或 storage compatibility contract。升级已有数据库前应保留完整备份；format 3 没有自动 downgrade。详见 [CHANGELOG](CHANGELOG.md) 与 [v0.1.0 Release Notes](docs/releases/v0.1.0.md)。
+v0.1.1 仍属于 pre-1.0 版本。升级已有数据库前应保留完整备份；format 3 没有自动 downgrade。Full-text analyzer 从 v0.1.0 到 v0.1.1 存在明确的配置行为变化，详见 [CHANGELOG](CHANGELOG.md) 与 [v0.1.1 Release Notes](docs/releases/v0.1.1.md)。
 
 - [技术设计](docs/design.md)
 - [开发计划](docs/development/README.md)
 - [Phase 11 性能优化计划](docs/development/phases/11-performance-optimization.md)
 - [Phase 12 全文 Tokenizer 扩展计划](docs/development/phases/12-fulltext-tokenizer.md)
-- 当前开发阶段：Phase 00–12 `done`；Phase 12 已完成开发验收，但尚未作为新版本发布，因此不属于 v0.1.0 已发布能力。
+- 当前开发阶段：Phase 00–12 `done`；Phase 12 Full-text tokenizer binding 从 v0.1.1 起进入发布基线。
 
 ## 许可
 

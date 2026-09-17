@@ -319,7 +319,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "lithograph-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "chrono",
@@ -339,7 +339,7 @@ dependencies = [
 
 [[package]]
 name = "lithograph-extension"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "lithograph-core",
  "rusqlite",
@@ -348,14 +348,14 @@ dependencies = [
 
 [[package]]
 name = "lithograph-fts5"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rusqlite",
 ]
 
 [[package]]
 name = "lithograph-test-support"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "lithograph-core",

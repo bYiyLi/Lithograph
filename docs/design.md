@@ -4,7 +4,7 @@
 
 Phase 00–12 均已实现并完成对应开发验收。Phase 11 已将第 7.8、8.3.1、11.7、14.3.1、17.1–17.3 节定义的性能合同落入当前实现；实施顺序、量化证据与完成状态见 [Phase 11](development/phases/11-performance-optimization.md)。
 
-第 11.5 节的 FTS5 tokenizer 扩展已由 [Phase 12](development/phases/12-fulltext-tokenizer.md) 实现并完成开发验收。当前已发布的 v0.1.0 仍只有两个硬编码 analyzer，因此不能把本节目标当作 v0.1.0 已发布能力。
+第 11.5 节的 FTS5 tokenizer 扩展已由 [Phase 12](development/phases/12-fulltext-tokenizer.md) 实现并完成开发验收。v0.1.0 发布制品仍只有两个硬编码 analyzer；完整的宿主 FTS5 tokenizer specification contract 从 v0.1.1 起进入发布基线。
 
 ## 1. 产品定义
 

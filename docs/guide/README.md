@@ -1,17 +1,21 @@
-# Lithograph v0.1.0 Developer Documentation
+# Lithograph Developer Documentation
 
 这套文档面向把 Lithograph 嵌入自己产品的应用开发者。无需先阅读源码或内部设计，即可安装扩展、读写图、使用检索与版本管理，并处理事务、错误和数据库维护。
 
 ## 适用版本
 
-| 项目 | 本手册基线 |
+| 项目 | 当前文档范围 |
 | --- | --- |
-| 产品版本 | **v0.1.0**，不是滚动更新的 `latest` |
+| 当前 Release | **v0.1.1** |
+| 基础接口 / 示例基线 | **v0.1.0**；未受 v0.1.1 影响的页面继续保留原版本标记 |
+| v0.1.1 增量 | Full-text tokenizer： [Search](search.md)、[Procedure](../reference/procedures.md)、[Limits](../reference/limits.md)、[Release Notes](../releases/v0.1.1.md) |
 | Cypher compatibility profile | `CY25-2026.08` |
 | Native ABI | `lithograph_v1_*`，ABI version `1` |
 | 新数据库格式 | Storage format `3` |
 | SQLite | `3.45.0+`，支持 loadable extension、FTS5 |
 | 部署 | Linux、macOS、Windows，分别提供 x64 / arm64 制品 |
+
+v0.1.1 没有改变 Native ABI、Cypher profile 或 storage format；因此未受 Full-text tokenizer 变更影响的 v0.1.0 指南与示例继续作为已验证基线。标记为 v0.1.0 的可执行示例仍会检查精确版本，不应拿 v0.1.1 binary 强行通过这些旧版本断言。v0.1.1 的安装包使用根 [README](../../README.md) 的 `latest` 下载入口或 [v0.1.1 Release Notes](../releases/v0.1.1.md)。
 
 Lithograph 是嵌入式数据库扩展，不是独立 Server、Neo4j 客户端、Agent 框架或 embedding 服务。一个 SQLite connection 的 `main` database 承载一个版本化 Property Graph；同一文件仍可保存宿主自己的普通 SQL 表，但不得使用保留的 `_lithograph_*` 名称。
 
@@ -46,11 +50,11 @@ Lithograph 是嵌入式数据库扩展，不是独立 Server、Neo4j 客户端�
 
 Commit 的图状态和 metadata 不可修改，但 Commit Data 是可修改注释；Tag 也可显式移动。历史版本查询只读。Branch、Tag 和 Merge Session 均不是账号或权限边界，Graph View 也不是认证机制。
 
-v0.1.0 是 pre-1.0 版本，后续 minor release 可能调整兼容合同。固定版本、保留升级前备份，不把当前 API 等同于永久兼容承诺。
+v0.1.1 仍是 pre-1.0 版本。固定版本、保留升级前备份，不把当前 API 等同于永久兼容承诺；Full-text analyzer 从 v0.1.0 升级到 v0.1.1 前先阅读对应 Release Notes。
 
 ## 文档依据与验证
 
-本手册描述 v0.1.0 发布行为，不定义新产品合同。依据是该版本的 [技术设计](../design.md)、[公开 C header](../../include/lithograph.h)、SQL / Cypher 实现与兼容测试；版本依据是 [v0.1.0 Release](https://github.com/bYiyLi/Lithograph/releases/tag/v0.1.0)。Reference 提供对应来源，读者不需要阅读它们才能使用产品。
+本手册以 v0.1.0 发布行为作为基础验证集，并在明确标记的页面加入 v0.1.1 Full-text tokenizer 增量，不定义新的产品合同。v0.1.0 历史事实依据 [v0.1.0 Release](https://github.com/bYiyLi/Lithograph/releases/tag/v0.1.0)；v0.1.1 增量依据 [v0.1.1 Release Notes](../releases/v0.1.1.md)、当前 [技术设计](../design.md)、公开 C header、实现与 release gates。Reference 提供对应来源，读者不需要阅读内部实现才能使用产品。
 
 本次验证的命令、平台和范围记录在 [示例验证说明](examples/README.md)。验证范围不等同于重新运行全部发布压测，也不代表所有第三方 SQLite binding 已逐一验证。
 

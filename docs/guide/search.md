@@ -1,6 +1,6 @@
 # Search 与数据导入
 
-适用 v0.1.0。以下检索 SQL 在独立空库、已加载扩展的 connection 中依次运行。Lithograph 不生成 embedding；应用提供向量及其维度、坐标类型和一致的模型来源。
+适用 v0.1.1。以下检索 SQL 在独立空库、已加载扩展的 connection 中依次运行。Lithograph 不生成 embedding；应用提供向量及其维度、坐标类型和一致的模型来源。
 
 ## 准备文档与全文索引
 
@@ -28,7 +28,7 @@ SELECT lithograph(
 
 全文查询是检索表达式，不是 Cypher 文本；不要拼接成另一条 Cypher。options 可包含 `skip`、`limit`、`analyzer`。
 
-当前 `main` 的 `fulltext.analyzer` 是 **SQLite FTS5 tokenizer specification**，默认 `unicode61`。Lithograph 不再把 `standard-no-stop-words` / `english` 当特殊别名；Porter stemming 直接写成 `porter unicode61`。FTS5 自带参数也原样声明，例如：
+v0.1.1 的 `fulltext.analyzer` 是 **SQLite FTS5 tokenizer specification**，默认 `unicode61`。Lithograph 不再把 `standard-no-stop-words` / `english` 当特殊别名；Porter stemming 直接写成 `porter unicode61`。FTS5 自带参数也原样声明，例如：
 
 ```cypher
 CREATE FULLTEXT INDEX doc_text FOR (d:Doc) ON EACH [d.title]
@@ -81,7 +81,7 @@ HNSW 是近似检索访问路径，缺少可用缓存时可以使用 exact scan 
 
 与普通查询相同，通过第三个参数 `options.at` 选择历史 Schema / 数据，通过 `options.graphView` 选择可见子图。历史上尚未创建的索引不能仅因为当前 Branch 有同名索引而使用。Graph View 在检索的可见结果与 top-k 边界内生效，不是结果返回后过滤。
 
-全文和向量可以在普通 Cypher 中组合过滤、子查询和投影；应用自己定义融合分数与排序逻辑。v0.1.0 不额外提供名为 `hybridSearch` 的专用 API，也不预定义 RAG 工作流。
+全文和向量可以在普通 Cypher 中组合过滤、子查询和投影；应用自己定义融合分数与排序逻辑。v0.1.1 不额外提供名为 `hybridSearch` 的专用 API，也不预定义 RAG 工作流。
 
 ## 导入 CSV
 
