@@ -2,6 +2,7 @@
 members = [
     "crates/lithograph-core",
     "crates/lithograph-extension",
+    "crates/lithograph-fts5",
     "crates/lithograph-test-support",
 ]
 resolver = "3"
@@ -18,6 +19,7 @@ blake3 = "1.8.2"
 chrono = "0.4.45"
 chrono-tz = "0.10.4"
 getrandom = "0.4.3"
+lithograph-fts5 = { path = "crates/lithograph-fts5", version = "=0.1.0" }
 pest = "=2.9.1"
 pest_derive = "=2.9.1"
 regex = "1.13.1"

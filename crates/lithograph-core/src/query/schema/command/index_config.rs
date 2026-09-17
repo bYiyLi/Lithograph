@@ -54,15 +54,11 @@ pub(super) fn parse_index_configuration(
 fn parse_fulltext_configuration(
     mut config: BTreeMap<String, Value>,
 ) -> QueryResult<IndexConfiguration> {
-    let analyzer = take_string_option(&mut config, "fulltext.analyzer", "standard-no-stop-words")?;
+    let analyzer = take_string_option(&mut config, "fulltext.analyzer", "unicode61")?;
     let eventually_consistent =
         take_boolean_option(&mut config, "fulltext.eventually_consistent", false)?;
     ensure_no_unknown_index_config(config)?;
-    if !matches!(analyzer.as_str(), "standard-no-stop-words" | "english") {
-        return Err(schema_error(format!(
-            "unsupported full-text analyzer {analyzer:?}"
-        )));
-    }
+    crate::query::semantic_index::validate_fulltext_schema_specification(&analyzer)?;
     Ok(IndexConfiguration::FullText {
         analyzer,
         eventually_consistent,

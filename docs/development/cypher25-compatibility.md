@@ -82,7 +82,7 @@ Phase 03 已交付 parser/AST/scope/type/value frontend foundation；Phase 04/05
 | Range index | DDL、SHOW、seek/ordering semantics | `done` | 07 |
 | Text index | DDL、SHOW、text seek semantics | `done` | 07 |
 | Point index | DDL、SHOW、spatial seek semantics | `done` | 07 |
-| Full-text index | DDL、analyzer/config、queryNodes/queryRelationships、score/options；query-time analyzer 组合语义待 Phase 12 修复，旧通过证据见下文 | `partial` | 08、12 |
+| Full-text index | DDL、原生 FTS5 analyzer specification、queryNodes/queryRelationships、query-time analyzer、score/options、历史/cache/connection 与失败原子性 | `done` | 08、12 |
 | Vector index | DDL、dimension/similarity/quantization/filter properties、SHOW | `done` | 08 |
 | SEARCH | MATCH/OPTIONAL MATCH vector ANN subclause、filter、LIMIT、SCORE | `done` | 08 |
 | LOAD CSV | headers、field parsing、URI source、periodic transaction composition | `done` | 08 |
@@ -95,18 +95,20 @@ Phase 03 已交付 parser/AST/scope/type/value frontend foundation；Phase 04/05
 
 ### Phase 12 FTS5 provider supplemental inventory
 
-**Supplemental inventory 当前全部 `planned`；Phase 12 设计/依赖齐备，开发状态 `ready`。** 以下是后续 backend binding 与其影响面的验收，不向冻结 Cypher 语言 coverage 分母混入 SQLite 专属 tokenizer。Phase 08 的 `done` 和实际测试历史继续保留；但当前 override 路径使用词集合近似，不能保留 QUERY mode 和短语/布尔组合，因此 Full-text family 的当前状态标为 `partial`，修复 owner 为 Phase 12。不能用历史通过记录覆盖新发现的缺口。
+**Supplemental inventory 已全部 `done`；Phase 12 开发与验收已闭合。** 以下 backend binding 验收不向冻结 Cypher 语言 coverage 分母混入 SQLite 专属 tokenizer。Phase 08 的历史 evidence 继续保留；Phase 12 已用原生 FTS5 query tokenizer 委托替换旧的词集合近似，并闭合 QUERY mode、短语/布尔组合、历史/cache、connection lifecycle 与失败原子性。
 
 | 验收面 | Acceptance 映射 | 状态 | Owner |
 | --- | --- | --- | --- |
-| 原生 specification、默认值、取消两个名称的特殊映射 | FT12-01–04 | `planned` | 12.1–12.2 |
-| 构造验证、失败原子性、planning/no-op 边界 | FT12-05–06 | `planned` | 12.2、12.5 |
-| Node/Relationship、完整定义、cache/history/connection | FT12-07–11 | `planned` | 12.3、12.5 |
-| Query-time analyzer、表达式/flags/synonym、score/pagination/lifetime | FT12-12–17 | `planned` | 12.4 |
-| 真实 SQLite 双 extension、Native/staged/SQL parity | FT12-18 | `planned` | 12.5 |
-| Cypher/Vector/version regression、完整 gates 与文档同步 | FT12-19–20 | `planned` | 12.6 |
+| 原生 specification、默认值、取消两个名称的特殊映射 | FT12-01–04 | `done` | 12.1–12.2 |
+| 构造验证、失败原子性、planning/no-op 边界 | FT12-05–06 | `done` | 12.2、12.5 |
+| Node/Relationship、完整定义、cache/history/connection | FT12-07–11 | `done` | 12.3、12.5 |
+| Query-time analyzer、表达式/flags/synonym、score/pagination/lifetime | FT12-12–17 | `done` | 12.4 |
+| 真实 SQLite 双 extension、Native/staged/SQL parity | FT12-18 | `done` | 12.5 |
+| Cypher/Vector/version regression、完整 gates 与文档同步 | FT12-19–20 | `done` | 12.6 |
 
 映射的完整场景及证据要求见 [Phase 12 acceptance](phases/12-fulltext-tokenizer.md#4-acceptance-matrix)。Cypher grammar、scope、type/null、Graph View-before-pagination 和事务语义按原有语言/执行规则验证；tokenizer/参数以直接 SQLite FTS5 + synthetic tokenizer 作 oracle。不得把 `porter unicode61` 称作 Neo4j `english` 等价实现，也不得为了使新 binding 通过而静默改写 Neo4j 语言 fixture。固定 v0.1.0 的两个 analyzer 测试属于旧 binding 证据；新 binding 的旧名称失败/原生行为由 FT12-01 明确替代并记录，而不是未解释 skip。
+
+Phase 12 当前完成证据绑定 `463fb7c5f372c097d7dae776d271936f8b25b68a` 基础上的未提交 worktree：`lithograph-fts5` unit tests 4/4、Phase 12 Core targeted tests 11/11、真实双 extension `lithograph-phase12` probe、SQLite 3.45.0/3.53.4 smoke 与 Native ABI 全部通过；`cargo make quality` exit 0，coverage regions/functions/lines 83.26% / 84.35% / 85.26%；最终 `scripts/ci.sh` exit 0。executable inherited openCypher TCK 继续为 3,777/3,777 applicable scenarios 通过、0 failure，120 个非 applicable scenario 的 machine-readable exclusion reason 未变化。该结果是开发验收，不表示新版本已经发布或重新跑过 hosted Release Matrix。
 
 ### Phase 03 frontend evidence
 

@@ -89,7 +89,7 @@ FROM lithograph_rows('MATCH (p:Person) RETURN p.name');
 
 ## 项目状态
 
-Lithograph 当前已经完成 Phase 00–11 的实现与验收，首个公开版本为 **v0.1.0**。现有实现已具备标准 SQLite loadable-extension / Native ABI boundary、version-aware immutable storage、Graph View、Cypher 25 parser/type/value、真实 read planner/executor、mutation/Commit path、versioned Graph Type/Constraint、lookup/range/text/point/full-text/vector index、`SEARCH`、`LOAD CSV`、Cypher transaction batching，以及 Branch/Tag/Commit Data/Diff/Patch/Merge/Rebase/Squash/Reset/Revert/GC 等 Version operations。Phase 10 已完成 compatibility、recovery/migration、10M Node / 100M Relationship scale、architecture/security hardening。Phase 11 在此基础上完成 storage format 3、persistent Standard Index、物理邻接 keyset、query-owned resolved state/read guard、增量 index overlay 与实测性能热点优化；固定性能机的10M Node / 100M Relationship、1M/100K Search、10K-conflict Merge、1/4/8-reader 30分钟压力以及 repository-wide quality/coverage/真实 SQLite CI 均已通过。
+Lithograph 当前已经完成 Phase 00–12 的实现与开发验收，首个公开版本为 **v0.1.0**。现有开发版本已具备标准 SQLite loadable-extension / Native ABI boundary、version-aware immutable storage、Graph View、Cypher 25 parser/type/value、真实 read planner/executor、mutation/Commit path、versioned Graph Type/Constraint、lookup/range/text/point/full-text/vector index、`SEARCH`、`LOAD CSV`、Cypher transaction batching，以及 Branch/Tag/Commit Data/Diff/Patch/Merge/Rebase/Squash/Reset/Revert/GC 等 Version operations。Phase 10 已完成 compatibility、recovery/migration、10M Node / 100M Relationship scale、architecture/security hardening。Phase 11 在此基础上完成 storage format 3、persistent Standard Index、物理邻接 keyset、query-owned resolved state/read guard、增量 index overlay 与实测性能热点优化；固定性能机的10M Node / 100M Relationship、1M/100K Search、10K-conflict Merge、1/4/8-reader 30分钟压力以及 repository-wide quality/coverage/真实 SQLite CI 均已通过。Phase 12 进一步完成宿主 FTS5 tokenizer specification、历史/cache、query-time analyzer、失败原子性与 SQL/Native 集成；该能力尚未作为新版本发布。
 
 v0.1.0 属于 pre-1.0 版本：后续 minor release 仍可能调整公开 API、ABI 或 storage compatibility contract。升级已有数据库前应保留完整备份；format 3 没有自动 downgrade。详见 [CHANGELOG](CHANGELOG.md) 与 [v0.1.0 Release Notes](docs/releases/v0.1.0.md)。
 
@@ -97,7 +97,7 @@ v0.1.0 属于 pre-1.0 版本：后续 minor release 仍可能调整公开 API、
 - [开发计划](docs/development/README.md)
 - [Phase 11 性能优化计划](docs/development/phases/11-performance-optimization.md)
 - [Phase 12 全文 Tokenizer 扩展计划](docs/development/phases/12-fulltext-tokenizer.md)
-- 当前开发阶段：Phase 00–11 `done`；Phase 12 `ready`，仅设计与计划就绪，尚未实现，不属于 v0.1.0 已发布能力。
+- 当前开发阶段：Phase 00–12 `done`；Phase 12 已完成开发验收，但尚未作为新版本发布，因此不属于 v0.1.0 已发布能力。
 
 ## 许可
 

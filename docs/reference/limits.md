@@ -22,10 +22,10 @@ Vector 支持 I8/I16/I32/I64/F32/F64 坐标；输入也接受相应 `INTEGER8/16
 
 | Key | 默认 | 允许值 |
 | --- | --- | --- |
-| `fulltext.analyzer` | `standard-no-stop-words` | `standard-no-stop-words`、`english` |
+| `fulltext.analyzer` | `unicode61` | 非空、无 NUL、且当前 SQLite connection 能由 FTS5 成功构造的完整 tokenizer specification |
 | `fulltext.eventually_consistent` | `false` | BOOLEAN |
 
-通过 `OPTIONS {indexConfig:{...}}` 声明。v0.1.0 不提供 Neo4j analyzer plugin 安装机制；不要自行填其他 analyzer 名称。派生缓存和 eventual-consistency metadata 不改变历史 Snapshot 的正确性要求。
+通过 `OPTIONS {indexConfig:{...}}` 声明。specification 直接遵守 FTS5 tokenizer grammar，例如 `porter unicode61` 或 `unicode61 remove_diacritics 0 tokenchars '-_'`；Lithograph 不再把 `standard-no-stop-words` / `english` 映射到内置实现。第三方 tokenizer 由宿主 SQLite extension 在**每个实际 connection** 上注册；数据库只版本化 specification 字符串，不持久化 native 实现。派生缓存和 eventual-consistency metadata 不改变历史 Snapshot 的正确性要求。
 
 ## Vector indexConfig
 

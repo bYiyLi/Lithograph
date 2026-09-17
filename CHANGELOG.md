@@ -2,6 +2,14 @@
 
 Lithograph 的用户可见版本变化记录在此文件。版本遵循 Semantic Versioning；在 `1.0.0` 之前，minor release 仍可能包含不兼容的公开接口或存储合同调整。
 
+## Unreleased
+
+### Changed
+
+- Full-text `fulltext.analyzer` 改为完整 SQLite FTS5 tokenizer specification，默认 `unicode61`；移除 `standard-no-stop-words` / `english` 特殊映射。
+- Full-text DDL 在发布变更前使用当前宿主 connection 的真实 FTS5 constructor 验证 tokenizer；第三方 tokenizer 注册保持 SQLite connection-local。
+- query-time analyzer override 改为原生 FTS5 QUERY/PREFIX tokenizer 委托，保留短语、布尔、prefix 与 colocated synonym 语义，不再使用去重词集合近似。
+
 ## 0.1.0 - 2026-09-16
 
 Lithograph 首个公开版本。

@@ -14,9 +14,9 @@ Procedure 通过 Cypher `CALL name(...)` 调用，返回行可接 `YIELD` / `RET
 | `db.index.fulltext.queryNodes(indexName,queryString[,options])` | 全文节点索引；返回 `node,score` |
 | `db.index.fulltext.queryRelationships(indexName,queryString[,options])` | 全文关系索引；返回 `relationship,score` |
 
-全文 options 默认 `{}`，支持 `skip`、`limit`、`analyzer`；skip 非负、limit 为合法非负整数，省略 limit 不额外施加该限制。Analyzer 为 `standard-no-stop-words` 或 `english`，默认采用索引配置。名称必须对应当前选定版本的正确索引 target family。
+全文 options 默认 `{}`，支持 `skip`、`limit`、`analyzer`；skip 非负、limit 为合法非负整数，省略 limit 不额外施加该限制。`analyzer` 是当前 SQLite connection 可构造的完整 FTS5 tokenizer specification；省略时采用 IndexDefinition 的 specification。它只改变本次查询文本的分词，不改变 IndexDefinition 或已索引文档。名称必须对应当前选定版本的正确索引 target family。
 
-支持 v0.1.0 已实现的全文查询表达式，不意味着整个外部 Lucene plugin ecosystem 可用。score 由检索语义定义，非概率；业务分页与 top-k 应显式限制结果量。例子见 [Search](../guide/search.md)。
+默认 tokenizer 为 `unicode61`；Porter stemming 使用 `porter unicode61`。`standard-no-stop-words` / `english` 不再有 Lithograph 特殊映射。第三方 tokenizer 通过宿主 SQLite extension 在每个实际 connection 上注册，不是 Neo4j/Lucene analyzer plugin。score 由检索语义定义，非概率；业务分页与 top-k 应显式限制结果量。例子见 [Search](../guide/search.md)。
 
 ## Branch 与 Tag
 

@@ -1,0 +1,13 @@
+[package]
+name = "lithograph-fts5"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rusqlite = { workspace = true, features = ["pointer"] }
+
+[lints]
+workspace = true

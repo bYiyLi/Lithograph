@@ -2,9 +2,9 @@
 
 本文是 Lithograph 的产品与技术设计真源。开发计划、阶段状态和验收记录位于 `docs/development/`。
 
-Phase 00–11 均已实现并完成对应验收。Phase 11 已将第 7.8、8.3.1、11.7、14.3.1、17.1–17.3 节定义的性能合同落入当前实现；实施顺序、量化证据与完成状态见 [Phase 11](development/phases/11-performance-optimization.md)。
+Phase 00–12 均已实现并完成对应开发验收。Phase 11 已将第 7.8、8.3.1、11.7、14.3.1、17.1–17.3 节定义的性能合同落入当前实现；实施顺序、量化证据与完成状态见 [Phase 11](development/phases/11-performance-optimization.md)。
 
-第 11.5 节的 FTS5 tokenizer 扩展是已确认、尚未实现的后续设计，实施与验收由 [Phase 12](development/phases/12-fulltext-tokenizer.md) 管理。当前 v0.1.0 实现仍只有两个硬编码 analyzer，不能把本节目标当作已发布能力。
+第 11.5 节的 FTS5 tokenizer 扩展已由 [Phase 12](development/phases/12-fulltext-tokenizer.md) 实现并完成开发验收。当前已发布的 v0.1.0 仍只有两个硬编码 analyzer，因此不能把本节目标当作 v0.1.0 已发布能力。
 
 ## 1. 产品定义
 
@@ -222,6 +222,8 @@ FROM lithograph_rows(
 每个会产生 SQLite side effect 的 SQL Bridge invocation（包括 `lithograph_init()`、mutating `lithograph()` 和 version-ref mutation）必须创建唯一内部 SAVEPOINT。成功时 `RELEASE`，Lithograph error/panic/cancel 时先 `ROLLBACK TO` 再 `RELEASE`，然后才把 error 返回 SQLite。这样一次 invocation 不会留下半写 Layer/Commit/ref/schema。SQLite function callback 本身不能依赖“外层 SQL statement 失败会自动撤销递归写入”。
 
 如果 host SQLite 因 authorizer、connection failure 或其它 SQLite-level failure 拒绝正常的 `ROLLBACK TO` / `RELEASE` cleanup，Lithograph 必须 fail closed：`ROLLBACK TO` 失败后不得继续 `RELEASE` 该 SAVEPOINT，因为最外层 SAVEPOINT 的 `RELEASE` 可能把本应撤销的变化提交；Engine 改为尝试整个 SQLite `ROLLBACK` 以清除未决 write 与 SAVEPOINT。该 recovery 在 caller-owned outer transaction 内也可能终止整个 outer transaction；这是无法完成 invocation-local cleanup 时优先保持 canonical storage 原子性的故障语义。只要进入 full-rollback fallback，本次 invocation 就返回 `INTERNAL_ERROR`，明确表示原 invocation-local transaction boundary 未能保持；若整个 `ROLLBACK` 也失败，仍返回 `INTERNAL_ERROR`，caller 应关闭并丢弃该 connection，不继续依赖其 transaction state。
+
+`SQLITE_NOMEM` 是这个 cleanup-failure 分支的已验证宿主特例：如果错误来自 scalar callback 内部的 FTS5 tokenizer 构造，SQLite 会在该 callback 剩余期间保持 malloc-failed 状态，使 `ROLLBACK TO`、`RELEASE` 和 full `ROLLBACK` 都继续返回 `SQLITE_NOMEM`；外层 `sqlite3_step` / `sqlite3_exec` 返回后才可能再次执行 rollback。SQL Bridge 仍保留真实 `SQLITE_NOMEM` primary code；当 tokenizer probe 在 canonical Schema 持久化之前失败时，不得发布 Commit/Branch 变化。但由于 callback 内无法恢复 invocation-local transaction boundary，该 connection 属于上段定义的 cleanup-failure quarantine，caller 必须关闭并丢弃，不能把“外层返回后手动 rollback 可以成功”当成 Lithograph invocation 已满足 cleanup 合同。Native API 不受 scalar callback 的这个宿主限制，仍按自身 fail-closed transaction contract 返回结构化错误并清理 active explicit transaction。
 
 多个 mutating `lithograph()` invocation 出现在同一个 raw SQL statement 时，语义明确为多个独立 SAVEPOINT/graph operations：在 SQLite autocommit mode 下，前一个成功 invocation 可以在后一个 invocation 失败前已经 durable；Lithograph 不承诺把整个宿主 SQL statement 合成一个 graph transaction。caller-owned SQLite `BEGIN ... COMMIT` 只能把多个已经形成的 Lithograph Commit 合并到同一个 durability boundary，不会折叠版本历史。调用方若需要“多个独立 Cypher execution 共同形成一个 Lithograph Commit”，必须使用第 9.2 节的 Native explicit transaction。推荐的 raw SQL write 形式始终是一个 statement 一个 `lithograph()` invocation。
 
@@ -1409,7 +1411,7 @@ Canonical Full-text configuration 只保留 `analyzer: String`（完整 specific
 
 FTS physical content 继续放在 connection-local TEMP derived cache，不新增持久化全文 backend 或第二套 canonical storage。Cache key 覆盖完整 Snapshot state identity、完整 IndexDefinition 和 FTS provider cache encoding version；staged Snapshot 必须包含自身 revision，不能与已提交状态混用。定义同名但 tokenizer/参数不同，不得复用旧 cache；不以 current Branch head 的 definition 重建历史 Snapshot。
 
-缓存只有完整构建成功后才可复用。构建中断、tokenizer 文本处理失败和清理失败不得把半成品标记为可用；正常失败必须清除本次 TEMP 中间态。Cache 被删除、connection 关闭或数据版本改变后，从目标 Snapshot 的 canonical graph 和 definition 重建。重建不创建 Commit、不移动 Branch、不写 `main`，也不使用额外 connection 来绕开注册或只读限制。宿主不允许所需 TEMP 操作时明确失败，不以忽略 tokenizer 的扫描代替。
+缓存只有完整构建成功并写入 connection-local readiness marker 后才可复用。构建中断或 tokenizer 文本处理失败必须先撤销 readiness；若当前宿主 SQLite statement 允许清理，则立即清空或删除本次 TEMP 中间态。真实 SQL scalar 执行中，SQLite 可能因为外层 statement 仍持有该 FTS virtual table 而对 DROP/DELETE 返回 `SQLITE_LOCKED`；此时允许保留**没有 readiness marker 的 quarantined root**，但它不属于可读 cache，后续任何使用都必须先成功 reset/rebuild，绝不能读取其中的部分内容。这样 cleanup 的物理回收可以延后，但 correctness 不依赖回收成功。Cache 被删除、connection 关闭或数据版本改变后，从目标 Snapshot 的 canonical graph 和 definition 重建。重建不创建 Commit、不移动 Branch、不写 `main`，也不使用额外 connection 来绕开注册或只读限制。宿主不允许所需 TEMP 操作时明确失败，不以忽略 tokenizer 的扫描代替。
 
 节点/关系和多 Property 的既有文本抽取行为继续保留。创建 cache 直接把原文本交给 FTS5，分词由 FTS5 调用 tokenizer；不能通过存储预分词文本替换 canonical Property。读 cache 之前解析目标版本是否存在该 Index，DROP 后当前版本不再可用，但保留该 definition 的历史 Snapshot 仍按历史配置尝试重建。
 
@@ -1421,9 +1423,9 @@ FTS physical content 继续放在 connection-local TEMP derived cache，不新�
 
 FTS5 正常 MATCH 路径必须保留 tokenizer 的 DOCUMENT、QUERY、QUERY|PREFIX 调用区别、token 次序、byte offsets 与 colocated synonym；不能把 query 当作一篇文档插入临时索引，再通过 `DISTINCT term` / vocab 交集近似执行。`queryString` 仍是既有全文查询表达式，而非 tokenizer specification；短语、布尔组合、Property 限定和前缀等已支持语义不能因更换 tokenizer 或 analyzer override 而丢失。
 
-当 query specification 与 index specification 相同时直接使用普通 FTS5 cache。当它们不同时，采用限定在 Full-text provider 内的 FTS5 原生委托适配：FTS5 发起 DOCUMENT/AUX tokenization 时委托 index tokenizer，发起 QUERY/QUERY|PREFIX 时委托 query tokenizer；token、位置、flags、callback 返回码原样转交，分词算法仍由外部 tokenizer 实现。每个实例绑定不可变的两份 specification，不使用 connection/process 全局可变的“当前 analyzer”。适配器只有内部固定身份，不提供用户注册/安装 API，不可覆盖宿主同名 tokenizer，也不能递归选择自身。
+当 query specification 与 index specification 相同时直接使用普通 FTS5 cache。当它们不同时，采用限定在 Full-text provider 内的 FTS5 原生委托适配：FTS5 发起 DOCUMENT/AUX tokenization 时委托 index tokenizer，发起 QUERY/QUERY|PREFIX 时委托本次 query tokenizer；token、位置、flags、callback 返回码原样转交，分词算法仍由外部 tokenizer 实现。Adapter instance 固定绑定 index specification 与 connection-local handle；query child tokenizer 只在一次 MATCH 的作用域内替换，作用域结束 exactly-once 恢复并释放。嵌套/重入 override 必须按 LIFO 保存和恢复上一层 child，不得因为另一个 analyzer 已在作用域中就串配置或使用 process/connection 全局“当前 analyzer”。适配器只有内部固定身份，不提供用户注册/安装 API，不可覆盖宿主同名 tokenizer，也不能递归选择自身。
 
-不同 analyzer 的执行可从同一 Snapshot 原文本构建一份 query-owned TEMP FTS table，文档仍由 index tokenizer 分词，MATCH 由 query tokenizer 分词。这是明确的慢路径：可产生一次 corpus 重建与额外 TEMP 开销，表和 tokenizer 实例在执行结束/取消后释放；同一次执行的同一配置对可以复用，不为每个 query string 保留跨查询无限增长的缓存。不把它扩展成另一套搜索 backend，也不让普通无 override 的 warm query 付出重建成本。
+不同 analyzer 的执行可从同一 Snapshot 原文本构建一份额外 TEMP FTS corpus，文档始终由 index tokenizer 分词，MATCH 期间由 scoped query child 分词。由于真实 SQL scalar 外层 statement 可能在内部 MATCH 返回后仍锁住参与执行的 virtual table，不能要求每次 procedure 调用结束时立即 DROP 该表；因此 corpus identity 只覆盖 `(Snapshot state identity, IndexDefinition, provider encoding version)`，**不包含 query analyzer 或 query string**。同一 Snapshot/IndexDefinition 的后续 override 复用这份 connection-local derived corpus，只重建本次 query child tokenizer；不同 analyzer 不产生无限增长的 TEMP table。corpus 删除、Snapshot/definition 改变或 connection 关闭后按 canonical graph 重建，不能跨 Snapshot/definition 复用，也不变成持久化 backend。普通无 override 的 warm query 不依赖该额外 corpus，也不承担其重建成本。
 
 原生 API 使用宿主 FTS5 API，保留 SQLite 3.45.0 最低 runtime；v2 方法只能在 `fts5_api.iVersion >= 3` 时访问，不假设宿主和编译 headers 同版本。本次不暴露 locale 配置；可使用满足本次无 locale 合同的原有 API。需要的 FFI 只封装在小范围 provider adapter，覆盖构造部分失败、exactly-once 释放、callback error/panic containment 与 connection 生命周期，不放宽 workspace-wide unsafe 规则。
 
@@ -1686,7 +1688,7 @@ INTERNAL_ERROR
 
 没有 query position 时 `line/column` 为 `null`。`sqliteCode` 使用 SQLite primary result code：parse/semantic/type/schema/version argument error 通常为 `SQLITE_ERROR`；ABI misuse 为 `SQLITE_MISUSE`；host lock contention 的 `SQLITE_BUSY/SQLITE_LOCKED` 映射 `BUSY` 并保留实际 primary code；`SQLITE_NOMEM/SQLITE_TOOBIG/SQLITE_FULL` 映射 `RESOURCE_ERROR`；`SQLITE_INTERRUPT` 保持 interrupt code；I/O/open/read-only-file 类错误映射 `IO_ERROR`。
 
-Native API 返回 SQLite primary result code + 结构化 `error_json`；SQL Bridge 使用 `LITHOGRAPH_<CATEGORY>: <message>` 作为 SQLite error text，并通过 `sqlite3_result_error_code` 保留对应 primary code。错误必须包含可定位 query position 时的 line/column，不把内部 SQLite table/schema 细节作为公开合同泄漏。
+Native API 返回 SQLite primary result code + 结构化 `error_json`；SQL Bridge 通常使用 `LITHOGRAPH_<CATEGORY>: <message>` 作为 SQLite error text，并通过 `sqlite3_result_error_code` 保留对应 primary code。SQLite 对少数 resource result code 有宿主级 canonicalization：已验证 `SQLITE_NOMEM` 在 scalar function 设置自定义 text 后仍会由 SQLite 对外改写成 `out of memory`。这类 code 不能为了保留 Lithograph 前缀而伪装成 `SQLITE_ERROR`；SQL Bridge 以真实 primary code 为权威，Native API 继续提供完整结构化 category/message。错误必须包含可定位 query position 时的 line/column，不把内部 SQLite table/schema 细节作为公开合同泄漏。
 
 ## 14. Integrity、Recovery 与 Migration
 

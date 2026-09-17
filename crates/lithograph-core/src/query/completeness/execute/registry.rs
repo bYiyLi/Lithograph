@@ -200,7 +200,10 @@ fn parse_fulltext_options(value: Value) -> QueryResult<FullTextQueryOptions> {
     let limit = take_nonnegative_option(&mut options, "limit")?;
     let analyzer = match options.remove("analyzer") {
         None => None,
-        Some(Value::String(value)) => Some(value),
+        Some(Value::String(value)) => {
+            super::super::super::semantic_index::validate_fulltext_query_specification(&value)?;
+            Some(value)
+        }
         Some(_) => {
             return Err(QueryError::semantic(
                 "full-text option analyzer must be String",

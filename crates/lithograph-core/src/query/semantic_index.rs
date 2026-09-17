@@ -1,15 +1,18 @@
 use std::collections::BTreeSet;
 
+use lithograph_fts5::{
+    Fts5Error, dual_tokenizer_spec, ensure_dual_tokenizer, override_query_tokenizer,
+};
 use rusqlite::{Connection, OptionalExtension as _, params_from_iter};
 
 use crate::cypher::{Value, VectorValues};
 use crate::storage::{
-    self, IndexConfiguration, IndexDefinition, IndexTarget, RelationshipRecord, Snapshot,
-    StandardIndexKind,
+    self, IndexConfiguration, IndexDefinition, IndexTarget, RelationshipRecord, SchemaState,
+    Snapshot, StandardIndexKind,
 };
 
 use super::graph::{self, ResolvedGraphView};
-use super::{QueryError, QueryResult};
+use super::{QueryError, QueryErrorKind, QueryResult};
 
 mod hnsw;
 use hnsw::{build_vector_cache, query_vector_cache};
@@ -500,7 +503,6 @@ pub(crate) fn fulltext_query(
 ) -> QueryResult<Vec<SemanticHit>> {
     validate_fulltext_target(index, input.relationship_query)?;
     let configured_analyzer = fulltext_configuration(index)?;
-    let table = ensure_fulltext_cache(connection, snapshot, index, is_interrupted)?;
     if let Some(analyzer) = input.analyzer
         && analyzer != configured_analyzer
     {
@@ -510,10 +512,10 @@ pub(crate) fn fulltext_query(
             graph_view,
             index,
             input,
-            &table,
             is_interrupted,
         );
     }
+    let table = ensure_fulltext_cache(connection, snapshot, index, is_interrupted)?;
     let candidates = default_fulltext_candidates(connection, index, input.query, &table)?;
     visible_fulltext_hits(snapshot, graph_view, input, candidates, is_interrupted)
 }
@@ -524,18 +526,32 @@ fn fulltext_query_with_analyzer_override(
     graph_view: &ResolvedGraphView,
     index: &IndexDefinition,
     input: &FullTextQueryInput<'_>,
-    table: &str,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<Vec<SemanticHit>> {
     let analyzer = input
         .analyzer
         .ok_or_else(|| QueryError::internal("full-text analyzer override is missing"))?;
-    let terms = analyze_fulltext_query(connection, input.query, analyzer)?;
-    if terms.is_empty() {
-        return Ok(Vec::new());
-    }
-    let candidates = override_fulltext_candidates(connection, table, &terms)?;
-    let _ = index;
+    let configured = fulltext_configuration(index)?;
+    ensure_dual_tokenizer(connection).map_err(|error| {
+        map_fts5_provider_error(
+            &index.name,
+            "query analyzer adapter registration",
+            QueryErrorKind::Semantic,
+            error,
+        )
+    })?;
+    let table =
+        ensure_fulltext_override_cache(connection, snapshot, index, configured, is_interrupted)?;
+    let _override_guard =
+        override_query_tokenizer(connection, &table, analyzer).map_err(|error| {
+            map_fts5_provider_error(
+                &index.name,
+                "query analyzer construction",
+                QueryErrorKind::Semantic,
+                error,
+            )
+        })?;
+    let candidates = default_fulltext_candidates(connection, index, input.query, &table)?;
     visible_fulltext_hits(snapshot, graph_view, input, candidates, is_interrupted)
 }
 
@@ -552,49 +568,39 @@ fn default_fulltext_candidates(
     let sql = format!(
         "SELECT owner_id, bm25({table}) FROM temp.{table} WHERE {table} MATCH ?1 ORDER BY bm25({table}), owner_id"
     );
-    let mut statement = connection.prepare(&sql)?;
-    statement
+    let mut statement = connection.prepare(&sql).map_err(|error| {
+        map_fulltext_sqlite_error(
+            &index.name,
+            "query expression",
+            QueryErrorKind::Semantic,
+            error,
+        )
+    })?;
+    let rows = statement
         .query_map([translated], |row| {
             let raw_score = row.get::<_, f64>(1)?;
             Ok(FullTextCandidate {
                 owner_id: row.get(0)?,
                 score: normalize_fulltext_score(raw_score),
             })
+        })
+        .map_err(|error| {
+            map_fulltext_sqlite_error(
+                &index.name,
+                "query expression",
+                QueryErrorKind::Semantic,
+                error,
+            )
         })?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(Into::into)
-}
-
-fn override_fulltext_candidates(
-    connection: &Connection,
-    table: &str,
-    terms: &[String],
-) -> QueryResult<Vec<FullTextCandidate>> {
-    let vocab = ensure_fulltext_vocab(connection, table)?;
-    let placeholders = (1..=terms.len())
-        .map(|index| format!("?{index}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "SELECT f.owner_id, count(DISTINCT v.term) AS matched \
-         FROM temp.{vocab} v JOIN temp.{table} f ON f.rowid = v.doc \
-         WHERE v.term IN ({placeholders}) GROUP BY f.owner_id \
-         ORDER BY matched DESC, f.owner_id"
-    );
-    let parameters = terms
-        .iter()
-        .map(|term| rusqlite::types::Value::Text(term.clone()))
-        .collect::<Vec<_>>();
-    let mut statement = connection.prepare(&sql)?;
-    statement
-        .query_map(params_from_iter(parameters), |row| {
-            Ok(FullTextCandidate {
-                owner_id: row.get(0)?,
-                score: row.get::<_, i64>(1)? as f64 / terms.len() as f64,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(Into::into)
+        .collect::<Result<Vec<_>, _>>();
+    rows.map_err(|error| {
+        map_fulltext_sqlite_error(
+            &index.name,
+            "query expression",
+            QueryErrorKind::Semantic,
+            error,
+        )
+    })
 }
 
 fn normalize_fulltext_score(raw_score: f64) -> f64 {
@@ -664,58 +670,28 @@ fn visible_fulltext_entity(
     }
 }
 
-fn ensure_fulltext_vocab(connection: &Connection, table: &str) -> QueryResult<String> {
-    let vocab = format!("{table}_vocab");
-    connection.execute_batch(&format!(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS temp.{vocab} USING fts5vocab(temp, {table}, instance)"
-    ))?;
-    Ok(vocab)
+pub(crate) fn validate_fulltext_schema_specification(analyzer: &str) -> QueryResult<()> {
+    validate_fulltext_specification(analyzer, QueryErrorKind::Schema)
 }
 
-fn analyze_fulltext_query(
-    connection: &Connection,
-    query: &str,
-    analyzer: &str,
-) -> QueryResult<Vec<String>> {
-    let tokenizer = fulltext_tokenizer(analyzer)?;
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"LITHOGRAPH_FTS5_QUERY_ANALYZER_V1");
-    hasher.update(analyzer.as_bytes());
-    hasher.update(query.as_bytes());
-    let digest = hasher.finalize().to_hex().to_string();
-    let table = format!("_lithograph_fts_query_{}", &digest[..20]);
-    let vocab = format!("{table}_vocab");
-    connection.execute_batch(&format!(
-        "DROP TABLE IF EXISTS temp.{vocab}; \
-         DROP TABLE IF EXISTS temp.{table}; \
-         CREATE VIRTUAL TABLE temp.{table} USING fts5(value, tokenize='{tokenizer}'); \
-         CREATE VIRTUAL TABLE temp.{vocab} USING fts5vocab(temp, {table}, instance);"
-    ))?;
-    connection.execute(
-        &format!("INSERT INTO temp.{table}(value) VALUES(?1)"),
-        [query],
-    )?;
-    let mut statement = connection.prepare(&format!(
-        "SELECT DISTINCT term FROM temp.{vocab} ORDER BY term"
-    ))?;
-    let terms = statement
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    drop(statement);
-    connection.execute_batch(&format!(
-        "DROP TABLE IF EXISTS temp.{vocab}; DROP TABLE IF EXISTS temp.{table};"
-    ))?;
-    Ok(terms)
+pub(crate) fn validate_fulltext_query_specification(analyzer: &str) -> QueryResult<()> {
+    validate_fulltext_specification(analyzer, QueryErrorKind::Semantic)
 }
 
-fn fulltext_tokenizer(analyzer: &str) -> QueryResult<&'static str> {
-    match analyzer {
-        "standard-no-stop-words" => Ok("unicode61"),
-        "english" => Ok("porter unicode61"),
-        other => Err(QueryError::semantic(format!(
-            "unsupported full-text analyzer {other:?}"
-        ))),
+fn validate_fulltext_specification(analyzer: &str, kind: QueryErrorKind) -> QueryResult<()> {
+    if analyzer.contains('\0') {
+        return Err(QueryError::new(
+            kind,
+            "full-text analyzer specification cannot contain NUL",
+        ));
     }
+    if analyzer.is_empty() || analyzer.bytes().all(|byte| byte == b' ') {
+        return Err(QueryError::new(
+            kind,
+            "full-text analyzer specification cannot be empty",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_fulltext_target(index: &IndexDefinition, relationship_query: bool) -> QueryResult<()> {
@@ -743,6 +719,48 @@ fn fulltext_configuration(index: &IndexDefinition) -> QueryResult<&str> {
     }
 }
 
+pub(crate) fn validate_fulltext_transition(
+    connection: &Connection,
+    previous: &SchemaState,
+    next: &SchemaState,
+) -> QueryResult<()> {
+    for (name, index) in &next.indexes {
+        if index.kind != StandardIndexKind::FullText || previous.indexes.get(name) == Some(index) {
+            continue;
+        }
+        let analyzer = fulltext_configuration(index)?;
+        validate_fulltext_schema_specification(analyzer)?;
+        probe_fulltext_specification(connection, index, analyzer)?;
+    }
+    Ok(())
+}
+
+fn probe_fulltext_specification(
+    connection: &Connection,
+    index: &IndexDefinition,
+    analyzer: &str,
+) -> QueryResult<()> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"LITHOGRAPH_FTS5_SCHEMA_PROBE_V1");
+    hasher.update(index.name.as_bytes());
+    hasher.update(analyzer.as_bytes());
+    let digest = hasher.finalize().to_hex().to_string();
+    let table = format!("_lithograph_fts_probe_{}", &digest[..20]);
+    let create = format!(
+        "CREATE VIRTUAL TABLE temp.{table} USING fts5(value, tokenize={})",
+        sql_text_literal(analyzer)
+    );
+    connection.execute_batch(&create).map_err(|error| {
+        map_fulltext_sqlite_error(
+            &index.name,
+            "schema analyzer construction",
+            QueryErrorKind::Schema,
+            error,
+        )
+    })?;
+    drop_fulltext_table(connection, &table, &index.name, "schema analyzer probe")
+}
+
 fn ensure_fulltext_cache(
     connection: &Connection,
     snapshot: &Snapshot<'_>,
@@ -750,24 +768,50 @@ fn ensure_fulltext_cache(
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<String> {
     let table = fulltext_cache_table(snapshot, index)?;
-    let exists = connection
-        .query_row(
-            "SELECT 1 FROM temp.sqlite_schema WHERE type = 'table' AND name = ?1",
-            [&table],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()?
-        .is_some();
-    if exists {
+    let slot = prepare_fulltext_cache_slot(connection, &table, &index.name)?;
+    if slot == FullTextCacheSlot::Ready {
         return Ok(table);
     }
-    build_fulltext_cache(connection, snapshot, index, &table, is_interrupted)?;
+    build_fulltext_cache(
+        connection,
+        snapshot,
+        index,
+        &table,
+        slot == FullTextCacheSlot::Missing,
+        is_interrupted,
+    )?;
     Ok(table)
 }
 
 fn fulltext_cache_table(snapshot: &Snapshot<'_>, index: &IndexDefinition) -> QueryResult<String> {
-    let digest = semantic_cache_digest(snapshot, index, b"LITHOGRAPH_FTS5_CACHE_V1")?;
+    let digest = semantic_cache_digest(snapshot, index, b"LITHOGRAPH_FTS5_CACHE_V2")?;
     Ok(format!("_lithograph_fts_{}", &digest[..24]))
+}
+
+fn ensure_fulltext_override_cache(
+    connection: &Connection,
+    snapshot: &Snapshot<'_>,
+    index: &IndexDefinition,
+    configured_analyzer: &str,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<String> {
+    let digest = semantic_cache_digest(snapshot, index, b"LITHOGRAPH_FTS5_OVERRIDE_V2")?;
+    let table = format!("_lithograph_fts_override_{}", &digest[..24]);
+    let slot = prepare_fulltext_cache_slot(connection, &table, &index.name)?;
+    if slot == FullTextCacheSlot::Ready {
+        return Ok(table);
+    }
+    let tokenizer = dual_tokenizer_spec(configured_analyzer, configured_analyzer, &table);
+    build_fulltext_table(
+        connection,
+        snapshot,
+        index,
+        &table,
+        &tokenizer,
+        slot == FullTextCacheSlot::Missing,
+        is_interrupted,
+    )?;
+    Ok(table)
 }
 
 fn build_fulltext_cache(
@@ -775,19 +819,49 @@ fn build_fulltext_cache(
     snapshot: &Snapshot<'_>,
     index: &IndexDefinition,
     table: &str,
+    create_table: bool,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<()> {
+    let analyzer = fulltext_configuration(index)?;
+    build_fulltext_table(
+        connection,
+        snapshot,
+        index,
+        table,
+        analyzer,
+        create_table,
+        is_interrupted,
+    )
+}
+
+fn build_fulltext_table(
+    connection: &Connection,
+    snapshot: &Snapshot<'_>,
+    index: &IndexDefinition,
+    table: &str,
+    analyzer: &str,
+    create_table: bool,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<()> {
     let properties = index_properties(index)?;
-    let analyzer = fulltext_configuration(index)?;
-    let tokenizer = fulltext_tokenizer(analyzer)?;
     let columns = (0..properties.len())
         .map(|index| format!("c{index}"))
         .collect::<Vec<_>>();
     let create = format!(
-        "CREATE VIRTUAL TABLE temp.{table} USING fts5({}, owner_id UNINDEXED, tokenize='{tokenizer}')",
-        columns.join(", ")
+        "CREATE VIRTUAL TABLE temp.{table} USING fts5({}, owner_id UNINDEXED, tokenize={})",
+        columns.join(", "),
+        sql_text_literal(analyzer)
     );
-    connection.execute_batch(&create)?;
+    if create_table {
+        connection.execute_batch(&create).map_err(|error| {
+            map_fulltext_sqlite_error(
+                &index.name,
+                "query analyzer construction",
+                QueryErrorKind::Semantic,
+                error,
+            )
+        })?;
+    }
     let result = populate_fulltext_cache(
         connection,
         snapshot,
@@ -796,10 +870,182 @@ fn build_fulltext_cache(
         properties,
         is_interrupted,
     );
-    if result.is_err() {
-        let _ = connection.execute_batch(&format!("DROP TABLE IF EXISTS temp.{table}"));
+    if let Err(error) = result {
+        return cleanup_failed_fulltext_build(connection, table, &index.name, error);
     }
-    result
+    if let Err(error) = mark_fulltext_cache_ready(connection, table) {
+        return cleanup_failed_fulltext_build(connection, table, &index.name, error);
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FullTextCacheSlot {
+    Ready,
+    EmptyExisting,
+    Missing,
+}
+
+fn prepare_fulltext_cache_slot(
+    connection: &Connection,
+    table: &str,
+    index_name: &str,
+) -> QueryResult<FullTextCacheSlot> {
+    ensure_fulltext_ready_table(connection)?;
+    let exists = connection
+        .query_row(
+            "SELECT 1 FROM temp.sqlite_schema WHERE type = 'table' AND name = ?1",
+            [table],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .is_some();
+    let ready = fulltext_cache_ready(connection, table)?;
+    if exists && ready {
+        return Ok(FullTextCacheSlot::Ready);
+    }
+    clear_fulltext_cache_ready(connection, table)?;
+    if exists {
+        reset_fulltext_table(connection, table, index_name, "discard incomplete cache")?;
+        return Ok(FullTextCacheSlot::EmptyExisting);
+    }
+    Ok(FullTextCacheSlot::Missing)
+}
+
+fn ensure_fulltext_ready_table(connection: &Connection) -> QueryResult<()> {
+    connection.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS _lithograph_semantic_fts_ready(\
+             table_name TEXT PRIMARY KEY\
+         ) WITHOUT ROWID;",
+    )?;
+    Ok(())
+}
+
+fn fulltext_cache_ready(connection: &Connection, table: &str) -> QueryResult<bool> {
+    Ok(connection
+        .query_row(
+            "SELECT 1 FROM temp._lithograph_semantic_fts_ready WHERE table_name = ?1",
+            [table],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .is_some())
+}
+
+fn mark_fulltext_cache_ready(connection: &Connection, table: &str) -> QueryResult<()> {
+    connection.execute(
+        "INSERT OR REPLACE INTO temp._lithograph_semantic_fts_ready(table_name) VALUES(?1)",
+        [table],
+    )?;
+    Ok(())
+}
+
+fn clear_fulltext_cache_ready(connection: &Connection, table: &str) -> QueryResult<()> {
+    connection.execute(
+        "DELETE FROM temp._lithograph_semantic_fts_ready WHERE table_name = ?1",
+        [table],
+    )?;
+    Ok(())
+}
+
+fn cleanup_failed_fulltext_build(
+    connection: &Connection,
+    table: &str,
+    index_name: &str,
+    error: QueryError,
+) -> QueryResult<()> {
+    let _ = clear_fulltext_cache_ready(connection, table);
+    match reset_fulltext_table(connection, table, index_name, "cache build rollback") {
+        Ok(()) => Err(error),
+        Err(cleanup_error) if cleanup_error.kind == QueryErrorKind::Busy => {
+            // The missing ready mark quarantines this table. A later use will
+            // retry the DML reset before any result can be read from it.
+            Err(error)
+        }
+        Err(cleanup_error) => Err(cleanup_error),
+    }
+}
+
+fn reset_fulltext_table(
+    connection: &Connection,
+    table: &str,
+    index_name: &str,
+    stage: &str,
+) -> QueryResult<()> {
+    connection
+        .execute(&format!("DELETE FROM temp.{table}"), [])
+        .map(|_| ())
+        .map_err(|error| {
+            map_fulltext_sqlite_error(index_name, stage, QueryErrorKind::Internal, error)
+        })
+}
+
+fn drop_fulltext_table(
+    connection: &Connection,
+    table: &str,
+    index_name: &str,
+    stage: &str,
+) -> QueryResult<()> {
+    connection
+        .execute_batch(&format!("DROP TABLE IF EXISTS temp.{table}"))
+        .map_err(|error| {
+            map_fulltext_sqlite_error(index_name, stage, QueryErrorKind::Internal, error)
+        })
+}
+
+fn sql_text_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn map_fts5_provider_error(
+    index_name: &str,
+    stage: &str,
+    fallback: QueryErrorKind,
+    error: Fts5Error,
+) -> QueryError {
+    fulltext_provider_error(index_name, stage, fallback, error.sqlite_code)
+}
+
+fn map_fulltext_sqlite_error(
+    index_name: &str,
+    stage: &str,
+    fallback: QueryErrorKind,
+    error: rusqlite::Error,
+) -> QueryError {
+    let mapped = QueryError::from(error);
+    if matches!(
+        mapped.kind,
+        QueryErrorKind::Busy
+            | QueryErrorKind::Io
+            | QueryErrorKind::Resource
+            | QueryErrorKind::Interrupted
+    ) {
+        return mapped;
+    }
+    let code = mapped.sqlite_code.unwrap_or(rusqlite::ffi::SQLITE_ERROR);
+    fulltext_provider_error(index_name, stage, fallback, code)
+}
+
+fn fulltext_provider_error(
+    index_name: &str,
+    stage: &str,
+    fallback: QueryErrorKind,
+    sqlite_code: i32,
+) -> QueryError {
+    let kind = match sqlite_code {
+        rusqlite::ffi::SQLITE_INTERRUPT => QueryErrorKind::Interrupted,
+        rusqlite::ffi::SQLITE_BUSY | rusqlite::ffi::SQLITE_LOCKED => QueryErrorKind::Busy,
+        rusqlite::ffi::SQLITE_IOERR
+        | rusqlite::ffi::SQLITE_CANTOPEN
+        | rusqlite::ffi::SQLITE_READONLY => QueryErrorKind::Io,
+        rusqlite::ffi::SQLITE_NOMEM | rusqlite::ffi::SQLITE_FULL | rusqlite::ffi::SQLITE_TOOBIG => {
+            QueryErrorKind::Resource
+        }
+        _ => fallback,
+    };
+    let mut error = QueryError::new(kind, format!("FULLTEXT Index {index_name} {stage} failed"));
+    error.sqlite_code = Some(sqlite_code);
+    error
 }
 
 fn index_properties(index: &IndexDefinition) -> QueryResult<&[String]> {
@@ -841,6 +1087,7 @@ fn populate_fulltext_cache(
             insert_fulltext_values(
                 connection,
                 &sql,
+                &index.name,
                 entity_id(entity),
                 properties,
                 |property| semantic_property(snapshot, entity, property),
@@ -853,6 +1100,7 @@ fn populate_fulltext_cache(
 fn insert_fulltext_values(
     connection: &Connection,
     sql: &str,
+    index_name: &str,
     owner_id: i64,
     properties: &[String],
     mut property_value: impl FnMut(&str) -> QueryResult<Value>,
@@ -866,7 +1114,16 @@ fn insert_fulltext_values(
     }
     if indexed {
         values.push(rusqlite::types::Value::Integer(owner_id));
-        connection.execute(sql, params_from_iter(values))?;
+        connection
+            .execute(sql, params_from_iter(values))
+            .map_err(|error| {
+                map_fulltext_sqlite_error(
+                    index_name,
+                    "document tokenization",
+                    QueryErrorKind::Semantic,
+                    error,
+                )
+            })?;
     }
     Ok(())
 }

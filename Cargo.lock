@@ -325,6 +325,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "getrandom 0.4.3",
+ "lithograph-fts5",
  "pest",
  "pest_derive",
  "regex",
@@ -343,6 +344,13 @@ dependencies = [
  "lithograph-core",
  "rusqlite",
  "serde_json",
+]
+
+[[package]]
+name = "lithograph-fts5"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
 ]
 
 [[package]]

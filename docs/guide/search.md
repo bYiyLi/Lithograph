@@ -26,7 +26,20 @@ SELECT lithograph(
 
 多 Label / 多 Property 的 DDL 可以写成 `FOR (d:Article|Doc) ON EACH [d.title,d.content]`。Relationship 检索使用 `db.index.fulltext.queryRelationships`，返回列是 `relationship, score`。
 
-全文查询是检索表达式，不是 Cypher 文本；不要拼接成另一条 Cypher。options 可包含 `skip`、`limit`、`analyzer`。Analyzer 必须与需要的语言行为匹配，不能假设所有 Neo4j / Lucene 插件 analyzer 都可用；v0.1.0 的具体范围见 [Procedure Reference](../reference/procedures.md)。
+全文查询是检索表达式，不是 Cypher 文本；不要拼接成另一条 Cypher。options 可包含 `skip`、`limit`、`analyzer`。
+
+当前 `main` 的 `fulltext.analyzer` 是 **SQLite FTS5 tokenizer specification**，默认 `unicode61`。Lithograph 不再把 `standard-no-stop-words` / `english` 当特殊别名；Porter stemming 直接写成 `porter unicode61`。FTS5 自带参数也原样声明，例如：
+
+```cypher
+CREATE FULLTEXT INDEX doc_text FOR (d:Doc) ON EACH [d.title]
+OPTIONS {indexConfig:{
+  `fulltext.analyzer`: "unicode61 remove_diacritics 0 tokenchars '-_'"
+}}
+```
+
+外部 tokenizer 由宿主 SQLite extension 注册，不由 Lithograph 安装。必须在**使用该 Index 的每个实际 SQLite connection** 上先加载/注册对应 tokenizer；definition 只保存 specification 字符串，不把 native 实现写进数据库。一个 connection 注册成功不会让连接池中的其它 connection 自动可用。DDL 创建/修改 definition 时会在当前 connection 用真实 FTS5 constructor 验证；历史 `SHOW` 不要求插件当前存在，但真正查询/冷重建需要该历史 specification 当前可构造。
+
+query-time `analyzer` 也是同样的 FTS5 specification，只改变本次查询文本的 tokenizer，不重写已索引文档或 IndexDefinition。例如 `{analyzer:'porter unicode61'}`。短语、布尔表达式、Property 限定与 prefix 仍由 FTS5 MATCH 解释，不要预先自行把查询拆成词集合。更多边界见 [Procedure Reference](../reference/procedures.md) 与 [Limits](../reference/limits.md)。
 
 ## 向量索引与 SEARCH
 

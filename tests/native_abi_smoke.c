@@ -74,16 +74,20 @@ static void require_error(char *error_json, const char *category) {
     require(strstr(error_json, category) != NULL, "native error category mismatch");
 }
 
-static void load_extension(sqlite3 *db, const char *path) {
+static void load_extension_entry(sqlite3 *db, const char *path, const char *entry) {
     char *error = NULL;
     require(sqlite3_enable_load_extension(db, 1) == SQLITE_OK, "failed to enable extension loading");
-    int rc = sqlite3_load_extension(db, path, "sqlite3_lithograph_init", &error);
+    int rc = sqlite3_load_extension(db, path, entry, &error);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "sqlite3_load_extension failed: %s\n", error == NULL ? "unknown" : error);
         sqlite3_free(error);
         exit(1);
     }
     sqlite3_free(error);
+}
+
+static void load_extension(sqlite3 *db, const char *path) {
+    load_extension_entry(db, path, "sqlite3_lithograph_init");
 }
 
 static int deny_meta_insert(
@@ -2186,12 +2190,346 @@ static void check_registered_native_surfaces(
 
  }
 
+static void check_phase12_sql_bridge_nomem(
+    const char *path,
+    const char *tokenizer_path
+) {
+    sqlite3 *db = NULL;
+    char *sqlite_error = NULL;
+    int rc;
+
+    require(sqlite3_open(":memory:", &db) == SQLITE_OK, "failed to open Phase 12 resource database");
+    load_extension_entry(db, tokenizer_path, "sqlite3_phase12_tokenizer_init");
+    load_extension(db, path);
+    require(
+        sqlite3_exec(db, "SELECT lithograph_init();", NULL, NULL, &sqlite_error) == SQLITE_OK,
+        sqlite_error == NULL ? "Phase 12 resource lithograph_init failed" : sqlite_error
+    );
+    sqlite3_free(sqlite_error);
+    sqlite_error = NULL;
+    require(
+        sqlite3_exec(
+            db,
+            "SELECT lithograph('CREATE (:NativeResource {text:''document''}) FINISH', '{}', '{}');",
+            NULL,
+            NULL,
+            &sqlite_error
+        ) == SQLITE_OK,
+        sqlite_error == NULL ? "Phase 12 resource fixture write failed" : sqlite_error
+    );
+    sqlite3_free(sqlite_error);
+    sqlite_error = NULL;
+
+    int64_t before = commit_count(db);
+    const char *resource_sql =
+        "SELECT lithograph('CREATE FULLTEXT INDEX native_nomem_text FOR (n:NativeResource) "
+        "ON EACH [n.text] OPTIONS {indexConfig:{`fulltext.analyzer`:''phase12_echo nomem''}}', "
+        "'{}', '{}');";
+    rc = sqlite3_exec(db, resource_sql, NULL, NULL, &sqlite_error);
+    require(
+        rc == SQLITE_NOMEM,
+        "Phase 12 SQL Bridge tokenizer resource failure must preserve SQLITE_NOMEM"
+    );
+    sqlite3_free(sqlite_error);
+    sqlite_error = NULL;
+    require(
+        commit_count(db) == before,
+        "Phase 12 SQL Bridge resource failure must not publish a schema Commit"
+    );
+    require(
+        sqlite3_get_autocommit(db) == 0,
+        "Phase 12 SQLITE_NOMEM fixture must exercise the cleanup-failure quarantine path"
+    );
+    sqlite3_close(db);
+}
+
+static void check_phase12_native_success(
+    sqlite3 *db,
+    execute_fn execute,
+    tx_begin_fn tx_begin,
+    execute_fn tx_execute,
+    tx_commit_fn tx_commit,
+    free_fn lithograph_free
+) {
+    char *result_json = NULL;
+    char *error_json = NULL;
+
+    int64_t before = commit_count(db);
+    require(
+        tx_begin(db, "{}", 2, &result_json, &error_json) == SQLITE_OK,
+        "Phase 12 Native tx_begin failed"
+    );
+    require(result_json != NULL, "Phase 12 Native tx_begin must return result_json");
+    lithograph_free(result_json);
+    result_json = NULL;
+    require(error_json == NULL, "Phase 12 Native tx_begin allocated error_json");
+
+    const char *create_data = "CREATE (:NativeFullText {name:'native', text:'document doc'}) FINISH";
+    require(
+        tx_execute(
+            db,
+            create_data,
+            strlen(create_data),
+            "{}",
+            2,
+            "{}",
+            2,
+            event_callback,
+            NULL,
+            &error_json
+        ) == SQLITE_OK,
+        "Phase 12 Native staged data write failed"
+    );
+    require(error_json == NULL, "Phase 12 Native staged data write allocated error_json");
+
+    const char *create_index =
+        "CREATE FULLTEXT INDEX native_text FOR (n:NativeFullText) ON EACH [n.text] "
+        "OPTIONS {indexConfig:{`fulltext.analyzer`:'phase12_echo'}}";
+    require(
+        tx_execute(
+            db,
+            create_index,
+            strlen(create_index),
+            "{}",
+            2,
+            "{}",
+            2,
+            event_callback,
+            NULL,
+            &error_json
+        ) == SQLITE_OK,
+        "Phase 12 Native staged Full-text DDL failed"
+    );
+    require(error_json == NULL, "Phase 12 Native staged Full-text DDL allocated error_json");
+
+    const char *staged_query =
+        "CALL db.index.fulltext.queryNodes('native_text', 'needle') "
+        "YIELD node RETURN node.name";
+    reset_callback_capture();
+    require(
+        tx_execute(
+            db,
+            staged_query,
+            strlen(staged_query),
+            "{}",
+            2,
+            "{}",
+            2,
+            event_callback,
+            NULL,
+            &error_json
+        ) == SQLITE_OK,
+        "Phase 12 Native staged Full-text query failed"
+    );
+    require(error_json == NULL, "Phase 12 Native staged Full-text query allocated error_json");
+    require(
+        strcmp(callback_row_json, "[\"native\"]") == 0,
+        "Phase 12 Native query did not see staged Full-text data and schema"
+    );
+
+    require(
+        tx_commit(db, &result_json, &error_json) == SQLITE_OK,
+        "Phase 12 Native Full-text tx_commit failed"
+    );
+    require(result_json != NULL, "Phase 12 Native Full-text tx_commit must return result_json");
+    lithograph_free(result_json);
+    result_json = NULL;
+    require(error_json == NULL, "Phase 12 Native Full-text tx_commit allocated error_json");
+    require(
+        commit_count(db) == before + 1,
+        "Phase 12 Native staged Full-text transaction must publish exactly one final Commit"
+    );
+
+    reset_callback_capture();
+    require(
+        execute(
+            db,
+            staged_query,
+            strlen(staged_query),
+            "{}",
+            2,
+            "{}",
+            2,
+            event_callback,
+            NULL,
+            &error_json
+        ) == SQLITE_OK,
+        "Phase 12 Native committed Full-text query failed"
+    );
+    require(strcmp(callback_row_json, "[\"native\"]") == 0, "committed Native Full-text result changed");
+}
+
+static void check_phase12_native_schema_failure(
+    sqlite3 *db,
+    execute_fn execute,
+    tx_begin_fn tx_begin,
+    execute_fn tx_execute,
+    tx_commit_fn tx_commit,
+    free_fn lithograph_free
+) {
+    char *result_json = NULL;
+    char *error_json = NULL;
+    int rc;
+
+    int64_t before = commit_count(db);
+    require(
+        tx_begin(db, "{}", 2, &result_json, &error_json) == SQLITE_OK,
+        "Phase 12 Native failure tx_begin failed"
+    );
+    lithograph_free(result_json);
+    result_json = NULL;
+    const char *staged_failure_data = "CREATE (:NativeMustRollback {text:'document'}) FINISH";
+    require(
+        tx_execute(
+            db,
+            staged_failure_data,
+            strlen(staged_failure_data),
+            "{}",
+            2,
+            "{}",
+            2,
+            event_callback,
+            NULL,
+            &error_json
+        ) == SQLITE_OK,
+        "Phase 12 Native failure fixture write failed"
+    );
+    const char *failing_index =
+        "CREATE FULLTEXT INDEX native_fail_text FOR (n:NativeMustRollback) ON EACH [n.text] "
+        "OPTIONS {indexConfig:{`fulltext.analyzer`:'phase12_echo fail'}}";
+    error_json = NULL;
+    rc = tx_execute(
+        db,
+        failing_index,
+        strlen(failing_index),
+        "{}",
+        2,
+        "{}",
+        2,
+        event_callback,
+        NULL,
+        &error_json
+    );
+    require(rc == SQLITE_ERROR, "Phase 12 Native failing tokenizer constructor must fail tx_execute");
+    require_error(error_json, "SCHEMA_ERROR");
+    lithograph_free(error_json);
+    error_json = NULL;
+    require(
+        commit_count(db) == before,
+        "Phase 12 Native failing Full-text DDL published staged history"
+    );
+    rc = tx_commit(db, &result_json, &error_json);
+    require(rc == SQLITE_MISUSE, "Phase 12 Native commit after fail-closed DDL must be misuse");
+    require_error(error_json, "INVALID_ARGUMENT");
+    lithograph_free(error_json);
+    error_json = NULL;
+
+    const char *rollback_check = "MATCH (n:NativeMustRollback) RETURN count(n)";
+    reset_callback_capture();
+    require(
+        execute(
+            db,
+            rollback_check,
+            strlen(rollback_check),
+            "{}",
+            2,
+            "{}",
+            2,
+            event_callback,
+            NULL,
+            &error_json
+        ) == SQLITE_OK,
+        "Phase 12 Native rollback verification failed"
+    );
+    require(strcmp(callback_row_json, "[0]") == 0, "Phase 12 Native failed transaction leaked staged graph data");
+}
+
+static void check_phase12_native_resource_failure(
+    sqlite3 *db,
+    tx_begin_fn tx_begin,
+    execute_fn tx_execute,
+    tx_commit_fn tx_commit,
+    free_fn lithograph_free
+) {
+    char *result_json = NULL;
+    char *error_json = NULL;
+    int rc;
+
+    int64_t before = commit_count(db);
+    require(
+        tx_begin(db, "{}", 2, &result_json, &error_json) == SQLITE_OK,
+        "Phase 12 Native resource-failure tx_begin failed"
+    );
+    lithograph_free(result_json);
+    result_json = NULL;
+    const char *resource_failing_index =
+        "CREATE FULLTEXT INDEX native_resource_fail_text FOR (n:NativeResource) ON EACH [n.text] "
+        "OPTIONS {indexConfig:{`fulltext.analyzer`:'phase12_echo nomem'}}";
+    rc = tx_execute(
+        db,
+        resource_failing_index,
+        strlen(resource_failing_index),
+        "{}",
+        2,
+        "{}",
+        2,
+        event_callback,
+        NULL,
+        &error_json
+    );
+    require(rc == SQLITE_NOMEM, "Phase 12 Native SQLITE_NOMEM constructor must preserve primary code");
+    require_error(error_json, "RESOURCE_ERROR");
+    lithograph_free(error_json);
+    error_json = NULL;
+    require(
+        commit_count(db) == before,
+        "Phase 12 Native resource failure published history"
+    );
+    rc = tx_commit(db, &result_json, &error_json);
+    require(rc == SQLITE_MISUSE, "Phase 12 Native commit after resource failure must be misuse");
+    require_error(error_json, "INVALID_ARGUMENT");
+    lithograph_free(error_json);
+    error_json = NULL;
+}
+
+static void check_phase12_native_fulltext(
+    const char *path,
+    const char *tokenizer_path,
+    execute_fn execute,
+    tx_begin_fn tx_begin,
+    execute_fn tx_execute,
+    tx_commit_fn tx_commit,
+    free_fn lithograph_free
+) {
+    check_phase12_sql_bridge_nomem(path, tokenizer_path);
+    sqlite3 *db = NULL;
+    char *sqlite_error = NULL;
+
+    require(sqlite3_open(":memory:", &db) == SQLITE_OK, "failed to open Phase 12 Native database");
+    load_extension_entry(db, tokenizer_path, "sqlite3_phase12_tokenizer_init");
+    load_extension(db, path);
+    require(
+        sqlite3_exec(db, "SELECT lithograph_init();", NULL, NULL, &sqlite_error) == SQLITE_OK,
+        sqlite_error == NULL ? "Phase 12 Native lithograph_init failed" : sqlite_error
+    );
+    sqlite3_free(sqlite_error);
+
+    check_phase12_native_success(db, execute, tx_begin, tx_execute, tx_commit, lithograph_free);
+    check_phase12_native_schema_failure(
+        db, execute, tx_begin, tx_execute, tx_commit, lithograph_free
+    );
+    check_phase12_native_resource_failure(db, tx_begin, tx_execute, tx_commit, lithograph_free);
+
+    sqlite3_close(db);
+}
+
 int main(int argc, char **argv) {
-    if (argc != 2) {
-        fprintf(stderr, "usage: native-abi-smoke <extension-path>\n");
+    if (argc != 2 && argc != 3) {
+        fprintf(stderr, "usage: native-abi-smoke <extension-path> [phase12-tokenizer-extension-path]\n");
         return 2;
     }
     const char *path = argv[1];
+    const char *phase12_tokenizer_path = argc == 3 ? argv[2] : NULL;
 
     library_handle library = open_library(path);
     if (library == NULL) {
@@ -2256,6 +2594,18 @@ int main(int argc, char **argv) {
     require(lithograph_free != NULL, "missing lithograph_v1_free export");
 
     check_registered_native_surfaces(path, execute, validate, tx_begin, tx_execute, tx_commit, tx_abort, lithograph_free);
+
+    if (phase12_tokenizer_path != NULL) {
+        check_phase12_native_fulltext(
+            path,
+            phase12_tokenizer_path,
+            execute,
+            tx_begin,
+            tx_execute,
+            tx_commit,
+            lithograph_free
+        );
+    }
 
     check_init_fault_rollback(path);
     check_release_fault_cleanup(path);

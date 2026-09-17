@@ -1,6 +1,6 @@
 # Phase 12：Full-text / FTS5 Tokenizer 扩展
 
-**状态：`ready`**
+**状态：`done`**
 
 ## 1. 目标与范围
 
@@ -15,9 +15,9 @@
 - Phase 00–11 `done`；直接依赖 Phase 08 Full-text、Phase 09 Schema/版本入口/Native transaction、Phase 11 Snapshot state/read guard 基础。
 - [Design](../../design.md) §3.2、§4.1/4.4、§7.7/7.8、§9、§10、§11.2–11.5、§14、§17；本次不更改 §11.6 Vector 合同。
 - [FTS5 研究证据](../../research/fts5-tokenizer-contract.md) S1–S4；[Compatibility inventory](../cypher25-compatibility.md) 的 Phase 12 supplemental inventory。
-- 检查基线 `2cbca18`：仍有两个 analyzer 白名单/映射；canonical STRING 和完整 definition cache digest 可复用；DDL 没有 FTS5 constructor probe；query-time override 使用去重词集合近似。
+- 实现起点基线 `2cbca18` 曾保留两个 analyzer 白名单/映射、缺少 FTS5 constructor probe，并用去重词集合近似 query-time override；这些缺口已由本 Phase 关闭。
 
-设计、依赖和下文 acceptance 已齐全，因此可以开始实现；**没有 Phase 12 代码完成或测试通过声明**。实施开始时重新检查 HEAD、Git diff、上述设计和源码，不把此检查基线当成未来仓库事实。
+Phase 12 已在 `463fb7c5f372c097d7dae776d271936f8b25b68a` 基础上的当前未提交 worktree 完成实现、review 与本地 repository acceptance。该状态不表示已经 commit、push、发布新版本或重新运行 hosted Release Matrix；这些动作仍按各自授权边界处理。
 
 ## 3. Feature 顺序
 
@@ -74,7 +74,7 @@
 
 **主要位置**：`query/semantic_index.rs`、`query/completeness/execute/registry.rs`、最小原生 FTS5 adapter；FFI 生命周期验证与既有 workspace lint 一并执行。
 
-**Acceptance**：FT12-12–16 及 17 的 override 部分；新测例先锁定当前近似路径的错误结构，再验证修复。索引分词与查询分词不同必须各自收到正确 flags；短语顺序、AND/OR/NOT、Property 限定、prefix、colocated synonym、score 与 Graph View-before-pagination 均有组合测例。两个并存 cursor/不同 analyzer 调用不得串配置；结束/取消释放 query-owned cache 与 tokenizer。普通 warm query 不为 override 支持新增 corpus 重建。
+**Acceptance**：FT12-12–16 及 17 的 override 部分；新测例先锁定当前近似路径的错误结构，再验证修复。索引分词与查询分词不同必须各自收到正确 flags；短语顺序、AND/OR/NOT、Property 限定、prefix、colocated synonym、score 与 Graph View-before-pagination 均有组合测例。两个并存/嵌套的不同 analyzer 调用不得串配置；scoped query tokenizer 按 LIFO 恢复并释放。额外 TEMP corpus 只按 Snapshot/IndexDefinition 有界复用，不按 analyzer/query string 增长；普通 warm query 不为 override 支持新增 corpus 重建。
 
 ### Feature 12.5 Version / Adapter 交叉验收
 
@@ -92,38 +92,38 @@
 
 将新 suite/probe 纳入真实 CI 和 coverage，不只把测试源码放在仓库里；运行下文门禁，复查全部生产 call sites、失败路径、最终 diff 和本文 acceptance。更新 `docs/guide/search.md`、集成/排障、`docs/reference/limits.md` / `procedures.md` 及必要 CHANGELOG，准确标记新版本或未发布行为，不篡改 v0.1.0 Release Notes。开发路线和 supplemental inventory 只按实际执行结果改状态。
 
-**Acceptance**：FT12-19–20；下表全部通过且具体报告绑定实际 revision/worktree，才能将本 Phase 改为 `done`。本次设计/计划写入不执行这些未来实现步骤。
+**Acceptance**：FT12-19–20；下表全部通过且具体报告绑定实际 revision/worktree，才能将本 Phase 改为 `done`。
 
 ## 4. Acceptance matrix
 
-每项必须有真实 automated test、命令结果或规定的人工 review 证据；下表当前均为 `planned`，不是测试执行报告。Feature Acceptance 引用本表，公共行为仍以 Design 为准。
+每项必须有真实 automated test、命令结果或规定的人工 review 证据；下表均已由本 Phase 当前 worktree 的 targeted/integration/regression/repository gate 关闭。Feature Acceptance 引用本表，公共行为仍以 Design 为准。
 
 | ID | 必须验证的场景 | 验收证据 / 判定 | 状态 |
 | --- | --- | --- | --- |
-| FT12-01 | 新默认 `unicode61`、`porter unicode61`；旧 `standard-no-stop-words` / `english` | 新行为与直接 FTS5 对照；旧值失败而非映射；显式注册旧名并使用合法内层 quoting 后走通用路径 | `planned` |
-| FT12-02 | 任意自定义注册名与 ordered arguments | 至少两个 synthetic 名字成功；exact name/args 验证，生产无测试特例 | `planned` |
-| FT12-03 | 嵌套引号、空格、空参数、Unicode、参数顺序、NUL、注入载荷 | 与直接 FTS5 grammar 差分；malformed spec 拒绝；SQL sentinel 表/数据不被载荷修改 | `planned` |
-| FT12-04 | 未知 Index OPTIONS/indexConfig/query options；错误类型/null/空 spec | 指定稳定错误；未知 key 不被吞掉或透传任意 table options | `planned` |
-| FT12-05 | 未注册、非法 args、xCreate 失败、资源/interrupt、cleanup failure | 新增/改变 Schema 前后 head/Commit 数/Schema 不变；无可复用半成品；错误分类不混淆 | `planned` |
-| FT12-06 | EXPLAIN、prepare、SHOW、DROP、真正 no-op、无关图/schema mutation | 无无意 plugin 构造/加载或 corpus build；no-op 无新 Commit；静态未知/类型检查仍执行 | `planned` |
-| FT12-07 | Node/Relationship、多 Label/Type、多 Property、String/List/缺失属性 | 继承相应 target/text 提取与去重行为；完整结果及 score 类型正确 | `planned` |
-| FT12-08 | cache deletion/rebuild、DROP/recreate 同名异配置 | 结果相同或按新配置正确改变；cache key 隔离；无 canonical write | `planned` |
-| FT12-09 | name/args-only definition change、SHOW、Diff/Patch、分支/合并 | 完整字符串 round-trip；单一 Index slot 变化可见；失败发布 rollback | `planned` |
-| FT12-10 | 历史 Snapshot 与新 connection/reopen | 冷重建使用历史配置；当下未注册历史 tokenizer 明确失败；注册后恢复；无 current-head 借用 | `planned` |
-| FT12-11 | connection A/B 隔离、外部资源、同名实现生命周期 | A 注册不使 B 可用；fixture 版本/资源固定；没有伪造的跨连接 registry 或算法 fingerprint | `planned` |
-| FT12-12 | query-time analyzer 省略/相同/不同、缺失/invalid args、空图/空 query/零 limit | 只有查询文本使用 override；不改变 definition 或 Commit；实际调用的空结果路径不掩盖配置错误 | `planned` |
-| FT12-13 | phrase、AND/OR/NOT、Property/prefix 与 analyzer override 组合 | 预期结果由固定 corpus 和实际 tokenizer 的独立 oracle 判定；不是词集合近似 | `planned` |
-| FT12-14 | QUERY/DOCUMENT/PREFIX/AUX、token offsets、colocated synonyms | synthetic 记录/断言真实回调；callback 错误传播、部分构造和所有成功实例释放 | `planned` |
-| FT12-15 | score/tie、Graph View Node/Relationship endpoint、skip/limit | visibility-before-pagination；0/1/多页、不足页、hidden top result 不漏/重；score FLOAT 有限非负 | `planned` |
-| FT12-16 | 并存/交错 analyzer、reentrancy、EOF/取消/失败清理 | immutable pair 不串配置；query-owned TEMP/handle 回到基线；不得覆盖宿主注册名 | `planned` |
-| FT12-17 | 默认 warm vs cold/rebuild、不同 analyzer 慢路径 | 记录 build/tokenizer 调用次数与耗时/TEMP；普通 warm 不重建；override 成本明确且结束释放 | `planned` |
-| FT12-18 | Native staged visibility/abort、SQL scalar/rows/Native、真实双 extension 加载 | 共用 host connection；同一语义一致，失败原子；最低/current SQLite 都实际运行 | `planned` |
-| FT12-19 | 既有 Full-text、Vector、版本、Cypher compatibility regression | 对应 suite 与 inherited TCK 无未知 failure/skip；不篡改语言 oracle 来消除 backend 差异 | `planned` |
-| FT12-20 | format/compile/clippy/quality/CI、最终 diff 和用户文档 | 全局 gate、相对链接、whitespace、无产物/secret/无关修改；文档区分新行为与 v0.1.0 | `planned` |
+| FT12-01 | 新默认 `unicode61`、`porter unicode61`；旧 `standard-no-stop-words` / `english` | 新行为与直接 FTS5 对照；旧值失败而非映射；显式注册旧名并使用合法内层 quoting 后走通用路径 | `done` |
+| FT12-02 | 任意自定义注册名与 ordered arguments | 至少两个 synthetic 名字成功；exact name/args 验证，生产无测试特例 | `done` |
+| FT12-03 | 嵌套引号、空格、空参数、Unicode、参数顺序、NUL、注入载荷 | 与直接 FTS5 grammar 差分；malformed spec 拒绝；SQL sentinel 表/数据不被载荷修改 | `done` |
+| FT12-04 | 未知 Index OPTIONS/indexConfig/query options；错误类型/null/空 spec | 指定稳定错误；未知 key 不被吞掉或透传任意 table options | `done` |
+| FT12-05 | 未注册、非法 args、xCreate 失败、资源/interrupt、cleanup failure | 新增/改变 Schema 失败不发布 head/Commit/Schema；无可复用半成品；错误分类不混淆；SQL scalar `SQLITE_NOMEM` cleanup-failure connection 明确 quarantine/discard | `done` |
+| FT12-06 | EXPLAIN、prepare、SHOW、DROP、真正 no-op、无关图/schema mutation | 无无意 plugin 构造/加载或 corpus build；`IF NOT EXISTS` no-op 保持既有 write-intent Commit 合同但不构造替代 tokenizer；静态未知/类型检查仍执行 | `done` |
+| FT12-07 | Node/Relationship、多 Label/Type、多 Property、String/List/缺失属性 | 继承相应 target/text 提取与去重行为；完整结果及 score 类型正确 | `done` |
+| FT12-08 | cache deletion/rebuild、DROP/recreate 同名异配置 | 结果相同或按新配置正确改变；cache key 隔离；无 canonical write | `done` |
+| FT12-09 | name/args-only definition change、SHOW、Diff/Patch、分支/合并 | 完整字符串 round-trip；单一 Index slot 变化可见；失败发布 rollback | `done` |
+| FT12-10 | 历史 Snapshot 与新 connection/reopen | 冷重建使用历史配置；当下未注册历史 tokenizer 明确失败；注册后恢复；无 current-head 借用 | `done` |
+| FT12-11 | connection A/B 隔离、外部资源、同名实现生命周期 | A 注册不使 B 可用；fixture 版本/资源固定；没有伪造的跨连接 registry 或算法 fingerprint | `done` |
+| FT12-12 | query-time analyzer 省略/相同/不同、缺失/invalid args、空图/空 query/零 limit | 只有查询文本使用 override；不改变 definition 或 Commit；实际调用的空结果路径不掩盖配置错误 | `done` |
+| FT12-13 | phrase、AND/OR/NOT、Property/prefix 与 analyzer override 组合 | 预期结果由固定 corpus 和实际 tokenizer 的独立 oracle 判定；不是词集合近似 | `done` |
+| FT12-14 | QUERY/DOCUMENT/PREFIX/AUX、token offsets、colocated synonyms | synthetic 记录/断言真实回调；callback 错误传播、部分构造和所有成功实例释放 | `done` |
+| FT12-15 | score/tie、Graph View Node/Relationship endpoint、skip/limit | visibility-before-pagination；0/1/多页、不足页、hidden top result 不漏/重；score FLOAT 有限非负 | `done` |
+| FT12-16 | 并存/交错 analyzer、reentrancy、EOF/取消/失败清理 | scoped query child 按 LIFO 恢复、不串配置；每次 override child exactly-once 释放；不得覆盖宿主注册名 | `done` |
+| FT12-17 | 默认 warm vs cold/rebuild、不同 analyzer 慢路径 | 记录 build/tokenizer 调用次数与 TEMP；普通 warm 不重建；override corpus 按 Snapshot/definition 有界复用且不按 analyzer/query string 增长 | `done` |
+| FT12-18 | Native staged visibility/abort、SQL scalar/rows/Native、真实双 extension 加载 | 共用 host connection；同一语义一致，失败原子；最低/current SQLite 都实际运行 | `done` |
+| FT12-19 | 既有 Full-text、Vector、版本、Cypher compatibility regression | 对应 suite 与 inherited TCK 无未知 failure/skip；不篡改语言 oracle 来消除 backend 差异 | `done` |
+| FT12-20 | format/compile/clippy/quality/CI、最终 diff 和用户文档 | 全局 gate、相对链接、whitespace、无产物/secret/无关修改；文档区分新行为与 v0.1.0 | `done` |
 
 ## 5. 验证执行与证据记录
 
-拟新增 `crates/lithograph-core/tests/phase12_fulltext_tokenizer.rs` 和 test-support 的 `lithograph-phase12` probe；这些名称是计划目标，当前尚不存在。复用已有 fixture 生命周期，不提交数据库、字典文件或动态库制品。Core/Extension tests 必须保持分开的 Cargo invocation，避免 `rusqlite/loadable_extension` feature unification 污染 standalone SQLite。
+已新增 `crates/lithograph-core/tests/phase12_fulltext_tokenizer.rs`、`crates/lithograph-fts5` 原生 FTS5 边界、test-support `lithograph-phase12` probe、synthetic tokenizer C extension 与对应 build/smoke wiring。fixture 继续使用 disposable database；数据库、字典文件和动态库制品不进入版本控制。Core/Extension tests 保持分开的 Cargo invocation，避免 `rusqlite/loadable_extension` feature unification 污染 standalone SQLite。
 
 实施后的 targeted 与 regression 顺序：
 
@@ -147,10 +147,20 @@ git diff --check
 
 本次不是性能专项重跑：用小型固定 corpus 证明默认 warm 不重建和 override 有界资源生命周期；仅当本次改动或失败证据影响既有规模合同才扩大性能验证。不因配置优化默认再跑 10M/100M 或修改 Vector benchmark contract。
 
+本次完成证据（2026-09-17 UTC，HEAD `463fb7c5f372c097d7dae776d271936f8b25b68a` + 当前未提交 worktree）：
+
+- `cargo test --locked -p lithograph-fts5`：4/4；`cargo test --locked -p lithograph-core --test phase12_fulltext_tokenizer`：11/11。
+- `cargo make quality`：exit 0；production duplication 0.99%；coverage regions/functions/lines 为 83.26% / 84.35% / 85.26%。
+- `scripts/ci.sh`：exit 0；当前 host SQLite 3.51.0、最低 SQLite 3.45.0 和冻结 SQLite 3.53.4 的真实 `.load`/Phase probes 均通过，3.45/3.53 都实际执行 Phase 12 synthetic tokenizer 与 Native ABI smoke。
+- executable inherited openCypher TCK 继续保持 3,777/3,777 applicable scenarios 通过、0 failure；120 个非 applicable scenario 仍全部有 machine-readable reason，没有为 Phase 12 修改语言 oracle。
+- hosted six-platform Release Matrix 本 Phase 未重新运行，也未声明新版本已发布；Phase 12 的跨平台发布验收仍在未来实际 release 流程执行。
+
+最终 continuation review 额外闭合了三项问题：修正 `fts5_api` 获取路径中由 SQLite 写入的 output pointer，避免通过共享引用地址承接外部写；把 FTS5 constructor C string helper 收紧为 `unsafe` 且立即复制成 owned `String`，不再暴露无约束借用生命周期；扩展真实 `lithograph-phase12` probe，端到端断言 query-time analyzer 的复杂参数透传、QUERY/PREFIX 生命周期平衡与 colocated synonym 行为。修复后重新执行 `cargo make quality` 和原始 `scripts/ci.sh` 均 exit 0，未发现新的本 Phase finding。
+
 ## 6. Review 与完成标准
 
 Review 必须交叉核对 Design、全部配置消费者、Schema/版本发布入口、FTS callbacks、测试 oracle 和状态文件。重点查找：未转义 SQL、丢失参数边界、旧名称残留特例、runtime 检查误放 prepare、历史 cache 读当前定义、缺插件的静默 fallback、override 破坏表达式、同名注册覆盖、部分构造泄漏、失败移动 head，以及测试只证明注册而未证明真实 query。
 
 每轮发现记录准确场景、位置和修复；重跑受影响的 checks，再继续 review。没有剩余本次范围内的 finding、FT12-01–20 全部有通过证据、文档与实现一致且 final diff 已检查，才完成本 Phase。不以“设计已评审”“可以开始开发”或旧 Phase 的 green report 替代实现验收。
 
-**当前结果：设计与开发计划就绪；实现、targeted tests 和 Phase 12 integration/compatibility gates 均未执行。**
+**当前结果：Phase 12 实现、FT12-01–20、targeted/integration/compatibility/quality/CI 与多轮 Phase-level review 均已闭合；当前 reviewed scope 无剩余 task-affecting finding。代码尚未 commit/push，也未发布新版本。**

@@ -45,12 +45,12 @@ Phase 10 Compatibility / Scale / Release Closure
 Phase 11 Performance Optimization (done)
         |
         v
-Phase 12 Full-text / FTS5 Tokenizer (ready)
+Phase 12 Full-text / FTS5 Tokenizer (done)
 ```
 
-Phase 00–11均已完成。Phase 11的实现、固定性能机验收、并发压力、repository quality/coverage、真实SQLite CI以及Linux x64/arm64、macOS x64/arm64、Windows x64/arm64六目标hosted Release Matrix都已闭合。产品目标行为仍由Design定义，实际执行/验收见 [Phase 11计划](phases/11-performance-optimization.md)。
+Phase 00–12均已完成开发验收。Phase 11的实现、固定性能机验收、并发压力、repository quality/coverage、真实SQLite CI以及Linux x64/arm64、macOS x64/arm64、Windows x64/arm64六目标hosted Release Matrix都已闭合。产品目标行为仍由Design定义，实际执行/验收见 [Phase 11计划](phases/11-performance-optimization.md)。
 
-Phase 12 的目标已由 Design §11.5 定义，目前只完成设计与计划，没有实现/验收证据；依赖 Phase 08/09/11，不重开已完成 Phase。具体顺序见 [Phase 12计划](phases/12-fulltext-tokenizer.md)。
+Phase 12 的目标由 Design §11.5 定义，当前实现与 FT12-01–20 开发验收已经闭合；依赖 Phase 08/09/11，不重开已完成 Phase。具体实现顺序与证据见 [Phase 12计划](phases/12-fulltext-tokenizer.md)。该状态不表示已经发布新版本或重新完成 hosted Release Matrix。
 
 ## 2. 为什么 Version Storage 必须早于 Cypher Engine
 

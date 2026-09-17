@@ -320,13 +320,13 @@ fn fulltext_relationship_query_supports_score_options_and_analyzer_contract() {
     .expect("relationship text fixtures");
     execute(
         &connection,
-        "CREATE FULLTEXT INDEX mention_text FOR ()-[r:MENTIONS]-() ON EACH [r.text] OPTIONS {indexConfig:{`fulltext.analyzer`:'english'}}",
+        "CREATE FULLTEXT INDEX mention_text FOR ()-[r:MENTIONS]-() ON EACH [r.text] OPTIONS {indexConfig:{`fulltext.analyzer`:'porter unicode61'}}",
         ExecutionOptions::default(),
     )
     .expect("relationship fulltext index");
     let (rows, _) = execute(
         &connection,
-        "CALL db.index.fulltext.queryRelationships('mention_text', 'run', {analyzer:'english', skip:0, limit:1}) YIELD relationship, score RETURN relationship.text, score",
+        "CALL db.index.fulltext.queryRelationships('mention_text', 'run', {analyzer:'porter unicode61', skip:0, limit:1}) YIELD relationship, score RETURN relationship.text, score",
         ExecutionOptions::default(),
     )
     .expect("relationship fulltext query");
@@ -337,7 +337,7 @@ fn fulltext_relationship_query_supports_score_options_and_analyzer_contract() {
     );
     let (override_rows, _) = execute(
         &connection,
-        "CALL db.index.fulltext.queryRelationships('mention_text', 'running', {analyzer:'standard-no-stop-words'}) YIELD relationship RETURN relationship.text",
+        "CALL db.index.fulltext.queryRelationships('mention_text', 'running', {analyzer:'unicode61'}) YIELD relationship RETURN relationship.text",
         ExecutionOptions::default(),
     )
     .expect("query-time analyzer override");

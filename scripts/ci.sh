@@ -92,8 +92,21 @@ if [ -n "$extension" ]; then
   cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase08 -- "$extension"
   cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase09 -- "$extension"
   scripts/sqlite-345-smoke.sh "$extension"
+  scripts/sqlite-3534-smoke.sh "$extension"
+  case "$(uname -s)" in
+    Darwin) phase12_tokenizer="$target_dir/phase10/sqlite-3.53.4/phase12_tokenizer.dylib" ;;
+    Linux) phase12_tokenizer="$target_dir/phase10/sqlite-3.53.4/phase12_tokenizer.so" ;;
+    *) phase12_tokenizer="" ;;
+  esac
+  if [ -n "$phase12_tokenizer" ]; then
+    cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase12 -- "$extension" "$phase12_tokenizer"
+  fi
   python3 scripts/check-extension-artifact.py "$extension"
-  scripts/native-abi-smoke.sh "$extension"
+  if [ -n "$phase12_tokenizer" ]; then
+    scripts/native-abi-smoke.sh "$extension" "$phase12_tokenizer"
+  else
+    scripts/native-abi-smoke.sh "$extension"
+  fi
 fi
 
 cargo run --locked --quiet -p lithograph-test-support --bin lithograph-compat -- self-check

@@ -6,7 +6,7 @@ mod show;
 mod validate;
 
 pub(crate) use command::{PreparedSchema, SchemaCounters, prepare_schema};
-pub(crate) use execute::execute_schema;
+pub(crate) use execute::{execute_schema, persist_validated_blob};
 pub(crate) use index::{
     StandardIndexCursor, StandardIndexSeek, build_persistent_generation, scan_node_index_page,
     scan_relationship_index_page, select_standard_index_seeks,

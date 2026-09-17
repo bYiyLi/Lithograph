@@ -10,7 +10,7 @@ use super::{
     string_value, target_branch,
 };
 use crate::query::options::ExecutionOptions;
-use crate::query::{QueryError, QueryErrorKind, QueryResult};
+use crate::query::{QueryError, QueryErrorKind, QueryResult, schema as qs};
 
 mod support;
 
@@ -405,7 +405,7 @@ fn apply_finalize_action(
             Ok(("fast_forward", session.theirs))
         }
         FinalizeAction::Merge { layer, schema_blob } => {
-            let schema_hash = storage::persist_schema_blob(connection, &schema_blob)?;
+            let schema_hash = qs::persist_validated_blob(connection, session.ours, &schema_blob)?;
             let metadata = CommitMetadata {
                 author: options.author.clone(),
                 message: options.message.clone(),

@@ -54,6 +54,15 @@ if [ "$version" != "3.53.4" ]; then
   exit 1
 fi
 
+case "$(uname -s)" in
+  Darwin) tokenizer_extension="$root/phase12_tokenizer.dylib" ;;
+  Linux) tokenizer_extension="$root/phase12_tokenizer.so" ;;
+  *) tokenizer_extension="" ;;
+esac
+if [ -n "$tokenizer_extension" ]; then
+  scripts/build-phase12-tokenizer.sh "$source_dir" "$tokenizer_extension"
+fi
+
 LITHOGRAPH_SQLITE3="$sqlite_bin" \
   cargo run --locked --quiet -p lithograph-test-support --bin lithograph-sqlite-probe -- "$extension"
 LITHOGRAPH_SQLITE3="$sqlite_bin" \
@@ -62,3 +71,10 @@ LITHOGRAPH_SQLITE3="$sqlite_bin" \
   cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase04 -- "$extension"
 LITHOGRAPH_SQLITE3="$sqlite_bin" \
   cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase05 -- "$extension"
+if [ -n "$tokenizer_extension" ]; then
+  LITHOGRAPH_SQLITE3="$sqlite_bin" \
+    cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase12 -- "$extension" "$tokenizer_extension"
+  LITHOGRAPH_SQLITE3="$sqlite_bin" \
+    LITHOGRAPH_SQLITE_SOURCE_DIR="$source_dir" \
+    scripts/native-abi-smoke.sh "$extension" "$tokenizer_extension"
+fi
