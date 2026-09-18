@@ -1,6 +1,6 @@
 # SQLite Embedding Provider / Cypher Vector Contract 研究证据
 
-核验记录：2026-09-17 UTC；仓库检查基线 `3ef8844`。本页保存 Phase 13 使用的外部合同、当前仓库观察和采用限制，不定义 Lithograph 产品行为；设计真源见 [Design §11.6](../design.md#116-vector)。
+核验记录：2026-09-18 UTC；仓库检查基线 `1e6e078`。本页保存 Phase 13 使用的外部合同、当前仓库观察和采用限制，不定义 Lithograph 产品行为；设计真源见 [Design §11.6](../design.md#116-vector)。
 
 ## 1. 权威来源
 
@@ -11,8 +11,10 @@
 | S3 | [Cypher 25 `SEARCH`](https://neo4j.com/docs/cypher-manual/25/clauses/search/) | `SEARCH ... VECTOR INDEX ... FOR query_vector` 的 query-vector contract 与 filtered top-k |
 | S4 | [Cypher 25 Index Syntax](https://neo4j.com/docs/cypher-manual/25/indexes/syntax/) | `CREATE VECTOR INDEX` 只索引一个真实 vector property、`WITH` 只增加 filter properties；Full-text/Vector procedure 入口 |
 | S5 | [Cypher 25 Vector values](https://neo4j.com/docs/cypher-manual/25/values-and-types/vector/) | `VECTOR` dimension / coordinate type 与持久 Property 语义 |
+| S6 | [OpenAI Create embeddings](https://developers.openai.com/api/reference/resources/embeddings/methods/create) | OpenAICompatible reference Provider 的 `/embeddings` request/response profile、input/model/dimensions/encoding_format/user 与 token/batch limits |
+| S7 | [OpenAI API authentication](https://developers.openai.com/api/reference/overview#authentication) | Bearer credential、OpenAI-Organization/OpenAI-Project 与 custom request-header boundary |
 
-网页会更新。本页只记录 2026-09-17 核验到的相关边界；Lithograph 的冻结兼容目标仍由仓库 `CY25-2026.08` Profile 与 Design 决定，不把 Neo4j 后续 proprietary/provider behavior 自动变成 Lithograph contract。
+网页会更新。本页只记录 2026-09-18 核验到的相关边界；Lithograph 的冻结兼容目标仍由仓库 `CY25-2026.08` Profile 与 Design 决定，不把 Neo4j/OpenAI 后续 additions 自动变成 Lithograph contract。
 
 ## 2. SQLite 已提供 extension 载体与 connection-local pointer
 
@@ -60,6 +62,12 @@ caller 生成/保存 Vector Property
 
 - S1 只提供 pointer storage/lifetime，不验证任意 Provider struct 的 ABI；Lithograph 必须自己检查 ABI version/size/callbacks。
 - Provider binary、模型文件、远程 endpoint 后面的实际模型 revision 都不由 SQLite client data 版本化。`semanticIdentity` 可以隔离 cache generation，但不能凭数据库文件证明远程服务永不漂移。
-- 本次没有把任何真实 OpenAI/BGE/Ollama extension 当作依赖或已实现事实。Phase 13 应使用 deterministic synthetic provider extension 验证 ABI/load-order/cache/error/cancel；vendor-specific provider artifact 可以在独立需求中实现。
+- Phase 13 现在同时使用 deterministic synthetic provider extension 验证 ABI/load-order/cache/error/cancel，并实现独立 `openai-compatible` reference Provider。后者只遵循 S6 的 Embeddings JSON shape，不能据此声称任意第三方“OpenAI-compatible”服务必然兼容；真实兼容性仍由对应服务实际行为决定。
 - Managed Semantic 的 source text 可能被 Provider 发送到网络；这是 Host 加载/配置该 extension 后授予的 external-I/O authority，不是 Graph View 的认证机制。
 - 本研究没有证明 multi-property text concatenation、chunking、Reranker 或 provider-specific secret/config schema；Design v1 明确不在这些方向提前增加合同。
+
+## 7. OpenAI-compatible profile 的采用边界
+
+S6 的当前 OpenAI Embeddings API 接受 string/string-array 或 token-array `input`、`model`、可选正整数 `dimensions`、`encoding_format = "float"|"base64"` 与可选 `user`；response 的 `data[]` 提供 `index` 与 embedding。官方同时明确空字符串非法、单 input 最多 8192 tokens、单 request 总计最多 300000 tokens、input array 最多 2048 项。Managed Semantic 的 source contract 固定为 String，所以 Provider 不暴露 token-array input；其它静态 request fields 全部由 Design 映射，`dimensions` 由 Semantic Index 顶层拥有并可通过 `send_dimensions` 决定是否发到 HTTP request。
+
+S7 使用 Bearer credential，并支持 `OpenAI-Organization`、`OpenAI-Project` 与 custom request headers；官方建议 custom header values 总量不超过 60 KiB、request headers 总量不超过 64 KiB。Reference Provider 因此支持 `api_key` / `api_key_env`、organization/project 和 custom headers。按照当前产品决定，这些都是 versioned `providerConfig`；Lithograph 不替用户移除 secret。只有 `api_key_env` 实际解析出的环境变量值不进入 SQLite。

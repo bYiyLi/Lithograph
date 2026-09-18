@@ -38,11 +38,11 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 
 ## 3. 当前基线
 
-**状态分界：Phase 00–12 全部 `done`；Phase 13 `ready`。** Phase 11 是在已完成的基础功能/规模验收之上增加的性能专项，不回开Phase 10，也不把Phase 10单次scale通过解释成全场景低延迟保证。Phase 11 已完成format3、persistent Standard Index、邻接keyset、query-owned resolved state/read guard、增量index overlay、实测热点优化以及固定性能机/并发/repository gate。Phase 12 在实现提交 `ec3be9ae26f0d756135cb838008971b1eeb5a4ff` 中闭合原生 FTS5 tokenizer specification、versioned definition、历史/cache、query-time analyzer、失败原子性及 SQL/Native/真实 SQLite 3.45.0/3.53.4 验收；后续 `a76fdbcfb26bfd811c2845a1039b11be88bcae56` 修正 Linux Native ABI gate 对 SQLite 上游 amalgamation warning 的处理。该 revision 的 repository CI 与六目标 hosted Release Matrix 均已通过。
+**状态分界：Phase 00–12 全部 `done`；Phase 13 `in_progress`。** Phase 11 是在已完成的基础功能/规模验收之上增加的性能专项，不回开Phase 10，也不把Phase 10单次scale通过解释成全场景低延迟保证。Phase 11 已完成format3、persistent Standard Index、邻接keyset、query-owned resolved state/read guard、增量index overlay、实测热点优化以及固定性能机/并发/repository gate。Phase 12 在实现提交 `ec3be9ae26f0d756135cb838008971b1eeb5a4ff` 中闭合原生 FTS5 tokenizer specification、versioned definition、历史/cache、query-time analyzer、失败原子性及 SQL/Native/真实 SQLite 3.45.0/3.53.4 验收；后续 `a76fdbcfb26bfd811c2845a1039b11be88bcae56` 修正 Linux Native ABI gate 对 SQLite 上游 amalgamation warning 的处理。该 revision 的 repository CI 与六目标 hosted Release Matrix 均已通过。
 
 **Phase 12 已完成并进入 v0.1.1 发布基线。** [Full-text / FTS5 Tokenizer 扩展](phases/12-fulltext-tokenizer.md) 根据 Design §11.5 接入宿主 connection 已注册 tokenizer 的原生 specification，移除两个旧 analyzer 名称的特殊映射，并闭合配置、历史/cache、query-time analyzer、失败原子性、version publication 与 Native/SQL integration。
 
-**Phase 13 已完成设计与开发计划，当前 `ready`，尚未实现。** [Managed Semantic Vector / Embedding Provider](phases/13-managed-semantic-vector.md) 根据 Design §11.6 保留现有 Raw Vector/Cypher 25 `SEARCH` 不变，并新增 SQLite Embedding Provider contract、Managed Semantic Index、format4 persistent Embedding Result Cache、`db.index.semantic.*` query/rebuild/cache maintenance 与 external-I/O/历史/Graph View 边界。该状态只表示 Design、依赖和 acceptance 已齐全，不表示当前 v0.1.1 已具有 Managed Semantic 能力。
+**Phase 13 当前 `in_progress`。** [Managed Semantic Vector / Embedding Provider](phases/13-managed-semantic-vector.md) 根据 Design §11.6 保留现有 Raw Vector/Cypher 25 `SEARCH` 不变，并新增 SQLite Embedding Provider contract、Managed Semantic Index、format4 persistent Embedding Result Cache、`db.index.semantic.*` query/rebuild/cache maintenance 与 external-I/O/历史/Graph View 边界。当前已开始实现 public `EmbeddingProviderV1` 与独立 `openai-compatible` reference Provider；Semantic Index/query/cache/format4 主体仍未完成，因此当前 v0.1.1 仍不具有 Managed Semantic 能力。
 
 当前仓库已经完成 Phase 00 Engineering Foundation、Phase 01 SQLite Extension Boundary、Phase 02 Version-aware Storage Core、Phase 03 Cypher Frontend and Value Semantics、Phase 04 Read Query Engine、Phase 05 Mutation, Transaction and Commit、Phase 06 Cypher 25 Query Completeness、Phase 07 Schema, Constraint and Standard Indexes、Phase 08 Search and Data Ingestion、Phase 09 Versioned State Operations、Phase 10 Compatibility Closure and Release Hardening、Phase 11 Performance Optimization 与 Phase 12 Full-text / FTS5 Tokenizer 扩展。现有 current-graph engine 已闭合 query composition、aggregation、advanced path、expression/function/value、mutation、versioned Graph Type/Constraint、lookup/range/text/point/full-text/vector index、Raw Vector `SEARCH`、`LOAD CSV` 与 Cypher transaction batching，并在同一 Graph View、version-aware storage、Commit/savepoint 与 SQL Bridge/Native 边界上执行。Phase 10 已完成 deterministic generated/property hardening、EXPLAIN/PROFILE/error compatibility、3,777/3,777 applicable inherited openCypher TCK、crash/recovery fault matrix、format `1 -> 2` preservation/migration、完整 10M Node / 100M Relationship release workload、10,000-conflict Merge Session、repository-wide quality/CI、final architecture/security review，以及 Linux x64/arm64、macOS x64/arm64、Windows x64/arm64 六目标 hosted release artifact acceptance；Phase 12 没有重开或修改该语言 Profile，而是关闭 Full-text provider binding 的后续实现缺口。Phase 13 是新的扩展能力开发，不把尚未实现的 Managed Semantic 写成当前引擎事实。
 
@@ -61,7 +61,7 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 - Phase 10：`done`；
 - Phase 11：`done`；
 - Phase 12：`done`；
-- Phase 13：`ready`；
+- Phase 13：`in_progress`；
 - `docs/development/cypher25-compatibility.md` 保留 Phase 00–12 已执行证据；Full-text family 与 Phase 12 provider supplemental inventory 均已闭合为 `done`。Phase 13 的 `db.index.semantic.*` 是 Lithograph procedure extension，不改变冻结 Cypher 语言 coverage 分母；只有实现和真实验收完成后才追加对应 supplemental evidence，不能预先标记兼容完成。
 
 ## 4. 路线总览
@@ -81,7 +81,7 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 | [10 Compatibility Closure and Release Hardening](phases/10-compatibility-release.md) | `done` | 100% applicable Profile、10M/100M scale、recovery/migration、跨平台 release | 00–09 |
 | [11 Performance Optimization](phases/11-performance-optimization.md) | `done` | format3、persistent index/keyset/query-owned state、性能/压力/quality/CI与六目标hosted Release Matrix全部闭合 | 00–10 |
 | [12 Full-text / FTS5 Tokenizer 扩展](phases/12-fulltext-tokenizer.md) | `done` | 原生 tokenizer specification、Schema/历史/cache、query analyzer、失败原子性与真实 SQLite/Native 扩展验收 | 08、09、11 |
-| [13 Managed Semantic Vector / Embedding Provider](phases/13-managed-semantic-vector.md) | `ready` | 保留 Raw Vector；新增 SQLite Embedding Provider、Semantic Index、format4 Embedding cache、文本 query/rebuild/cache maintenance | 01、07–12 |
+| [13 Managed Semantic Vector / Embedding Provider](phases/13-managed-semantic-vector.md) | `in_progress` | 保留 Raw Vector；新增 SQLite Embedding Provider、Semantic Index、format4 Embedding cache、文本 query/rebuild/cache maintenance | 01、07–12 |
 
 关键依赖原则：**Version-aware graph storage 在 Phase 02 建立，不能拖到后期再 retrofit。** Phase 09 在该 immutable history foundation 上完成 transaction -> Commit 行为：增加 Native explicit transaction，把多个 execution 的最终 net delta 写成一个 Layer/Commit；增加 Merge Session，把长时间 conflict resolution 保存在非历史 operational workspace 中并只在 finalize 形成最终 Merge Commit/ref move；同时增加用户级状态 sidecar/ref 与版本操作，并通过显式 `1 -> 2` migration 增加 Commit Data / Tag / Merge Session storage。这不改变 Phase 02 的 Layer / Commit / Snapshot 核心合同，也不要求重开 Phase 02/05。Phase 13 同样不回开 Phase 08 Raw Vector：它只在既有 Index/History/HNSW foundation 上增加 String -> derived Vector 的 managed path，Raw Vector 继续作为标准 Cypher 25 contract。
 

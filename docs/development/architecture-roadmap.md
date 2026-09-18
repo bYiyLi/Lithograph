@@ -48,10 +48,10 @@ Phase 11 Performance Optimization (done)
 Phase 12 Full-text / FTS5 Tokenizer (done)
         |
         v
-Phase 13 Managed Semantic Vector / Embedding Provider (ready)
+Phase 13 Managed Semantic Vector / Embedding Provider (in_progress)
 ```
 
-Phase 00–12均已完成开发验收；Phase 13 已完成 Design/计划并处于 `ready`，尚未实现。Phase 11的实现、固定性能机验收、并发压力、repository quality/coverage、真实SQLite CI以及Linux x64/arm64、macOS x64/arm64、Windows x64/arm64六目标hosted Release Matrix都已闭合。产品目标行为仍由Design定义，实际执行/验收见 [Phase 11计划](phases/11-performance-optimization.md)。
+Phase 00–12均已完成开发验收；Phase 13 已进入 `in_progress`，当前正在实现 Provider ABI 与 Managed Semantic vertical slice。Phase 11的实现、固定性能机验收、并发压力、repository quality/coverage、真实SQLite CI以及Linux x64/arm64、macOS x64/arm64、Windows x64/arm64六目标hosted Release Matrix都已闭合。产品目标行为仍由Design定义，实际执行/验收见 [Phase 11计划](phases/11-performance-optimization.md)。
 
 Phase 12 的目标由 Design §11.5 定义，当前实现与 FT12-01–20 开发验收已经闭合；依赖 Phase 08/09/11，不重开已完成 Phase。具体实现顺序与证据见 [Phase 12计划](phases/12-fulltext-tokenizer.md)。该成果已经进入 v0.1.1 发布基线，对应 repository CI 与六目标 hosted Release Matrix 均已通过。
 
