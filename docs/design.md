@@ -6,12 +6,14 @@ Phase 00–12 均已实现并完成对应开发验收。Phase 11 已将第 7.8�
 
 第 11.5 节的 FTS5 tokenizer 扩展已由 [Phase 12](development/phases/12-fulltext-tokenizer.md) 实现并完成开发验收。v0.1.0 发布制品仍只有两个硬编码 analyzer；完整的宿主 FTS5 tokenizer specification contract 从 v0.1.1 起进入发布基线。
 
+第 11.6 节进一步定义 Raw Vector 与 Managed Semantic 两套并列能力。Raw Vector 保持现有 Cypher 25 `VECTOR` Property、`CREATE VECTOR INDEX` 与 `SEARCH` 合同；Managed Semantic 新增 SQLite Embedding Provider、versioned Semantic IndexDefinition 与可重建 Embedding cache，不把派生向量伪装成 graph Property，也不修改 Cypher 25 grammar。该新增能力尚未实现，实施与验收由 [Phase 13](development/phases/13-managed-semantic-vector.md) 负责。
+
 ## 1. 产品定义
 
 Lithograph 是一个运行在标准 SQLite 上的、可加载的 Property Graph 数据库扩展。它在同一个 SQLite 数据库文件内提供三项一体化能力：
 
 1. 完整的 Cypher 25 当前图查询与数据库语义；
-2. 面向大规模单机图的 Property Graph 存储、执行、Schema、Index、Full-text 与 Vector Search；
+2. 面向大规模单机图的 Property Graph 存储、执行、Schema、Index、Full-text、Raw Vector Search 与 Managed Semantic Search；
 3. 基于 immutable Commit DAG 的版本化状态图：每个 graph / Schema / Index **逻辑写单元**形成 Commit；普通 auto-commit query 是一个写单元，Native explicit transaction 可以把多个独立 execution 组合成一个写单元。系统同时提供 Branch、Tag、可修改的 Commit Data、显式 empty-delta Commit、可分页 History、Time-travel、Diff、Patch、Merge、Rebase、Squash、Reset 与 Revert。Git / TerminusDB 是机制参考，不限定调用方如何解释这些状态。
 
 ```text
@@ -146,7 +148,7 @@ Lithograph v1 的 canonical graph storage 固定属于目标 connection 的 SQLi
 
 首次初始化生成一个 RFC 9562 UUID 作为 `databaseId`，保存在 `_lithograph_meta`，在该 database 的整个生命周期和 storage migration 中保持不变。Storage format `1` 是首个 canonical graph-storage baseline；加入 Commit Data / Tag sidecar 与 Merge Session operational storage 后，首个公开 release 的 current storage format 固定为 `2`。最终 Extension 对 fresh database 直接创建 format `2`；已存在 format `1` database 只能通过第 14.3 节定义的显式 `1 -> 2` migration 升级，既有 Commit ID 不重算。
 
-上述 format `2` 是 Phase 10 已实现基线。Phase 11 为持久 derived Standard Index 增加 format `3`，其 fresh/init、旧格式读取、exact internal-schema inventory 与迁移边界由第 14.3.1 节统一定义；不能在 format `2` 中静默添加未声明的 reserved table/index。公开 C ABI 和 Cypher Profile 不因此升级。
+上述 format `2` 是 Phase 10 已实现基线。Phase 11 为持久 derived Standard Index 增加 format `3`，其 fresh/init、旧格式读取、exact internal-schema inventory 与迁移边界由第 14.3.1 节统一定义；Phase 13 的 Managed Semantic persistent Embedding cache 再使用第 14.3.2 节定义的 format `4`。任何更高格式都不能在旧 format 中静默添加未声明的 reserved table/index。公开 Native execution ABI 和 Cypher 25 grammar/Profile 不因此升级；Embedding Provider contract 是独立的 additive SQLite-extension ABI。
 
 重复执行 `lithograph_init()` 是幂等的。数据库格式高于当前 Extension 可理解版本时直接返回 `FORMAT_TOO_NEW`，不得自动降级或重写历史。
 
@@ -1301,6 +1303,8 @@ Schema command 在同一个 write transaction 中：
 
 Full-text 按第 11.5.4 节在此边界内验证 tokenizer 的构造能力；完整 FTS corpus 仍按需构建，不把一次配置验证扩大为全图全文索引构建。Canonical write 与 Branch move 的对外成功仍以整个 invocation/transaction 成功为准。
 
+Managed Semantic Index 按第 11.6 节只在此边界执行 connection-local Provider 存在性、ABI 与纯本地配置验证，不调用远程模型、不枚举 corpus、不生成 Embedding。任何 Provider 网络、本地模型推理或批量 materialization 都位于普通 graph/schema writer 之外；因此一次 `SET content = ...` 不会等待外部 Embedding 服务。
+
 ### 11.3 Index 类型
 
 Lithograph 实现 Cypher 25 current-graph index surface：
@@ -1313,6 +1317,8 @@ Lithograph 实现 Cypher 25 current-graph index surface：
 - vector index。
 
 Index definition 是 versioned Schema；physical index content 是 derived cache。历史 Snapshot 缺少对应 physical cache 时允许构建 cache 或使用正确但更慢的 fallback，不得返回错误结果。
+
+除此之外，Lithograph 提供 **Managed Semantic Index** 作为明确的数据库扩展能力。它同样使用 versioned `IndexDefinition` 与全局 index-name namespace，但不是 Cypher 25 `VECTOR INDEX` 的别名：创建和查询只通过第 11.6 节的 `db.index.semantic.*` procedures；`CREATE VECTOR INDEX ... ON (stringProperty)` 永远不会被重新解释成自动 Embedding。`SHOW ALL INDEXES` 可以返回 `type = 'SEMANTIC'`，`SHOW VECTOR INDEXES` 只返回标准 Vector Index；删除继续使用通用 `DROP INDEX <name>`，不新增 `DROP SEMANTIC INDEX` grammar。
 
 ### 11.4 Range / Text / Point
 
@@ -1458,9 +1464,190 @@ SQLite specification quoting、connection-local API、tokenizer flags、v1/v2 �
 
 ### 11.6 Vector
 
-Vector property 保留 dimension 与 coordinate type。Vector index 使用 HNSW ANN architecture，并支持 Cypher 25 vector index metadata、similarity、additional filtering properties 与 `SEARCH` subclause。
+#### 11.6.1 两套并列能力
 
-HNSW physical graph 是 derived cache，可以按 `(index definition, commit)` 重建。Vector cache 的缺失不能改变语义；没有 cache 时可以使用 exact scan 作为 correctness fallback。
+Lithograph 同时保留两套互不替代的向量能力：
+
+1. **Raw Vector**：调用方拥有 `VECTOR` Property。Vector value 是 canonical graph data，随 Node/Relationship Property 一起进入 Commit / Layer / Diff / Merge；调用方负责生成、更新和查询向量。标准 `CREATE VECTOR INDEX`、additional filtering properties 与 Cypher 25 `SEARCH ... VECTOR INDEX ... FOR <vector-expression>` 保持现有语义不变。
+2. **Managed Semantic**：调用方拥有文本 Property；Semantic IndexDefinition 指定一个 Embedding Provider，把文本映射为 derived Vector，再复用 HNSW 相似度检索。生成 Vector 不是 Node/Relationship Property，不进入 Commit/Layer，也不从 Graph View 暴露；删除所有 Semantic derived data 不改变 canonical graph/schema/history，只会使后续查询重新 materialize。
+
+Raw Vector 仍是需要 caller-owned embedding、Vector 本身进入历史、Cypher 25 `SEARCH` filter/composition 或非文本向量数据时的完整路径。Managed Semantic 只解决“文本由数据库托管 Embedding”的当前需求，不包装或废弃 Raw Vector。
+
+Raw Vector property 保留 dimension 与 coordinate type。Vector index 使用 HNSW ANN architecture，并支持 Cypher 25 vector index metadata、similarity、additional filtering properties 与 `SEARCH` subclause。现有 HNSW physical graph 继续是 connection-local TEMP derived cache，可按 `(index definition, commit)` 重建；cache 缺失不能改变语义，没有 cache 时可以使用 exact scan correctness fallback。Phase 13 不把 Raw Vector HNSW 改造成第二套 persistent truth。
+
+#### 11.6.2 Semantic IndexDefinition
+
+一个 Semantic Index v1 固定绑定：
+
+- Node 的一个或多个 Label，或 Relationship 的一个或多个 Type；
+- **一个** source Property；只有最终值为 `STRING` 的 owner 参与索引，缺失、`null` 或其它类型不生成 Semantic entry；
+- `provider: STRING`：精确、区分大小写的 Embedding Provider 注册名；
+- `providerConfig: MAP`：Provider 自己解释并验证的 versioned 非 secret 语义配置；
+- `dimensions: INTEGER > 0`；
+- `similarity: STRING`：复用 Raw Vector Index 已支持的 similarity contract；
+- managed embedding 的输出 coordinate type v1 固定为 `FLOAT32`。
+
+v1 故意只允许一个 source Property，不定义 `title + content` 等隐式拼接、字段名注入、`null` 拼接或 normalization 规则。Embedding 输入是 Property 的精确 UTF-8 String value；Lithograph 不 trim、lowercase、切块或静默截断。未来只有出现真实 multi-source/chunking requirement 时才单独设计其 versioned transform contract。
+
+`providerConfig` 允许 JSON-compatible 的 `null`、BOOLEAN、INTEGER、有限 FLOAT、STRING、LIST 与 STRING-key MAP；Node/Relationship/Path/Point/Temporal/Vector 等运行时值不能进入配置。Lithograph 对其做稳定 canonical encoding、Schema hash、Diff/Patch/Merge 与 cache identity 计算，但不理解 `model`、`normalize`、`deployment` 等 provider-specific key。凭据、token、proxy、device、本机模型路径和其它运行资源不得放入 `providerConfig`；这些属于 Provider runtime。Lithograph 无法从任意 opaque key 名可靠判断 secret，调用方和 Provider 文档必须把 versioned config 限制为可持久化的非 secret 语义配置。
+
+同一个历史 Semantic IndexDefinition 永远绑定同一个 provider name/config/dimensions/similarity。改变任一 versioned 字段属于 Index slot 更新，走正常 Schema history；不在原 definition 上热改配置。Similarity 只决定向量比较，不参与 Embedding Space identity；同一个 Provider/config 生成的 Vector 可以被不同 similarity 的 Semantic Index 复用。
+
+#### 11.6.3 SQLite Embedding Provider Contract
+
+Embedding 实现是普通 SQLite loadable extension，与 Lithograph extension 平级；Lithograph 不建立动态库安装器、目录扫描、下载器或通用 AI plugin framework。Host 可以在同一个 `sqlite3*` connection 上加载 OpenAI-compatible、本地模型或其它 provider extension；每个真正执行 Semantic create validation、query 或 rebuild 的 connection 必须拥有所需注册。
+
+SQLite 3.44.0+ 的 `sqlite3_set_clientdata()` / `sqlite3_get_clientdata()` 用于 connection-local provider pointer binding；Lithograph 的最低 SQLite 3.45.0 已覆盖该 API。每个 Provider 使用 versioned client-data key `lithograph.embedding.v1/<provider-name>` 注册一个 `EmbeddingProviderV1` pointer。Provider extension 可以先于或后于 Lithograph 加载，因为两者只通过同一 SQLite connection 的公开 client-data API 会合；Lithograph 不需要枚举 provider，IndexDefinition 已给出精确 name。
+
+注册前必须先读取同名 key；已存在时返回错误，不允许依赖 `sqlite3_set_clientdata()` 的 replacement 行为静默覆盖另一个 Provider。Provider name 是非空 UTF-8、不得含 NUL，并按 SQLite client-data 的 `strcmp()` 语义区分大小写。Provider state 的 destructor 由注册 extension 交给 SQLite，connection close 时释放。Lithograph 取得 pointer 后至少验证 ABI version、struct size 和必需 callbacks，再调用 Provider；损坏/不兼容 pointer fail closed，不能按另一个 ABI 猜测布局。
+
+`EmbeddingProviderV1` 的最小职责固定为：
+
+```text
+provider name (来自 client-data key)
+provider semanticIdentity() -> stable STRING
+validate(providerConfig, dimensions, FLOAT32) -> local validation only
+embedBatch(exact UTF-8 text[]) -> FLOAT32 vector[]
+cancel/error/lifetime boundary required by the C ABI
+```
+
+`validate` 只能执行 bounded、本地验证；它不得联网、加载大型远程资源或做 corpus Embedding，因为 Schema writer 不能把外部等待包进 Commit transaction。`embedBatch` 可以使用网络或本地模型，必须保持 input/output 数量和顺序，返回每个恰好 `dimensions` 个有限 `FLOAT32` coordinate；数量、维度、NaN/Infinity 或 ABI shape 不符视为 Provider contract failure，不允许写入 cache 或返回部分 Semantic 结果。Provider 可以在 callback 内按自己的 API/GPU 限制进一步 batching；Lithograph 在调用前先对相同 cache key 的文本去重。
+
+`semanticIdentity` 是 **runtime cache-generation identity**，不是 versioned Schema 字段。它必须是非空、bounded、纯本地取得并在一次 provider registration / connection lifetime 内保持不变；需要改变 identity 时应通过新的 provider registration/connection lifecycle 生效，而不是在执行中的 callback 后热切换。Provider 在“同一 provider name + providerConfig 不再代表兼容 embedding space”时必须改变它；Lithograph 把它纳入 Embedding cache key，以防 provider binary/model mapping 升级后复用旧 Vector。它不让 Lithograph 自动证明远程模型长期不漂移：要重现历史 Semantic 结果，部署仍必须固定兼容 Provider implementation、模型版本和外部资源。该边界与 Full-text 中“versioned tokenizer name/args 不等于二进制/词典快照”一致。
+
+SQLite 没有 Full-text FTS5 那样的标准 Embedding Provider API，因此本节只定义当前 Embedding 所需的最小 ABI。未来 Reranker 如果成为真实需求，应定义独立 contract；不得提前把 Tokenizer、Embedding、Reranker 压成一个 `execute(anything)` 通用接口。Provider 外部依据与采用边界见 [Embedding Provider 研究证据](research/embedding-provider-contract.md)。
+
+#### 11.6.4 创建、展示与删除
+
+Managed Semantic 不新增 Cypher grammar。创建使用标准 `CALL <procedure>` 形式调用 Lithograph database procedures：
+
+```cypher
+CALL db.index.semantic.createNodeIndex(
+  'document_semantic',
+  ['Document'],
+  'content',
+  {
+    provider: 'openai',
+    providerConfig: {model: 'text-embedding-3-small'},
+    dimensions: 1536,
+    similarity: 'cosine'
+  }
+)
+```
+
+Relationship 使用：
+
+```text
+db.index.semantic.createRelationshipIndex(
+  indexName :: STRING,
+  relationshipTypes :: LIST<STRING>,
+  sourceProperty :: STRING,
+  options :: MAP
+)
+```
+
+Node 的完整签名固定为 `db.index.semantic.createNodeIndex(indexName :: STRING, labels :: LIST<STRING>, sourceProperty :: STRING, options :: MAP)`；Relationship 对应上面的同形签名。Node 版本第二参数 `labels` 同样是非空 `LIST<STRING>`。Label/Type/name/property 为空、重复 target token、未知 option、非法 config type、dimensions/similarity 不合法、同名 Index 冲突或 Provider 未注册/ABI 不兼容/`validate` 失败，均在发布新 Schema/Branch head 前失败。CREATE 只做本地 Provider validation，不遍历 source data、不调用 `embedBatch`、不创建 persistent Embedding cache entry。
+
+普通 auto-commit 调用形成正常 Schema Commit；Native explicit transaction 可以 staged create/drop Semantic Index，因为 create validation 无 external I/O，最终仍只发布一个 transaction Commit。Patch/Merge/Rebase/Revert 等若产生新增或改变的 Semantic definition，也必须在发布新 Schema 前执行同一 provider/validate 检查；纯历史 inspection、`SHOW INDEXES`、`DROP INDEX`、纯 ref move 和真正没有改变该 definition 的路径不要求 Provider 当前可用。
+
+Semantic Index 与其它 Index 共用名称 namespace、Schema hash、Diff/Patch/Merge slot。`SHOW ALL INDEXES` 返回 source、provider 与 versioned options；不会暴露 runtime credential、Provider pointer、semanticIdentity 或 cache stats。`DROP INDEX name` 删除逻辑 definition 并形成正常 Schema history；Embedding result cache 不是某个 Index 私有资源，因此 DROP 不扫描或同步删除共享 cache entry。
+
+#### 11.6.5 文本查询 surface
+
+Managed Semantic query 同样不扩展 `SEARCH` grammar，不提供 `lithograph.vector.embed()` 之类 Lithograph-specific expression。Raw Vector 继续使用 Cypher 25 `SEARCH`；文本查询通过：
+
+```cypher
+CALL db.index.semantic.queryNodes(
+  'document_semantic',
+  $query,
+  {skip: 0, limit: 10}
+)
+YIELD node, score
+RETURN node, score
+```
+
+完整签名固定为 `db.index.semantic.queryNodes(indexName :: STRING, queryString :: STRING, options :: MAP) :: (node :: NODE, score :: FLOAT)` 与 `db.index.semantic.queryRelationships(indexName :: STRING, queryString :: STRING, options :: MAP) :: (relationship :: RELATIONSHIP, score :: FLOAT)`。`limit` 是 `options` 中必需的非负 INTEGER，`skip` 省略时为 `0`；未知 key、错误类型和显式 `null` 返回 `INVALID_ARGUMENT`。v1 不提供 semantic-specific arbitrary filter map、query-time provider/model override 或 additional filtering properties：需要 Cypher 25 `SEARCH WHERE`、复杂 top-k filtering/composition 时使用 Raw Vector path。Post-`YIELD` filter 只过滤 procedure 已返回结果，不得描述成“filtered top-k”。
+
+查询先按目标 Snapshot 解析 Semantic IndexDefinition，再使用该 definition 的 provider/config 生成 query Vector；调用方不能在 query 时重复或覆盖 model/dimensions/similarity。当前 Graph View 必须在候选可见性与 top-k/skip/limit 之前生效；Relationship 继续检查 relationship 与 endpoints 的可见性。`options.at` 选择历史 Snapshot 时，使用历史 IndexDefinition；不能借用 current Branch 的 provider config 或 HNSW cache。历史 definition 的 Provider 当前缺失时，仅实际 Semantic query/rebuild 失败，普通 graph read、Schema inspection 与 `SHOW INDEXES` 仍可工作。
+
+Managed Semantic query 是拥有 network/local-model external-I/O authority 的 execution surface，因此 `lithograph_rows()` 返回 `READ_ONLY_ADAPTER`；普通 `lithograph()` 与 Native execution 可用。Native explicit transaction 从 `tx_begin` 起持有 single-writer ownership，`tx_execute` 不接受 `db.index.semantic.query*` / `rebuild`，在开始 Provider I/O 前返回 `TRANSACTION_BOUNDARY_REQUIRED`；普通 graph mutation 与 Semantic definition 的纯本地 Schema validation 不受影响。
+
+查询不能为了 cache miss 隐式写 `main`。它优先读取 persistent source Embedding cache，再使用 connection-local query Embedding LRU / TEMP Semantic materialization；仍缺少的 exact text 才调用 Provider。query-only text 的新 Embedding 默认只进入 connection-local memory cache，不写 persistent table，避免任意搜索词成为数据库持久痕迹。Source cache 未预热时，查询可以对当前 Graph View 中实际需要的 source text 做 bounded provider batching 并在 TEMP 中完成正确 fallback；失败、取消或任一必要文本无法 Embedding 时整个 query 失败，不把相关 owner 静默漏掉形成“成功的部分 top-k”。
+
+由 on-demand Provider miss 构建的 TEMP owner/vector/HNSW 如果只覆盖当前 Graph View，可见性 identity 必须进入 cache key，或直接限制为 query-local lifetime；它绝不能被标记成“完整 Snapshot + IndexDefinition”的全图 HNSW 供更宽 Graph View / 无 view 查询复用。反过来，如果全部 owner 的 embedding 已来自不需要 external call 的完整 persistent cache，可以构建完整 TEMP HNSW，再按现有 Vector search 的 visibility-before-top-k 规则查询。
+
+Semantic query/rebuild 保持现有 read guard pin 住目标 immutable Snapshot。Provider 等待不持有 SQLite single-writer ownership，但长 external call 可能延长 read view / WAL pin；Phase 13 的 mixed-workload/resource 验收必须测量这项成本，不能把“没有 writer hold”描述成零并发代价。
+
+#### 11.6.6 Persistent Embedding Result Cache
+
+为避免不同 owner、Index、Branch/Commit 中的相同文本反复调用外部 Provider，format 4 增加 database-local persistent **Embedding Result Cache**。它和 HNSW 是两层不同 derived data：Embedding cache 回答“某个 embedding space 下这段 exact text 的 Vector 是什么”；TEMP HNSW 回答“某个 Snapshot + IndexDefinition 中哪些 owner 最相似”。两者都不是 correctness truth，但 Embedding cache 可跨 Index/Commit/connection 复用。
+
+Cache key 固定由：
+
+```text
+space_hash = H(
+  provider name,
+  canonical providerConfig,
+  dimensions,
+  coordinate type = FLOAT32,
+  provider semanticIdentity,
+  embedding-cache encoding version
+)
+
+text_hash = H(exact UTF-8 text bytes)
+
+key = (space_hash, text_hash)
+```
+
+Index name、Commit/Branch、Node/Relationship identity、similarity、API key、proxy、timeout、retry 等都不参与 key。相同 embedding space + exact text 即使来自不同 Semantic Index/owner/history，也只需要一个 cached Vector；不同 provider/model/config/semanticIdentity 必须隔离。Cache 不保存 query-only 原文，也不要求复制 source 原文；`text_hash` 使用 Lithograph 既有 domain-separated cryptographic hashing discipline，payload 额外保存 text byte length、dimension/coordinate metadata 与 Vector 以做结构检查。
+
+Persistent cache 只在拥有明确 maintenance/write boundary 的路径填充。`db.index.semantic.rebuild(name, version)` 先 pin 目标 immutable Snapshot，枚举该 definition 的 String source、按 cache key 去重并读取已有 cache；Provider miss 的 `embedBatch` 发生在 SQLite single-writer ownership 之外。全部需要的结果成功后，短 write transaction 重新验证目标 Commit/definition 仍可解析，原子插入缺失 cache entries、执行容量淘汰并完成当前 connection 的 TEMP Semantic/HNSW materialization；它不创建 Commit、不移动 ref。Provider failure/cancel、target 被 GC、config mismatch 或 cache publish failure 不留下可复用半成品。
+
+普通 `query*` 只读 persistent cache；其 Provider miss 使用 bounded connection-local memory/TEMP，不隐式更新 `main`。这样普通 query 继续满足“read 不持久化 derived data”的现有 invariant；需要跨 connection 消除 API 重算时由调用方显式 `rebuild`/预热。一个 Semantic Index source 改变后，旧 exact text cache entry仍可被其它 owner/history复用；新的 text 在下一次 rebuild 前可以由 query 临时计算。
+
+构建/重建前先对 source text 去重，并以 Provider batch contract 调用；Provider 自己可以再按 remote/GPU limit 分批。只缓存完整成功、维度和有限值都通过检查的 Vector；timeout、429/5xx、interrupt、resource failure、ABI violation 等错误不做 negative cache。
+
+#### 11.6.7 Cache policy、清理与运维
+
+Persistent Embedding cache 的容量策略是 **database-level operational config**，不属于任何 IndexDefinition，不进入 Commit/Schema hash、Diff/Patch/Merge。Format 4 在 `_lithograph_meta` 声明两项受支持 key：`semantic.embedding_cache.enabled`（BOOLEAN，默认 `true`）和 `semantic.embedding_cache.max_bytes`（positive INTEGER，默认 `1_073_741_824`，即 1 GiB）。用户显式设置后该值持久化到 database；更换 Branch/历史 Snapshot 不改变它。这个默认值是当前版本的 operations policy，不参与 Commit/Schema/storage identity，未来版本可以调整 fresh/default policy，但已显式保存的 database 配置不得被升级静默覆盖。
+
+公开维护 procedures：
+
+```text
+db.index.semantic.cache.configure(options :: MAP)
+  -> effective enabled/maxBytes
+
+db.index.semantic.cache.stats()
+  -> enabled, maxBytes, usedBytes, entries, spaces
+
+db.index.semantic.cache.clear()
+  -> deletedEntries, releasedPayloadBytes
+
+db.index.semantic.rebuild(name :: STRING, version :: STRING)
+  -> name, commit, indexedEntities, embeddedTexts, cacheHits
+```
+
+`configure` 只接受 `enabled` / `maxBytes`；未知 key、错误类型或 enabled=true 且非正 maxBytes 返回 `INVALID_ARGUMENT`。把 `maxBytes` 降到当前 `usedBytes` 以下时，configure 在同一 operational transaction 内按 oldest-entry/FIFO 立即逐出到新预算以内再返回。v1 不公开 TTL、refresh-after、per-provider quota 或严格 LRU 配置：Embedding Space identity 已处理 provider/config 变化，TTL 只会让相同输入周期性重新产生外部费用。Persistent cache 采用写入时的 bounded oldest-entry/FIFO eviction；普通 cache hit 不更新 `last_used_at`，避免 read query 为 LRU 触碰 `main`。
+
+`enabled=false` 时 persistent cache 不读不写，现有 rows 保留直到显式 `clear` 或后续重新启用后的容量维护；Semantic query/rebuild 仍可用 Provider + TEMP/memory 正确执行。`clear` 只删除 Embedding Result Cache，不删除 canonical graph/schema/history，也不要求删除当前 connection 已经 ready 的 TEMP HNSW；后续 rebuild/query miss 可以重新生成。DELETE 后 SQLite page 可供后续复用但文件不保证立即缩小，Lithograph 不自动运行 `VACUUM`。
+
+Query text 使用独立的小型 connection-local memory LRU；同 exact text 若已经存在 persistent source cache 可以直接命中，但 query-only miss 默认不写 persistent cache。Connection close 后 query LRU 消失。Canonical `lithograph.gc()` 继续可以清理不可达 Commit 对应的 derived index generation；共享 Embedding Result Cache 不以单一 Index reachability 作为 ownership，主要通过 maxBytes eviction 与显式 `clear` 回收，避免为“某个 Index 被 DROP”扫描并误删其它 Index 仍可复用的 embedding space。
+
+`cache.configure`、`cache.clear` 与 `rebuild` 是明确的 operational-write / maintenance procedures：只能由 `lithograph()` 或普通 Native execution 独立调用，`lithograph_rows()` 返回 `READ_ONLY_ADAPTER`，Native explicit transaction / transaction-owning subquery / Merge candidate 返回 `TRANSACTION_BOUNDARY_REQUIRED`；它们不接受 `graphView`，`rebuild` 自己的 `version` 使用现有 `commit/`、`branch/`、`tag/` descriptor 并拒绝同时使用 `options.at`。这三类成功执行都不创建 Commit、不移动 ref，`summary.queryType = "version"`、`summary.commit = null`、graph/schema mutation counters 为 `0`。`cache.stats()` 是无副作用 read procedure，可从 streaming adapter 调用。`queryNodes/queryRelationships` 的 result contract仍是 graph read，`summary.queryType = "read"`，`summary.commit` 是执行开始时 pin 的目标 Commit；其 external Provider 调用不改变这一点。
+
+#### 11.6.8 Failure、历史与可复现性边界
+
+Provider 未注册、ABI/version 不兼容或 config validation 失败：新增/改变 Semantic definition 的 Schema publication 失败；已有 definition 的普通历史/SHOW inspection 不受阻。**每次实际 Semantic query/rebuild 都必须先解析并验证目标 Provider 与当前 `semanticIdentity`，即使相关 persistent/TEMP cache 看起来已经完整也不能让“Provider 未加载时能否查询”取决于偶然 cache 状态。** Provider 缺失时明确失败，不静默换 provider/model，不返回其它 Commit 的 cache，也不把旧向量当成当前 source 的结果。
+
+Remote Provider error 通过既有 `IO_ERROR`，内存/大小/磁盘资源问题通过 `RESOURCE_ERROR`，取消保留 SQLite interrupt；非法用户 options/config shape 使用 `INVALID_ARGUMENT` / Schema command 对应的稳定错误。Provider 返回违反 ABI、数量、维度或 finite-number contract 的 payload fail closed，不写 cache；内部 cache payload 损坏视为 derived corruption，失效并回到可正确重算路径，不能用坏 Vector 返回结果。
+
+Versioned Semantic IndexDefinition 固定“应该使用的 provider name/config 和向量合同”，但不快照第三方二进制、本地模型文件或远程模型服务。相同 definition 在不同时间若运行时 provider 对同一 semanticIdentity 实际产生不同 Vector，Lithograph 无法从 SQLite 文件独立证明 bit-identical reproducibility；需要历史精确复现的应用必须 pin provider implementation、model/revision 与外部资源，或者使用 Raw Vector 把 Vector 本身作为 canonical Property 进入历史。
+
+#### 11.6.9 设计取舍
+
+Managed Semantic 使用单独 Index kind + procedures，而不是重载 `CREATE VECTOR INDEX`：Cypher 25 Vector Index 明确定义为对一个真实 vector property 建索引，`SEARCH` 的 `FOR` 接受 Vector/List expression；把 String property 偷换为自动 Embedding 会改变标准 observable semantics。Procedure surface 使用既有 `CALL` mechanism，但 `db.index.semantic.*` 名称本身是 Lithograph 扩展，不宣称属于 Cypher 25 compatibility matrix。
+
+把 Provider 实现留给 SQLite extension、只让 Lithograph 定义最小 Embedding ABI，可以同时安装多个 provider并隔离 vendor-specific config，同时避免 Core 直接依赖 OpenAI/HTTP/GPU runtime。Persistent cache 只保存 text->vector derived result，不把外部 I/O 塞进 graph write；代价是 Semantic query 在未预热 cache 时可能产生外部延迟/费用，且跨 runtime 的可复现性取决于 Provider identity discipline。需要完全可控的历史向量仍使用 Raw Vector。
 
 ### 11.7 Persistent Standard Index Base + Delta（Phase 11）
 
@@ -1558,11 +1745,11 @@ Cache失效在首行输出前被发现时，可以切换canonical fallback重新
 
 ## 12. LOAD CSV 与 External I/O
 
-`LOAD CSV` 支持 `file://`、`http://` 与 `https://` source。读取权限继承宿主进程的 OS / network authority；Lithograph 不注入隐藏 credentials。
+`LOAD CSV` 支持 `file://`、`http://` 与 `https://` source。Managed Semantic 的 Embedding Provider 同样可能拥有 network / local-model external-I/O authority。两者的读取/调用权限都继承宿主进程和实际 SQLite extension runtime；Lithograph 不注入隐藏 credentials。
 
 I/O error、malformed CSV、type/constraint error 按 Cypher query failure 传播。普通 `LOAD CSV` 位于当前 query transaction；`CALL ... IN TRANSACTIONS` 使用第 9.6 节 transaction semantics。
 
-Native explicit transaction 已从 `tx_begin` 起持有 single-writer ownership，因此不接受 `LOAD CSV`；`tx_execute` 在 external I/O 开始前返回 `TRANSACTION_BOUNDARY_REQUIRED` 并按第 9.2 节 fail-closed abort。需要批量导入时使用普通 `LOAD CSV` 或 Cypher `IN TRANSACTIONS`，不把网络/文件等待时间包进 multi-execution version-atomicity boundary。
+Native explicit transaction 已从 `tx_begin` 起持有 single-writer ownership，因此不接受 `LOAD CSV` 或 `db.index.semantic.query*` / `db.index.semantic.rebuild`；`tx_execute` 在 external I/O 开始前返回 `TRANSACTION_BOUNDARY_REQUIRED` 并按第 9.2 节 fail-closed abort。需要批量导入时使用普通 `LOAD CSV` 或 Cypher `IN TRANSACTIONS`；需要 Semantic query/rebuild 时使用独立普通 execution，不把网络/文件/model 等待时间包进 multi-execution version-atomicity boundary。Semantic Index create/drop 的纯本地 Schema operation 不属于该 external-I/O 禁止项。
 
 ## 13. Result 与 Error Contract
 
@@ -1706,6 +1893,7 @@ Native API 返回 SQLite primary result code + 结构化 `error_json`；SQL Brid
 - Relationship endpoint 在对应 Snapshot 存在；
 - dictionary ID 唯一且 name 唯一；
 - checkpoint 与 derived index 声明的 Commit 可解析；
+- format 4 的 Embedding cache table/index shape 与 operational metadata key 类型合法；cache payload 的 dimension/coordinate/vector encoding 可解析。单个 cache row payload 损坏属于可删除 derived corruption，不升级为 canonical history corruption；reserved table/index shape 被篡改仍是 `STORAGE_ERROR`；
 - internal storage format 与 Extension 兼容。
 
 上述完整检查是显式 maintenance/integrity surface，不是每个普通 query、graph/version API、Native `tx_begin` / `tx_execute` 或 validation call 的隐式前置全库扫描。普通 initialized gate 只执行第 4.1 节定义、可在 bounded metadata/schema cost 内完成的结构性校验，包括 metadata marker、storage format、reserved internal-schema inventory、TEMP internal trigger 与 canonical table/index shape；Commit/Layer/Schema hash 重算、完整 DAG/ref/referential/checkpoint consistency 属于显式 `lithograph_integrity_check()`、初始化/迁移验证和 recovery/maintenance gate。需要证明完整 immutable history 未被离线篡改时，调用方必须显式运行 `lithograph_integrity_check()`。该边界不降低 corruption detection：显式 integrity surface 仍执行完整检查，运行时访问自身触及的 canonical object 也继续 fail closed；它只禁止普通 API 每次 invocation 重复扫描全部 canonical history，否则 read/write latency 会随全图/全历史线性放大并违反第 17 节 large-scale invariant。
@@ -1743,6 +1931,36 @@ Phase 10 的 format `2` 保持已实现历史基线。Phase 11 已完成实现�
 - Migration 只增加空 derived structures 和更新 metadata；已有必须执行的 integrity validation 不被省略，但不把全量 cache build 混入 migration。后续新 index DDL 或显式 rebuild 填充内容；普通只读查询可先走 fallback。
 - 初始化/迁移、exact-schema collision/TEMP trigger、reopen、crash rollback、mixed-format Commit DAG、GC 与六平台 interoperability fixtures 全部需要扩展到 format `3`。不能因数据可重建就免除 storage-format 变更的测试。
 
+### 14.3.2 Managed Semantic Storage Format 4（Phase 13）
+
+Format `3` 保持 v0.1.1 已发布基线。Phase 13 为第 11.6 节 persistent Embedding Result Cache 增加 format `4`；这次 migration 只增加可删除 derived cache 与明确允许的 operational metadata key，不改变 Raw Vector Property、HNSW TEMP layout 或 canonical graph/version encoding。
+
+Format `4` 增加一张 `main` reserved table，逻辑字段固定为：
+
+```text
+_lithograph_embedding_cache
+  entry_id INTEGER PRIMARY KEY AUTOINCREMENT
+  space_hash BLOB(32) NOT NULL
+  text_hash BLOB(32) NOT NULL
+  text_bytes INTEGER NOT NULL
+  dimension INTEGER NOT NULL
+  coordinate_type INTEGER NOT NULL   -- v1 managed semantic 只写 FLOAT32
+  vector_blob BLOB NOT NULL
+  payload_bytes INTEGER NOT NULL
+  UNIQUE(space_hash, text_hash)
+```
+
+`entry_id` 只提供 database-local FIFO eviction 顺序，不参与任何 canonical hash/Schema/history identity，也不得被 API 当成稳定业务 ID。`payload_bytes` 是 capacity accounting 元数据；读取 entry 前仍验证实际 blob/dimension/type，不因 counter 正常就信任损坏 payload。Exact DDL、UNIQUE backing index、reserved inventory 与 migration schema 常量必须由 storage layer 单一来源生成并检查，不运行时按 Provider/Index 名创建表。
+
+`_lithograph_meta` 在 format `4` 额外允许 `semantic.embedding_cache.enabled` 与 `semantic.embedding_cache.max_bytes` operational keys。它们不进入 Commit/Layer/Schema hash，也不随 Branch/Tag/time-travel 改变；`cache.configure` 只修改这两个 key。Fresh/migration 未显式覆盖时使用第 11.6.7 节定义的当前默认 `enabled=true` / `maxBytes=1_073_741_824`；`cache.stats()` 始终返回 effective values。
+
+- Fresh database 的显式 `lithograph_init()` 创建 format `4`；format `3` 的显式 init 原子执行 `3 -> 4`，format `1/2` 按已有链在同一外层 migration transaction 完成到 `4`。失败保留原格式和原 inventory。
+- Migration 只创建空 Embedding cache table/metadata policy，不扫描 graph、不调用 Embedding Provider、不构建 Semantic/HNSW cache，也不修改任何历史 Commit/Schema hash。
+- 新 Engine 在尚未显式 init 升级的 format `1/2/3` 上继续按各自 legacy contract 读取已有 Raw Vector/历史数据；创建 Semantic Index、持久化 Embedding cache 或其它需要 format `4` reserved inventory 的 operation 返回 `STORAGE_ERROR` 并要求显式 `lithograph_init()`。普通 Raw Vector read/SEARCH 不因为 Phase 13 自动要求 semantic provider。
+- maximum-format-3 的旧 Engine 遇到 format `4` 按 `FORMAT_TOO_NEW` fail closed；不能通过删 `_lithograph_embedding_cache` 或手改 metadata 做 downgrade。
+- Cache `clear`/FIFO eviction/rebuild publish 都在短 SQLite transaction/savepoint 中保持 table 与 metadata 自洽；crash 后允许旧完整 cache set 或新完整 batch，不允许半写 vector blob 被标记为可用。
+- Format 4 的 minimum/current SQLite real-load、migration/reopen/read-only、crash rollback、exact inventory、legacy format 与六平台 artifact acceptance 进入 Phase 13 验收。Derived data 可重建不等于 storage-format gate 可以省略。
+
 ## 15. Deployment 与 Runtime Boundary
 
 ### 15.1 Implementation Language 与 SQLite ABI
@@ -1759,6 +1977,7 @@ Rust 负责 parser/semantic model、planner、executor、version engine、typed 
 
 - loadable extension support；
 - FTS5；
+- `sqlite3_get_clientdata()` / `sqlite3_set_clientdata()` connection client-data API，用于 Phase 13 Embedding Provider binding；
 - thread-safety 与 transaction behavior 符合 SQLite 官方公开 API。
 
 Lithograph 不静默修改宿主的 journal mode、synchronous level 或其它 durability PRAGMA。
@@ -1779,6 +1998,10 @@ Windows x86_64, arm64
 
 Lithograph 是 embedded extension，没有独立 account / role / authentication layer。读取和写入数据库文件、`LOAD CSV` 文件、HTTP(S) 与加载 Extension 的权限都继承宿主进程和 SQLite connection。
 
+Managed Semantic Provider 可能把 source/query String 发送给网络服务或本地模型 runtime；加载和配置该 Provider 等价于 Host 主动授予相应外部处理能力。Lithograph 不从 IndexDefinition 读取 API key，也不把 credential 写入 Commit/cache；Provider-specific secret/resource lifecycle 由 Host/Provider extension 负责。Semantic Index `providerConfig` 会进入 versioned Schema 并可被 SHOW/history 看到，因此调用方不得把 secret 放入 opaque config。
+
+`graphView` 仍不是 authorization boundary，但 Managed Semantic query 的 on-demand fallback 只对本次 Graph View 中可见的候选 source text 发起 Provider 调用；它不能为了建立全图 HNSW 而在受限 query 中顺带把不可见 owner 的文本发送给外部 Provider。需要预热整个 Index 的 `db.index.semantic.rebuild` 是显式 maintenance surface，不接受 `graphView`，由拥有完整 database execution authority 的调用方执行。
+
 `graphView` 不是 authorization boundary：它只约束一次 execution 的可见 Property Subgraph。能够直接调用 Lithograph 且自行选择 options 的主体可以省略该 option 访问完整 graph；需要强制隔离的上层必须控制 execution surface 与 option construction。
 
 执行 Cypher、初始化、migration、version mutation 和 integrity-maintenance 的 SQL entrypoints 注册为 direct-only surface，不能从持久化 trigger/view/schema expression 隐式触发。纯信息函数只有在确认无副作用后才可注册为 innocuous。
@@ -1796,6 +2019,7 @@ Lithograph 是 embedded extension，没有独立 account / role / authentication
 - streaming query memory 与 executor batch / semantic barrier 相关，不与最终 row count 线性增长；
 - historical query 从 checkpoint + bounded overlay 解析，不要求从 Root 重放全部 history；
 - derived index / checkpoint 可 rebuild，不阻塞 canonical history correctness；
+- Managed Semantic 对重复 exact text 必须先做 embedding-space cache lookup + batch 去重；在固定 Provider/config 下，将同一文本复制到 N 个 owner 不得导致 N 次外部 Provider call。普通 query cache miss 只做 bounded TEMP/memory materialization，persistent cache 由显式 rebuild/maintenance 写入；
 - planner statistics 可以增量刷新，不能要求每个 query 扫描全图计算 cardinality；
 - Graph View 不能通过预先 materialize 整个子图实现；scan/seek/expand/search 必须在现有 Snapshot access path 上按需执行 visibility check，且不得因 view 导致本可 seek 的查询退化为无条件全图扫描；
 - 10M Node / 100M Relationship benchmark tier 必须作为 release hardening 的真实规模验证，覆盖 traversal、indexed lookup、write、history、diff 与 search；通过条件是正确完成、无 OOM、无意外全图扫描，并建立可持续 regression baseline。
@@ -1937,6 +2161,13 @@ Mixed-workload 验证覆盖1/4/8个 reader与一个 writer、不同 Graph View�
 - 备选：继续只用 TEMP、每个 Commit 复制完整 index、把 physical cache 纳入 canonical history、引入后台 server。
 - 取舍：付出 derived disk space、generation cleanup 与一次显式2→3迁移；换取 reopen可复用和小delta不全量重建。缓存确实缺失时仍有 fallback/build 成本，显式全量 rebuild 仍可能持有长 writer，不能隐瞒。
 
+### D14 Raw Vector 与 Managed Semantic 并列，Provider 留在 SQLite Extension
+
+- 决定：保留 Cypher 25 Raw Vector Property/Index/`SEARCH` 全部语义，另加一个非 grammar 的 `db.index.semantic.*` managed surface。Semantic source 是一个 String Property，派生 Vector 只存在于 derived materialization；具体 Embedding 由同 connection 上的普通 SQLite loadable extension 按 `EmbeddingProviderV1` 提供，Lithograph Core 不内置 vendor/model runtime。Persistent text->Vector cache 使用 format 4，并以 embedding-space + exact-text hash 去重；普通 graph mutation 永不调用 Provider。
+- 依据：标准 Vector Index 明确索引真实 vector property，Cypher 25 `SEARCH` 接受 query Vector/List；把 String `ON (...)` 偷换为自动 Embedding 会创建 Lithograph dialect/语义差异。SQLite 已提供 loadable extension 与 connection client-data pointer，最低 3.45.0 可直接复用；当前需求只缺 Embedding contract，不需要第二套 plugin loader。外部 API 成本又要求跨 owner/index/history 复用 exact text 的 Vector，而该结果不应成为 canonical graph truth。
+- 备选：废弃 Vector Property统一改自动 Embedding；给 Cypher 增加 `CREATE SEMANTIC INDEX` / `FOR TEXT`；让 KG OS 或应用维护 hidden vector Property；在 Lithograph Core 内置 OpenAI/HTTP/GPU；普通 query 隐式写 persistent cache；做万能 Tokenizer/Embedding/Reranker plugin ABI。
+- 取舍：产品存在 Raw Vector 与 Managed Semantic 两个明确入口，Semantic query在 cache 未预热时可能产生 external-I/O cost，历史 bit-identical rebuild 依赖部署固定 Provider runtime；换取的是标准 Cypher Vector 兼容不被破坏、任意正常 Cypher text mutation 不会留下 stale hidden vector、Provider 可替换/并存、重复文本能共享 cache，且 graph write 不被网络 latency 占住 writer。需要 Vector 本身成为历史真源或完全可复现时继续使用 Raw Vector。
+
 ## 19. 参考基线
 
 外部项目只提供 evidence 和实现参考，不覆盖本文设计：
@@ -1953,3 +2184,5 @@ Mixed-workload 验证覆盖1/4/8个 reader与一个 writer、不同 Graph View�
 外部研究证据的快照与采用边界另见 `docs/research/reference-baseline.md`。
 
 Phase 11 的当前实现/性能观察、SQLite row-value pagination、INDEXED BY、read-transaction 与 statement-counter 依据及不采用边界见 [性能证据](research/phase11-performance-evidence.md)。
+
+Phase 13 的 SQLite client-data、loadable-extension、Cypher 25 Vector Index/`SEARCH` 边界与 Provider 适用限制见 [Embedding Provider 研究证据](research/embedding-provider-contract.md)。

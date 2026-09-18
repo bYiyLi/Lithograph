@@ -1,0 +1,65 @@
+# SQLite Embedding Provider / Cypher Vector Contract 研究证据
+
+核验记录：2026-09-17 UTC；仓库检查基线 `3ef8844`。本页保存 Phase 13 使用的外部合同、当前仓库观察和采用限制，不定义 Lithograph 产品行为；设计真源见 [Design §11.6](../design.md#116-vector)。
+
+## 1. 权威来源
+
+| 标识 | 来源 | 本次用途 |
+| --- | --- | --- |
+| S1 | [SQLite Database Connection Client Data](https://www.sqlite.org/c3ref/get_clientdata.html) | connection-local named pointer、destructor、case-sensitive name、3.44.0+ availability 与不可枚举边界 |
+| S2 | [SQLite Run-Time Loadable Extensions](https://www.sqlite.org/loadext.html) | 第三方能力以普通 SQLite shared-library extension 加载、共享目标 `sqlite3*` connection |
+| S3 | [Cypher 25 `SEARCH`](https://neo4j.com/docs/cypher-manual/25/clauses/search/) | `SEARCH ... VECTOR INDEX ... FOR query_vector` 的 query-vector contract 与 filtered top-k |
+| S4 | [Cypher 25 Index Syntax](https://neo4j.com/docs/cypher-manual/25/indexes/syntax/) | `CREATE VECTOR INDEX` 只索引一个真实 vector property、`WITH` 只增加 filter properties；Full-text/Vector procedure 入口 |
+| S5 | [Cypher 25 Vector values](https://neo4j.com/docs/cypher-manual/25/values-and-types/vector/) | `VECTOR` dimension / coordinate type 与持久 Property 语义 |
+
+网页会更新。本页只记录 2026-09-17 核验到的相关边界；Lithograph 的冻结兼容目标仍由仓库 `CY25-2026.08` Profile 与 Design 决定，不把 Neo4j 后续 proprietary/provider behavior 自动变成 Lithograph contract。
+
+## 2. SQLite 已提供 extension 载体与 connection-local pointer
+
+S2 规定 SQLite loadable extension 是独立 shared library / DLL，通过目标 database connection 加载，并可注册应用函数、virtual table 等扩展能力。由此可以让 Lithograph extension 与 Embedding provider extension 作为同一个 `sqlite3*` 上的平级扩展，而不需要 Lithograph 再实现动态库 loader、插件目录或独立 server。
+
+S1 的 `sqlite3_set_clientdata()` / `sqlite3_get_clientdata()` 可以在一个 database connection 上按 case-sensitive name 关联 pointer；replacement 或 connection close 会调用注册时提供的 destructor。该 API 从 SQLite 3.44.0 起可用，低于 Lithograph 当前最低 SQLite 3.45.0 的门槛，因此 Phase 13 不需要提高最低 SQLite 版本。
+
+S1 同时明确 client data 不是大规模 key/value store：当前实现使用 linked list，典型设计只放少量 names，也没有 enumeration API。因此 Phase 13 只用它保存实际加载的少量 Provider pointer；不会把文本/向量 cache entry 塞进 client data，也不依赖运行时枚举来解释历史 IndexDefinition。IndexDefinition 自己给出精确 provider name，Lithograph 按 versioned key 直接 lookup。
+
+`sqlite3_set_clientdata()` 对同名调用会替换旧 pointer并触发旧 destructor，这不适合 Provider identity。Lithograph contract 因此要求 provider 注册前先 `get_clientdata()` 检测冲突并拒绝 duplicate；该规则来自产品一致性要求，不是 SQLite 自动提供的“禁止覆盖”语义。
+
+## 3. SQLite 没有 FTS5 同类的标准 Embedding Provider API
+
+SQLite FTS5 已经拥有 tokenizer registration/lookup contract，因此 Full-text 可以直接委托宿主注册 tokenizer。S1/S2 提供的是通用 extension/client-data 机制，不定义 `register_embedding_provider`、Embedding input/output shape、模型配置、维度或批量结果错误语义。
+
+因此 Phase 13 需要一个 Lithograph-owned、版本化且尽量小的 `EmbeddingProviderV1` C contract，负责 `validate`、batch text -> vector、semantic/cache identity、错误/取消和生命周期；Provider 本身仍是普通 SQLite extension。这个 ABI 只解决已经存在的 Managed Semantic 需求，不自动扩张为 Tokenizer/Reranker/通用 AI plugin framework。
+
+## 4. 标准 Vector Index 不能被 String source 偷换
+
+S4 的 Cypher 25 Vector Index 只索引一个 property；该 property 是 Vector/List 数值空间，`WITH` 添加的是可在 `SEARCH WHERE` 中使用的额外 filter properties，不是第二个 vector/source property。S3 的 `query_vector` 是任何最终求值为 `VECTOR` 或数值 LIST 的表达式。
+
+所以已有 Raw Vector 的标准闭环是：
+
+```text
+caller 生成/保存 Vector Property
+ -> CREATE VECTOR INDEX ON (n.embedding)
+ -> SEARCH ... FOR $queryVector
+```
+
+如果 Lithograph 把 `CREATE VECTOR INDEX ... ON (n.content)` 中的 String 自动送给 Embedding Provider，就会改变该标准 observable semantics。Phase 13 因此保留 Raw Vector 不变，并把 String -> managed embedding 定义成新的 `IndexDefinition(kind=Semantic)` + `db.index.semantic.*` procedure surface；它使用既有 `CALL` mechanism，但 procedure 名不是 Cypher 25 标准能力。
+
+## 5. 当前 Lithograph 实现基线
+
+| 位置 | `3ef8844` 的观察 |
+| --- | --- |
+| `storage/schema_state.rs` | `StandardIndexKind` 已有 `Vector`，`IndexConfiguration::Vector` 保存 dimension/similarity/HNSW config；没有 Semantic kind/provider config |
+| `query/semantic_index.rs` | Raw Vector 从真实 indexed Property 读取 Vector，cache miss 先 exact scan，再构建 HNSW cache |
+| `query/semantic_index/hnsw.rs` | HNSW 使用 `temp._lithograph_vector_cache*` connection-local derived tables；cache key 绑定 Snapshot/IndexDefinition/dimension |
+| `docs/design.md` §11.5 | Full-text 已证明“SQLite extension provider + versioned config + connection-local availability + history/cache isolation”的可行边界 |
+| `docs/design.md` §11.7 / §14.3.1 | `main` persistent derived storage 必须显式升级 storage format；普通 read 不因 cache miss 隐式写 `main` |
+
+这些现状支持最小 Phase 13：复用现有 HNSW，不顺带把 Raw Vector HNSW 持久化；只新增 Semantic IndexDefinition、Embedding Provider ABI 与跨 connection 的 text->Vector persistent cache。Raw Vector current tests 是 Phase 13 必须保持的回归 oracle。
+
+## 6. 适用限制与未声称事项
+
+- S1 只提供 pointer storage/lifetime，不验证任意 Provider struct 的 ABI；Lithograph 必须自己检查 ABI version/size/callbacks。
+- Provider binary、模型文件、远程 endpoint 后面的实际模型 revision 都不由 SQLite client data 版本化。`semanticIdentity` 可以隔离 cache generation，但不能凭数据库文件证明远程服务永不漂移。
+- 本次没有把任何真实 OpenAI/BGE/Ollama extension 当作依赖或已实现事实。Phase 13 应使用 deterministic synthetic provider extension 验证 ABI/load-order/cache/error/cancel；vendor-specific provider artifact 可以在独立需求中实现。
+- Managed Semantic 的 source text 可能被 Provider 发送到网络；这是 Host 加载/配置该 extension 后授予的 external-I/O authority，不是 Graph View 的认证机制。
+- 本研究没有证明 multi-property text concatenation、chunking、Reranker 或 provider-specific secret/config schema；Design v1 明确不在这些方向提前增加合同。
