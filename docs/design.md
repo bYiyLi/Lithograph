@@ -6,7 +6,7 @@ Phase 00–12 均已实现并完成对应开发验收。Phase 11 已将第 7.8�
 
 第 11.5 节的 FTS5 tokenizer 扩展已由 [Phase 12](development/phases/12-fulltext-tokenizer.md) 实现并完成开发验收。v0.1.0 发布制品仍只有两个硬编码 analyzer；完整的宿主 FTS5 tokenizer specification contract 从 v0.1.1 起进入发布基线。
 
-第 11.6 节进一步定义 Raw Vector 与 Managed Semantic 两套并列能力。Raw Vector 保持现有 Cypher 25 `VECTOR` Property、`CREATE VECTOR INDEX` 与 `SEARCH` 合同；Managed Semantic 新增 SQLite Embedding Provider、versioned Semantic IndexDefinition 与可重建 Embedding cache，不把派生向量伪装成 graph Property，也不修改 Cypher 25 grammar。该新增能力尚未实现，实施与验收由 [Phase 13](development/phases/13-managed-semantic-vector.md) 负责。
+第 11.6 节进一步定义 Raw Vector 与 Managed Semantic 两套并列能力。Raw Vector 保持现有 Cypher 25 `VECTOR` Property、`CREATE VECTOR INDEX` 与 `SEARCH` 合同；Managed Semantic 新增 SQLite Embedding Provider、versioned Semantic IndexDefinition 与可重建 Embedding cache，不把派生向量伪装成 graph Property，也不修改 Cypher 25 grammar。[Phase 13](development/phases/13-managed-semantic-vector.md) 当前 `in_progress`：worktree 已开始 Provider ABI 与 OpenAICompatible reference Provider 的未提交实现，但 Semantic Index/query/cache/format4 主体尚未完成，因此 Managed Semantic 仍不是 v0.1.1 已交付能力。
 
 ## 1. 产品定义
 
@@ -1482,14 +1482,14 @@ Raw Vector property 保留 dimension 与 coordinate type。Vector index 使用 H
 - Node 的一个或多个 Label，或 Relationship 的一个或多个 Type；
 - **一个** source Property；只有最终值为 `STRING` 的 owner 参与索引，缺失、`null` 或其它类型不生成 Semantic entry；
 - `provider: STRING`：精确、区分大小写的 Embedding Provider 注册名；
-- `providerConfig: MAP`：Provider 自己解释并验证的 versioned 非 secret 语义配置；
-- `dimensions: INTEGER > 0`；
+- `providerConfig: MAP`：Provider 自己解释并验证的 versioned 配置；Lithograph 按原值 canonicalize、持久化和参与历史，不替 Provider 删除 credential、runtime 或其它字段；
+- `dimensions: INTEGER 1–4096`，与 Raw Vector Index 的 dimension contract 一致；
 - `similarity: STRING`：复用 Raw Vector Index 已支持的 similarity contract；
 - managed embedding 的输出 coordinate type v1 固定为 `FLOAT32`。
 
 v1 故意只允许一个 source Property，不定义 `title + content` 等隐式拼接、字段名注入、`null` 拼接或 normalization 规则。Embedding 输入是 Property 的精确 UTF-8 String value；Lithograph 不 trim、lowercase、切块或静默截断。未来只有出现真实 multi-source/chunking requirement 时才单独设计其 versioned transform contract。
 
-`providerConfig` 允许 JSON-compatible 的 `null`、BOOLEAN、INTEGER、有限 FLOAT、STRING、LIST 与 STRING-key MAP；Node/Relationship/Path/Point/Temporal/Vector 等运行时值不能进入配置。Lithograph 对其做稳定 canonical encoding、Schema hash、Diff/Patch/Merge 与 cache identity 计算，但不理解 `model`、`normalize`、`deployment` 等 provider-specific key。凭据、token、proxy、device、本机模型路径和其它运行资源不得放入 `providerConfig`；这些属于 Provider runtime。Lithograph 无法从任意 opaque key 名可靠判断 secret，调用方和 Provider 文档必须把 versioned config 限制为可持久化的非 secret 语义配置。
+`providerConfig` 允许 JSON-compatible 的 `null`、BOOLEAN、INTEGER、有限 FLOAT、STRING、LIST 与 STRING-key MAP；Node/Relationship/Path/Point/Temporal/Vector 等运行时值不能进入配置。Lithograph 对整个 Map 做稳定 canonical encoding、Schema hash、Diff/Patch/Merge 与 cache identity 计算，但不理解 `model`、`api_key`、`headers`、`timeout_ms` 等 provider-specific key。Provider 自己定义允许的字段、默认值、优先级与验证。因为 `providerConfig` 属于 versioned IndexDefinition，其中任何字段——包括调用方选择直接写入的 credential——都会进入 SQLite database、Schema history、SHOW/Diff/Patch/Merge 和备份；Lithograph 不做 secret 识别、脱敏或自动改写。调用方若不希望 secret 进入历史，应使用 Provider 提供的 indirection 字段（例如 `api_key_env`），这是使用选择而不是 Kernel 强制策略。
 
 同一个历史 Semantic IndexDefinition 永远绑定同一个 provider name/config/dimensions/similarity。改变任一 versioned 字段属于 Index slot 更新，走正常 Schema history；不在原 definition 上热改配置。Similarity 只决定向量比较，不参与 Embedding Space identity；同一个 Provider/config 生成的 Vector 可以被不同 similarity 的 Semantic Index 复用。
 
@@ -1517,6 +1517,60 @@ cancel/error/lifetime boundary required by the C ABI
 
 SQLite 没有 Full-text FTS5 那样的标准 Embedding Provider API，因此本节只定义当前 Embedding 所需的最小 ABI。未来 Reranker 如果成为真实需求，应定义独立 contract；不得提前把 Tokenizer、Embedding、Reranker 压成一个 `execute(anything)` 通用接口。Provider 外部依据与采用边界见 [Embedding Provider 研究证据](research/embedding-provider-contract.md)。
 
+##### OpenAICompatible reference Provider
+
+Lithograph 同仓库交付一个独立的 `lithograph-openai-compatible` SQLite loadable extension，作为 `EmbeddingProviderV1` 的首个 production/reference implementation。它是与 Lithograph 平级加载的单独 shared library，不链接或调用 `lithograph-core` 内部 API；只依赖公开 Embedding Provider ABI、SQLite loadable-extension ABI 与 HTTP/JSON/base64 runtime。注册名固定为 `openai-compatible`，client-data key 为 `lithograph.embedding.v1/openai-compatible`。一个 connection 上的同一个 Provider registration 可以服务多个 Semantic Index；所有 endpoint/model/auth/HTTP 行为都来自每次调用传入的 `providerConfig`，不能在 extension load 时冻结为 process-global endpoint。
+
+“OpenAI-compatible”v1 只承诺 **Embeddings HTTP profile**：向 `<base_url>/embeddings` 发送 OpenAI Embeddings 风格请求，并解析 `data[].index` / `data[].embedding` response。它不实现 Chat、Responses、Images、Audio 或 Azure 特有 deployment/api-version contract，也不声称任意自称 compatible 的服务一定满足本 profile。
+
+当前 OpenAI Embeddings body 的静态 request fields 全部可配置：`model`、`dimensions`、`encoding_format`、`user`；其中 `input` 是 Lithograph 每次 `embedBatch` 传入的 exact source/query text，不是静态配置，`dimensions` 已由 Semantic Index 顶层字段拥有，不在 `providerConfig` 重复定义。Provider 同时暴露 endpoint、authentication、OpenAI request-context header、custom header 与 HTTP execution 配置。v1 `providerConfig` 完整 schema 为：
+
+```text
+{
+  base_url: STRING = "https://api.openai.com/v1",
+
+  api_key: STRING?,
+  api_key_env: STRING?,
+
+  model: STRING,                         # required
+  send_dimensions: BOOLEAN = true,
+  encoding_format: "float" | "base64" = "float",
+  user: STRING?,
+
+  organization: STRING?,
+  project: STRING?,
+  headers: MAP<STRING, STRING> = {},
+
+  timeout_ms: INTEGER = 30000,
+  max_retries: INTEGER = 2,
+  batch_size: INTEGER = 32,
+
+  semantic_identity: STRING?
+}
+```
+
+未知 key 返回 `INVALID_ARGUMENT`；Provider 不维护 model whitelist，也不在 `validate` 中联网探测 model/credential/endpoint，且 `validate` 只验证 `api_key_env` 字段本身，不要求对应环境变量此刻存在。所有字符串必须是合法 UTF-8 且不含 NUL；`model` 必须非空；显式 `api_key` / `api_key_env` 若出现也必须非空。`base_url` 必须是 absolute `http://` 或 `https://` URL，去除尾部 `/` 后不能为空，且不能带 query 或 fragment；请求固定发往 `<base_url>/embeddings`。Provider 不根据 URL 判断 vendor，也不阻止 caller 把 credential 发给 HTTP 或第三方 endpoint。
+
+Authentication 完全由 config 决定，HTTP header name 按大小写不敏感语义处理。若 `headers` 已显式提供 `Authorization`，直接使用该值并且不要求解析 `api_key` / `api_key_env`；否则若 `api_key` 存在且非空，生成 `Authorization: Bearer <api_key>`；再否则若配置了 `api_key_env`，每次 HTTP request 前从该环境变量读取 credential 并生成 Bearer header，变量不存在或为空则本次调用明确失败；三者都没有时不生成 Authorization。Provider 不再隐式读取 `OPENAI_API_KEY` 或任何其它环境变量。`api_key` 名称表示直接 Bearer credential，也可以承载兼容 endpoint 接受的其它 Bearer access token。
+
+`organization` 与 `project` 分别生成 `OpenAI-Organization` / `OpenAI-Project`。Provider 默认生成 `Content-Type: application/json`，随后应用 `headers` 中的用户值；用户自定义 header **最后覆盖**同名生成 header，包括 `Authorization`、`Content-Type`、`OpenAI-Organization` 和 `OpenAI-Project`。因此兼容服务可以使用其它认证/header 约定；例如 `X-Client-Request-Id` 也可直接通过 `headers` 传递，Provider 不自动生成 request id。Header name/value 必须是合法 HTTP header；同一个 `headers` Map 中若存在仅大小写不同的重复 header name，配置无歧义地拒绝而不是依赖 Map iteration 顺序。Custom header values 总预算最多 60 KiB，最终 request headers 总大小最多 64 KiB。
+
+HTTP body 总是包含 `model` 与 `input`。`send_dimensions = true` 时把 Semantic Index 顶层 `dimensions` 作为 OpenAI `dimensions` request field 发送；为兼容不支持该 optional field 的旧模型，`send_dimensions = false` 时省略 HTTP 参数，但 response 仍必须严格匹配 Semantic Index 的 dimensions。`encoding_format` 按 config 原样发送，`user` 存在时发送。Managed Semantic 的 input contract 只有 exact UTF-8 String，因此不暴露 OpenAI token-array input variant；这不是缺失配置，而是上层 source-data model 的固定类型边界。OpenAI 当前单 input 8192 tokens、单 request 总计 300000 tokens、数组最多 2048 items；Provider 不引入 tokenizer 或自动 truncate/chunk，只按 `batch_size`（1–2048）按 item count 分批，超出模型/token limit 由 endpoint 返回错误。
+
+`encoding_format = "float"` 时解析 JSON number vector；`encoding_format = "base64"` 时解析 OpenAI-compatible base64 embedding payload并解码为 ABI 所需 FLOAT32 values。无论 wire format，response 必须满足：`data` 数量等于 input 数量、每个 `index` 唯一且在范围内、按 index 恢复原 input 顺序、每个 vector 恰好等于 Semantic Index `dimensions`、转换后全部 coordinate finite；任一不满足时整批失败，不返回部分结果。Response 中其它向后兼容新增字段忽略。
+
+`timeout_ms` 必须为正且有实现上限；`max_retries` 必须非负且有实现上限；`batch_size` 范围固定 1–2048。408、429、5xx 与 transport failure 可按 bounded retry policy 重试，其它 4xx 默认不重试；若 response 带合法 `Retry-After`，在实现定义的最大 backoff 预算内优先采用。取消在发 batch、HTTP 返回后、重试前、backoff 期间与下一 batch 前检查；阻塞中的单次 HTTP system call 只受 `timeout_ms` 上界约束，v1 不声称可异步抢占任意第三方 HTTP stack。
+
+Provider error、log、trace 和 test diagnostics 不得主动序列化完整 `providerConfig` 或回显 `api_key`、解析后的 `api_key_env` value、`Authorization` / custom secret header value；允许报告字段名、HTTP status、bounded endpoint、request id 和不含 credential 的结构错误。调用方选择把 secret 写入 versioned config 与 Provider 自己在错误路径泄漏 secret 是两个不同边界，后者不被允许。
+
+`semantic_identity` 是调用方可选的 versioned cache-separation salt，用于同一 `base_url/model` 名称背后的实际 embedding space 发生不兼容变化时主动隔离 cache。它与 Provider ABI 自身固定的 implementation semantic identity 是两个不同输入：OpenAICompatible registration 的 ABI identity 只表示实现/行为版本，不编码某个 endpoint/config，因此同一 connection 可以安全使用多个不同 config。最终 cache key 已包含完整 canonical `providerConfig` + ABI semantic identity + dimensions，因此 v1 **保守地把任何 providerConfig 变化都视为不同 cache space**。这可能让仅改变 timeout/retry/api_key 的配置重新计算 embedding，但不会错误复用潜在不兼容的向量；未来只有在出现真实成本证据时才考虑 provider-specific semantic projection，不提前增加第二套 config canonicalization ABI。
+
+`api_key_env` 的**环境变量名**参与 versioned config/cache key，但其运行时 secret value 不进入 SQLite。若同一个环境变量名在不改变 config 的情况下被切换到会路由不同 embedding space 的 credential/tenant，调用方必须同步改变 `semantic_identity`；普通 credential rotation 若服务语义不变则不需要。
+
+Lithograph v1 不要求 Provider 把默认值回写成另一份 canonical config：例如省略 `base_url` 与显式写入 `https://api.openai.com/v1`、省略 `timeout_ms` 与显式写入 `30000`，虽然 Provider 执行语义相同，但原始 versioned `providerConfig` 不同，因此可以形成不同 Schema/cache identity。这是保守的正确性取舍；不为节省少量重复 cache 提前增加 provider-specific config-rewrite ABI。
+
+由于整个 `providerConfig` 都进入 versioned Schema，直接使用 `api_key`、secret custom header 或其它敏感值会把该值保存到 Commit history、Diff/Patch、备份和 SHOW 可观察结果；这是调用方选择。使用 `api_key_env` 时数据库只保存环境变量名，实际 credential 不进入 SQLite history。
+
 #### 11.6.4 创建、展示与删除
 
 Managed Semantic 不新增 Cypher grammar。创建使用标准 `CALL <procedure>` 形式调用 Lithograph database procedures：
@@ -1527,8 +1581,16 @@ CALL db.index.semantic.createNodeIndex(
   ['Document'],
   'content',
   {
-    provider: 'openai',
-    providerConfig: {model: 'text-embedding-3-small'},
+    provider: 'openai-compatible',
+    providerConfig: {
+      base_url: 'https://api.openai.com/v1',
+      api_key_env: 'OPENAI_API_KEY',
+      model: 'text-embedding-3-small',
+      encoding_format: 'float',
+      timeout_ms: 30000,
+      max_retries: 2,
+      batch_size: 32
+    },
     dimensions: 1536,
     similarity: 'cosine'
   }
@@ -1550,7 +1612,7 @@ Node 的完整签名固定为 `db.index.semantic.createNodeIndex(indexName :: ST
 
 普通 auto-commit 调用形成正常 Schema Commit；Native explicit transaction 可以 staged create/drop Semantic Index，因为 create validation 无 external I/O，最终仍只发布一个 transaction Commit。Patch/Merge/Rebase/Revert 等若产生新增或改变的 Semantic definition，也必须在发布新 Schema 前执行同一 provider/validate 检查；纯历史 inspection、`SHOW INDEXES`、`DROP INDEX`、纯 ref move 和真正没有改变该 definition 的路径不要求 Provider 当前可用。
 
-Semantic Index 与其它 Index 共用名称 namespace、Schema hash、Diff/Patch/Merge slot。`SHOW ALL INDEXES` 返回 source、provider 与 versioned options；不会暴露 runtime credential、Provider pointer、semanticIdentity 或 cache stats。`DROP INDEX name` 删除逻辑 definition 并形成正常 Schema history；Embedding result cache 不是某个 Index 私有资源，因此 DROP 不扫描或同步删除共享 cache entry。
+Semantic Index 与其它 Index 共用名称 namespace、Schema hash、Diff/Patch/Merge slot。`SHOW ALL INDEXES` 返回 source、provider 与完整 versioned `providerConfig` / options，因此调用方直接写入的 `api_key`、secret custom header 等也按原值可观察；只有 `api_key_env` 实际解析出的环境变量值、Provider pointer 和内部 cache stats 不属于 Schema introspection。`DROP INDEX name` 删除逻辑 definition 并形成正常 Schema history；Embedding result cache 不是某个 Index 私有资源，因此 DROP 不扫描或同步删除共享 cache entry。
 
 #### 11.6.5 文本查询 surface
 
@@ -1998,7 +2060,7 @@ Windows x86_64, arm64
 
 Lithograph 是 embedded extension，没有独立 account / role / authentication layer。读取和写入数据库文件、`LOAD CSV` 文件、HTTP(S) 与加载 Extension 的权限都继承宿主进程和 SQLite connection。
 
-Managed Semantic Provider 可能把 source/query String 发送给网络服务或本地模型 runtime；加载和配置该 Provider 等价于 Host 主动授予相应外部处理能力。Lithograph 不从 IndexDefinition 读取 API key，也不把 credential 写入 Commit/cache；Provider-specific secret/resource lifecycle 由 Host/Provider extension 负责。Semantic Index `providerConfig` 会进入 versioned Schema 并可被 SHOW/history 看到，因此调用方不得把 secret 放入 opaque config。
+Managed Semantic Provider 可能把 source/query String 发送给网络服务或本地模型 runtime；加载和配置该 Provider 等价于 Host 主动授予相应外部处理能力。Lithograph 对 `providerConfig` 保持 provider-opaque：如果调用方直接配置 `api_key`、secret header 或其它敏感值，它们会像其它 config 一样进入 Commit/Schema/history/SHOW/backup，Lithograph 不自动脱敏或阻止；如果配置 `api_key_env`，数据库只保存环境变量名，运行时解析出的 secret value 不进入 SQLite。Provider 也可能把 caller-supplied secret 发送到任意 caller-supplied HTTP endpoint，因此 endpoint/credential trust 由调用方负责。
 
 `graphView` 仍不是 authorization boundary，但 Managed Semantic query 的 on-demand fallback 只对本次 Graph View 中可见的候选 source text 发起 Provider 调用；它不能为了建立全图 HNSW 而在受限 query 中顺带把不可见 owner 的文本发送给外部 Provider。需要预热整个 Index 的 `db.index.semantic.rebuild` 是显式 maintenance surface，不接受 `graphView`，由拥有完整 database execution authority 的调用方执行。
 

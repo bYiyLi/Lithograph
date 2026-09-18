@@ -1,6 +1,6 @@
 # Phase 13：Managed Semantic Vector / Embedding Provider
 
-**状态：`ready`**
+**状态：`in_progress`**
 
 ## 1. 目标与范围
 
@@ -8,24 +8,25 @@
 
 本 Phase 的产品行为只由 Design §11.6、§12、§14.3.2、§15–17 定义；本计划只安排依赖、实现顺序、验收与状态。外部证据见 [Embedding Provider 研究](../../research/embedding-provider-contract.md)。
 
-本 Phase 包含：connection-local Provider ABI/registration、Node/Relationship Semantic IndexDefinition、create/query/SHOW/DROP/history/version operations、persistent Embedding Result Cache、format `3 -> 4` migration、query-memory cache、explicit rebuild、Graph View/history、external-I/O/transaction boundary、真实 SQLite extension integration 与 Raw Vector regression。
+本 Phase 包含：connection-local Provider ABI/registration、deterministic synthetic Provider oracle、独立 `openai-compatible` production/reference Provider、Node/Relationship Semantic IndexDefinition、create/query/SHOW/DROP/history/version operations、persistent Embedding Result Cache、format `3 -> 4` migration、query-memory cache、explicit rebuild、Graph View/history、external-I/O/transaction boundary、真实 SQLite extension integration 与 Raw Vector regression。
 
-本 Phase **不**交付：OpenAI/BGE/Ollama 等 vendor-specific production provider、Reranker、通用 AI plugin framework、新 Cypher grammar、`CREATE SEMANTIC INDEX`、`SEARCH ... FOR TEXT`、multi-source concat/chunking、Semantic arbitrary filtered top-k、Raw Vector HNSW 持久化或 KG OS 特例。Commit、push、发布/部署仍需要各自独立授权。
+本 Phase **不**交付：OpenAI-compatible Embeddings profile 之外的 Chat/Responses API、Azure/OpenAI vendor 特例、BGE/Ollama 专有 API、Reranker、通用 AI plugin framework、新 Cypher grammar、`CREATE SEMANTIC INDEX`、`SEARCH ... FOR TEXT`、multi-source concat/chunking、Semantic arbitrary filtered top-k、Raw Vector HNSW 持久化或 KG OS 特例。Commit、push、发布/部署仍需要各自独立授权。
 
 ## 2. 前置条件与当前差距
 
 - Phase 00–12 全部 `done`；直接依赖 Phase 01 SQLite extension boundary、Phase 07 versioned IndexDefinition、Phase 08 Raw Vector/HNSW/Search、Phase 09 version operation/Native transaction、Phase 11 storage format3/cache/read guard 与 Phase 12 provider-binding经验。
 - 当前 `StandardIndexKind` 只有 Cypher 25 index families；`IndexConfiguration` 没有 Semantic provider config。
 - 当前 Raw Vector 从真实 graph Property 读取向量，HNSW 是 connection-local TEMP derived cache；调用方必须自己生成/写入/query Vector。
-- 当前没有 Embedding Provider ABI、client-data registration、text->Vector persistent cache、Semantic procedures 或 format4 inventory。
+- 提交基线 `1e6e078` 尚无 Provider ABI；当前未提交 worktree 已开始 public `EmbeddingProviderV1`、client-data registration fixture 与独立 OpenAICompatible Provider 的 13.1 实现，但尚未完成 Phase acceptance，不能按已交付能力引用。
+- 当前仍没有可验收的 Semantic Index kind/config、text->Vector persistent cache、Semantic create/query/rebuild/cache procedures 或 format4 inventory；这些继续是 13.2–13.5 的主体差距。
 - SQLite minimum 3.45.0 已覆盖 3.44.0 引入的 connection client-data API，因此不需要为了本 Phase 提高 SQLite minimum。
 
-Phase 13 设计已完成；依赖 Phase 均已完成，因此计划状态是 `ready`。实现开始后才能改为 `in_progress`；只有 SV13 acceptance 全部有当前 worktree/revision 的真实证据后才能标记 `done`。
+Phase 13 已开始实现，当前状态为 `in_progress`。只有 SV13 acceptance 全部有当前 worktree/revision 的真实证据后才能标记 `done`。
 
 ## 3. Feature 顺序
 
 ```text
-13.1 Provider ABI + synthetic SQLite provider oracle
+13.1 Provider ABI + synthetic SQLite provider oracle + OpenAI-compatible Provider
  -> 13.2 Versioned Semantic IndexDefinition + create/SHOW/DROP
  -> 13.3 Format4 persistent Embedding cache + operational policy
  -> 13.4 Managed query + Graph View/history + TEMP HNSW reuse
@@ -43,9 +44,11 @@ Phase 13 设计已完成；依赖 Phase 均已完成，因此计划状态是 `re
 
 新增最小 deterministic synthetic provider extension，真实通过 `sqlite3ext.h` / host API table 注册；支持至少两个 provider 名、不同 semantic identity/config、batch call counter、可控 invalid vector、IO/resource/interrupt failure。测试两种 extension load order 和每 connection 独立注册；生产 Core 不包含 synthetic provider name whitelist。
 
-**主要位置**：公共 ABI header / extension bridge、`crates/lithograph-core` provider adapter、新 test-support C extension 与真实 `.load` probe。不得引入 vendor HTTP/model dependency或 process-global provider registry。
+同时实现独立 `lithograph-openai-compatible` cdylib/SQLite extension：不依赖 `lithograph-core`，只消费 public Provider ABI；完整实现 Design 冻结的 OpenAICompatible Embeddings config surface。所有 endpoint/auth/request/header/execution 参数都来自 versioned `providerConfig`；不再用 extension-load 环境变量作为隐藏配置来源，只有显式 `api_key_env` 会在 request-time 读取它指定的环境变量。HTTP integration tests 使用本地 deterministic stub server，不需要真实 API key 或公网。
 
-**Acceptance**：SV13-01–05。
+**主要位置**：公共 ABI header/ABI crate、extension bridge、`crates/lithograph-core` provider adapter、新 test-support C extension、`crates/lithograph-openai-compatible` 与真实 `.load` probe。不得把 HTTP/model dependency引入 Core，也不得增加 process-global provider registry。
+
+**Acceptance**：SV13-01–05、SV13-29–35。
 
 ### Feature 13.2 Semantic Schema / Procedure surface
 
@@ -137,6 +140,13 @@ Graph View 必须在 top-k/skip/limit 之前约束 Node/Relationship/endpoint；
 | SV13-26 | provider-call/resource quantitative gate | duplicate/warm/query-LRU call counters、cache bytes、batch数、writer hold有可重复报告 | `planned` |
 | SV13-27 | real SQLite + cross-platform ABI/storage | 3.45.0 + current/frozen runtime真实dual-extension smoke；六目标 artifact build/load/migration通过 | `planned` |
 | SV13-28 | repository gates/docs/final review | fmt/clippy/tests/quality/CI、links/diff-check/无secret/无产物；Phase-level review finding闭合 | `planned` |
+| SV13-29 | OpenAICompatible config schema / persistence | `base_url/api_key/api_key_env/model/send_dimensions/encoding_format/user/organization/project/headers/timeout_ms/max_retries/batch_size/semantic_identity` 全部 round-trip；unknown/type/range 负例；config进入 Schema/SHOW/Diff/Patch，含显式 secret 原值；省略默认与显式默认不被偷偷改写 | `planned` |
+| SV13-30 | Auth / environment / header precedence | custom `Authorization` > `api_key` > `api_key_env` > no Authorization；自定义Authorization存在时不解析env；仅显式env名被读取，必要env missing明确失败；organization/project映射header；custom headers大小写不敏感覆盖且case-duplicate拒绝 | `planned` |
+| SV13-31 | OpenAI Embeddings request completeness | local HTTP oracle断言 `POST <base_url>/embeddings`，body覆盖 `model/input/dimensions(optional)/encoding_format/user`；`send_dimensions` true/false均覆盖；input来自 exact String、dimension contract来自 Semantic Index，不建立重复 config field | `planned` |
+| SV13-32 | float/base64 response contract | 两种 encoding format 都转成 ABI FLOAT32；response按index重排并校验count/index/dimension/finite；unknown extra response fields不破坏解析 | `planned` |
+| SV13-33 | batch/token-limit/failure/retry/cancel / secret-safe diagnostics | batch_size 1–2048按item分批；不truncate/chunk/tokenize；empty/oversize由明确本地或endpoint错误；408/429/5xx/transport bounded retry，其他4xx不重试；Retry-After与cancel边界有oracle；sentinel api_key/env/header secret不出现在error/log/trace | `planned` |
+| SV13-34 | cache identity / config change | 完整 canonical providerConfig + 固定实现 ABI semantic identity + dimensions隔离 space；修改endpoint/model/header/auth/runtime字段均不误复用旧space；同env名secret rotation默认复用，语义路由改变时必须通过`semantic_identity`显式隔离 | `planned` |
+| SV13-35 | Provider独立 artifact / multi-config | crate不依赖`lithograph-core`；真实SQLite 3.45+/current可单独`.load`并注册；同connection两个Semantic Index可使用不同base_url/auth/model config，无process-global endpoint冻结 | `planned` |
 
 ## 5. 验证执行计划
 
@@ -158,14 +168,14 @@ scripts/ci.sh
 git diff --check
 ```
 
-Provider fixture必须是真正 SQLite loadable extension，不以 Rust mock直接注入 Core pointer代替 ABI acceptance。Network vendor plugin不进入 CI；synthetic provider可确定性证明 batch/cache/error/cancel。所有 external-I/O fixture使用本地 synthetic data/server或完全离线 provider，不提交真实 API key/模型文件。
+Provider fixture必须是真正 SQLite loadable extension，不以 Rust mock直接注入 Core pointer代替 ABI acceptance。OpenAICompatible 使用本地 deterministic HTTP oracle 覆盖完整 config/request/response/retry/cancel，不访问公网；测试 `api_key` 使用 synthetic value，`api_key_env` 使用 disposable test env name，不提交真实 credential。Synthetic provider继续证明通用 ABI/cache/error边界。
 
 性能证据至少报告：unique source text数、duplicate率、provider input/call batch计数、persistent cache hit/miss/bytes、TEMP HNSW build次数、query first-row/full-consume、rebuild provider阶段耗时与writer wait/hold、长provider call期间read-guard/WAL pin。不得把 provider sleep/HTTP等待藏到未计时 setup，也不得用预热结果冒充 cold。
 
 ## 6. Review 与完成标准
 
-Phase review必须同时检查：Raw Vector compatibility、Semantic definition/history、Provider ABI pointer/lifetime、安全配置边界、external-I/O writer lifetime、Graph View provider-input isolation、cache key/容量/清理、format4 migration/integrity、failure cleanup、SQL/Native adapters与测试 oracle。
+Phase review必须同时检查：Raw Vector compatibility、Semantic definition/history、Provider ABI pointer/lifetime、OpenAICompatible 完整 config/secret 持久化与 header/auth precedence、external-I/O writer lifetime、Graph View provider-input isolation、cache key/容量/清理、format4 migration/integrity、failure cleanup、SQL/Native adapters与测试 oracle。
 
-重点反例：把 String `CREATE VECTOR INDEX` 偷换为managed、在 graph mutation 内调用provider、provider duplicate静默覆盖、query miss隐式写main、把query-only text持久化、cache key漏model/config/identity、similarity错误进入space key、外部调用持有writer、Graph View query给hidden source做embedding、Provider错误返回部分top-k、Raw Vector regression被semantic fallback掩盖、format4表在format3静默出现。
+重点反例：把 String `CREATE VECTOR INDEX` 偷换为managed、在 graph mutation 内调用provider、provider duplicate静默覆盖、OpenAICompatible 在 load 时冻结单一 endpoint、偷偷读取未配置环境变量、删除/脱敏调用方显式 `api_key`、漏掉官方 Embeddings request field、custom header precedence错误、query miss隐式写main、把query-only text持久化、cache key漏model/config/identity、similarity错误进入space key、外部调用持有writer、Graph View query给hidden source做embedding、Provider错误返回部分top-k、Raw Vector regression被semantic fallback掩盖、format4表在format3静默出现。
 
-SV13-01–28全部有当前 revision/worktree 的真实自动化/集成/人工 diff review证据，required repository gates通过，文档同步到实际实现，且当前 Phase scope无剩余 task-affecting finding后，才能把状态从 `ready/in_progress` 改为 `done`。设计/计划完成本身不等于 Phase 13 实现完成。
+SV13-01–35全部有当前 revision/worktree 的真实自动化/集成/人工 diff review证据，required repository gates通过，文档同步到实际实现，且当前 Phase scope无剩余 task-affecting finding后，才能把状态从 `in_progress` 改为 `done`。设计/计划完成本身不等于 Phase 13 实现完成。
