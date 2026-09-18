@@ -12,7 +12,7 @@
 
 ## 3. Design Inputs
 
-- `docs/design.md` 第 5、8–10、14、17 节。
+- [Property Graph 与 Value Model](../../design/query-engine.md#property-graph-and-values)、[Version-aware Storage Model](../../design/storage.md#version-aware-storage)、[Transaction 与 Concurrency Model](../../design/storage.md#transactions-and-concurrency)、[Versioned Graph Model](../../design/versioning.md)、[Integrity、Recovery 与 Migration](../../design/storage.md#integrity-recovery-migration)、[Large-scale Invariants](../../design/runtime.md#large-scale-invariants)。
 
 ## 4. Features
 
@@ -84,7 +84,7 @@ Storage API 提供：
 
 ### Feature 02.7 Integrity checker
 
-实现第 14.1 节 canonical invariants，并提供 intentional corruption fixtures。
+实现[Integrity Invariants](../../design/storage.md#integrity-invariants) canonical invariants，并提供 intentional corruption fixtures。
 
 ## 5. Acceptance
 

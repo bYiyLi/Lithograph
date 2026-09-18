@@ -12,7 +12,7 @@
 
 ## 3. Design Inputs
 
-- `docs/design.md` 第 4.4、7–10、13–14 节。
+- [Query Options](../../design/interfaces.md#query-options)、[Query Planning 与 Execution](../../design/query-engine.md#planning-and-execution)、[Version-aware Storage Model](../../design/storage.md#version-aware-storage)、[Transaction 与 Concurrency Model](../../design/storage.md#transactions-and-concurrency)、[Versioned Graph Model](../../design/versioning.md)、[Result 与 Error Contract](../../design/interfaces.md#results-and-errors)、[Integrity、Recovery 与 Migration](../../design/storage.md#integrity-recovery-migration)。
 
 ## 4. Features
 

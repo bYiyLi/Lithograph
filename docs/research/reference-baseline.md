@@ -2,7 +2,7 @@
 
 **研究快照日期：2026-09-10**
 
-本文保存 Lithograph 设计使用的外部证据。它不是产品设计真源；最终设计以 `docs/design.md` 为准。
+本文保存 Lithograph 设计使用的外部证据。它不是产品设计真源；最终设计以 [设计入口及其职责表列出的专题](../design.md#design-ownership) 为准。
 
 ## 1. SQLite
 

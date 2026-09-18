@@ -121,7 +121,7 @@ Streaming最终报告 `target/phase11-stream-final/report.json` 各3轮均为0 f
 - 所有Vector样本tie-aware recall@10均为1.0，warm query不重建cache，并只point-load实际访问的HNSW entries（样本约153–683个entry），不再每次反序列化整个百万entry cache。
 - 1M Full-text cold build约111.8 s；warm/historical samples约0.63–5.14 ms，结果与预期visible/historical语义一致。
 
-FLOAT32 cosine corpus在midpoint存在大量exact cutoff同分项。原先按deterministic ID交集计算recall会把score完全等价的ANN top-k误报为0；Design §17.2已冻结tie-aware规则：高于cutoff的strict结果仍必须命中，等于cutoff的等分candidate可互换，同时继续检查返回score、去重和稳定score/identity顺序。这是benchmark oracle修正，不是降低ANN质量门槛。
+FLOAT32 cosine corpus在midpoint存在大量exact cutoff同分项。原先按deterministic ID交集计算recall会把score完全等价的ANN top-k误报为0；[扩展压力场景与范围控制](../design/runtime.md#stress-workloads)已冻结tie-aware规则：高于cutoff的strict结果仍必须命中，等于cutoff的等分candidate可互换，同时继续检查返回score、去重和稳定score/identity顺序。这是benchmark oracle修正，不是降低ANN质量门槛。
 
 ### 5.3 Merge与30分钟mixed workload
 

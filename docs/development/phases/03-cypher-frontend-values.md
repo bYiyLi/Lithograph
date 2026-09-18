@@ -12,7 +12,7 @@
 
 ## 3. Design Inputs
 
-- `docs/design.md` 第 3、5–7、13 节；
+- [Cypher 25 兼容合同](../../design/compatibility.md)、[Property Graph 与 Value Model](../../design/query-engine.md#property-graph-and-values)、[Engine Structure](../../design/query-engine.md#engine-structure)、[Query Planning 与 Execution](../../design/query-engine.md#planning-and-execution)、[Result 与 Error Contract](../../design/interfaces.md#results-and-errors)；
 - `docs/development/cypher25-compatibility.md`。
 
 ## 4. Features

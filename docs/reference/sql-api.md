@@ -87,4 +87,4 @@ SQL 错误文本是 `LITHOGRAPH_<CATEGORY>: <message>`，保留 SQLite primary r
 
 每次 mutating scalar 调用使用内部 savepoint。外层 SQL BEGIN/COMMIT 仍由宿主掌握；多次调用不会因此变成一个图 Commit。SQL Bridge 不支持 transaction-owning subquery，checkout 另见 [Known Issues](known-issues.md)。
 
-依据：[公开 SQL 实现](../../crates/lithograph-extension/src/scalar.rs)、[结果适配](../../crates/lithograph-extension/src/execution.rs)、[设计](../design.md)。
+依据：[公开 SQL 实现](../../crates/lithograph-extension/src/scalar.rs)、[结果适配](../../crates/lithograph-extension/src/execution.rs)、[SQL Bridge](../design/interfaces.md#sql-bridge)。

@@ -12,7 +12,7 @@
 
 ## 3. Design Inputs
 
-- `docs/design.md` 第 4、13–16 节。
+- [SQLite Extension 接口](../../design/interfaces.md#sqlite-extension)、[Result 与 Error Contract](../../design/interfaces.md#results-and-errors)、[Integrity、Recovery 与 Migration](../../design/storage.md#integrity-recovery-migration)、[Deployment 与 Runtime Boundary](../../design/runtime.md#deployment)、[Security Boundary](../../design/runtime.md#security)。
 
 ## 4. Features
 

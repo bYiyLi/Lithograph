@@ -12,10 +12,10 @@
 
 - Lithograph 是标准 SQLite loadable extension，不 Fork SQLite，不引入独立 Server/Daemon。
 - 一个 SQLite database 对应一个 Versioned Property Graph；版本通过 Commit / Branch 表达，不复制数据库文件模拟 Branch。
-- Query engine 的兼容目标是 `docs/design.md` 定义的 Cypher 25 Profile；不得创建 Lithograph query dialect 代替已有 Cypher semantics。
+- Query engine 的兼容目标是 `docs/design/compatibility.md` 定义的 Cypher 25 Profile；不得创建 Lithograph query dialect 代替已有 Cypher semantics。
 - Versioning 是 storage foundation。所有 graph/schema/index write 从 Root Commit 起进入 immutable history，不先实现 mutable-only storage 再补 history。
 - Canonical history 由 immutable Commit / Layer / Schema object 构成；Branch ref 可变；checkpoint、statistics 和 physical search/index content 是可重建 derived data。
-- GraphQLite、TerminusDB、Git、Neo4j/Cypher 和 SQLite 是 evidence/reference，不是自动依赖，也不能覆盖 `docs/design.md` 已确认的 Lithograph contract。
+- GraphQLite、TerminusDB、Git、Neo4j/Cypher 和 SQLite 是 evidence/reference，不是自动依赖，也不能覆盖 `docs/design.md` 入口与 `docs/design/` 专题已确认的 Lithograph contract。
 - 默认参考外部项目的公开 behavior、tests 和 architecture，不直接复制源码。任何源码级复用必须先检查该版本许可证与 attribution/NOTICE 要求，并把必要 notices 随代码保留；不能为了省实现时间引入许可证不兼容。
 
 ## Repository Truth
@@ -25,7 +25,8 @@
 真源职责：
 
 - `README.md`：普通用户产品介绍与入门入口。
-- `docs/design.md`：产品行为、技术架构、数据/事务/version/interface contract 的唯一设计真源。
+- `docs/design.md`：设计入口、产品定义、全局边界与设计职责表；与职责表列出的 `docs/design/` 专题共同构成唯一设计真源。
+- `docs/design/`：按职责分别拥有接口、查询、存储、版本、Schema/Search 与 runtime 的完整合同；跨域规则链接到拥有该合同的专题，不复制正文。
 - `docs/research/`：外部研究和参考证据；研究不是产品设计。
 - `docs/development/README.md`：开发路线、Phase 状态与全局完成标准。
 - `docs/development/cypher25-compatibility.md`：Cypher Profile inventory 与兼容验收状态。
@@ -38,7 +39,7 @@
 
 修改行为前必须：
 
-1. 读取拥有该行为的 `docs/design.md` section；
+1. 先从 `docs/design.md` 的职责表定位并读取拥有该行为的设计正文及其必要依赖；
 2. 读取当前 Phase 文档；
 3. 检查相关代码、测试和 Git 状态；
 4. 对 Cypher compatibility 变更读取 `docs/development/cypher25-compatibility.md`；
@@ -75,7 +76,7 @@
 - `CY25-2026.08` 的 observable semantics 是 acceptance contract，不以 parser 能接受语法作为完成依据。
 - 每个新增 Cypher feature 必须覆盖 positive、negative/error、type/null 和与相邻 clause/operator 组合的 semantic tests。
 - openCypher TCK 是 inherited baseline；Cypher 25 新能力按 compatibility matrix 增加 fixtures。
-- 与 Neo4j oracle 结果不一致时先判断是否属于 `docs/design.md` 定义的 current-graph Profile；属于 Profile 就修复实现或明确修正 design，不能把差异静默标为 expected failure。
+- 与 Neo4j oracle 结果不一致时先判断是否属于 `docs/design/compatibility.md` 定义的 current-graph Profile；属于 Profile 就修复实现或明确修正 design，不能把差异静默标为 expected failure。
 - Compatibility matrix 中的 scenario 只有真实自动化测试通过后才能标记 `done`。
 - 不通过加入 alias、special case 或 hidden compatibility mode 掩盖 parser/planner/storage 的结构性错误。
 

@@ -12,7 +12,7 @@
 
 ## 3. Design Inputs
 
-- `docs/design.md` 第 4.4、7.7、8、10–11 节；
+- [Query Options](../../design/interfaces.md#query-options)、[Graph View Execution Boundary](../../design/query-engine.md#graph-view)、[Version-aware Storage Model](../../design/storage.md#version-aware-storage)、[Versioned Graph Model](../../design/versioning.md)、[Schema、Constraint 与 Index Model](../../design/schema-and-indexes.md)、[Full-text](../../design/full-text.md)、[Vector](../../design/vector.md)；
 - `docs/development/cypher25-compatibility.md`。
 
 ## 4. Features

@@ -41,4 +41,4 @@
 
 独立 `IN TRANSACTIONS` 的已成功 batch 仍然持久化；错误不意味着整次导入没有副作用。已经向调用方发送的 ROW 也不等于整个操作成功，必须检查最终返回码/事务提交。
 
-排障时记录版本、SQLite runtime、操作名、参数**形状**、category/code、Commit/Session revision。避免记录完整 credentials、私有文档、向量正文或含 token 的 URL。依据：[错误映射](../../crates/lithograph-extension/src/execution.rs)、[Native API](native-api.md)、[设计](../design.md)。
+排障时记录版本、SQLite runtime、操作名、参数**形状**、category/code、Commit/Session revision。避免记录完整 credentials、私有文档、向量正文或含 token 的 URL。依据：[错误映射](../../crates/lithograph-extension/src/execution.rs)、[Native API](native-api.md)、[Error Categories](../design/interfaces.md#error-categories)。

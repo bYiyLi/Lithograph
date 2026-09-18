@@ -70,4 +70,4 @@ Property 赋值 null 表示移除该 Property，不是保存一个存在但 null
 
 Primitive float 的标准 JSON 不接受 NaN / Infinity；示例使用 `json.dumps(...,allow_nan=False)`，需要这些值时显式使用 Float tag。单行和总 result envelope 还受宿主 SQLite 长度/资源限制。
 
-依据：[JSON encoder/decoder](../../crates/lithograph-core/src/cypher/json.rs)、[types](../../crates/lithograph-core/src/cypher/types.rs)、[设计结果合同](../design.md)。
+依据：[JSON encoder/decoder](../../crates/lithograph-core/src/cypher/json.rs)、[types](../../crates/lithograph-core/src/cypher/types.rs)、[Lithograph JSON](../design/interfaces.md#lithograph-json)。

@@ -41,4 +41,4 @@ Version mutation 不能与 at 或非空 graphView 混用。不要把同一份 op
 
 参数与 options 不要混淆：查询里的 `$name` 从 params 取值，而不是 options。timeout、SQL busy handler、取消与线程策略属于宿主 SQLite API。
 
-依据：[option parser](../../crates/lithograph-core/src/query/options.rs)、[Native ABI](../../include/lithograph.h)、[设计](../design.md)。
+依据：[option parser](../../crates/lithograph-core/src/query/options.rs)、[Native ABI](../../include/lithograph.h)、[Query Options](../design/interfaces.md#query-options)。

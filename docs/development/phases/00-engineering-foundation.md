@@ -8,7 +8,7 @@
 
 ## 2. Design Inputs
 
-- `docs/design.md`：第 3、15、17 节；
+- [Cypher 25 兼容合同](../../design/compatibility.md)、[Deployment 与 Runtime Boundary](../../design/runtime.md#deployment)、[Large-scale Invariants](../../design/runtime.md#large-scale-invariants)；
 - `docs/development/cypher25-compatibility.md`；
 - `docs/research/reference-baseline.md`。
 

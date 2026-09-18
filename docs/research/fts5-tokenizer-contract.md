@@ -1,6 +1,6 @@
 # SQLite FTS5 Tokenizer Contract 研究证据
 
-核验记录：2026-09-16 UTC；仓库检查基线 `2cbca18`。本页保存外部合同、实际观察和适用限制，不定义 Lithograph 产品行为；设计真源见 [Design §11.5](../design.md#115-full-text)。
+核验记录：2026-09-16 UTC；仓库检查基线 `2cbca18`。本页保存外部合同、实际观察和适用限制，不定义 Lithograph 产品行为；设计真源见 [Full-text](../design/full-text.md)。
 
 ## 1. 权威来源
 

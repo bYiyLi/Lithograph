@@ -13,7 +13,7 @@
 
 ## 3. Design Inputs
 
-- `docs/design.md` 第 4.3–4.4、7.5–7.7、8–10、12–14 节。
+- [Native C ABI](../../design/interfaces.md#native-c-abi)、[Query Options](../../design/interfaces.md#query-options)、[Temporal Clock Boundary](../../design/query-engine.md#temporal-clocks)、[Cancellation 与 Connection State](../../design/query-engine.md#cancellation-and-connection-state)、[Graph View Execution Boundary](../../design/query-engine.md#graph-view)、[Version-aware Storage Model](../../design/storage.md#version-aware-storage)、[Transaction 与 Concurrency Model](../../design/storage.md#transactions-and-concurrency)、[Versioned Graph Model](../../design/versioning.md)、[LOAD CSV 与 External I/O](../../design/interfaces.md#external-io)、[Result 与 Error Contract](../../design/interfaces.md#results-and-errors)、[Integrity、Recovery 与 Migration](../../design/storage.md#integrity-recovery-migration)。
 
 ## 4. Features
 
@@ -69,7 +69,7 @@ lithograph.tag.delete
 
 ### Feature 09.3 Native Explicit Transaction
 
-在 Native ABI 增加 additive explicit-transaction family，落实 `docs/design.md` 第 4.3、4.4、7.5–7.7、9.2、12、14.2 节：
+在 Native ABI 增加 additive explicit-transaction family，落实 [Native C ABI](../../design/interfaces.md#native-c-abi)、[Query Options](../../design/interfaces.md#query-options)、[Temporal Clock Boundary](../../design/query-engine.md#temporal-clocks)、[Cancellation 与 Connection State](../../design/query-engine.md#cancellation-and-connection-state)、[Graph View Execution Boundary](../../design/query-engine.md#graph-view)、[Native Explicit Transaction](../../design/storage.md#native-explicit-transaction)、[LOAD CSV 与 External I/O](../../design/interfaces.md#external-io)、[Crash Recovery](../../design/storage.md#crash-recovery)：
 
 - public lifecycle：`lithograph_v1_tx_begin/execute/commit/abort`，直接以 `sqlite3*` connection 作为 transaction identity；准确 C signature、input/output ownership 与 `lithograph_v1_free` contract 已由 Design 冻结，不在实现阶段重新设计；
 - begin 只允许 SQLite autocommit mode，取得 Engine/SQLite single-writer ownership，pin target Branch head；可选 `expectedHead=commit/<id>` 在 writer ownership 下原子校验，mismatch 返回 `BRANCH_HEAD_MOVED`；

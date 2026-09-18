@@ -14,7 +14,7 @@ Phase 04/05 已建立的 Graph View 是 execution context，不是新 Cypher 语
 
 ## 3. Design Inputs
 
-- `docs/design.md` 第 3、4.4、5–7 节；
+- [Cypher 25 兼容合同](../../design/compatibility.md)、[Query Options](../../design/interfaces.md#query-options)、[Property Graph 与 Value Model](../../design/query-engine.md#property-graph-and-values)、[Engine Structure](../../design/query-engine.md#engine-structure)、[Query Planning 与 Execution](../../design/query-engine.md#planning-and-execution)；
 - `docs/development/cypher25-compatibility.md`。
 
 ## 4. Features

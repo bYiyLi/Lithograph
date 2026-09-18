@@ -1,6 +1,6 @@
 # SQLite Embedding Provider / Cypher Vector Contract 研究证据
 
-核验记录：2026-09-18 UTC；仓库检查基线 `1e6e078`。本页保存 Phase 13 使用的外部合同、当前仓库观察和采用限制，不定义 Lithograph 产品行为；设计真源见 [Design §11.6](../design.md#116-vector)。
+核验记录：2026-09-18 UTC；仓库检查基线 `1e6e078`。本页保存 Phase 13 使用的外部合同、当前仓库观察和采用限制，不定义 Lithograph 产品行为；设计真源见 [Vector](../design/vector.md)。
 
 ## 1. 权威来源
 
@@ -53,8 +53,8 @@ caller 生成/保存 Vector Property
 | `storage/schema_state.rs` | `StandardIndexKind` 已有 `Vector`，`IndexConfiguration::Vector` 保存 dimension/similarity/HNSW config；没有 Semantic kind/provider config |
 | `query/semantic_index.rs` | Raw Vector 从真实 indexed Property 读取 Vector，cache miss 先 exact scan，再构建 HNSW cache |
 | `query/semantic_index/hnsw.rs` | HNSW 使用 `temp._lithograph_vector_cache*` connection-local derived tables；cache key 绑定 Snapshot/IndexDefinition/dimension |
-| `docs/design.md` §11.5 | Full-text 已证明“SQLite extension provider + versioned config + connection-local availability + history/cache isolation”的可行边界 |
-| `docs/design.md` §11.7 / §14.3.1 | `main` persistent derived storage 必须显式升级 storage format；普通 read 不因 cache miss 隐式写 `main` |
+| [Full-text](../design/full-text.md) | Full-text 已证明“SQLite extension provider + versioned config + connection-local availability + history/cache isolation”的可行边界 |
+| [Persistent Standard Index Base + Delta](../design/schema-and-indexes.md#persistent-standard-index)、[Performance Storage Format 3](../design/storage.md#storage-format-3) | `main` persistent derived storage 必须显式升级 storage format；普通 read 不因 cache miss 隐式写 `main` |
 
 这些现状支持最小 Phase 13：复用现有 HNSW，不顺带把 Raw Vector HNSW 持久化；只新增 Semantic IndexDefinition、Embedding Provider ABI 与跨 connection 的 text->Vector persistent cache。Raw Vector current tests 是 Phase 13 必须保持的回归 oracle。
 

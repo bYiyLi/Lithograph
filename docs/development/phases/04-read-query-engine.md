@@ -12,7 +12,7 @@
 
 ## 3. Design Inputs
 
-- `docs/design.md` 第 4.4、6–8、13、17 节。
+- [Query Options](../../design/interfaces.md#query-options)、[Engine Structure](../../design/query-engine.md#engine-structure)、[Query Planning 与 Execution](../../design/query-engine.md#planning-and-execution)、[Version-aware Storage Model](../../design/storage.md#version-aware-storage)、[Result 与 Error Contract](../../design/interfaces.md#results-and-errors)、[Large-scale Invariants](../../design/runtime.md#large-scale-invariants)。
 
 ## 4. Features
 
@@ -116,7 +116,7 @@ LIMIT ...
 - [x] OPTIONAL null preservation fixtures 通过；
 - [x] duplicate rows / aggregation / ordering 基础语义通过；
 - [x] 1M-row synthetic streaming fixture 在 rows API 下不按总结果线性增长内存；
-- [x] `lithograph()` read query 返回第 13.1 节完整 JSON envelope；`lithograph_rows` columns/row encoding 与同一 query 一致；
+- [x] `lithograph()` read query 返回[Lithograph JSON](../../design/interfaces.md#lithograph-json)完整 JSON envelope；`lithograph_rows` columns/row encoding 与同一 query 一致；
 - [x] Native read event 顺序固定为 `COLUMNS -> ROW* -> SUMMARY`；callback cancel 返回 `SQLITE_INTERRUPT` 且停止继续发 event；
 - [x] sort spill fixture 与 in-memory result 相同；
 - [x] historical commit read 与同一 commit 创建时 read 一致；

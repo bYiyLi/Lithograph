@@ -4,9 +4,9 @@
 
 ## 1. 目标与范围
 
-在 Phase 00–12 已完成、v0.1.1 已发布的基线上，实现 [Design §11.6](../../design.md#116-vector) 已冻结的双轨 Vector 模型：**现有 Raw Vector Property / Vector Index / Cypher 25 `SEARCH` 完全保留**；新增 Managed Semantic Index，使一个 String Property 可以通过当前 SQLite connection 注册的 `EmbeddingProviderV1` 生成 derived Vector，并通过 `db.index.semantic.*` 查询、rebuild 与 cache maintenance 使用。
+在 Phase 00–12 已完成、v0.1.1 已发布的基线上，实现 [Vector](../../design/vector.md) 已冻结的双轨 Vector 模型：**现有 Raw Vector Property / Vector Index / Cypher 25 `SEARCH` 完全保留**；新增 Managed Semantic Index，使一个 String Property 可以通过当前 SQLite connection 注册的 `EmbeddingProviderV1` 生成 derived Vector，并通过 `db.index.semantic.*` 查询、rebuild 与 cache maintenance 使用。
 
-本 Phase 的产品行为只由 Design §11.6、§12、§14.3.2、§15–17 定义；本计划只安排依赖、实现顺序、验收与状态。外部证据见 [Embedding Provider 研究](../../research/embedding-provider-contract.md)。
+本 Phase 的产品行为只由 [Vector](../../design/vector.md)、[LOAD CSV 与 External I/O](../../design/interfaces.md#external-io)、[Managed Semantic Storage Format 4](../../design/storage.md#storage-format-4)、[Deployment 与 Runtime Boundary](../../design/runtime.md#deployment)、[Security Boundary](../../design/runtime.md#security)、[Large-scale Invariants](../../design/runtime.md#large-scale-invariants) 定义；本计划只安排依赖、实现顺序、验收与状态。外部证据见 [Embedding Provider 研究](../../research/embedding-provider-contract.md)。
 
 本 Phase 包含：connection-local Provider ABI/registration、deterministic synthetic Provider oracle、独立 `openai-compatible` production/reference Provider、Node/Relationship Semantic IndexDefinition、create/query/SHOW/DROP/history/version operations、persistent Embedding Result Cache、format `3 -> 4` migration、query-memory cache、explicit rebuild、Graph View/history、external-I/O/transaction boundary、真实 SQLite extension integration 与 Raw Vector regression。
 
@@ -38,7 +38,7 @@ Phase 13 已开始实现，当前状态为 `in_progress`。只有 SV13 acceptanc
 
 ### Feature 13.1 Provider ABI 与真实 SQLite fixture
 
-**依赖：Phase 01/08/12；来源：Design §11.6.3、§15.1–15.2。**
+**依赖：Phase 01/08/12；来源：[SQLite Embedding Provider Contract](../../design/vector.md#embedding-provider)、[Implementation Language 与 SQLite ABI](../../design/runtime.md#implementation-and-sqlite-abi)、[SQLite Baseline](../../design/runtime.md#sqlite-baseline)。**
 
 定义可供普通 SQLite loadable extension 使用的 `EmbeddingProviderV1` public C header/FFI boundary：ABI version/struct size、opaque context、stable semantic identity、local `validate`、`embedBatch`、取消/错误与 destructor ownership。按 `lithograph.embedding.v1/<provider>` client-data key lookup；duplicate name 先查后拒绝，不静默 replacement。
 
@@ -52,7 +52,7 @@ Phase 13 已开始实现，当前状态为 `in_progress`。只有 SV13 acceptanc
 
 ### Feature 13.2 Semantic Schema / Procedure surface
 
-**依赖：13.1；来源：Design §11.6.2、§11.6.4、§11.3。**
+**依赖：13.1；来源：[Semantic IndexDefinition](../../design/vector.md#semantic-index-definition)、[创建、展示与删除](../../design/vector.md#create-show-drop)、[Index 类型](../../design/schema-and-indexes.md#index-types)。**
 
 新增 Semantic Index kind/config canonical encoding；实现 `db.index.semantic.createNodeIndex` / `createRelationshipIndex`，固定单 source Property、provider/config/dimensions/similarity、FLOAT32 output。Provider create validation 必须 bounded/local，不调用 `embedBatch`。接通 `SHOW ALL INDEXES`、通用 `DROP INDEX`、Schema hash/Diff/Patch/Merge/Rebase/Revert 与 Native staged schema publication；`SHOW VECTOR INDEXES` 和现有 Raw Vector DDL 不改变。
 
@@ -64,7 +64,7 @@ ProviderConfig 只接受 Design 允许的 canonical JSON-compatible values；未
 
 ### Feature 13.3 Format 4 Persistent Embedding Result Cache
 
-**依赖：13.2；来源：Design §11.6.6–11.6.7、§14.1、§14.3.2。**
+**依赖：13.2；来源：[Persistent Embedding Result Cache](../../design/vector.md#embedding-result-cache)、[Cache policy、清理与运维](../../design/vector.md#cache-policy-and-maintenance)、[Integrity Invariants](../../design/storage.md#integrity-invariants)、[Managed Semantic Storage Format 4](../../design/storage.md#storage-format-4)。**
 
 将 `_lithograph_embedding_cache`、format4 exact inventory、`3 -> 4` migration 与 legacy read boundary落入 storage constants；实现 embedding-space/text domain-separated hash、cache lookup/batch insert、payload validation、oldest-entry/FIFO budget eviction。Raw source text不复制进 cache，query-only miss不持久化。
 
@@ -76,7 +76,7 @@ ProviderConfig 只接受 Design 允许的 canonical JSON-compatible values；未
 
 ### Feature 13.4 Managed query、历史与 Graph View
 
-**依赖：13.3；来源：Design §11.6.5–11.6.8。**
+**依赖：13.3；来源：[文本查询 surface](../../design/vector.md#semantic-query)、[Persistent Embedding Result Cache](../../design/vector.md#embedding-result-cache)、[Cache policy、清理与运维](../../design/vector.md#cache-policy-and-maintenance)、[Failure、历史与可复现性边界](../../design/vector.md#failures-and-reproducibility)。**
 
 实现 `db.index.semantic.queryNodes/queryRelationships`：目标 Snapshot 先解析历史 Semantic definition，query text使用同 provider/config，复用 persistent source cache + connection-local query LRU；source miss按 exact text key去重/batch调用 Provider，再构造 TEMP managed vector materialization并复用现有 HNSW search primitives。普通 query不写 `main`。
 
@@ -88,7 +88,7 @@ Graph View 必须在 top-k/skip/limit 之前约束 Node/Relationship/endpoint；
 
 ### Feature 13.5 Explicit rebuild、batching 与 version-operation closure
 
-**依赖：13.4；来源：Design §11.6.6–11.6.8、§12。**
+**依赖：13.4；来源：[Persistent Embedding Result Cache](../../design/vector.md#embedding-result-cache)、[Cache policy、清理与运维](../../design/vector.md#cache-policy-and-maintenance)、[Failure、历史与可复现性边界](../../design/vector.md#failures-and-reproducibility)、[LOAD CSV 与 External I/O](../../design/interfaces.md#external-io)。**
 
 实现 `db.index.semantic.rebuild(name, version)` 的两阶段 maintenance：读阶段 pin immutable target、枚举/去重 source、cache lookup并在不持有 SQLite single-writer ownership 时调用 Provider；provider全部成功后短 writer重新验证 target definition并原子发布缺失 persistent cache entries、执行容量淘汰，再为当前 connection构建 TEMP semantic/HNSW。全过程不产生 Commit/ref move。
 
@@ -100,7 +100,7 @@ Graph View 必须在 top-k/skip/limit 之前约束 Node/Relationship/endpoint；
 
 ### Feature 13.6 完整回归、性能、质量与文档收尾
 
-**依赖：13.5；来源：Design §17、全局 Phase 完成标准。**
+**依赖：13.5；来源：[Large-scale Invariants](../../design/runtime.md#large-scale-invariants)、全局 Phase 完成标准。**
 
 加入可计数 synthetic provider performance fixtures，证明 duplicate exact text 不线性放大 Provider calls、new connection在 persistent cache warm 后不再调用 provider、query-only repeated text在同 connection命中 memory LRU；记录 cache bytes/entry counts、batch call count与 rebuild writer hold。测试 corpus只需证明机制和资源边界；除非 finding 影响既有 scale contract，不重新跑无关 10M/100M graph tier。
 

@@ -4,7 +4,7 @@
 
 ## 1. 目标与范围
 
-在 Phase 00–11 的已完成基线上，使 Full-text Index 可以引用实际宿主 SQLite connection 中任意符合 FTS5 contract 的 tokenizer 及其参数，不再为每个 tokenizer 修改 Lithograph 映射。实现范围和行为唯一真源是 [Design §11.5](../../design.md#115-full-text)，本计划只安排工作、依赖、验证和真实状态。
+在 Phase 00–11 的已完成基线上，使 Full-text Index 可以引用实际宿主 SQLite connection 中任意符合 FTS5 contract 的 tokenizer 及其参数，不再为每个 tokenizer 修改 Lithograph 映射。实现范围和行为唯一真源是 [Full-text](../../design/full-text.md)，本计划只安排工作、依赖、验证和真实状态。
 
 本 Phase 包含配置/Schema、原生 tokenizer 委托、query-time analyzer、历史/cache、失败原子性及 SQL/Native integration。允许 Design 已明确的 analyzer binding 破坏升级，不交付旧名称兼容层。Phase 08/11 保持 `done`；它们的历史验收不代替本 Phase 的新验收。
 
@@ -13,7 +13,7 @@
 ## 2. 前置条件与当前差距
 
 - Phase 00–11 `done`；直接依赖 Phase 08 Full-text、Phase 09 Schema/版本入口/Native transaction、Phase 11 Snapshot state/read guard 基础。
-- [Design](../../design.md) §3.2、§4.1/4.4、§7.7/7.8、§9、§10、§11.2–11.5、§14、§17；本次不更改 §11.6 Vector 合同。
+- [完整兼容范围](../../design/compatibility.md#compatibility-scope)、[加载与初始化](../../design/interfaces.md#loading-and-initialization)、[Query Options](../../design/interfaces.md#query-options)、[Graph View Execution Boundary](../../design/query-engine.md#graph-view)、[Query-scoped Resolved State](../../design/query-engine.md#query-scoped-resolved-state)、[Transaction 与 Concurrency Model](../../design/storage.md#transactions-and-concurrency)、[Versioned Graph Model](../../design/versioning.md)、[Schema Change](../../design/schema-and-indexes.md#schema-change)、[Index 类型](../../design/schema-and-indexes.md#index-types)、[Range / Text / Point](../../design/schema-and-indexes.md#range-text-point)、[Full-text](../../design/full-text.md)、[Integrity、Recovery 与 Migration](../../design/storage.md#integrity-recovery-migration)、[Large-scale Invariants](../../design/runtime.md#large-scale-invariants)；本次不更改 [Vector](../../design/vector.md) Vector 合同。
 - [FTS5 研究证据](../../research/fts5-tokenizer-contract.md) S1–S4；[Compatibility inventory](../cypher25-compatibility.md) 的 Phase 12 supplemental inventory。
 - 实现起点基线 `2cbca18` 曾保留两个 analyzer 白名单/映射、缺少 FTS5 constructor probe，并用去重词集合近似 query-time override；这些缺口已由本 Phase 关闭。
 
@@ -36,7 +36,7 @@ Phase 12 已在 `463fb7c5f372c097d7dae776d271936f8b25b68a` 基础上的当前未
 
 ### Feature 12.1 Specification 与可执行测试底座
 
-**依赖：前置 Phase；来源：Design §11.5.1–11.5.2、§11.5.6–11.5.7。**
+**依赖：前置 Phase；来源：[职责与边界](../../design/full-text.md#scope)、[Cypher 配置与 FTS5 specification](../../design/full-text.md#fts5-specification)、[Query-time analyzer 与结果语义](../../design/full-text.md#query-time-analyzer)、[运行环境、失败与可复现性](../../design/full-text.md#runtime-and-failures)。**
 
 建立 Full-text 局部 specification 校验/SQL literal 编码辅助，去掉对未转义字符串拼 SQL 的依赖。原生委托所需的瞬态解析以 FTS5 原文规则作 oracle，不引入自己的配置语言。
 
@@ -48,7 +48,7 @@ Phase 12 已在 `463fb7c5f372c097d7dae776d271936f8b25b68a` 基础上的当前未
 
 ### Feature 12.2 Versioned configuration、DDL 与 SHOW
 
-**依赖：12.1；来源：Design §11.5.2–11.5.4。**
+**依赖：12.1；来源：[Cypher 配置与 FTS5 specification](../../design/full-text.md#fts5-specification)、[Versioned definition 与破坏升级](../../design/full-text.md#versioned-definition)、[Schema 执行验证与原子失败](../../design/full-text.md#schema-validation)。**
 
 修改当前配置 parser/default、FullText definition 消费者和 SHOW；在实际 Schema 执行边界加入本次改变 definition 的原生构造验证，不在无副作用 planning 或全量 Schema load 中执行。明确 `IF NOT EXISTS` 的静态检查与真实 no-op，不把缺失插件变成无关 schema mutation 的阻塞。
 
@@ -58,7 +58,7 @@ Phase 12 已在 `463fb7c5f372c097d7dae776d271936f8b25b68a` 基础上的当前未
 
 ### Feature 12.3 Cache、历史与 connection lifecycle
 
-**依赖：12.2；来源：Design §11.5.3、§11.5.5、§11.5.7。**
+**依赖：12.2；来源：[Versioned definition 与破坏升级](../../design/full-text.md#versioned-definition)、[Cache 与历史 Snapshot](../../design/full-text.md#cache-and-history)、[运行环境、失败与可复现性](../../design/full-text.md#runtime-and-failures)。**
 
 将真实已注册 tokenizer 接入当前 TEMP FTS build/rebuild 路径。覆盖完整 definition 与目标 Snapshot key、构建失败清理、DROP/recreate、跨 Branch/historical/staged state，以及每个连接独立注册的边界。
 
@@ -68,7 +68,7 @@ Phase 12 已在 `463fb7c5f372c097d7dae776d271936f8b25b68a` 基础上的当前未
 
 ### Feature 12.4 Query-time analyzer 与可见结果
 
-**依赖：12.3；来源：Design §11.5.6。**
+**依赖：12.3；来源：[Query-time analyzer 与结果语义](../../design/full-text.md#query-time-analyzer)。**
 
 替换现有 query-as-document / `DISTINCT term` override 近似，让普通与不同 analyzer 两条路径都遵守 FTS5 tokenization mode 和完整查询结构。按 Design 实现局限于 provider 内的委托适配，不给外部提供第二套 tokenizer 注册机制。
 
@@ -78,7 +78,7 @@ Phase 12 已在 `463fb7c5f372c097d7dae776d271936f8b25b68a` 基础上的当前未
 
 ### Feature 12.5 Version / Adapter 交叉验收
 
-**依赖：12.4；来源：Design §11.5.3–11.5.7 和既有 §4/9/10。**
+**依赖：12.4；来源：[Versioned definition 与破坏升级](../../design/full-text.md#versioned-definition)、[Schema 执行验证与原子失败](../../design/full-text.md#schema-validation)、[Cache 与历史 Snapshot](../../design/full-text.md#cache-and-history)、[Query-time analyzer 与结果语义](../../design/full-text.md#query-time-analyzer)、[运行环境、失败与可复现性](../../design/full-text.md#runtime-and-failures) 和既有 [SQLite Extension 接口](../../design/interfaces.md#sqlite-extension)、[Transaction 与 Concurrency Model](../../design/storage.md#transactions-and-concurrency)、[Versioned Graph Model](../../design/versioning.md)。**
 
 检查所有会发布 Full-text definition 的入口，不把原生可用性验证只接到 CREATE 的一种 adapter。版本结构读取/纯 ref move 与真正引入新定义的操作按 Design 区分。构建真实 `.load Lithograph + .load synthetic tokenizer` 的集成闭环；也验证两者反向加载顺序。
 

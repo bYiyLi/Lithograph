@@ -97,4 +97,4 @@ Graph Type 描述它声明覆盖的元素，保持 open graph type 语义；不�
 
 使用 `SHOW CURRENT GRAPH TYPE` 保存返回 specification，并配合版本 Branch 试验迁移；业务迁移成功后再合并。Schema 指令不能与非空 Graph View 混用，不会形成 view-local 唯一性域。
 
-显式索引重建方法见 [维护](operations.md)，语义依据 [设计 §11](../design.md)。
+显式索引重建方法见 [维护](operations.md)，语义依据 [Schema、Constraint 与 Index Model](../design/schema-and-indexes.md)、[Full-text](../design/full-text.md)、[Vector](../design/vector.md)。

@@ -12,7 +12,7 @@
 
 ## 3. Design Inputs
 
-- 完整 `docs/design.md`；
+- [完整设计文档集](../../design.md#design-ownership)（入口与职责表列出的全部专题）；
 - `docs/development/cypher25-compatibility.md`；
 - 所有 Phase acceptance record。
 

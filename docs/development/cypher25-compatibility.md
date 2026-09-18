@@ -5,11 +5,11 @@
 **Profile ID:** `CY25-2026.08`
 
 **Frozen evidence date:** `2026-09-09`
-**Product contract:** `docs/design.md#3-cypher-25-兼容合同`
+**Product contract:** [Cypher 25 兼容合同](../design/compatibility.md)
 
 Profile 由 Neo4j Cypher 25 current-graph Manual + 2026.08 已公开 Cypher additions 冻结。未来 Cypher 25 新功能建立新的 Profile，不回写本 Profile 的 acceptance meaning。
 
-Phase 12 的 FTS5 provider binding 不是新增 Cypher grammar 或新的语言 Profile。其非可移植 analyzer 取值、破坏升级和新增验收按 [Design §11.5](../design.md#115-full-text) 与下文 supplemental inventory 单列；已有 `done` 只代表对应已执行基线，不代表任意 tokenizer 或所有 analyzer 组合已通过。
+Phase 12 的 FTS5 provider binding 不是新增 Cypher grammar 或新的语言 Profile。其非可移植 analyzer 取值、破坏升级和新增验收按 [Full-text](../design/full-text.md) 与下文 supplemental inventory 单列；已有 `done` 只代表对应已执行基线，不代表任意 tokenizer 或所有 analyzer 组合已通过。
 
 ## 2. Status Semantics
 

@@ -1,6 +1,6 @@
 # Lithograph 架构实现路线
 
-本文只表达实现依赖，不重新定义 `docs/design.md` 的产品 contract。
+本文只表达实现依赖，不重新定义 [设计文档集](../design.md#design-ownership) 的产品 contract。
 
 ## 1. Critical Path
 
@@ -53,9 +53,9 @@ Phase 13 Managed Semantic Vector / Embedding Provider (in_progress)
 
 Phase 00–12均已完成开发验收；Phase 13 已进入 `in_progress`，当前正在实现 Provider ABI 与 Managed Semantic vertical slice。Phase 11的实现、固定性能机验收、并发压力、repository quality/coverage、真实SQLite CI以及Linux x64/arm64、macOS x64/arm64、Windows x64/arm64六目标hosted Release Matrix都已闭合。产品目标行为仍由Design定义，实际执行/验收见 [Phase 11计划](phases/11-performance-optimization.md)。
 
-Phase 12 的目标由 Design §11.5 定义，当前实现与 FT12-01–20 开发验收已经闭合；依赖 Phase 08/09/11，不重开已完成 Phase。具体实现顺序与证据见 [Phase 12计划](phases/12-fulltext-tokenizer.md)。该成果已经进入 v0.1.1 发布基线，对应 repository CI 与六目标 hosted Release Matrix 均已通过。
+Phase 12 的目标由 [Full-text](../design/full-text.md) 定义，当前实现与 FT12-01–20 开发验收已经闭合；依赖 Phase 08/09/11，不重开已完成 Phase。具体实现顺序与证据见 [Phase 12计划](phases/12-fulltext-tokenizer.md)。该成果已经进入 v0.1.1 发布基线，对应 repository CI 与六目标 hosted Release Matrix 均已通过。
 
-Phase 13 的目标由 Design §11.6、§14.3.2 定义：保留 Phase 08 的 Raw Vector/Cypher 25 `SEARCH`，新增 SQLite Embedding Provider contract、Managed Semantic Index 与 persistent Embedding Result Cache。它依赖既有 SQLite extension、Schema/version、HNSW、format3/read guard 和 Full-text provider lifecycle，但不回开这些 Phase；具体顺序与验收见 [Phase 13计划](phases/13-managed-semantic-vector.md)。
+Phase 13 的目标由 [Vector](../design/vector.md)、[Managed Semantic Storage Format 4](../design/storage.md#storage-format-4) 定义：保留 Phase 08 的 Raw Vector/Cypher 25 `SEARCH`，新增 SQLite Embedding Provider contract、Managed Semantic Index 与 persistent Embedding Result Cache。它依赖既有 SQLite extension、Schema/version、HNSW、format3/read guard 和 Full-text provider lifecycle，但不回开这些 Phase；具体顺序与验收见 [Phase 13计划](phases/13-managed-semantic-vector.md)。
 
 ## 2. 为什么 Version Storage 必须早于 Cypher Engine
 
@@ -157,7 +157,7 @@ FTS5 specification / synthetic native tokenizer oracle
 | Schema 发布入口、Native staged 与 SQL adapters | 09 | 12.5 |
 | 全部新验收与原有 regression / gates | 10/11 | 12.6 |
 
-行为和取舍只由 Design §11.5 定义，不把本表当第二份配置合同；FTS/HNSW 共享辅助代码的改动需要回归 Vector，但不据此扩大 Vector 设计范围。
+行为和取舍只由 [Full-text](../design/full-text.md) 定义，不把本表当第二份配置合同；FTS/HNSW 共享辅助代码的改动需要回归 Vector，但不据此扩大 Vector 设计范围。
 
 ### Phase 13 Managed Semantic Vector 纵向闭环
 
@@ -179,7 +179,7 @@ SQLite provider extension + client-data ABI oracle
 | Rebuild、batch去重、external-I/O transaction boundary | 09/12 | 13.5 |
 | Raw Vector/compat/performance/CI/六目标artifact回归 | 10–12 | 13.6 |
 
-Phase 13 不复制 Design §11.6 的 providerConfig/cache-key/procedure 语义；本表只说明实现依赖。Raw Vector Property/`CREATE VECTOR INDEX`/`SEARCH` 继续由 Phase 08/10 的既有实现拥有，Phase 13 只能追加 managed path，不能把旧入口重解释成自动 Embedding。
+Phase 13 不复制 [Vector](../design/vector.md) 的 providerConfig/cache-key/procedure 语义；本表只说明实现依赖。Raw Vector Property/`CREATE VECTOR INDEX`/`SEARCH` 继续由 Phase 08/10 的既有实现拥有，Phase 13 只能追加 managed path，不能把旧入口重解释成自动 Embedding。
 
 ### Cypher vertical slice
 

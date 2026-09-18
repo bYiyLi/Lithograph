@@ -82,4 +82,4 @@ tx_commit 成功返回 `{"commit":"commit/...","counters":{...}}`。有 mutation
 
 begin 要求 idle/autocommit connection；不能与 SQL BEGIN 叠加。Version Procedure、LOAD CSV、IN TRANSACTIONS 或普通 graph API 不得穿插到 active Native transaction。完整生命周期和重试规则见 [事务指南](../guide/transactions.md)。
 
-可运行 C 示例见 [应用集成](../guide/integration.md)。checkout 的 adapter 缺陷单独记录在 [Known Issues](known-issues.md)。依据：[公开 header](../../include/lithograph.h)、[Native implementation](../../crates/lithograph-extension/src/native.rs)、[设计](../design.md)。
+可运行 C 示例见 [应用集成](../guide/integration.md)。checkout 的 adapter 缺陷单独记录在 [Known Issues](known-issues.md)。依据：[公开 header](../../include/lithograph.h)、[Native implementation](../../crates/lithograph-extension/src/native.rs)、[Native C ABI](../design/interfaces.md#native-c-abi)。
