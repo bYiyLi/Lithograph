@@ -1,3 +1,7 @@
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include <sqlite3.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -72,13 +76,21 @@ static sqlite3_int64 scalar_int64(sqlite3 *db, const char *sql) {
     return value;
 }
 
+#ifndef _WIN32
 static sqlite3_int64 monotonic_millis(void) {
     struct timespec value;
     require(clock_gettime(CLOCK_MONOTONIC, &value) == 0, "clock_gettime failed");
     return (sqlite3_int64)value.tv_sec * 1000 + value.tv_nsec / 1000000;
 }
 
-#ifndef _WIN32
+static void sleep_millis(long milliseconds) {
+    const struct timespec delay = {
+        .tv_sec = milliseconds / 1000,
+        .tv_nsec = (milliseconds % 1000) * 1000000,
+    };
+    require(nanosleep(&delay, NULL) == 0, "nanosleep failed");
+}
+
 static void *run_rebuild(void *user_data) {
     rebuild_context *context = (rebuild_context *)user_data;
     context->rc = sqlite3_exec(
@@ -151,7 +163,7 @@ static void wait_for_provider_call(sqlite3 *db) {
             active = 1;
             break;
         }
-        usleep(5000);
+        sleep_millis(5);
     }
     require(active, "semantic rebuild never entered the synthetic Provider call");
 }

@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -13,6 +13,13 @@ use lithograph_core::query::{
 };
 use lithograph_core::storage::{branch_head, create_storage_schema, initialize_root};
 use rusqlite::Connection;
+
+static TRANSACTION_RETRY_BUSY_OBSERVED: AtomicBool = AtomicBool::new(false);
+
+fn observe_transaction_retry_busy(_attempt: i32) -> bool {
+    TRANSACTION_RETRY_BUSY_OBSERVED.store(true, Ordering::SeqCst);
+    false
+}
 
 fn csv_fixture(name: &str, contents: &str) -> (PathBuf, String) {
     let path = std::env::temp_dir().join(format!(
@@ -725,26 +732,41 @@ fn transaction_subquery_fail_and_break_preserve_precise_partial_durability_and_s
 #[test]
 fn transaction_subquery_retry_recovers_from_transient_sqlite_busy() {
     let (path, connection) = fresh_file_storage("retry");
+    connection
+        .busy_handler(Some(observe_transaction_retry_busy))
+        .expect("install retry observation busy handler");
     let before = commit_count(&connection);
-    let (ready_tx, ready_rx) = mpsc::channel();
-    let lock_path = path.clone();
-    let locker = thread::spawn(move || {
-        let lock = Connection::open(lock_path).expect("open locking connection");
-        lock.execute_batch("BEGIN IMMEDIATE")
-            .expect("acquire SQLite write lock");
-        ready_tx.send(()).expect("signal lock acquired");
-        thread::sleep(Duration::from_millis(120));
-        lock.execute_batch("COMMIT").expect("release SQLite lock");
-    });
-    ready_rx.recv().expect("wait for write lock");
+    let lock = Connection::open(&path).expect("open locking connection");
+    lock.execute_batch("BEGIN IMMEDIATE")
+        .expect("acquire SQLite write lock");
+    TRANSACTION_RETRY_BUSY_OBSERVED.store(false, Ordering::SeqCst);
 
-    execute(
-        &connection,
-        "UNWIND [1] AS value CALL (value) { CREATE (:RetriedBatch {value:value}) } IN TRANSACTIONS OF 1 ROWS ON ERROR RETRY FOR 1 SEC THEN FAIL FINISH",
-        ExecutionOptions::default(),
-    )
-    .expect("transient SQLITE_BUSY is retried");
-    locker.join().expect("locking thread");
+    let worker = thread::spawn(move || {
+        let result = execute(
+            &connection,
+            "UNWIND [1] AS value CALL (value) { CREATE (:RetriedBatch {value:value}) } IN TRANSACTIONS OF 1 ROWS ON ERROR RETRY FOR 5 SEC THEN FAIL FINISH",
+            ExecutionOptions::default(),
+        );
+        (connection, result)
+    });
+    let mut observed_busy = false;
+    for _ in 0..5_000 {
+        if TRANSACTION_RETRY_BUSY_OBSERVED.load(Ordering::SeqCst) {
+            observed_busy = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    lock.execute_batch("COMMIT").expect("release SQLite lock");
+    let (connection, result) = worker.join().expect("retry worker");
+    assert!(
+        observed_busy,
+        "transaction batch never observed SQLITE_BUSY"
+    );
+    result.expect("transient SQLITE_BUSY is retried");
+    connection
+        .busy_handler(None)
+        .expect("remove retry observation busy handler");
     assert_eq!(commit_count(&connection), before + 1);
     let (count, _) = execute(
         &connection,

@@ -66,7 +66,11 @@ fn create_fixture(path: &Path) -> Result<(), Box<dyn Error>> {
              id INTEGER PRIMARY KEY CHECK(id=1),\
              magic TEXT NOT NULL,\
              database_id TEXT NOT NULL,\
-             storage_format INTEGER NOT NULL\
+             storage_format INTEGER NOT NULL,\
+             \"semantic.embedding_cache.enabled\" INTEGER NULL \
+                 CHECK(\"semantic.embedding_cache.enabled\" IN (0, 1)),\
+             \"semantic.embedding_cache.max_bytes\" INTEGER NULL \
+                 CHECK(\"semantic.embedding_cache.max_bytes\" > 0)\
          );",
     )?;
     connection.execute(
