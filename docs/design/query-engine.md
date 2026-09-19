@@ -164,7 +164,7 @@ Executor 使用 row pipeline。没有 `ORDER BY`、global aggregation、`DISTINC
 
 ### Temporal Clock Boundary
 
-普通 auto-commit execution 下，一次 top-level Lithograph execution 同时是 Cypher temporal clock 的 transaction boundary 和 statement boundary；`date/time/localtime/localdatetime/datetime.transaction()` 与 `.statement()` 都在 execution 开始时取值，因此两者相等且在所有 cursor batch 中稳定。Native explicit transaction 下，`.transaction()` 在 `tx_begin` 成功时固定，并在全部 `tx_execute` 中保持同一 instant；`.statement()` 则在每次 `tx_execute` 开始时重新取得并在该 execution 内稳定。`.realtime()` 每次求值读取 wall clock，不保证稳定。timezone 参数只改变同一 instant 的本地表示，不改变 clock identity。
+普通 auto-commit execution 下，一次 top-level Lithograph execution 同时是 Cypher temporal clock 的 transaction boundary 和 statement boundary；`date/time/localtime/localdatetime/datetime.transaction()` 与 `.statement()` 都在 execution 开始时取值，因此两者相等且在所有 cursor batch 中稳定。SQL / Native explicit transaction 下，`.transaction()` 在 `tx_begin` 成功时固定，并在全部 `tx_execute` 中保持同一 instant；`.statement()` 则在每次 `tx_execute` 开始时重新取得并在该 execution 内稳定。`.realtime()` 每次求值读取 wall clock，不保证稳定。timezone 参数只改变同一 instant 的本地表示，不改变 clock identity。
 
 caller-owned outer SQLite transaction 可以把多个普通 Lithograph execution 的 durability 合并到一次 `COMMIT` / `ROLLBACK`，但不把这些 execution 合并成一个 Cypher transaction 或一个 Lithograph Commit；每次 invocation 仍取得自己的 transaction/statement clock。[Cypher Transaction Subqueries](storage.md#transaction-subqueries)的 transaction subquery 由每个 inner batch transaction 各自取得 transaction clock。
 
@@ -174,7 +174,7 @@ caller-owned outer SQLite transaction 可以把多个普通 Lithograph execution
 
 Executor 在 batch/operator boundary 与长路径/搜索循环中检查 SQLite interrupt state；host 调用 `sqlite3_interrupt()` 后 query 尽快停止并返回 `SQLITE_INTERRUPT`。Native event callback 返回非零是同一 cancellation 语义的另一入口。
 
-Active Branch、Native explicit transaction state、temporary query options、prepared-plan/cache handle、current error/cancellation state 全部属于单个 `sqlite3*` connection 或单个 query。禁止使用 process-global mutable query/branch/parser/transaction state。跨线程使用同一 `sqlite3*` 是否允许完全遵循 host SQLite threading mode；Lithograph 不为一个不允许并发使用的 connection 增加第二套线程安全保证。
+Active Branch、explicit transaction state、temporary query options、prepared-plan/cache handle、current error/cancellation state 全部属于单个 `sqlite3*` connection 或单个 query。禁止使用 process-global mutable query/branch/parser/transaction state。跨线程使用同一 `sqlite3*` 是否允许完全遵循 host SQLite threading mode；Lithograph 不为一个不允许并发使用的 connection 增加第二套线程安全保证。
 
 Native C ABI 在已完成 Lithograph registration 的 connection 上，使用 host SQLite 的 `sqlite3_db_mutex()` 覆盖一次 ABI invocation 的 connection-state check、client-data access、query/transaction execution 与 error cleanup。SQLite serialized mode 下该 mutex 是 recursive，因此同一个 `sqlite3*` 的 Native 调用与 SQLite 自身 connection 操作按同一 serialization boundary 排序；multi-thread / single-thread mode 如果 host 不提供同 connection serialization，Lithograph 不另建独立 mutex 去扩大 SQLite 自己的线程安全承诺。`sqlite3_get_clientdata()` / `sqlite3_set_clientdata()` 只负责 state ownership/lifetime，不单独承担 invocation serialization。
 
@@ -260,7 +260,7 @@ WAL 下另一 connection 可以继续提交，读者保持旧 read view；rollba
 Write / candidate state 不复用过期的 read membership：
 
 - 普通 read-write execution 保留 immutable base，已完成 clause 的 staged mutation 以单调 state revision 更新；后续 clause 的 accessor、visibility 和 index overlay 必须读取新 revision。
-- Native explicit transaction 每次 `tx_execute` 有自己的 statement state，观察前序成功 execution 的 staged changes；最终 commit/abort 清理所有 staged cache。不得把 transaction 起点的 membership 当成整个 transaction 不变的集合。
+- SQL / Native explicit transaction 每次 `tx_execute` 有自己的 statement state，观察前序成功 execution 的 staged changes；最终 commit/abort 清理所有 staged cache。不得把 transaction 起点的 membership 当成整个 transaction 不变的集合。
 - Merge candidate 绑定 `(session, revision, candidate identity)`；一次 inspection 在同一 read view 验证 revision 并执行，不能跨 revision 复用。`IN TRANSACTIONS` 仍按[Cypher Transaction Subqueries](storage.md#transaction-subqueries)每个 inner transaction 独立 pin，不跨 batch transaction 复用旧 state。
 
 Storage page 与输出 batch 分离：改变调用方的 `max_rows` 不应导致重复解析或重新执行已消费的查询。复用 prepared storage statements、按需读取 properties，并用 bounded ordered merge 代替每页不必要的 map/set 重建；不以增大 batch 隐藏每 batch 重复工作，也不把整图预装内存。

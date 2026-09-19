@@ -1,6 +1,6 @@
 # Search 与数据导入
 
-适用正式 v0.2.0。以下检索 SQL 在独立空库、已加载扩展的 connection 中依次运行。**Raw Vector** 路径仍由应用提供向量及其维度、坐标类型和模型来源；**Managed Semantic** 才通过独立 Embedding Provider extension 生成 derived Vector。
+适用正式 v0.2.1；Managed Semantic 从 v0.2.0 起可用。以下检索 SQL 在独立空库、已加载扩展的 connection 中依次运行。**Raw Vector** 路径仍由应用提供向量及其维度、坐标类型和模型来源；**Managed Semantic** 才通过独立 Embedding Provider extension 生成 derived Vector。
 
 ## 准备文档与全文索引
 
@@ -164,13 +164,13 @@ SELECT lithograph(
 );
 ```
 
-`rebuild`、`cache.configure`、`cache.clear` 是 operational maintenance：不创建 graph Commit、不移动 ref，不能从 `lithograph_rows()` 或 Native explicit transaction 中执行。普通 semantic query 的 cache publish同样只修改derived cache，summary仍是`read`，不创建 graph Commit、不移动ref。实际 semantic query/rebuild 每次都要求目标 Provider 当前可用并通过 validation，即使 persistent cache 已经 warm。详细签名见 [Procedure Reference](../reference/procedures.md)。
+`rebuild`、`cache.configure`、`cache.clear` 是 operational maintenance：不创建 graph Commit、不移动 ref，不能从 `lithograph_rows()` 或 SQL / Native explicit transaction 中执行。普通 semantic query 的 cache publish同样只修改derived cache，summary仍是`read`，不创建 graph Commit、不移动ref。实际 semantic query/rebuild 每次都要求目标 Provider 当前可用并通过 validation，即使 persistent cache 已经 warm。详细签名见 [Procedure Reference](../reference/procedures.md)。
 
 ## 历史检索和子图检索
 
 与普通查询相同，通过第三个参数 `options.at` 选择历史 Schema / 数据，通过 `options.graphView` 选择可见子图。历史上尚未创建的索引不能仅因为当前 Branch 有同名索引而使用。Graph View 在检索的可见结果与 top-k 边界内生效，不是结果返回后过滤。
 
-全文和向量可以在普通 Cypher 中组合过滤、子查询和投影；应用自己定义融合分数与排序逻辑。v0.2.0 不额外提供名为 `hybridSearch` 的专用 API，也不预定义 RAG 工作流。
+全文和向量可以在普通 Cypher 中组合过滤、子查询和投影；应用自己定义融合分数与排序逻辑。v0.2.0–v0.2.1 不额外提供名为 `hybridSearch` 的专用 API，也不预定义 RAG 工作流。
 
 ## 导入 CSV
 
@@ -204,6 +204,6 @@ CALL (row) {
 FINISH
 ```
 
-每个成功 mutating batch 形成一个 Commit。后续 batch 失败不回滚前面已经提交的 batch，重试前必须检查业务导入进度。该形式不能从 SQL Bridge 或 Native explicit transaction 内调用。
+每个成功 mutating batch 形成一个 Commit。后续 batch 失败不回滚前面已经提交的 batch，重试前必须检查业务导入进度。该形式不能从 SQL Bridge 或 SQL / Native explicit transaction 内调用。
 
 LOAD CSV 使用宿主进程的文件和网络权限，不注入凭据。上层应用必须限制来源、大小、超时与网络访问；不要把不可信 Cypher 当作没有外部 I/O 能力的表达式。更多边界见 [事务](transactions.md) 与 [部署安全](operations.md)。

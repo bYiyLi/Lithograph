@@ -484,6 +484,45 @@ unsafe fn native_tx_begin_impl(
     }
 }
 
+pub(super) unsafe fn sql_tx_begin(
+    db: *mut ffi::sqlite3,
+    options_json: &str,
+    validate_result: impl FnOnce(&str) -> LithographResult<()>,
+) -> LithographResult<String> {
+    let mut began = false;
+    let operation = || {
+        // SAFETY: both slices point to the live Rust input for this synchronous call.
+        let result = unsafe {
+            native_tx_begin_impl(
+                db,
+                NativeTextInput::new(options_json.as_ptr().cast::<c_char>(), options_json.len()),
+            )
+        }?;
+        began = true;
+        validate_result(&result)?;
+        Ok(result)
+    };
+    match catch_unwind(AssertUnwindSafe(operation)) {
+        Ok(Ok(result)) => Ok(result),
+        Ok(Err(error)) if began => {
+            // SAFETY: `db` is the live handle of the scalar callback. Cleanup
+            // applies only after this invocation successfully completed BEGIN.
+            Err(unsafe { cleanup_active_transaction_after_error(db, error) })
+        }
+        Ok(Err(error)) => Err(error),
+        Err(_) => {
+            let error =
+                LithographError::internal("panic while starting explicit transaction SQL callback");
+            if began {
+                // SAFETY: `db` is the live handle of the active scalar callback.
+                Err(unsafe { cleanup_active_transaction_after_error(db, error) })
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
 fn begin_explicit_transaction_state(
     db: *mut ffi::sqlite3,
     connection: &Connection,
@@ -599,6 +638,44 @@ unsafe fn native_tx_execute_impl(
 
 #[allow(
     clippy::too_many_arguments,
+    reason = "the shared transaction execution boundary keeps the three input buffers and event callback explicit"
+)]
+pub(super) unsafe fn sql_tx_execute(
+    db: *mut ffi::sqlite3,
+    query: &str,
+    params_json: &str,
+    options_json: &str,
+    callback: LithographEventCallbackV1,
+    user_data: *mut c_void,
+) -> LithographResult<()> {
+    let operation = || {
+        // SAFETY: all Rust strings and the callback state remain live for this
+        // synchronous invocation.
+        unsafe {
+            native_tx_execute_impl(
+                db,
+                NativeTextInput::new(query.as_ptr().cast::<c_char>(), query.len()),
+                NativeTextInput::new(params_json.as_ptr().cast::<c_char>(), params_json.len()),
+                NativeTextInput::new(options_json.as_ptr().cast::<c_char>(), options_json.len()),
+                callback,
+                user_data,
+            )
+        }
+    };
+    match catch_unwind(AssertUnwindSafe(operation)) {
+        Ok(result) => result,
+        Err(_) => {
+            let error = LithographError::internal(
+                "panic while executing explicit transaction SQL callback",
+            );
+            // SAFETY: `db` is the live handle of the active scalar callback.
+            Err(unsafe { cleanup_active_transaction_after_error(db, error) })
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
     reason = "the Native ABI query boundary keeps caller-owned buffers and callback explicit"
 )]
 unsafe fn run_explicit_transaction_query(
@@ -687,6 +764,35 @@ pub unsafe extern "C" fn lithograph_v1_tx_commit(
 
 unsafe fn native_tx_commit_impl(db: *mut ffi::sqlite3) -> LithographResult<String> {
     // SAFETY: the Native ABI caller owns `db` for this invocation.
+    unsafe { tx_commit_impl(db, |_connection, _result| Ok(())) }
+}
+
+pub(super) unsafe fn sql_tx_commit(db: *mut ffi::sqlite3) -> LithographResult<String> {
+    let operation = || {
+        // SAFETY: the scalar callback owns the live connection handle for this invocation.
+        unsafe {
+            tx_commit_impl(db, |connection, result| {
+                execution::ensure_scalar_result_fits(connection, result)
+            })
+        }
+    };
+    match catch_unwind(AssertUnwindSafe(operation)) {
+        Ok(result) => result,
+        Err(_) => {
+            let error = LithographError::internal(
+                "panic while committing explicit transaction SQL callback",
+            );
+            // SAFETY: `db` is the live handle of the active scalar callback.
+            Err(unsafe { cleanup_active_transaction_after_error(db, error) })
+        }
+    }
+}
+
+unsafe fn tx_commit_impl(
+    db: *mut ffi::sqlite3,
+    validate_result: impl FnOnce(&Connection, &str) -> LithographResult<()>,
+) -> LithographResult<String> {
+    // SAFETY: the Native ABI caller owns `db` for this invocation.
     let (state, connection) = unsafe { explicit_transaction_context(db)? };
 
     let result = finalize_explicit_transaction(&connection, &state);
@@ -694,6 +800,9 @@ unsafe fn native_tx_commit_impl(db: *mut ffi::sqlite3) -> LithographResult<Strin
         Ok(result) => result,
         Err(error) => return fail_closed_tx_with_connection(db, &connection, error),
     };
+    if let Err(error) = validate_result(&connection, &result) {
+        return fail_closed_tx_with_connection(db, &connection, error);
+    }
     if let Err(error) = connection.execute_batch("COMMIT") {
         return fail_closed_tx_with_connection(
             db,
@@ -750,6 +859,34 @@ unsafe fn native_tx_abort_impl(db: *mut ffi::sqlite3) -> LithographResult<()> {
     let connection = unsafe { Connection::from_handle(db) }
         .map_err(|error| map_sqlite_error(error, "invalid SQLite connection"))?;
     rollback_explicit_transaction(db, &connection)
+}
+
+pub(super) unsafe fn sql_tx_abort(db: *mut ffi::sqlite3) -> LithographResult<()> {
+    let operation = || {
+        // SAFETY: the scalar callback owns the live connection handle.
+        unsafe { native_tx_abort_impl(db) }
+    };
+    match catch_unwind(AssertUnwindSafe(operation)) {
+        Ok(result) => result,
+        Err(_) => {
+            let error =
+                LithographError::internal("panic while aborting explicit transaction SQL callback");
+            // SAFETY: `db` is the live handle of the active scalar callback.
+            Err(unsafe { cleanup_active_transaction_after_error(db, error) })
+        }
+    }
+}
+
+pub(super) fn fail_closed_sql_transaction<T>(
+    connection: &Connection,
+    error: LithographError,
+) -> LithographResult<T> {
+    // SAFETY: `connection` is borrowed from the active SQLite scalar callback.
+    let db = unsafe { connection.handle() };
+    if explicit_transaction_state(db).is_none() {
+        return Err(error);
+    }
+    fail_closed_tx_with_connection(db, connection, error)
 }
 
 fn finalize_explicit_transaction(

@@ -115,7 +115,7 @@ Benchmark 报告至少保存：Git commit 与 dirty-tree digest、fixture seed/v
 
 10M/100M 核心 read workload 的总 process peak RSS 目标 ≤ 1 GiB；在固定 graph state / batch / cache budget 下，将同一 streaming query 的消费行数从1M增加到10M，额外 peak RSS ≤ 128 MiB，且无与输出行数同阶增长的 retained collection。全量 persistent index build 必须分批/可取消并单独报告内存、writer hold、磁盘体积和耗时，不能把其成本移到未计时 setup 后宣称 cold-build 已优化；它不适用 ready-index 的毫秒级延迟目标。
 
-1000 Node batch+Commit、History、Diff、Native explicit transaction、10K-conflict Merge 各阶段作为非回退集：相同条件下新中位数不得超过 before 的 `max(1.20 × before, before + 10 ms)`。重复3轮仍出现超标时按 finding 处理，不靠删掉慢样本通过。Merge 的 read preparation、writer wait、writer hold 与 total finalize 分开测量；total finalize 时间不能当成 writer hold。
+1000 Node batch+Commit、History、Diff、explicit transaction、10K-conflict Merge 各阶段作为非回退集：相同条件下新中位数不得超过 before 的 `max(1.20 × before, before + 10 ms)`。重复3轮仍出现超标时按 finding 处理，不靠删掉慢样本通过。Merge 的 read preparation、writer wait、writer hold 与 total finalize 分开测量；total finalize 时间不能当成 writer hold。
 
 <a id="stress-workloads"></a>
 

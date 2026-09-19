@@ -99,6 +99,10 @@ FROM lithograph_rows(
 | --- | --- |
 | `lithograph_init()` | 初始化或迁移当前 database |
 | `lithograph(query [, params [, options]])` | 执行一个 Cypher query，返回完整 Lithograph JSON envelope |
+| `lithograph_tx_begin(options_json)` | 开始当前 connection 的 Lithograph explicit transaction，返回 pinned base Commit |
+| `lithograph_tx_execute(query [, params_json [, options_json]])` | 在 active explicit transaction 内执行一个 Cypher query，返回完整 Lithograph JSON envelope |
+| `lithograph_tx_commit()` | finalize 唯一最终 Commit 并提交 Engine-owned SQLite transaction |
+| `lithograph_tx_abort()` | rollback Engine-owned SQLite transaction，返回 `{"aborted":true}` |
 | `lithograph_rows(query [, params [, options]])` | eponymous-only table-valued function，流式返回 `ordinal`、`columns` 与 `row` |
 | `lithograph_validate(query)` | 只执行 parse + semantic/type/schema validation，不执行 query |
 | `lithograph_version()` | 返回 Extension 与 storage-format version |
@@ -108,7 +112,7 @@ FROM lithograph_rows(
 
 `lithograph_rows` 的 `columns` 是 JSON string array，`row` 是按同一顺序排列的 JSON value array；`columns` 在每一结果行重复，因此即使存在相同显示名也不会丢失列位置。该 adapter 只接受**无副作用、无外部 I/O、无 connection-state mutation** 的 read-only query / procedure。Graph/schema/version mutation、`LOAD CSV`、Branch checkout、GC 或其它会产生 SQLite/OS/network side effect 的 query 返回 `READ_ONLY_ADAPTER`，避免 SQLite query planner 重复扫描 virtual table 时重复执行副作用。此类 Cypher 使用 `lithograph()` 的一次函数调用或 Native C ABI。
 
-`lithograph()` 每一次 SQLite scalar-function invocation 都对应一次 Cypher execution。用于 mutating Cypher 时，调用方应把它作为独立的 `SELECT lithograph(...)` statement 调用；如果 SQL 本身产生多次 scalar invocation，每次 invocation 都是独立 Cypher write 并各自遵守[Transaction 与 Concurrency Model](storage.md#transactions-and-concurrency) transaction/Commit 语义。
+`lithograph()` 每一次 SQLite scalar-function invocation 都对应一次 Cypher execution。用于 mutating Cypher 时，调用方应把它作为独立的 `SELECT lithograph(...)` statement 调用；如果 SQL 本身产生多次 scalar invocation，每次 invocation 都是独立 Cypher write 并各自遵守[Transaction 与 Concurrency Model](storage.md#transactions-and-concurrency) transaction/Commit 语义。这条普通 SQL Bridge 语义不因下述 explicit-transaction 封装而改变；Lithograph 不在 caller-owned `BEGIN ... COMMIT` 结束时自动合并已形成的 graph Commits。
 
 `lithograph()` 返回完整 JSON envelope，因此受 SQLite 单值长度限制和宿主可用内存约束。结果可能较大时，read query 应使用 `lithograph_rows()` 或 Native streaming API；超过 SQLite/Engine 可用资源时返回 `RESOURCE_ERROR`，不得截断结果。
 
@@ -118,7 +122,33 @@ FROM lithograph_rows(
 
 `SQLITE_NOMEM` 是这个 cleanup-failure 分支的已验证宿主特例：如果错误来自 scalar callback 内部的 FTS5 tokenizer 构造，SQLite 会在该 callback 剩余期间保持 malloc-failed 状态，使 `ROLLBACK TO`、`RELEASE` 和 full `ROLLBACK` 都继续返回 `SQLITE_NOMEM`；外层 `sqlite3_step` / `sqlite3_exec` 返回后才可能再次执行 rollback。SQL Bridge 仍保留真实 `SQLITE_NOMEM` primary code；当 tokenizer probe 在 canonical Schema 持久化之前失败时，不得发布 Commit/Branch 变化。但由于 callback 内无法恢复 invocation-local transaction boundary，该 connection 属于上段定义的 cleanup-failure quarantine，caller 必须关闭并丢弃，不能把“外层返回后手动 rollback 可以成功”当成 Lithograph invocation 已满足 cleanup 合同。Native API 不受 scalar callback 的这个宿主限制，仍按自身 fail-closed transaction contract 返回结构化错误并清理 active explicit transaction。
 
-多个 mutating `lithograph()` invocation 出现在同一个 raw SQL statement 时，语义明确为多个独立 SAVEPOINT/graph operations：在 SQLite autocommit mode 下，前一个成功 invocation 可以在后一个 invocation 失败前已经 durable；Lithograph 不承诺把整个宿主 SQL statement 合成一个 graph transaction。caller-owned SQLite `BEGIN ... COMMIT` 只能把多个已经形成的 Lithograph Commit 合并到同一个 durability boundary，不会折叠版本历史。调用方若需要“多个独立 Cypher execution 共同形成一个 Lithograph Commit”，必须使用[Native Explicit Transaction](storage.md#native-explicit-transaction)的 Native explicit transaction。推荐的 raw SQL write 形式始终是一个 statement 一个 `lithograph()` invocation。
+多个 mutating `lithograph()` invocation 出现在同一个 raw SQL statement 时，语义明确为多个独立 SAVEPOINT/graph operations：在 SQLite autocommit mode 下，前一个成功 invocation 可以在后一个 invocation 失败前已经 durable；Lithograph 不承诺把整个宿主 SQL statement 合成一个 graph transaction。caller-owned SQLite `BEGIN ... COMMIT` 只能把多个已经形成的 Lithograph Commit 合并到同一个 durability boundary，不会折叠版本历史。调用方若需要“多个独立 Cypher execution 共同形成一个 Lithograph Commit”，必须使用[Explicit Transaction](storage.md#native-explicit-transaction)的 SQL 或 Native lifecycle。推荐的普通 raw SQL write 形式仍是一个 statement 一个 `lithograph()` invocation。
+
+#### SQL Explicit Transaction 封装
+
+`lithograph_tx_begin/execute/commit/abort` 是已有 explicit-transaction state machine 的 SQL scalar adapter，不是第二套 transaction 实现。它们与 `lithograph_v1_tx_*` 共享同一个 connection-local active state、writer ownership、staged state、temporal clock、finalize 与 fail-closed cleanup；同一 `sqlite3*` 仍最多只有一个 active Lithograph explicit transaction。SQL 调用方不额外执行 `BEGIN` / `COMMIT` / `ROLLBACK`：`lithograph_tx_begin` 内部执行 `BEGIN IMMEDIATE`，`lithograph_tx_commit` 内部 finalize graph Commit 并执行 SQLite `COMMIT`，`lithograph_tx_abort` 内部执行 SQLite `ROLLBACK`。
+
+精确 SQL 签名与结果为：
+
+```text
+lithograph_tx_begin(options_json)
+  -> {"baseCommit":"commit/<id>"}
+
+lithograph_tx_execute(query [, params_json [, options_json]])
+  -> {"columns":[...],"rows":[...],"summary":{...}}
+
+lithograph_tx_commit()
+  -> {"commit":"commit/<id>","counters":{...}}
+
+lithograph_tx_abort()
+  -> {"aborted":true}
+```
+
+`options_json` / `params_json` 必须是非 `NULL` UTF-8 SQL TEXT；`tx_begin` 要求恰好一个 options JSON object，`tx_execute` 只接受 1–3 个参数，省略的 params/options 等价于 `'{}'`。明确 `NULL`、非 TEXT、错误 JSON shape、未知 option 与空 query 沿用 Native contract 的 `INVALID_ARGUMENT`；`tx_execute` 的参数、prepare、execution、event 或结果构造错误都是 execution failure，必须自动 abort 当前 transaction。开始前的 `tx_begin` 参数错误没有 transaction 可清理；没有 active transaction 时的 execute/commit/abort 继续返回 `INVALID_ARGUMENT` + `SQLITE_MISUSE`。
+
+`tx_execute` 把共享 execution core 的 `COLUMNS -> ROW* -> SUMMARY` event 按普通 scalar envelope 组装，不丢弃重复列名的位置语义。整个 envelope 在 SQLite callback 成功返回前完整构造、验证且检查 `SQLITE_LIMIT_LENGTH`；构造、编码、长度或取消失败按上述规则整体 abort，不保留 staged writes。`tx_begin` 结果在返回 SQL 前发生可检测的构造/长度失败时也 abort；`tx_commit` 必须在 SQLite `COMMIT` 前构造并检查结果。一旦 SQLite `COMMIT` 已经成功，后续宿主因内存/结果传递失败不能反向撤销 durable Commit；调用方不得因此盲目重放 commit 或整个 write transaction。
+
+四个函数都是有 transaction / storage side effect 的 direct-only scalar，只使用 `SQLITE_UTF8 | SQLITE_DIRECTONLY`，不得声明 `SQLITE_DETERMINISTIC` 或 `SQLITE_INNOCUOUS`。外层 SQLite transaction 已存在时 begin 仍返回 `TRANSACTION_BOUNDARY_REQUIRED`；active 期间普通 `lithograph()` / `lithograph_rows()` 的拒绝规则不变。connection 关闭而未调用 commit/abort 时，SQLite teardown rollback 与 connection-state destructor 共同清除未提交状态。
 
 <a id="native-c-abi"></a>
 
@@ -205,9 +235,9 @@ Native v1 pointer/length 规则与现有 `execute` 一致：可选 UTF-8 JSON �
 
 `error_json` 只在失败时设置，使用[Result 与 Error Contract](#results-and-errors) tagged JSON/error contract，由 Extension 分配并必须通过 `lithograph_v1_free` 释放。callback payload 只在 callback 调用期间有效，不需要也不能由 caller 释放。
 
-Native API 接收现有 `sqlite3*`、Cypher text、parameter JSON、option JSON 和 event callback。普通 `lithograph_v1_execute` 是单 execution surface；`lithograph_v1_tx_begin/execute/commit/abort` 在同一个 connection-local explicit transaction 上执行，`tx_execute` 复用同一 parser/planner/executor，不建立第二套 Cypher engine。SQL Bridge 是面向普通 SQLite 客户端的 adapter，并调用同一个 Engine，但不加入 Native explicit transaction lifecycle。
+Native API 接收现有 `sqlite3*`、Cypher text、parameter JSON、option JSON 和 event callback。普通 `lithograph_v1_execute` 是单 execution surface；`lithograph_v1_tx_begin/execute/commit/abort` 在同一个 connection-local explicit transaction 上执行，`tx_execute` 复用同一 parser/planner/executor，不建立第二套 Cypher engine。SQL Bridge 是面向普通 SQLite 客户端的 adapter；其普通 `lithograph()` 仍是单 execution surface，新增 `lithograph_tx_*` 则直接加入并复用同一 explicit transaction lifecycle。C ABI 签名、symbol 与 ownership 规则不变。
 
-`CALL { ... } IN TRANSACTIONS` 需要 Query Engine 拥有真实 transaction boundary。Native API 在没有 caller-owned active transaction 或 Native explicit transaction 时执行该语义。SQL Bridge 本身运行在一个进行中的 SQLite statement 内，因此遇到需要独立 commit boundary 的 `IN TRANSACTIONS` / `IN CONCURRENT TRANSACTIONS` 时返回 `TRANSACTION_BOUNDARY_REQUIRED`，要求调用普通 Native execution；explicit transaction 内同样拒绝这类会再拥有独立 transaction boundary 的 query。其它 Cypher 语义不因此分叉。
+`CALL { ... } IN TRANSACTIONS` 需要 Query Engine 拥有真实 transaction boundary。Native API 在没有 caller-owned active transaction 或 active explicit transaction 时执行该语义。SQL Bridge 本身运行在一个进行中的 SQLite statement 内，因此遇到需要独立 commit boundary 的 `IN TRANSACTIONS` / `IN CONCURRENT TRANSACTIONS` 时返回 `TRANSACTION_BOUNDARY_REQUIRED`，要求调用普通 Native execution；explicit transaction 内同样拒绝这类会再拥有独立 transaction boundary 的 query。其它 Cypher 语义不因此分叉。
 
 <a id="query-options"></a>
 
@@ -247,7 +277,7 @@ Native API 接收现有 `sqlite3*`、Cypher text、parameter JSON、option JSON 
 
 Parameters JSON 与 result JSON 共用[Lithograph JSON](#lithograph-json) tagged-value encoding。普通 JSON primitive/list/map 直接映射到对应 Cypher value；需要保留 INTEGER64 边界、Temporal、Point、Vector 或 UUID 类型时必须使用 `$type` tagged form。
 
-Native explicit transaction 的 begin options 使用独立的 transaction-level shape：
+SQL / Native explicit transaction 的 begin options 使用独立的 transaction-level shape：
 
 ```json
 {
@@ -293,7 +323,7 @@ Merge Session candidate inspection 使用同一 execution options surface，而�
 
 I/O error、malformed CSV、type/constraint error 按 Cypher query failure 传播。普通 `LOAD CSV` 位于当前 query transaction；`CALL ... IN TRANSACTIONS` 使用[Cypher Transaction Subqueries](storage.md#transaction-subqueries) transaction semantics。
 
-Native explicit transaction 已从 `tx_begin` 起持有 single-writer ownership，因此不接受 `LOAD CSV` 或 `db.index.semantic.query*` / `db.index.semantic.rebuild`；`tx_execute` 在 external I/O 开始前返回 `TRANSACTION_BOUNDARY_REQUIRED` 并按[Native Explicit Transaction](storage.md#native-explicit-transaction) fail-closed abort。需要批量导入时使用普通 `LOAD CSV` 或 Cypher `IN TRANSACTIONS`；需要 Semantic query/rebuild 时使用独立普通 execution，不把网络/文件/model 等待时间包进 multi-execution version-atomicity boundary。
+SQL / Native explicit transaction 已从 `tx_begin` 起持有 single-writer ownership，因此不接受 `LOAD CSV` 或 `db.index.semantic.query*` / `db.index.semantic.rebuild`；`tx_execute` 在 external I/O 开始前返回 `TRANSACTION_BOUNDARY_REQUIRED` 并按 [Explicit Transaction](storage.md#native-explicit-transaction) fail-closed abort。需要批量导入时使用普通 `LOAD CSV` 或 Cypher `IN TRANSACTIONS`；需要 Semantic query/rebuild 时使用独立普通 execution，不把网络/文件/model 等待时间包进 multi-execution version-atomicity boundary。
 
 `db.index.semantic.query*`、`db.index.semantic.rebuild`、`db.index.semantic.cache.configure` 与 `db.index.semantic.cache.clear` 不能与 graph mutation 共用一个 Cypher execution，也不能嵌入 `CALL { ... } IN TRANSACTIONS` / `IN CONCURRENT TRANSACTIONS`；planner 必须在 Provider I/O 或 maintenance write 开始前返回 `TRANSACTION_BOUNDARY_REQUIRED`。普通 `query*` 可以在 Provider 成功后用短 SAVEPOINT 发布 query/source Embedding 到 format 4 的内部 persistent cache；该 derived-cache 写入不是 graph/schema/version mutation，不产生 Commit、不移动 Branch，因此 procedure mode 与 `summary.queryType` 仍为 `READ` / `read`。只读数据库与 cache disabled 跳过该 publish。Semantic Index create/drop 的纯本地 Schema operation 与 `cache.stats` read procedure 不属于该 external-I/O 禁止项。
 
@@ -324,7 +354,7 @@ SQL Bridge 的完整 envelope：
 }
 ```
 
-`summary.queryType` 使用封闭值 `read | write | schema | version | mixed`。普通 `lithograph()` / `lithograph_v1_execute` 中，`summary.commit` 是该 query 执行所 pin 的最终可观察 Snapshot：read query 为读取 Commit，graph/schema write 为新 Commit，ref-only version operation 为操作后的 active-branch Commit。Native explicit transaction 的 `tx_execute` statement 只作用于 staged state，因此其 `summary.commit = null`；最终 durable Commit 由 `tx_commit` 单独返回。Merge Session candidate query 同样不是 durable Commit，因此 `summary.commit = null`，并额外返回 `summary.mergeSession={"id":"merge-session/...","revision":N}`；其它 execution 省略 `mergeSession` 字段。`summary.counters` 至少固定包含：
+`summary.queryType` 使用封闭值 `read | write | schema | version | mixed`。普通 `lithograph()` / `lithograph_v1_execute` 中，`summary.commit` 是该 query 执行所 pin 的最终可观察 Snapshot：read query 为读取 Commit，graph/schema write 为新 Commit，ref-only version operation 为操作后的 active-branch Commit。Explicit transaction 的 Native / SQL `tx_execute` statement 只作用于 staged state，因此其 `summary.commit = null`；最终 durable Commit 由 `tx_commit` 单独返回。Merge Session candidate query 同样不是 durable Commit，因此 `summary.commit = null`，并额外返回 `summary.mergeSession={"id":"merge-session/...","revision":N}`；其它 execution 省略 `mergeSession` 字段。`summary.counters` 至少固定包含：
 
 ```text
 nodesCreated

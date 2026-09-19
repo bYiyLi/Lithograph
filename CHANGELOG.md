@@ -4,6 +4,25 @@ Lithograph 的用户可见版本变化记录在此文件。版本遵循 Semantic
 
 ## Unreleased
 
+## 0.2.1 - Unreleased
+
+SQL explicit transaction adapter release.
+
+### Added
+
+- 新增 `lithograph_tx_begin(options_json)`、`lithograph_tx_execute(query [, params_json [, options_json]])`、`lithograph_tx_commit()` 与 `lithograph_tx_abort()`，普通 SQLite driver 无需绑定 C ABI 即可把多次 Cypher execution 组合为一个最终 graph Commit。
+- 新增真实 SQLite SQL transaction smoke，覆盖 staged read、read-only、empty-delta、abort、fail-closed、connection close、outer transaction、参数错误与 result-length cleanup；回滚验收同时检查 Commit、Layer、Schema object、Branch head 与 integrity。
+
+### Changed
+
+- SQL 与 Native explicit transaction 共用同一 connection-local state machine、staged storage、Commit finalize 和 fail-closed cleanup；普通 `lithograph()` 与 caller-owned SQLite transaction 语义不变。
+- Linux/macOS/Windows x64/arm64 Release Matrix 对 SQLite 3.45.0 与 3.53.4 制品执行 Phase 14 SQL explicit transaction smoke。
+
+### Compatibility
+
+- Native ABI 仍为 1，Embedding Provider ABI 仍为 V1，Cypher profile 仍为 `CY25-2026.08`，storage format 仍为 4；从 v0.2.0 升级不需要 storage migration。
+- 四个新 SQL function 使用 `SQLITE_DIRECTONLY`，不声明 deterministic 或 innocuous。
+
 ## 0.2.0 - 2026-09-19
 
 Managed Semantic Vector / Embedding Provider release.

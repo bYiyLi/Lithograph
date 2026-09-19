@@ -1,12 +1,12 @@
 # 版本边界、类型与配置限制
 
-**版本：v0.2.0。** 本页列出应用可依赖的入口约束，不把内部 cache budget、性能实测或机器容量当作通用硬上限。
+**版本：v0.2.1。** 本页列出应用可依赖的入口约束，不把内部 cache budget、性能实测或机器容量当作通用硬上限。
 
 ## 平台与存储
 
 SQLite 最低 3.45.0，必须可加载扩展并支持 FTS5。仅 connection 的 main 承载 graph repository；单文件多 Branch 仍共享 writer。预编译包提供 Linux/macOS/Windows x64/arm64，不等于保证任意 Linux libc、任意旧 OS 或所有 SQLite binding 都相容；必须在实际部署运行时 smoke-test。
 
-v0.2.0 读取支持格式 1–4，新建使用 4，并通过显式 init 支持 format 3 → 4；无法把已升级 format 4 自动降级给旧 binary。内部 `_lithograph_*` namespace 保留，不插入、删除、重命名或加 trigger/index。
+从 v0.2.0 起读取支持格式 1–4，新建使用 4，并通过显式 init 支持 format 3 → 4；无法把已升级 format 4 自动降级给旧 binary。内部 `_lithograph_*` namespace 保留，不插入、删除、重命名或加 trigger/index。
 
 ## 名称、Descriptor 与 JSON
 

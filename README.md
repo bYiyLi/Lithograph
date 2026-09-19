@@ -15,11 +15,11 @@ Lithograph 为 SQLite 提供版本化 Property Graph 数据库能力。
 
 ## 安装与 Quickstart
 
-当前正式版本是 **v0.2.0**。GitHub Releases 提供 Linux x64/arm64、macOS x64/arm64、Windows x64/arm64 六个平台的预编译 extension；运行时需要支持 loadable extension 与 FTS5 的 SQLite 3.45.0 或更高版本。
+当前正式版本是 **v0.2.0**；仓库正在准备 **v0.2.1** release candidate。GitHub Releases 提供 Linux x64/arm64、macOS x64/arm64、Windows x64/arm64 六个平台的预编译 extension；运行时需要支持 loadable extension 与 FTS5 的 SQLite 3.45.0 或更高版本。
 
-v0.2.0 发布 Phase 13 Managed Semantic、独立 `lithograph-openai-compatible` Provider 与 storage format 4。每个平台包同时包含 Lithograph 主 extension 与 OpenAI-compatible Provider extension；源码使用、加载顺序与接口见 [v0.2.0 Release Notes](docs/releases/v0.2.0.md)、[Search 指南](docs/guide/search.md) 和 [Procedure Reference](docs/reference/procedures.md)。
+v0.2.1 在 v0.2.0 Managed Semantic / storage format 4 基线上发布 Phase 14 SQL Explicit Transaction Adapter：普通 SQLite driver 可通过四个 `lithograph_tx_*` SQL function 把多次 Cypher execution 组合为一个 graph Commit，无需自行绑定 C API。每个平台包继续同时包含 Lithograph 主 extension 与 OpenAI-compatible Provider extension；见 [v0.2.1 Release Notes](docs/releases/v0.2.1.md)、[事务指南](docs/guide/transactions.md) 和 [SQL API Reference](docs/reference/sql-api.md)。
 
-基础接入从 [Developer Documentation](docs/guide/README.md) 开始。v0.2.0 保持 Native ABI 1 与 `CY25-2026.08`，并把新数据库 storage format 提升为 4。版本变化见 [CHANGELOG](CHANGELOG.md)、[v0.2.0 Release Notes](docs/releases/v0.2.0.md) 与 [Search 指南](docs/guide/search.md)；下面的 `latest` 地址会随未来 release 更新。
+基础接入从 [Developer Documentation](docs/guide/README.md) 开始。v0.2.1 保持 Native ABI 1、`CY25-2026.08` 与 storage format 4。版本变化见 [CHANGELOG](CHANGELOG.md)、[v0.2.1 Release Notes](docs/releases/v0.2.1.md) 与 [事务指南](docs/guide/transactions.md)；下面的 `latest` 地址会随未来 release 更新。
 
 稳定下载地址：
 
@@ -76,7 +76,7 @@ FROM lithograph_rows('MATCH (p:Person) RETURN p.name');
 
 ## 开发者文档
 
-完整入口：**[Lithograph Developer Documentation](docs/guide/README.md)**。文档明确区分 v0.1.0 基础验证、v0.1.1 Full-text tokenizer 增量与 v0.2.0 Managed Semantic 增量；不会把固定旧版本的示例、已知问题或历史证据静默改写成新版本事实。
+完整入口：**[Lithograph Developer Documentation](docs/guide/README.md)**。文档明确区分 v0.1.0 基础验证、v0.1.1 Full-text tokenizer、v0.2.0 Managed Semantic 与 v0.2.1 SQL explicit transaction 增量；不会把固定旧版本的示例、已知问题或历史证据静默改写成新版本事实。
 
 | 任务 | 文档 |
 | --- | --- |
@@ -91,16 +91,17 @@ FROM lithograph_rows('MATCH (p:Person) RETURN p.name');
 
 ## 项目状态
 
-Lithograph 当前已经完成 Phase 00–13 的实现与开发验收，当前发布版本为 **v0.2.0**。Phase 13 已闭合并发布 Managed Semantic 主路径：公开 Embedding Provider ABI、OpenAI-compatible reference Provider、versioned Semantic Index、文本 query、persistent cache / rebuild、format 4 migration、Graph View / history / Diff-Patch-Merge-Rebase-Revert publication validation、SQL/Native transaction boundary、真实 SQLite 3.45.0 / 3.53.4，以及 Linux/macOS/Windows x64/arm64 六目标 hosted Release Matrix。
+Lithograph 当前已经完成 Phase 00–13 的开发验收，正式发布版本为 **v0.2.0**。Phase 14 在不改变 Native ABI、Cypher profile 或 storage format 的前提下新增 SQL explicit transaction adapter；实现与本地真实 SQLite 3.45.0 / 3.53.4 验收已完成，正在等待 Linux/macOS/Windows x64/arm64 六目标 hosted release gate。
 
-v0.2.0 仍属于 pre-1.0 版本。升级已有数据库前应保留完整备份；`lithograph_init()` 支持 format 3 → 4 原子迁移，但 format 4 没有自动 downgrade。详见 [CHANGELOG](CHANGELOG.md) 与 [v0.2.0 Release Notes](docs/releases/v0.2.0.md)。
+v0.2.1 仍属于 pre-1.0 版本。从 v0.2.0 升级不需要 storage migration；从 v0.1.1 或更早版本升级前应保留完整备份，`lithograph_init()` 支持 format 3 → 4 原子迁移，但 format 4 没有自动 downgrade。详见 [CHANGELOG](CHANGELOG.md) 与 [v0.2.1 Release Notes](docs/releases/v0.2.1.md)。
 
 - [技术设计](docs/design.md)
 - [开发计划](docs/development/README.md)
 - [Phase 11 性能优化计划](docs/development/phases/11-performance-optimization.md)
 - [Phase 12 全文 Tokenizer 扩展计划](docs/development/phases/12-fulltext-tokenizer.md)
 - [Phase 13 Managed Semantic Vector / Embedding Provider](docs/development/phases/13-managed-semantic-vector.md)
-- 当前开发阶段：Phase 00–13 全部 `done`；Phase 13 从 v0.2.0 起进入正式发布基线。
+- [Phase 14 SQL Explicit Transaction Adapter](docs/development/phases/14-sql-explicit-transaction.md)
+- 当前开发阶段：Phase 00–13 已 `done`；Phase 14 为 `in_progress`，等待 v0.2.1 hosted release gate。
 
 ## 许可
 

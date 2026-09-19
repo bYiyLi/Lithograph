@@ -99,6 +99,7 @@ args = [
     "tests/phase11_adapter_bench.c",
     "tests/phase11_mixed_stress.c",
     "tests/phase11_stream_bench.c",
+    "tests/sql_tx_smoke.c",
     "tests/synthetic_embedding_provider.c",
     "tests/synthetic_embedding_provider_smoke.c",
     "-w",
@@ -195,6 +196,7 @@ cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase06 -
 cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase07 -- "$extension"
 cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase08 -- "$extension"
 cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase09 -- "$extension"
+scripts/sql-tx-smoke.sh "$extension"
 rm -rf "$CARGO_TARGET_DIR/phase11-search-coverage"
 LITHOGRAPH_PHASE11_SEARCH_DIR="$CARGO_TARGET_DIR/phase11-search-coverage" \
 LITHOGRAPH_PHASE11_SEARCH_DOCUMENTS=512 \

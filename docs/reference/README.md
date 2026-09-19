@@ -1,11 +1,11 @@
 # Lithograph Reference
 
-本目录用于查找准确接口，不替代 [入门与任务指南](../guide/README.md)。正式 v0.2.0 使用 `CY25-2026.08` / Native ABI 1 / storage format 4，并包含 Phase 13 Managed Semantic / Embedding Provider。
+本目录用于查找准确接口，不替代 [入门与任务指南](../guide/README.md)。v0.2.1 release candidate 使用 `CY25-2026.08` / Native ABI 1 / storage format 4，包含 Phase 13 Managed Semantic / Embedding Provider 与 Phase 14 SQL explicit transaction adapter；当前正式 Release 仍为 v0.2.0。
 
 | 需要查找 | 页面 |
 | --- | --- |
 | SQL 函数、行适配器、结果 envelope、counters | [SQL API](sql-api.md) |
-| Query / Native transaction 的 options 与互斥关系 | [Execution Options](execution-options.md) |
+| Query / SQL / Native explicit transaction 的 options 与互斥关系 | [Execution Options](execution-options.md) |
 | JSON 参数和 Node / Relationship / Temporal / Vector 等值编码 | [Values](values.md) |
 | Procedure 参数语义、返回值和操作限制 | [Procedures](procedures.md) |
 | 完整公开 Procedure 签名与输出列（不信任错误的类型 metadata） | [Procedure Inventory](procedure-inventory.md) |

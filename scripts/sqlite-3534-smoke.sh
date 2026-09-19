@@ -81,6 +81,9 @@ LITHOGRAPH_SQLITE3="$sqlite_bin" \
   cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase04 -- "$extension"
 LITHOGRAPH_SQLITE3="$sqlite_bin" \
   cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase05 -- "$extension"
+LITHOGRAPH_SQLITE3="$sqlite_bin" \
+  LITHOGRAPH_SQLITE_SOURCE_DIR="$source_dir" \
+  scripts/sql-tx-smoke.sh "$extension"
 if [ -n "$tokenizer_extension" ]; then
   LITHOGRAPH_SQLITE3="$sqlite_bin" \
     cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase12 -- "$extension" "$tokenizer_extension"

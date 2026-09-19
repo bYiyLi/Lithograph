@@ -1,33 +1,33 @@
-# 安装与加载 v0.2.0
+# 安装与加载 v0.2.1
 
-目标：在自己的 SQLite connection 中加载 v0.2.0，并确认版本、运行时和数据库格式。新手先用全新的演示文件；已有数据库的初始化可能触发 migration，先阅读 [备份与升级](operations.md)。
+目标：在自己的 SQLite connection 中加载 v0.2.1，并确认版本、运行时和数据库格式。新手先用全新的演示文件；已有数据库的初始化可能触发 migration，先阅读 [备份与升级](operations.md)。
 
 ## 1. 选择制品
 
 下载固定版本，而不是 `releases/latest`，以保持本文的版本边界：
 
-| 运行进程的平台 | v0.2.0 下载 | 解压后的主扩展 |
+| 运行进程的平台 | v0.2.1 下载 | 解压后的主扩展 |
 | --- | --- | --- |
-| Linux x64 | [lithograph-linux-x64.tar.gz](https://github.com/bYiyLi/Lithograph/releases/download/v0.2.0/lithograph-linux-x64.tar.gz) | `lithograph.so` |
-| Linux arm64 | [lithograph-linux-arm64.tar.gz](https://github.com/bYiyLi/Lithograph/releases/download/v0.2.0/lithograph-linux-arm64.tar.gz) | `lithograph.so` |
-| macOS x64 | [lithograph-macos-x64.tar.gz](https://github.com/bYiyLi/Lithograph/releases/download/v0.2.0/lithograph-macos-x64.tar.gz) | `lithograph.dylib` |
-| macOS arm64 | [lithograph-macos-arm64.tar.gz](https://github.com/bYiyLi/Lithograph/releases/download/v0.2.0/lithograph-macos-arm64.tar.gz) | `lithograph.dylib` |
-| Windows x64 | [lithograph-windows-x64.zip](https://github.com/bYiyLi/Lithograph/releases/download/v0.2.0/lithograph-windows-x64.zip) | `lithograph.dll` |
-| Windows arm64 | [lithograph-windows-arm64.zip](https://github.com/bYiyLi/Lithograph/releases/download/v0.2.0/lithograph-windows-arm64.zip) | `lithograph.dll` |
+| Linux x64 | [lithograph-linux-x64.tar.gz](https://github.com/bYiyLi/Lithograph/releases/download/v0.2.1/lithograph-linux-x64.tar.gz) | `lithograph.so` |
+| Linux arm64 | [lithograph-linux-arm64.tar.gz](https://github.com/bYiyLi/Lithograph/releases/download/v0.2.1/lithograph-linux-arm64.tar.gz) | `lithograph.so` |
+| macOS x64 | [lithograph-macos-x64.tar.gz](https://github.com/bYiyLi/Lithograph/releases/download/v0.2.1/lithograph-macos-x64.tar.gz) | `lithograph.dylib` |
+| macOS arm64 | [lithograph-macos-arm64.tar.gz](https://github.com/bYiyLi/Lithograph/releases/download/v0.2.1/lithograph-macos-arm64.tar.gz) | `lithograph.dylib` |
+| Windows x64 | [lithograph-windows-x64.zip](https://github.com/bYiyLi/Lithograph/releases/download/v0.2.1/lithograph-windows-x64.zip) | `lithograph.dll` |
+| Windows arm64 | [lithograph-windows-arm64.zip](https://github.com/bYiyLi/Lithograph/releases/download/v0.2.1/lithograph-windows-arm64.zip) | `lithograph.dll` |
 
-每个包还包含 `lithograph-openai-compatible` Provider extension、`README.md`、`VERSION`、`LICENSE`、`COMMERCIAL-LICENSE.md`。Native header 不在二进制包中；需要编译 Native 客户端时，另取 [v0.2.0 header](https://raw.githubusercontent.com/bYiyLi/Lithograph/v0.2.0/include/lithograph.h)。
+每个包还包含 `lithograph-openai-compatible` Provider extension、`README.md`、`VERSION`、`LICENSE`、`COMMERCIAL-LICENSE.md`。Native header 不在二进制包中；需要编译 Native 客户端时，另取 [v0.2.1 header](https://raw.githubusercontent.com/bYiyLi/Lithograph/v0.2.1/include/lithograph.h)。
 
 以 macOS arm64 为例，在新建的下载目录执行：
 
 ```sh
-curl -fLO https://github.com/bYiyLi/Lithograph/releases/download/v0.2.0/lithograph-macos-arm64.tar.gz
-curl -fLO https://github.com/bYiyLi/Lithograph/releases/download/v0.2.0/SHA256SUMS
+curl -fLO https://github.com/bYiyLi/Lithograph/releases/download/v0.2.1/lithograph-macos-arm64.tar.gz
+curl -fLO https://github.com/bYiyLi/Lithograph/releases/download/v0.2.1/SHA256SUMS
 grep '  lithograph-macos-arm64.tar.gz$' SHA256SUMS | shasum -a 256 -c -
 tar -xzf lithograph-macos-arm64.tar.gz
 cat VERSION
 ```
 
-应看到校验 `OK` 和版本 `0.2.0`。Linux 使用对应包名，校验命令可改为 `sha256sum -c -`。Windows 下载 ZIP 与同一 [SHA256SUMS](https://github.com/bYiyLi/Lithograph/releases/download/v0.2.0/SHA256SUMS)，用 `Get-FileHash -Algorithm SHA256` 比对该文件名对应的 hash，再解压。校验缺失或不匹配时停止，不加载该文件。
+应看到校验 `OK` 和版本 `0.2.1`。Linux 使用对应包名，校验命令可改为 `sha256sum -c -`。Windows 下载 ZIP 与同一 [SHA256SUMS](https://github.com/bYiyLi/Lithograph/releases/download/v0.2.1/SHA256SUMS)，用 `Get-FileHash -Algorithm SHA256` 比对该文件名对应的 hash，再解压。校验缺失或不匹配时停止，不加载该文件。
 
 校验用于核对下载内容，不能取代对下载来源的信任。不要为了加载未知扩展而关闭整机安全策略。
 
@@ -65,7 +65,7 @@ SELECT lithograph_init();
 SELECT lithograph_version();
 ```
 
-未初始化时 `databaseId` 和 `storageFormat.current` 为 `null`。初始化后，`extension` 为 `"0.2.0"`，`abi` 为 `1`，`cypherProfile` 为 `"CY25-2026.08"`，`storageFormat.current` 为 `4`。`databaseId` 每个新库不同。
+未初始化时 `databaseId` 和 `storageFormat.current` 为 `null`。初始化后，`extension` 为 `"0.2.1"`，`abi` 为 `1`，`cypherProfile` 为 `"CY25-2026.08"`，`storageFormat.current` 为 `4`。`databaseId` 每个新库不同。
 
 `lithograph_init()` 的 `root` 是裸 64 位十六进制 hash；需要 Version Descriptor 时使用 `commit/` 前缀，或读取 `lithograph.commit.get('branch/main')` 的 `commit` 列。
 
@@ -82,14 +82,14 @@ SELECT lithograph_version();
 使用预编译包不需要 Rust。只有自行构建才需要仓库固定的 Rust `1.98.1`：
 
 ```sh
-git clone --branch v0.2.0 --depth 1 https://github.com/bYiyLi/Lithograph.git
+git clone --branch v0.2.1 --depth 1 https://github.com/bYiyLi/Lithograph.git
 cd Lithograph
 cargo build --locked --release -p lithograph-extension
 ```
 
 Cargo 输出 Linux `target/release/liblithograph.so`、macOS `target/release/liblithograph.dylib`、Windows `target/release/lithograph.dll`，与发布包无 `lib` 前缀的文件名不同。加载实际文件路径，不要假定存在 `pip install lithograph`、npm SDK 或独立 `lithograph` CLI。
 
-v0.2.0 发布包已经同时包含 Lithograph 主 extension 与 OpenAI-compatible Provider。若要从上面的固定 tag checkout 构建 Managed Semantic 能力，再构建独立 Provider：
+v0.2.1 发布包已经同时包含 Lithograph 主 extension 与 OpenAI-compatible Provider。若要从上面的固定 tag checkout 构建 Managed Semantic 能力，再构建独立 Provider：
 
 ```sh
 cargo build --locked --release -p lithograph-openai-compatible
@@ -102,6 +102,6 @@ Cargo 会额外生成 `liblithograph_openai_compatible.so` / `.dylib` 或 Window
 .load ./target/release/liblithograph_openai_compatible.dylib sqlite3_lithographopenaicompatible_init
 ```
 
-预编译 v0.2.0 package 使用无 `lib` 前缀的对应平台文件名，并包含这两个 extension。只有实际执行 Semantic create/query/rebuild 的 connection 需要加载 Provider；普通图查询仍只需 Lithograph 主 extension。
+预编译 v0.2.1 package 使用无 `lib` 前缀的对应平台文件名，并包含这两个 extension。只有实际执行 Semantic create/query/rebuild 的 connection 需要加载 Provider；普通图查询仍只需 Lithograph 主 extension。
 
-加载失败时转到 [排障](troubleshooting.md)。SQLite 加载机制依据 [SQLite 官方说明](https://www.sqlite.org/loadext.html)；版本依据 [v0.2.0 Release Notes](../releases/v0.2.0.md)。
+加载失败时转到 [排障](troubleshooting.md)。SQLite 加载机制依据 [SQLite 官方说明](https://www.sqlite.org/loadext.html)；版本依据 [v0.2.1 Release Notes](../releases/v0.2.1.md)。

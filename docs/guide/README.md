@@ -6,17 +6,18 @@
 
 | 项目 | 当前文档范围 |
 | --- | --- |
-| 当前 Release | **v0.2.0** |
+| 当前正式 Release | **v0.2.0**；仓库正在准备 v0.2.1 release candidate |
 | 基础接口 / 示例基线 | **v0.1.0**；未受后续版本影响的历史验证页面继续保留原版本标记 |
 | v0.1.1 增量 | Full-text tokenizer： [Search](search.md)、[Procedure](../reference/procedures.md)、[Limits](../reference/limits.md)、[Release Notes](../releases/v0.1.1.md) |
 | v0.2.0 增量 | Managed Semantic / Embedding Provider、storage format 4：[Search](search.md)、[Operations](operations.md)、[Procedure](../reference/procedures.md)、[Release Notes](../releases/v0.2.0.md) |
+| v0.2.1 增量 | SQL Explicit Transaction Adapter：[事务](transactions.md)、[SQL API](../reference/sql-api.md)、[Release Notes](../releases/v0.2.1.md) |
 | Cypher compatibility profile | `CY25-2026.08` |
 | Native ABI | `lithograph_v1_*`，ABI version `1` |
-| 新数据库格式 | v0.2.0：`4` |
+| 新数据库格式 | v0.2.0–v0.2.1：`4` |
 | SQLite | `3.45.0+`，支持 loadable extension、FTS5 |
 | 部署 | Linux、macOS、Windows，分别提供 x64 / arm64 制品 |
 
-v0.2.0 没有改变 Native ABI 或 Cypher profile，但把 storage format 提升为 4，并正式发布 Managed Semantic / Embedding Provider。标记为 v0.1.0 的可执行示例仍检查精确历史版本，不应拿 v0.2.0 binary 强行通过旧版本断言；当前发布行为以 v0.2.0 Release Notes 和明确标记的增量页面为准。
+v0.2.0 把 storage format 提升为 4 并发布 Managed Semantic / Embedding Provider；待发布的 v0.2.1 保持 Native ABI、Cypher profile 和 storage format 不变，新增 SQL explicit transaction adapter。标记为旧版本的可执行示例仍检查精确历史版本，不应拿 v0.2.1 binary 强行通过旧版本断言；v0.2.1 候选行为以其 Release Notes 和明确标记的增量页面为准。
 
 Lithograph 是嵌入式数据库扩展，不是独立 Server、Neo4j 客户端、Agent 框架或 embedding 服务。一个 SQLite connection 的 `main` database 承载一个版本化 Property Graph；同一文件仍可保存宿主自己的普通 SQL 表，但不得使用保留的 `_lithograph_*` 名称。
 
@@ -43,19 +44,19 @@ Lithograph 是嵌入式数据库扩展，不是独立 Server、Neo4j 客户端�
 
 安装时只下载与你的进程 OS / CPU 架构匹配的扩展。示例中的 `./lithograph.dylib` 是 macOS 文件名；Linux 改为 `.so`，Windows 改为 `.dll`。程序使用扩展的绝对路径。
 
-[Python 快速入门](examples/python_quickstart.py)、[完整版本工作流](examples/version_workflow.py) 和 [Native 单 Commit 事务](examples/native_transaction.c) 提供可执行代码。它们使用独立演示数据库，不修改已有业务数据库。运行方法见 [应用集成](integration.md)。
+[Python 快速入门](examples/python_quickstart.py)、[完整版本工作流](examples/version_workflow.py)、[SQL 单 Commit 事务](examples/sql_transaction.py) 和 [Native 单 Commit 事务](examples/native_transaction.c) 提供可执行代码。它们使用独立演示数据库，不修改已有业务数据库。运行方法见 [应用集成](integration.md)。
 
 ## 必须先理解的边界
 
-普通 graph / Schema / Index 写查询成功后已经形成 Commit，**没有待手动提交的 working tree**。多次 `SELECT lithograph(...)` 放入 SQL `BEGIN`，只合并落盘边界，不合并历史中的 Commit；多 execution 单 Commit 使用 Native explicit transaction。
+普通 graph / Schema / Index 写查询成功后已经形成 Commit，**没有待手动提交的 working tree**。多次 `SELECT lithograph(...)` 放入 SQL `BEGIN`，只合并落盘边界，不合并历史中的 Commit；多 execution 单 Commit 使用 SQL `lithograph_tx_*` 或 Native explicit transaction。
 
 Commit 的图状态和 metadata 不可修改，但 Commit Data 是可修改注释；Tag 也可显式移动。历史版本查询只读。Branch、Tag 和 Merge Session 均不是账号或权限边界，Graph View 也不是认证机制。
 
-v0.2.0 仍是 pre-1.0 版本。固定版本、保留升级前备份，不把当前 API 等同于永久兼容承诺；从 v0.1.1 升级前先阅读 format 3 → 4 migration 与 Provider 部署说明。
+v0.2.1 仍是 pre-1.0 版本。固定版本、保留升级前备份，不把当前 API 等同于永久兼容承诺；从 v0.1.1 升级前先阅读 format 3 → 4 migration 与 Provider 部署说明。
 
 ## 文档依据与验证
 
-本手册以 v0.1.0 发布行为作为基础验证集，并在明确标记的页面加入 v0.1.1 Full-text tokenizer 与 v0.2.0 Managed Semantic 增量。v0.2.0 事实依据 [v0.2.0 Release Notes](../releases/v0.2.0.md)、当前 [技术设计](../design.md)、实现、Phase acceptance 与真实 SQLite/release gates。
+本手册以 v0.1.0 发布行为作为基础验证集，并在明确标记的页面加入 v0.1.1 Full-text tokenizer、v0.2.0 Managed Semantic 与 v0.2.1 SQL explicit transaction 增量。当前事实依据 [v0.2.1 Release Notes](../releases/v0.2.1.md)、当前 [技术设计](../design.md)、实现、Phase acceptance 与真实 SQLite/release gates。
 
 本次验证的命令、平台和范围记录在 [示例验证说明](examples/README.md)。验证范围不等同于重新运行全部发布压测，也不代表所有第三方 SQLite binding 已逐一验证。
 

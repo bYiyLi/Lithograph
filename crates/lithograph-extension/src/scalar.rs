@@ -11,6 +11,10 @@ pub(super) fn register_scalar_functions(db: &Connection) -> SqliteResult<()> {
     let innocuous = ffi::SQLITE_UTF8 | ffi::SQLITE_INNOCUOUS;
     register_scalar(db, c"lithograph_init", 0, direct, scalar_init)?;
     register_scalar(db, c"lithograph", -1, direct, scalar_execute)?;
+    register_scalar(db, c"lithograph_tx_begin", 1, direct, scalar_tx_begin)?;
+    register_scalar(db, c"lithograph_tx_execute", -1, direct, scalar_tx_execute)?;
+    register_scalar(db, c"lithograph_tx_commit", 0, direct, scalar_tx_commit)?;
+    register_scalar(db, c"lithograph_tx_abort", 0, direct, scalar_tx_abort)?;
     register_scalar(db, c"lithograph_validate", 1, innocuous, scalar_validate)?;
     register_scalar(db, c"lithograph_version", 0, innocuous, scalar_version)?;
     register_scalar(
@@ -84,6 +88,99 @@ unsafe extern "C" fn scalar_execute(
             execution::scalar_result(connection, &query, &params, &options)
         });
     }
+}
+
+unsafe extern "C" fn scalar_tx_begin(
+    context: *mut ffi::sqlite3_context,
+    argc: c_int,
+    argv: *mut *mut ffi::sqlite3_value,
+) {
+    let operation = |args: &ScalarArgs, connection: &Connection| {
+        let options = args.text(0, "options_json must be JSON TEXT")?;
+        // SAFETY: `connection` borrows the live callback connection.
+        let db = unsafe { connection.handle() };
+        // SAFETY: `db`, `options`, and the validation closure remain live for
+        // this synchronous callback invocation.
+        unsafe {
+            native::sql_tx_begin(db, &options, |result| {
+                execution::ensure_scalar_result_fits(connection, result)
+            })
+        }
+    };
+    // SAFETY: SQLite owns `context` and supplies `argc` entries in `argv`.
+    unsafe { run_scalar(context, argc, argv, operation) };
+}
+
+unsafe extern "C" fn scalar_tx_execute(
+    context: *mut ffi::sqlite3_context,
+    argc: c_int,
+    argv: *mut *mut ffi::sqlite3_value,
+) {
+    let operation = |args: &ScalarArgs, connection: &Connection| {
+        let (query, params, options) = match tx_execution_args(args) {
+            Ok(inputs) => inputs,
+            Err(error) => {
+                return native::fail_closed_sql_transaction(connection, error);
+            }
+        };
+        // SAFETY: `connection` borrows the live callback connection.
+        let db = unsafe { connection.handle() };
+        let mut collector = TxScalarEventCollector::new(db);
+        // SAFETY: all inputs and collector state remain live for the
+        // synchronous transaction execution.
+        let execute = unsafe {
+            native::sql_tx_execute(
+                db,
+                &query,
+                &params,
+                &options,
+                Some(collect_tx_scalar_event),
+                (&raw mut collector).cast::<c_void>(),
+            )
+        };
+        match execute {
+            Ok(()) => match collector.finish() {
+                Ok(result) => Ok(result),
+                Err(error) => native::fail_closed_sql_transaction(connection, error),
+            },
+            Err(error) => Err(collector.error.take().unwrap_or(error)),
+        }
+    };
+    // SAFETY: SQLite owns `context` and supplies `argc` entries in `argv`.
+    unsafe { run_scalar(context, argc, argv, operation) };
+}
+
+unsafe extern "C" fn scalar_tx_commit(
+    context: *mut ffi::sqlite3_context,
+    argc: c_int,
+    argv: *mut *mut ffi::sqlite3_value,
+) {
+    let operation = |_args: &ScalarArgs, connection: &Connection| {
+        // SAFETY: `connection` borrows the live callback connection.
+        let db = unsafe { connection.handle() };
+        // SAFETY: `db` remains live for this synchronous callback invocation.
+        unsafe { native::sql_tx_commit(db) }
+    };
+    // SAFETY: SQLite owns `context` and supplies `argc` entries in `argv`.
+    unsafe { run_scalar(context, argc, argv, operation) };
+}
+
+unsafe extern "C" fn scalar_tx_abort(
+    context: *mut ffi::sqlite3_context,
+    argc: c_int,
+    argv: *mut *mut ffi::sqlite3_value,
+) {
+    let operation = |_args: &ScalarArgs, connection: &Connection| {
+        // SAFETY: `connection` borrows the live callback connection.
+        let db = unsafe { connection.handle() };
+        // SAFETY: `db` remains live for this synchronous callback invocation.
+        unsafe { native::sql_tx_abort(db) }?;
+        let result = json!({"aborted": true}).to_string();
+        execution::ensure_scalar_result_fits(connection, &result)?;
+        Ok(result)
+    };
+    // SAFETY: SQLite owns `context` and supplies `argc` entries in `argv`.
+    unsafe { run_scalar(context, argc, argv, operation) };
 }
 
 unsafe extern "C" fn scalar_validate(
@@ -177,6 +274,166 @@ fn execution_args(args: &ScalarArgs) -> LithographResult<(String, String, String
         "{}".to_owned()
     };
     Ok((query, params, options))
+}
+
+fn tx_execution_args(args: &ScalarArgs) -> LithographResult<(String, String, String)> {
+    if !(1..=3).contains(&args.len()) {
+        return Err(LithographError::invalid_argument(
+            "lithograph_tx_execute() expects query [, params_json [, options_json]]",
+        ));
+    }
+    let query = args.text(0, "query must be TEXT")?;
+    let params = if args.len() >= 2 {
+        args.text(1, "params_json must be JSON TEXT")?
+    } else {
+        "{}".to_owned()
+    };
+    let options = if args.len() >= 3 {
+        args.text(2, "options_json must be JSON TEXT")?
+    } else {
+        "{}".to_owned()
+    };
+    Ok((query, params, options))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TxScalarEventStage {
+    Columns,
+    Rows,
+    Done,
+}
+
+struct TxScalarEventCollector {
+    db: *mut ffi::sqlite3,
+    stage: TxScalarEventStage,
+    columns: Option<Value>,
+    rows: Vec<Value>,
+    result: Option<String>,
+    error: Option<LithographError>,
+}
+
+impl TxScalarEventCollector {
+    fn new(db: *mut ffi::sqlite3) -> Self {
+        Self {
+            db,
+            stage: TxScalarEventStage::Columns,
+            columns: None,
+            rows: Vec::new(),
+            result: None,
+            error: None,
+        }
+    }
+
+    fn collect(
+        &mut self,
+        kind: native::LithographEventKindV1,
+        payload: &[u8],
+    ) -> LithographResult<()> {
+        let value: Value = serde_json::from_slice(payload).map_err(|error| {
+            LithographError::internal(format!(
+                "failed to decode explicit transaction result event: {error}"
+            ))
+        })?;
+        match (self.stage, kind) {
+            (TxScalarEventStage::Columns, native::LithographEventKindV1::Columns) => {
+                let valid = value
+                    .as_array()
+                    .is_some_and(|columns| columns.iter().all(Value::is_string));
+                if !valid {
+                    return Err(LithographError::internal(
+                        "explicit transaction COLUMNS event is not a string array",
+                    ));
+                }
+                self.columns = Some(value);
+                self.stage = TxScalarEventStage::Rows;
+            }
+            (TxScalarEventStage::Rows, native::LithographEventKindV1::Row) => {
+                if !value.is_array() {
+                    return Err(LithographError::internal(
+                        "explicit transaction ROW event is not an array",
+                    ));
+                }
+                self.rows.push(value);
+            }
+            (TxScalarEventStage::Rows, native::LithographEventKindV1::Summary) => {
+                if !value.is_object() {
+                    return Err(LithographError::internal(
+                        "explicit transaction SUMMARY event is not an object",
+                    ));
+                }
+                let columns = self.columns.take().ok_or_else(|| {
+                    LithographError::internal(
+                        "explicit transaction result is missing COLUMNS event",
+                    )
+                })?;
+                let result = json!({
+                    "columns": columns,
+                    "rows": std::mem::take(&mut self.rows),
+                    "summary": value,
+                })
+                .to_string();
+                execution::ensure_scalar_result_fits_handle(self.db, &result)?;
+                self.result = Some(result);
+                self.stage = TxScalarEventStage::Done;
+            }
+            _ => {
+                return Err(LithographError::internal(
+                    "explicit transaction result events are out of order",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> LithographResult<String> {
+        if let Some(error) = self.error {
+            return Err(error);
+        }
+        if self.stage != TxScalarEventStage::Done {
+            return Err(LithographError::internal(
+                "explicit transaction result is missing SUMMARY event",
+            ));
+        }
+        self.result.ok_or_else(|| {
+            LithographError::internal("explicit transaction result envelope disappeared")
+        })
+    }
+}
+
+unsafe extern "C" fn collect_tx_scalar_event(
+    user_data: *mut c_void,
+    kind: native::LithographEventKindV1,
+    json: *const u8,
+    json_len: usize,
+) -> c_int {
+    if user_data.is_null() || (json.is_null() && json_len != 0) {
+        return 1;
+    }
+    // SAFETY: user_data points to the collector owned by the synchronous
+    // scalar invocation; payload bytes remain valid for this callback only.
+    let collector = unsafe { &mut *user_data.cast::<TxScalarEventCollector>() };
+    let collect = || {
+        let payload = if json_len == 0 {
+            &[][..]
+        } else {
+            // SAFETY: the Native event contract provides `json_len` readable bytes.
+            unsafe { std::slice::from_raw_parts(json, json_len) }
+        };
+        collector.collect(kind, payload)
+    };
+    match catch_unwind(AssertUnwindSafe(collect)) {
+        Ok(Ok(())) => 0,
+        Ok(Err(error)) => {
+            collector.error = Some(error);
+            1
+        }
+        Err(_) => {
+            collector.error = Some(LithographError::internal(
+                "panic while collecting explicit transaction result events",
+            ));
+            1
+        }
+    }
 }
 
 pub(super) fn catch_scalar_operation<T>(

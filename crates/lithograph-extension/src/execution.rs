@@ -151,10 +151,20 @@ fn collect_scalar_result(
     Ok(result)
 }
 
-fn ensure_scalar_result_fits(connection: &Connection, result: &str) -> LithographResult<()> {
+pub(super) fn ensure_scalar_result_fits(
+    connection: &Connection,
+    result: &str,
+) -> LithographResult<()> {
     // SAFETY: this only reads the configured limit from the live connection;
     // passing -1 leaves the limit unchanged.
     let db = unsafe { connection.handle() };
+    ensure_scalar_result_fits_handle(db, result)
+}
+
+pub(super) fn ensure_scalar_result_fits_handle(
+    db: *mut ffi::sqlite3,
+    result: &str,
+) -> LithographResult<()> {
     // SAFETY: `db` is the live handle borrowed from `connection`, and -1 is
     // SQLite's documented read-only sentinel for this limit API.
     let limit = unsafe { ffi::sqlite3_limit(db, ffi::SQLITE_LIMIT_LENGTH, -1) };

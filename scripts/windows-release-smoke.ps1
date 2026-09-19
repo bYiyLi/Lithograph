@@ -185,6 +185,24 @@ function Invoke-Phase09Regressions {
     }
 }
 
+function Invoke-SqlTxSmoke {
+    param(
+        [Parameter(Mandatory = $true)]$Runtime,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    $source = Join-Path $repoRoot "tests\sql_tx_smoke.c"
+    $object = Join-Path $Runtime.Root "sql-tx-smoke.obj"
+    $executable = Join-Path $Runtime.Root "sql-tx-smoke.exe"
+    $database = Join-Path $Runtime.Root "sql-tx-smoke.db"
+    Invoke-VcCommand -Name "sql-tx-$Name-compile" -Command "cd /d `"$($Runtime.Root)`" && cl /nologo /c /std:c11 /W4 /WX /I`"$($Runtime.Include)`" `"$source`" /Fo`"$object`""
+    Invoke-VcCommand -Name "sql-tx-$Name-link" -Command "cd /d `"$($Runtime.Root)`" && link /nologo `"$object`" `"$($Runtime.Obj)`" /OUT:`"$executable`""
+    & $executable $extension $database
+    if ($LASTEXITCODE -ne 0) {
+        throw "Phase 14 SQL explicit transaction smoke failed with $($Runtime.Exe)"
+    }
+}
+
 $minimum = Build-SqliteRuntime -Version "3.45.0" -ArchiveVersion "3450000" -Year "2024" -Sha256 "72887d57a1d8f89f52be38ef84a6353ce8c3ed55ada7864eb944abd9a495e436"
 $current = Build-SqliteRuntime -Version "3.53.4" -ArchiveVersion "3530400" -Year "2026" -Sha256 "0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c"
 $lithographInclude = Join-Path $repoRoot "include"
@@ -220,6 +238,9 @@ foreach ($runtime in @($minimum, $current)) {
     }
     Invoke-Phase13Probe -Runtime $runtime -SyntheticProvider $syntheticProvider -OpenAIProvider $openaiProvider
 }
+
+Invoke-SqlTxSmoke -Runtime $minimum -Name "sqlite-3.45.0"
+Invoke-SqlTxSmoke -Runtime $current -Name "sqlite-3.53.4"
 
 foreach ($probe in @(
     "lithograph-sqlite-probe",
@@ -328,4 +349,4 @@ if ($openaiProvider) {
     }
 }
 
-Write-Host "Windows Phase 13 release artifact smoke passed ($architecture): $extension"
+Write-Host "Windows Phase 14 release artifact smoke passed ($architecture): $extension"

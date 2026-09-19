@@ -325,7 +325,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "lithograph-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "blake3",
  "chrono",
@@ -346,14 +346,14 @@ dependencies = [
 
 [[package]]
 name = "lithograph-embedding-provider"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "rusqlite",
 ]
 
 [[package]]
 name = "lithograph-extension"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "lithograph-core",
  "lithograph-embedding-provider",
@@ -363,14 +363,14 @@ dependencies = [
 
 [[package]]
 name = "lithograph-fts5"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "rusqlite",
 ]
 
 [[package]]
 name = "lithograph-openai-compatible"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64",
  "httpdate",
@@ -384,7 +384,7 @@ dependencies = [
 
 [[package]]
 name = "lithograph-test-support"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "blake3",
  "lithograph-core",

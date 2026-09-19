@@ -1,6 +1,6 @@
 # 部署、备份与维护
 
-适用 v0.2.0 发布基线，并保留 v0.1.0/v0.1.1 的升级边界。Lithograph 运行在应用的 SQLite connection 中，没有独立管理 Server。以下操作涉及已有数据时，先确认文件路径、扩展版本、目标 Branch 与保留策略；不要直接修改 `_lithograph_*` 表。
+适用 v0.2.1 发布基线，并保留 v0.1.0–v0.2.0 的升级边界。Lithograph 运行在应用的 SQLite connection 中，没有独立管理 Server。以下操作涉及已有数据时，先确认文件路径、扩展版本、目标 Branch 与保留策略；不要直接修改 `_lithograph_*` 表。
 
 ## 部署前检查
 
@@ -85,7 +85,7 @@ CALL db.index.semantic.cache.clear()
 CALL db.index.semantic.rebuild('document_semantic', 'branch/main')
 ```
 
-`stats` 只读；`configure`、`clear`、`rebuild` 是独立 maintenance write，只能从普通 `lithograph()` 或 autocommit Native execution 调用，不能放入 `lithograph_rows()`、Native explicit transaction、transaction-owning subquery 或 Merge candidate。它们成功时不创建 Commit、不移动 Branch/Tag。
+`stats` 只读；`configure`、`clear`、`rebuild` 是独立 maintenance write，只能从普通 `lithograph()` 或 autocommit Native execution 调用，不能放入 `lithograph_rows()`、SQL / Native explicit transaction、transaction-owning subquery 或 Merge candidate。它们成功时不创建 Commit、不移动 Branch/Tag。
 
 普通 semantic query 会先查 persistent cache；query/source exact text miss 才调用 Provider。Provider 返回的整批结果通过数量、维度、finite value 与 similarity 校验后，在短 transaction 中自动写入同一 database-local cache，因此正常搜索不需要先执行 `rebuild` 或预热，并可跨 connection/process restart 复用。Cache 只保存 embedding-space/text hash、text byte length、向量和结构 metadata，不复制 query/source 原文。只读数据库或 cache disabled 时跳过 persistent publish，仍用 Provider + TEMP/LRU 完成查询。
 
@@ -107,7 +107,7 @@ GC 不删除仍被保留引用保护的历史；物理文件也不保证立刻�
 
 读取只投影需要的字段，用 Cypher 内的 WHERE / ORDER BY / LIMIT 表达语义；大量结果选择行适配器或 Native stream，同时及时关闭 cursor。排序、聚合、路径探索、全文/向量访问仍可能需要内存与 TEMP 空间，streaming API 不等于所有 query 都恒定内存。
 
-EXPLAIN 无执行副作用；PROFILE 实际执行，写查询也会写入。出现索引未被选择时先检查类型约束与查询计划，而不是强制删建索引。迁移、GC 和 rebuild 与线上写请求共享资源，避免把人工审查或网络工作放进 Native explicit transaction。
+EXPLAIN 无执行副作用；PROFILE 实际执行，写查询也会写入。出现索引未被选择时先检查类型约束与查询计划，而不是强制删建索引。迁移、GC 和 rebuild 与线上写请求共享资源，避免把人工审查或网络工作放进 SQL / Native explicit transaction。
 
 WAL、synchronous、busy timeout、线程模式和 TEMP 位置由宿主 SQLite 决定，Lithograph 不替你静默修改。没有适合所有产品的默认吞吐/延迟承诺；最终优化验收见 [Phase 11](../development/phases/11-performance-optimization.md)，早期基线及其限制见 [Performance Evidence](../research/phase11-performance-evidence.md)。旧基线不是 v0.1.0 最终延迟数据，机器、规模和缓存状态必须一起阅读。
 

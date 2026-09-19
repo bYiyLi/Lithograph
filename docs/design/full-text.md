@@ -92,7 +92,7 @@ Canonical Full-text configuration 只保留 `analyzer: String`（完整 specific
 
 普通 CREATE、Native staged DDL，以及 Patch/Merge/Rebase/Revert 等创建新 canonical 状态并引入或更改 Full-text definition 的路径，都必须在发布新 Schema/Branch 状态之前，在实际执行的宿主 SQLite connection 上验证对应 specification。只验证相对本次目标 Branch base 新增/改变的定义，不为无关 Schema/graph 写入重新构造所有 tokenizer。纯 ref 移动（包括仅移动到已有 Commit 的 fast-forward）、历史 Schema inspection、DROP 和真正没有改变 definition 的 `IF NOT EXISTS` 不以 tokenizer 可用为前提；配置类型/结构验证仍不能被 `IF NOT EXISTS` 绕过。
 
-最低成本的原生验证是：在当前 invocation/savepoint 内创建只有一个文本列的临时 FTS5 table，使用安全编码后的 specification，成功后删除探针。它检查实际 FTS5 解析、注册名与 tokenizer `xCreate`，不构建整个 graph corpus。缺失 tokenizer、无效 specification 或 tokenizer 报告的参数错误使本次 Schema mutation 失败，不能留下新的 durable Commit、Schema 引用、Branch move 或不完整探针。Native explicit transaction 继续遵守任一 execution 失败整体 abort 的既有合同。
+最低成本的原生验证是：在当前 invocation/savepoint 内创建只有一个文本列的临时 FTS5 table，使用安全编码后的 specification，成功后删除探针。它检查实际 FTS5 解析、注册名与 tokenizer `xCreate`，不构建整个 graph corpus。缺失 tokenizer、无效 specification 或 tokenizer 报告的参数错误使本次 Schema mutation 失败，不能留下新的 durable Commit、Schema 引用、Branch move 或不完整探针。SQL / Native explicit transaction 继续遵守任一 execution 失败整体 abort 的既有合同。
 
 `xCreate` 成功只证明构造成功，不证明该插件会拒绝所有不认识的参数，也不证明任意文本的 `xTokenize` 永不失败。后续构建/查询遇到 tokenizer、I/O、资源或中断错误必须传播；不可把之前的探针成功当作允许返回部分结果或 fallback 的理由。
 

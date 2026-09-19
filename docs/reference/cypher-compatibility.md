@@ -32,7 +32,7 @@ Lithograph 不提供 Bolt/HTTP 数据库服务器或 Neo4j driver 协议。APOC 
 
 图查询文本仍是 Cypher；SQLite 通过 `lithograph()`、`lithograph_rows()` 或 Native API 承载执行。版本管理通过 `CALL lithograph.*` procedures 扩展数据库能力，不创造新的 Cypher grammar。
 
-`CALL ... IN TRANSACTIONS` 虽然是 profile 的 query 能力，但需要能拥有 batch transaction boundary 的普通 Native 入口，不能放进 SQL scalar 或 Native explicit transaction。`IN CONCURRENT TRANSACTIONS` 不意味着一个 SQLite 文件支持多个物理 writer 同时提交。
+`CALL ... IN TRANSACTIONS` 虽然是 profile 的 query 能力，但需要能拥有 batch transaction boundary 的普通 Native 入口，不能放进 SQL scalar 或 SQL / Native explicit transaction。`IN CONCURRENT TRANSACTIONS` 不意味着一个 SQLite 文件支持多个物理 writer 同时提交。
 
 `lithograph_rows` 只读且无外部 I/O；历史 at 只读；Graph View 约束执行可见子图。Graph Type / Constraint / Index 与图状态一起 versioned，历史查询解析历史 Schema，而不是最新 schema catalog。
 

@@ -37,7 +37,7 @@
 
 ## 错误后的原子性
 
-普通 mutating query 的失败不留下该 invocation 的部分图写入。Native explicit transaction 中任一 execution 失败会自动 abort 整体；不能继续 tx_execute/tx_commit。外层 SQL transaction 的后续处理仍由宿主决定。
+普通 mutating query 的失败不留下该 invocation 的部分图写入。SQL / Native explicit transaction 中任一 execution 失败会自动 abort 整体；不能继续 `tx_execute` / `tx_commit`。外层 SQL transaction 的后续处理仍由宿主决定。
 
 独立 `IN TRANSACTIONS` 的已成功 batch 仍然持久化；错误不意味着整次导入没有副作用。已经向调用方发送的 ROW 也不等于整个操作成功，必须检查最终返回码/事务提交。
 

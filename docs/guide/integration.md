@@ -69,7 +69,7 @@ Linux 编译时额外链接 `-ldl`，使用 `.so` 扩展。开发机需要 SQLit
 
 不取源码也可以下载这个 C 示例和 [v0.1.0 header](https://raw.githubusercontent.com/bYiyLi/Lithograph/v0.1.0/include/lithograph.h)，把编译命令的源文件/header 目录替换成保存位置。
 
-程序先在 `sqlite3*` 上通过 `sqlite3_load_extension` 完成注册，再用 dynamic loader 解析 Native symbol。只调用 `dlopen` 不够。v0.1.0–v0.2.0 的 params/options 必须显式传 `"{}",2`，不能用 `NULL,0` 代替默认 object，见 [已知问题](../reference/known-issues.md)。两次 staged CREATE 的 SUMMARY 中 commit 为 null；tx_commit 返回最终 Commit；检查 log 只有 Root + 一个新 Commit。
+程序先在 `sqlite3*` 上通过 `sqlite3_load_extension` 完成注册，再用 dynamic loader 解析 Native symbol。只调用 `dlopen` 不够。v0.1.0–v0.2.1 的 params/options 必须显式传 `"{}",2`，不能用 `NULL,0` 代替默认 object，见 [已知问题](../reference/known-issues.md)。两次 staged CREATE 的 SUMMARY 中 commit 为 null；tx_commit 返回最终 Commit；检查 log 只有 Root + 一个新 Commit。
 
 示例还检查 callback cancellation 会自动 abort，并区分 SQLite 分配的错误（`sqlite3_free`）与 Lithograph 分配的 JSON（`lithograph_v1_free`）。生产程序应把示例的失败即退出改成所属应用的结构化错误路径，避免在有未完成事务时继续复用 connection。
 
@@ -77,7 +77,7 @@ Linux 编译时额外链接 `-ldl`，使用 `.so` 扩展。开发机需要 SQLit
 
 Node.js、Rust、Go 等不需要 Lithograph 特有查询语言 SDK，但**具体 SQLite binding 必须**允许加载 extension、提供符合最低版本与 FTS5 的 runtime，并允许目标部署环境的 native library loading。能执行普通 SQL 不自动表示能加载扩展。
 
-纯 SQL binding 可以使用 SQL Bridge；需要 Native transaction 的 binding 还要可靠暴露同一 host runtime 的 `sqlite3*`。不要同时向一个 connection 混入来自另一份 SQLite library 的 handle 或内存释放函数。
+纯 SQL binding 可以使用 SQL Bridge，包括 `lithograph_tx_*` 显式事务；只有需要 Native streaming callback 或其它 C ABI 能力的 binding 才必须可靠暴露同一 host runtime 的 `sqlite3*`。不要同时向一个 connection 混入来自另一份 SQLite library 的 handle 或内存释放函数。
 
 每个池连接加载一次扩展；保留每次 query 的 branch/at 上下文，不把上个请求的业务目标泄漏到下个请求。关闭流式 cursor，显式处理 outer transaction，丢弃 cleanup 失败的 connection。SQLite connection threading mode 不因 Lithograph 自动增强。
 

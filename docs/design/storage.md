@@ -286,15 +286,15 @@ pin active branch head
     -> SQLite COMMIT
 ```
 
-上图的 `SQLite COMMIT` 对 Native API 表示 Engine 自己拥有的 transaction commit；对 SQL Bridge 表示内部 SAVEPOINT 成功 release 后，由宿主 SQLite autocommit/outer transaction 决定最终 durability。SQL Bridge 不能从 function callback 提前 commit caller-owned transaction。
+上图的 `SQLite COMMIT` 对 Engine-owned explicit transaction（Native `lithograph_v1_tx_*` 或 SQL `lithograph_tx_*`）表示 Engine 自己拥有的 transaction commit；对普通 SQL Bridge `lithograph()` 表示内部 SAVEPOINT 成功 release 后，由宿主 SQLite autocommit/outer transaction 决定最终 durability。普通 SQL Bridge 不能从 function callback 提前 commit caller-owned transaction；只有明确的 `lithograph_tx_commit()` 回调可以提交由对应 `lithograph_tx_begin()` 建立的 Engine-owned transaction。
 
-普通 auto-commit execution 中，每个成功的 **graph / Schema / Index mutating query** 都产生一个 Commit，即使 effective delta 为空；这样 graph history 与 write intent 一致。Native explicit transaction 改变的是多个 execution 的 Commit boundary，而不是这些 query 的 Cypher mutation semantics，规则见 [Native Explicit Transaction](#native-explicit-transaction)。Version ref/control procedure 不一概产生 Commit：`branch.create/delete`、`reset` 与 `merge.finalize` 的 fast-forward 结果只原子修改 ref，`branch.checkout` 只修改 connection-local context，`gc` 只做 reachability cleanup，Merge Session 的 start/resolve/abort 只修改 operational workspace；`patch.apply`、`merge.finalize` 的 diverged `merged` 结果与 `revert` 会产生 Commit。
+普通 auto-commit execution 中，每个成功的 **graph / Schema / Index mutating query** 都产生一个 Commit，即使 effective delta 为空；这样 graph history 与 write intent 一致。Explicit transaction 改变的是多个 execution 的 Commit boundary，而不是这些 query 的 Cypher mutation semantics，规则见 [Explicit Transaction](#native-explicit-transaction)。Version ref/control procedure 不一概产生 Commit：`branch.create/delete`、`reset` 与 `merge.finalize` 的 fast-forward 结果只原子修改 ref，`branch.checkout` 只修改 connection-local context，`gc` 只做 reachability cleanup，Merge Session 的 start/resolve/abort 只修改 operational workspace；`patch.apply`、`merge.finalize` 的 diverged `merged` 结果与 `revert` 会产生 Commit。
 
 <a id="native-explicit-transaction"></a>
 
-### Native Explicit Transaction
+### Explicit Transaction（Native / SQL lifecycle）
 
-Native explicit transaction 解决的是 **version atomicity**：调用方可以把多个独立 Cypher execution 组织成一个逻辑写单元，整个单元成功时只产生一个 Layer、一个 Commit 和一次 Branch head move。它不是 Git-style staging area，不暴露 raw Layer/Structural Patch，也不把 Cypher 25 换成 Lithograph-specific mutation language。
+Explicit transaction 解决的是 **version atomicity**：调用方可以通过 Native `lithograph_v1_tx_*` 或 SQL `lithograph_tx_*` 把多个独立 Cypher execution 组织成一个逻辑写单元，整个单元成功时只产生一个 Layer、一个 Commit 和一次 Branch head move。两种 adapter 共享同一 connection-local state machine，不建立第二套 staged storage 或 commit coordinator。它不是 Git-style staging area，不暴露 raw Layer/Structural Patch，也不把 Cypher 25 换成 Lithograph-specific mutation language。
 
 逻辑生命周期固定为：
 
@@ -319,7 +319,7 @@ tx_abort()
 精确语义：
 
 - `tx_begin` 只能在目标 `sqlite3*` 处于 autocommit mode 且没有其它 active Lithograph explicit transaction 时成功；否则返回 `TRANSACTION_BOUNDARY_REQUIRED`。成功 begin 进入 Engine-owned SQLite write transaction / branch-commit coordinator，取得该 database 的 single-writer ownership，并 pin target Branch 当前 head 为 immutable base Commit；
-- active explicit transaction 独占该 `sqlite3*` 上的 Lithograph graph/version execution lifecycle：除同一 connection 的 `tx_execute` / `tx_commit` / `tx_abort` 与纯信息 `lithograph_version()` 外，普通 `lithograph_v1_execute` / `lithograph_v1_validate`、SQL Bridge `lithograph()` / `lithograph_rows()`、`lithograph_init()`、`lithograph_integrity_check()` 以及其它会解析/读取/修改 graph/version state 的 operation 都返回 `TRANSACTION_BOUNDARY_REQUIRED`。这样既不能绕过 explicit transaction 形成独立 Commit，也不能通过另一个 surface 对 staged / committed state 得到含糊解释；
+- active explicit transaction 独占该 `sqlite3*` 上的 Lithograph graph/version execution lifecycle：除同一 connection 的 Native / SQL `tx_execute` / `tx_commit` / `tx_abort` 与纯信息 `lithograph_version()` 外，普通 `lithograph_v1_execute` / `lithograph_v1_validate`、SQL Bridge `lithograph()` / `lithograph_rows()`、`lithograph_init()`、`lithograph_integrity_check()` 以及其它会解析/读取/修改 graph/version state 的 operation 都返回 `TRANSACTION_BOUNDARY_REQUIRED`。这样既不能绕过 explicit transaction 形成独立 Commit，也不能通过另一个普通 execution surface 对 staged / committed state 得到含糊解释；
 - `expectedHead` 提供时必须与取得 writer ownership 后观察到的 Branch head 相同，否则返回 `BRANCH_HEAD_MOVED` 且不创建 transaction。省略时以实际 pin 到的 head 为 base；
 - 每个 `tx_execute` 使用同一 base + transaction-local staged graph/Schema/Index state。后续 execution 必须看到前序 execution 已成功完成的 staged writes；这些 staged state 在 `tx_commit` 前没有 public Commit identity、不会移动 Branch，也不会被其它 connection 读取；
 - 每个 `tx_execute` 的 `graphView` 仍是 query-local selector，可以与前一个 execution 不同；visibility 必须针对**当前 transaction staged state**重新计算，因此会观察全部前序成功 `tx_execute` 的 staged writes，但不能看到后序 execution。不能在 `tx_begin` 时把 Graph View 预展开为固定 element-ID membership；
@@ -332,7 +332,7 @@ tx_abort()
 - begin 已持有 single-writer ownership，正常情况下其它 writer 不能在 transaction 生命周期内移动 Branch；Commit 前仍保留最终 compare-and-move / integrity guard，任何不一致都整体 rollback，不产生 partial Commit；
 - explicit transaction 会占用 SQLite 单文件 writer ownership，因此调用方必须保持 transaction 短小，不在其中等待用户输入、长时间网络交互或其它无界外部工作。
 
-`tx_execute` 的 Native callback 仍使用 `COLUMNS -> ROW* -> SUMMARY`。因为 staged state 尚没有 durable Commit，transaction 内 statement 的 `SUMMARY.commit` 固定为 `null`；statement counters 描述该 execution 的 provisional effect。只有 `tx_commit` 返回最终 durable Commit identity 和 transaction-level final-delta counters。
+`tx_execute` 的逻辑 event 序列仍为 `COLUMNS -> ROW* -> SUMMARY`：Native adapter 流式交给 callback，SQL adapter 把它组装为与 `lithograph()` 相同的完整 envelope。因为 staged state 尚没有 durable Commit，transaction 内 statement 的 `SUMMARY.commit` 固定为 `null`；statement counters 描述该 execution 的 provisional effect。只有 `tx_commit` 返回最终 durable Commit identity 和 transaction-level final-delta counters。
 
 逻辑结果 shape 固定为：`tx_begin -> {"baseCommit":"commit/<id>"}`，其中 `baseCommit` 是实际 pin 的 resolved Commit；`tx_commit -> {"commit":"commit/<id>","counters":{...}}`，纯 read transaction 的 `commit == baseCommit` 且 counters 全为 `0`，存在 mutating execution 时 `commit` 是唯一新建 Commit。`tx_execute` / `tx_commit` / `tx_abort` 在当前 connection 没有 active explicit transaction 时返回 `INVALID_ARGUMENT` + `SQLITE_MISUSE`。
 
@@ -344,7 +344,7 @@ tx_abort()
 
 如果调用方已经 `BEGIN` SQLite transaction，同一 connection 内每个 mutating Cypher query 仍产生独立逻辑 Commit 并连续移动 Branch head，但这些 Commit 与 ref move 只有在外层 SQLite `COMMIT` 后才对其它 connection 可见。外层 `ROLLBACK` 会移除这一 transaction 中创建的全部 graph Commits。
 
-因此 caller-owned SQLite transaction 只提供 **durability atomicity**，不等价于 [Native Explicit Transaction](#native-explicit-transaction) 的 version atomicity。一个 outer SQLite transaction 可以整体回滚 Commit A/B/C，但只要最终 SQLite COMMIT 成功，历史中仍保留 A -> B -> C；需要一个逻辑版本节点时必须使用 Native explicit transaction，而不是事后隐式 squash。
+因此 caller-owned SQLite transaction 只提供 **durability atomicity**，不等价于 [Explicit Transaction](#native-explicit-transaction) 的 version atomicity。一个 outer SQLite transaction 可以整体回滚 Commit A/B/C，但只要最终 SQLite COMMIT 成功，历史中仍保留 A -> B -> C；需要一个逻辑版本节点时必须使用 SQL / Native explicit transaction，而不是事后隐式 squash。
 
 <a id="stale-branch-head"></a>
 
@@ -352,7 +352,7 @@ tx_abort()
 
 Write 在开始时记录 base Commit，在写 Branch ref 前再次 compare current head。若同一 Branch 已被其它 writer 移动，当前 write 失败为 `BRANCH_HEAD_MOVED`；Lithograph 不自动把两个并发写隐式 merge。
 
-普通 auto-commit write 使用 query-level base；Native explicit transaction 使用 `tx_begin` pin 的 base / `expectedHead`，并由 [Native Explicit Transaction](#native-explicit-transaction) 的 writer ownership 把 compare-and-move boundary 扩展到整个 transaction。
+普通 auto-commit write 使用 query-level base；SQL / Native explicit transaction 使用 `tx_begin` pin 的 base / `expectedHead`，并由 [Explicit Transaction](#native-explicit-transaction) 的 writer ownership 把 compare-and-move boundary 扩展到整个 transaction。
 
 <a id="readers-and-writers"></a>
 
@@ -405,7 +405,7 @@ Native API 在 caller 没有 active transaction 时实现 `CALL { ... } IN TRANS
 
 Canonical write 与 Branch move 共用 SQLite transaction，因此 crash 后只允许出现 commit 前状态或 commit 后状态，不存在 Branch 指向半写 Layer 的合法状态。SQLite recovery 完成后 Lithograph 再执行自身 metadata/integrity checks。
 
-Native explicit transaction 在 `tx_commit` 前没有 public intermediate Commit；process crash 或实际 SQLite connection teardown 会由 SQLite rollback 未提交 transaction，恢复后只能看到 `tx_begin` 前的 base State。`tx_commit` finalize 期间仍服从同一 canonical write + Branch move crash boundary，只允许完整旧 State 或完整新 Commit。Explicit transaction 的 connection-local staged state 不进入 storage format，也不能在 reopen 后恢复为“悬挂 transaction”。
+SQL / Native explicit transaction 在 `tx_commit` 前没有 public intermediate Commit；process crash 或实际 SQLite connection teardown 会由 SQLite rollback 未提交 transaction，恢复后只能看到 `tx_begin` 前的 base State。`tx_commit` finalize 期间仍服从同一 canonical write + Branch move crash boundary，只允许完整旧 State 或完整新 Commit。Explicit transaction 的 connection-local staged state 不进入 storage format，也不能在 reopen 后恢复为“悬挂 transaction”。
 
 Commit Data set/clear 与 Tag create/move/delete 同样必须是单 SQLite transaction 的原子 sidecar/ref mutation；crash/reopen 后只允许看到操作前或操作后状态，不允许出现半写 JSON、Tag 指向不存在 Commit 或 ref/data 与返回成功状态不一致。
 

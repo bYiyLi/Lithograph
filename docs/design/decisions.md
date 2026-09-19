@@ -91,11 +91,11 @@
 
 <a id="d10"></a>
 
-### D10 Native Explicit Transaction 提供多 execution 的单 Commit boundary
+### D10 Explicit Transaction 提供多 execution 的单 Commit boundary
 
-- 决定：Native ABI 以 `sqlite3*` connection 作为 transaction identity，提供 `begin -> execute* -> commit | abort` 的 explicit transaction，不增加 opaque transaction handle。多个标准 Cypher current-graph execution 共享 transaction-local staged graph/Schema/Index state；成功 transaction 只创建一个最终 Layer/Commit 并只移动 Branch 一次。caller-owned SQLite transaction 继续只负责 durability atomicity，Cypher `IN TRANSACTIONS` 继续按 batch 独立 Commit，二者都不替代 explicit transaction。
-- 依据：通用数据库调用方存在一个逻辑变化需要跨多个 query 读取中间结果、分配 identity、修改 graph + Schema/Constraint/Index，但版本历史只应出现最终一致 Snapshot 的需求。把每个 query 自动提交后再 squash 会产生真实 intermediate history；把 raw Structural Patch 变成普通 CRUD language 又会复制 Cypher mutation semantics。
-- 备选：只允许“一条 Cypher query -> 一个 Commit”；用 caller-owned SQLite transaction 包裹多个 Commit；要求调用方构造 Structural Patch；完成后自动 squash/rewrite history；建立独立 server/session transaction layer。
+- 决定：以 `sqlite3*` connection 作为 transaction identity，提供 `begin -> execute* -> commit | abort` 的 explicit transaction，不增加 opaque transaction handle。Native C ABI 与 SQL `lithograph_tx_*` 只是同一 state machine 的两个 adapter；多个标准 Cypher current-graph execution 共享 transaction-local staged graph/Schema/Index state，成功 transaction 只创建一个最终 Layer/Commit 并只移动 Branch 一次。caller-owned SQLite transaction 继续只负责 durability atomicity，Cypher `IN TRANSACTIONS` 继续按 batch 独立 Commit，二者都不替代 explicit transaction。
+- 依据：通用数据库调用方存在一个逻辑变化需要跨多个 query 读取中间结果、分配 identity、修改 graph + Schema/Constraint/Index，但版本历史只应出现最终一致 Snapshot 的需求。只有 Native binding 才能进入该 lifecycle 会迫使普通 SQLite driver 另行绑定 C API；SQL scalar 封装能复用现有 connection identity 与 Engine-owned transaction，无需新建 server/session 层。把每个 query 自动提交后再 squash 会产生真实 intermediate history；把 raw Structural Patch 变成普通 CRUD language 又会复制 Cypher mutation semantics。
+- 备选：只允许“一条 Cypher query -> 一个 Commit”；只提供 Native binding；用 caller-owned SQLite transaction 包裹多个 Commit；要求调用方构造 Structural Patch；完成后自动 squash/rewrite history；建立独立 server/session transaction layer。
 - 取舍：Engine 必须维护跨 execution 的 staged snapshot、transaction-level temporal clock、final net-delta canonicalization 与 fail-closed cleanup；active transaction 持有 SQLite single-writer ownership，长事务会阻塞其它写入。换取的是标准 Cypher 25 仍为正常 mutation language，同时获得明确的 version atomicity 和 one logical change -> one Commit 语义。
 
 <a id="d11"></a>

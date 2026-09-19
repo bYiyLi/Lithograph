@@ -4,7 +4,7 @@
 参数的可选方括号是签名说明，不是实际 Cypher 调用字符。返回列可由 YIELD / RETURN 投影。
 
 **登记存在不等于每种 adapter 都能执行。** checkout 的发布问题见 [Known Issues](known-issues.md)，
-SQL rows 只读限制、Native transaction 限制及每个参数的语义见 [Procedures](procedures.md)。
+SQL rows 只读限制、SQL / Native explicit transaction 限制及每个参数的语义见 [Procedures](procedures.md)。
 WRITE mode 也可能仅修改 ref / sidecar / cache，并不总是产生 Commit。
 
 v0.1.0 的 SHOW returnDescription.type 全部标为 STRING，argumentDescription 也为空；

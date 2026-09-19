@@ -1,6 +1,6 @@
 # Procedure Reference
 
-**版本：v0.2.0。** 33 个既有公开签名与 v0.2.0 新增的 8 个 `db.index.semantic.*` procedure 见 [Inventory](procedure-inventory.md)。本页补充参数语义、默认值、Commit 效果及限制；名称不省略 `lithograph.` / `db.` 前缀。
+**版本：v0.2.1。** 33 个既有公开签名与 v0.2.0 新增的 8 个 `db.index.semantic.*` procedure 见 [Inventory](procedure-inventory.md)。本页补充参数语义、默认值、Commit 效果及限制；名称不省略 `lithograph.` / `db.` 前缀。
 
 Procedure 通过 Cypher `CALL name(...)` 调用，返回行可接 `YIELD` / `RETURN`。本页的方括号表示可选位置参数，不是实际调用字符。可选参数通常通过省略提供默认值，不应把 null 当作任意可选参数的默认值。
 
@@ -39,7 +39,7 @@ create 的 `labels` / `relationshipTypes` 是非空 `LIST<STRING>`；`sourceProp
 
 query options 必须包含非负 `limit`，可选非负 `skip`；未知 key / null / 错误类型返回 `INVALID_ARGUMENT`。实际 query/rebuild 每次都要求目标历史 Semantic definition 指定的 Provider 当前注册并通过 validation，即使 persistent cache 已 warm。query 是 graph read，summary commit 为 pinned Commit；cache enabled 且 database 可写时，query/source miss 的有效向量会自动写入 derived persistent cache。该写入不创建 Commit、不移动 Branch；只读或 cache disabled 时旁路 persistent publish并继续使用 TEMP/LRU。
 
-`cache.configure` 只接受 `enabled` / `maxBytes`；`cache.clear` 只删 Embedding Result Cache；`rebuild` 的 version 是现有 version descriptor。configure/clear/rebuild 都是 operational maintenance：成功时 `summary.queryType="version"`、`summary.commit=null`、不创建 graph Commit、不移动 ref。它们和 semantic query 都不能通过 `lithograph_rows()` 执行；Native explicit transaction 在 Provider I/O 前拒绝 semantic query/rebuild，maintenance 也要求独立 autocommit boundary。
+`cache.configure` 只接受 `enabled` / `maxBytes`；`cache.clear` 只删 Embedding Result Cache；`rebuild` 的 version 是现有 version descriptor。configure/clear/rebuild 都是 operational maintenance：成功时 `summary.queryType="version"`、`summary.commit=null`、不创建 graph Commit、不移动 ref。它们和 semantic query 都不能通过 `lithograph_rows()` 执行；SQL / Native explicit transaction 在 Provider I/O 前拒绝 semantic query/rebuild，maintenance 也要求独立 autocommit boundary。
 
 Provider/config/source 都属于 versioned IndexDefinition。Semantic definition 的 Diff/Patch 使用普通 Index logical slot；Patch/Merge/Rebase/Revert 发布新增/改变 definition 前会再次验证 Provider，失败不会移动 Branch。SHOW/DROP/history inspection 不要求 Provider 当前存在。完整示例见 [Search](../guide/search.md#managed-semantic-text-search)。
 
@@ -50,7 +50,7 @@ Provider/config/source 都属于 versioned IndexDefinition。Semantic definition
 | `lithograph.branch.create(name[,from])` | from 为 Descriptor，省略从 active Branch head 创建；返回 name,commit；不切换 active Branch |
 | `lithograph.branch.list()` | 返回 name,commit,active，按名称排序 |
 | `lithograph.branch.delete(name)` | 返回 name,previousCommit；不能删除 main 或 connection active Branch |
-| `lithograph.branch.checkout(name)` | 设计上改变 connection active Branch，要求 autocommit；**v0.1.0–v0.2.0 SQL / Native adapter 均有已知执行缺陷，使用 query options.branch** |
+| `lithograph.branch.checkout(name)` | 设计上改变 connection active Branch，要求 autocommit；**v0.1.0–v0.2.1 SQL / Native adapter 均有已知执行缺陷，使用 query options.branch** |
 | `lithograph.tag.create(name,target)` | target 为 Descriptor，返回 name,commit |
 | `lithograph.tag.list()` | 返回 name,commit |
 | `lithograph.tag.move(name,target)` | 显式移动已有 Tag，返回 name,previousCommit,commit |
@@ -118,7 +118,7 @@ Rebase resolutions 使用 conflicts 返回的 conflictId，并根据槽位选择
 
 ## 返回值类型与 introspection 注意事项
 
-v0.1.0–v0.2.0 的 `SHOW PROCEDURES.returnDescription[*].type` 把所有输出写成 STRING，`argumentDescription` 也未提供实际参数清单；见 [DOC-V010-03](known-issues.md)。不要把这些字段用于自动转换结果，或据空 argumentDescription 判断 procedure 没有参数。
+v0.1.0–v0.2.1 的 `SHOW PROCEDURES.returnDescription[*].type` 把所有输出写成 STRING，`argumentDescription` 也未提供实际参数清单；见 [DOC-V010-03](known-issues.md)。不要把这些字段用于自动转换结果，或据空 argumentDescription 判断 procedure 没有参数。
 
 | 字段 / 对象 | 实际值类型 |
 | --- | --- |
@@ -142,7 +142,7 @@ v0.1.0–v0.2.0 的 `SHOW PROCEDURES.returnDescription[*].type` 把所有输出�
 
 `lithograph.index.rebuild(name,version)`：两个参数均为非空字符串，version 是明确 Descriptor。仅支持持久 Standard Index 的 RANGE/TEXT/POINT / Relationship LOOKUP family，不支持 Node LOOKUP、FULLTEXT、VECTOR。返回 `name,commit,indexedEntities`；commit 是实际 anchor，不创建新 Commit、不移动 Branch。
 
-rebuild 在普通 scalar / Native 上独立执行，可接只读结果投影，但不与其他 mutation/maintenance 合并。rows adapter 禁止，Native explicit transaction / transaction-owning subquery / candidate 中禁止，不接受 at 或不适用 execution options。全量重建可能长时间持有 writer，应安排维护窗口。
+rebuild 在普通 scalar / Native 上独立执行，可接只读结果投影，但不与其他 mutation/maintenance 合并。rows adapter 禁止，SQL / Native explicit transaction / transaction-owning subquery / candidate 中禁止，不接受 at 或不适用 execution options。全量重建可能长时间持有 writer，应安排维护窗口。
 
 Managed Semantic 不复用 `lithograph.index.rebuild`；使用上节的 `db.index.semantic.rebuild`。它先在 writer ownership 之外完成 Provider I/O，再在短 publish transaction 写入 persistent embedding cache，因此与 Standard Index rebuild 的锁持有模型不同。
 

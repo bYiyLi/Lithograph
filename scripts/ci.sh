@@ -96,6 +96,7 @@ if [ -n "$extension" ]; then
   cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase07 -- "$extension"
   cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase08 -- "$extension"
   cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase09 -- "$extension"
+  scripts/sql-tx-smoke.sh "$extension"
   scripts/openai-compatible-provider-smoke.sh "$openai_provider"
   scripts/sqlite-345-smoke.sh "$extension" "$openai_provider"
   scripts/sqlite-3534-smoke.sh "$extension" "$openai_provider"

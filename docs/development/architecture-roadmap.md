@@ -49,15 +49,22 @@ Phase 12 Full-text / FTS5 Tokenizer (done)
         |
         v
 Phase 13 Managed Semantic Vector / Embedding Provider (done)
+        |
+        v
+Phase 14 SQL Explicit Transaction Adapter (in progress: hosted release gate)
 ```
 
-Phase 00–13均已完成开发验收。Phase 13 已闭合 Provider ABI、OpenAI-compatible Provider、Semantic Schema/query/rebuild、format4 persistent Embedding cache、Graph View/history/version publication、TEMP HNSW reuse、SQLite 3.45.0 / 3.53.4 dual-extension/concurrency/performance acceptance，以及 Linux/macOS/Windows x64/arm64 六目标 hosted Release Matrix；具体状态与证据见 [Phase 13计划](phases/13-managed-semantic-vector.md)。Phase 11既有 performance/release acceptance 仍保持已完成状态。
+Phase 00–13均已完成开发验收。Phase 13 已闭合 Provider ABI、OpenAI-compatible Provider、Semantic Schema/query/rebuild、format4 persistent Embedding cache、Graph View/history/version publication、TEMP HNSW reuse、SQLite 3.45.0 / 3.53.4 dual-extension/concurrency/performance acceptance，以及 Linux/macOS/Windows x64/arm64 六目标 hosted Release Matrix；Phase 14 已闭合 SQL explicit transaction adapter、真实 SQLite 3.45.0/3.51.0/3.53.4 与 Native ABI/quality/coverage 本地回归，等待当前 revision 的六目标 hosted Release Matrix。具体状态与证据分别见 [Phase 13计划](phases/13-managed-semantic-vector.md)与 [Phase 14 计划](phases/14-sql-explicit-transaction.md)。Phase 11既有 performance/release acceptance 仍保持已完成状态。
 
 Phase 12 的目标由 [Full-text](../design/full-text.md) 定义，当前实现与 FT12-01–20 开发验收已经闭合；依赖 Phase 08/09/11，不重开已完成 Phase。具体实现顺序与证据见 [Phase 12计划](phases/12-fulltext-tokenizer.md)。该成果已经进入 v0.1.1 发布基线，对应 repository CI 与六目标 hosted Release Matrix 均已通过。
 
 Phase 13 的目标由 [Vector](../design/vector.md)、[Managed Semantic Storage Format 4](../design/storage.md#storage-format-4) 定义：保留 Phase 08 的 Raw Vector/Cypher 25 `SEARCH`，新增 SQLite Embedding Provider contract、Managed Semantic Index 与 persistent Embedding Result Cache。它依赖既有 SQLite extension、Schema/version、HNSW、format3/read guard 和 Full-text provider lifecycle，但不回开这些 Phase；具体顺序与验收见 [Phase 13计划](phases/13-managed-semantic-vector.md)。
 
 Phase 13 的实现从 v0.2.0 起进入正式发布基线；Native ABI 与 `CY25-2026.08` 保持不变，storage format 提升为 4。
+
+Phase 14 的目标由 [SQL Bridge](../design/interfaces.md#sql-bridge) 与 [Explicit Transaction](../design/storage.md#native-explicit-transaction) 定义：在 Phase 09 已有 state machine 上增加 SQL adapter，不新建 transaction/storage abstraction，不改变普通 `lithograph()` 与 caller-owned transaction 语义。具体顺序与验收见 [Phase 14 计划](phases/14-sql-explicit-transaction.md)。
+
+Phase 14 计划进入 v0.2.1 正式发布基线；在 hosted release gate 闭合前不标记为 `done`。
 
 ## 2. 为什么 Version Storage 必须早于 Cypher Engine
 
@@ -78,7 +85,7 @@ Phase 13 的实现从 v0.2.0 起进入正式发布基线；Native ABI 与 `CY25-
 | --- | --- | --- |
 | Rust workspace / CI / test harness | 00 | 10 |
 | SQLite loadable extension ABI | 01 | 10 |
-| SQL Bridge / Native ABI | 01 | 10 |
+| SQL Bridge / Native ABI | 01 | 14 |
 | internal storage metadata/migration | 01 | 10 |
 | IDs / dictionaries | 02 | 02 |
 | immutable Layer / Commit | 02 | 05 |

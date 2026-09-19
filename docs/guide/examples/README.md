@@ -6,6 +6,7 @@
 | --- | --- |
 | [python_quickstart.py](python_quickstart.py) | 标准库 Python、内存库；SQL 参数绑定、图写入、stream、Tag、history、integrity |
 | [version_workflow.py](version_workflow.py) | 独立临时目录；持久 Session/重连/冲突/CAS、Diff/Patch、Data、历史改写、GC、备份恢复 |
+| [sql_transaction.py](sql_transaction.py) | 标准库 Python；通过四个 SQL scalar 完成多次写入单 Commit 与 abort，不绑定 C API |
 | [native_transaction.c](native_transaction.c) | POSIX C，内存库；两次写入一个 Commit、events/ownership、取消与 fail-closed abort |
 | [verify.py](verify.py) | 提取指南 SQL，在独立空库执行；额外检查失败路径、类型保真和 CSV |
 | [generate_reference.py](generate_reference.py) | 从已验证发布制品的 SHOW 导出重建 function/procedure reference tables |
@@ -19,6 +20,7 @@
 ```sh
 python3 -B docs/guide/examples/python_quickstart.py /absolute/path/lithograph.dylib
 python3 -B docs/guide/examples/version_workflow.py /absolute/path/lithograph.dylib
+python3 -B docs/guide/examples/sql_transaction.py /absolute/path/lithograph.dylib
 ```
 
 程序全部断言成功后输出 PASS，失败返回非零。C 编译与运行见 [Integration](../integration.md)。默认 Native 示例会故意取消一次 query，输出 `RESOURCE_ERROR` / `SQLITE_INTERRUPT` 是该负向验证的预期诊断；最终仍须有 PASS 和退出码 0。

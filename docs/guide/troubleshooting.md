@@ -1,6 +1,6 @@
 # 排障与恢复路径
 
-适用 v0.1.0。先记录实际应用进程中的 SQLite version、`lithograph_version()`、OS/进程架构、调用入口，以及完整的 category / SQLite code。不要先重复执行所有写请求，也不要直接编辑内部表。
+适用 v0.2.1，并保留旧版本症状的明确标记。先记录实际应用进程中的 SQLite version、`lithograph_version()`、OS/进程架构、调用入口，以及完整的 category / SQLite code。不要先重复执行所有写请求，也不要直接编辑内部表。
 
 ## 安装与加载
 
@@ -20,11 +20,11 @@
 | 症状 | 检查与处理 |
 | --- | --- |
 | `PARSE_ERROR` / `SEMANTIC_ERROR` | Cypher 必须传给 Lithograph，不是直接作为 SQLite 顶层语句；检查 profile、作用域与 SQL 引号 |
-| `INVALID_ARGUMENT` / JSON EOF | params/options 必须为 JSON object TEXT；Native v0.1.0–v0.2.0 空参数显式传 `"{}",2`，不能用 `NULL,0` |
+| `INVALID_ARGUMENT` / JSON EOF | params/options 必须为 JSON object TEXT；Native v0.1.0–v0.2.1 空参数显式传 `"{}",2`，不能用 `NULL,0` |
 | 数字精度丢失 | 在跨 JSON 边界前保留 signed 64-bit 大整数的 Integer tag，不先转成 float |
 | `$type` 业务字段被识别为类型 | 用 Map wrapper 保存包含 `$type` 的普通业务 Map；不要删除数据库返回的合法 tags |
 | 返回 rows 为空但发生了变化 | 写查询没有 RETURN / 使用 FINISH 可以成功返回空 rows；查看成功状态、summary.commit 和 counters |
-| SHOW 描述的类型与实际结果不一致 | v0.1.0–v0.2.0 Procedure introspection 把 returnDescription 类型全部标成 STRING；按真实 JSON type/tag 与 Reference 解码，不据此强制转换 |
+| SHOW 描述的类型与实际结果不一致 | v0.1.0–v0.2.1 Procedure introspection 把 returnDescription 类型全部标成 STRING；按真实 JSON type/tag 与 Reference 解码，不据此强制转换 |
 | 全文/向量索引不存在 | 核对当前 Branch / at 所看到的历史 Schema；索引名称存在于当前 main 不代表历史中已经创建 |
 | `TYPE_ERROR` / `CONSTRAINT_ERROR` | 检查 query 参数、合法 Property 值、向量维度和已有约束；不要删除约束来掩盖数据问题 |
 | 找不到预期节点 | 核对 databaseId、options.branch/at、Label 大小写、graphView，以及 mutation 是否最终提交 |
@@ -35,12 +35,12 @@
 
 | 症状 | 检查与处理 |
 | --- | --- |
-| `branch.checkout` 即使没有 BEGIN 也报事务边界错误 | v0.1.0–v0.2.0 已知 adapter 问题；使用每次执行的 `options.branch`，不要修改内部状态 |
-| SQL BEGIN 内仍出现多个 Commit | 这是外层落盘边界，不是多次执行单 Commit；后者使用 Native explicit transaction |
+| `branch.checkout` 即使没有 BEGIN 也报事务边界错误 | v0.1.0–v0.2.1 已知 adapter 问题；使用每次执行的 `options.branch`，不要修改内部状态 |
+| SQL BEGIN 内仍出现多个 Commit | 这是外层落盘边界，不是多次执行单 Commit；后者使用 `lithograph_tx_*` 或 Native explicit transaction |
 | `lithograph_rows` 拒绝 CREATE / LOAD CSV | 该 adapter 只读且禁止 external I/O；选择 scalar 或普通 Native |
 | `at` 写入失败 | historical Snapshot 只读；从所需版本创建 Branch 后写入 |
 | Native tx_execute 失败后 tx_commit 返回 MISUSE | 之前的 execution 已自动 abort 整体；重新读取当前 head，重建一个新事务 |
-| `IN TRANSACTIONS` 在 SQL 中被拒绝 | 该 query 需要普通 Native execute，connection 不能已有外层/Native explicit transaction |
+| `IN TRANSACTIONS` 在 SQL 中被拒绝 | 该 query 需要普通 Native execute，connection 不能已有外层/explicit transaction |
 | Merge candidate 被拒绝 | 检查 unresolved 是否为 0、revision 是否最新，以及是否混用了 branch/at/author/message |
 | `MERGE_SESSION_CHANGED` | 重新 get/conflicts 并检查新 revision；旧 cursor/resolution submission 不可直接复用 |
 | `BRANCH_HEAD_MOVED` | 当前状态已不同于你审查的基线；重新读取并重新审查，不盲目覆盖 |

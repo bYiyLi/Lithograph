@@ -32,7 +32,7 @@ int lithograph_v1_tx_abort(sqlite3 *db, char **error_json);
 void lithograph_v1_free(void *ptr);
 ```
 
-普通 execute 支持与 SQL Bridge 相同的 query / params / options，也提供 SQL Bridge 不能拥有的 transaction-batching boundary。tx_execute 仅在本 connection 的 active Native transaction 中工作，不能代替普通 execute 任意调用。
+普通 execute 支持与 SQL Bridge 相同的 query / params / options。Native `tx_*` 与 SQL `lithograph_tx_*` 共享同一 transaction-batching boundary；`tx_execute` 仅在本 connection 的 active Lithograph explicit transaction 中工作，不能代替普通 execute 任意调用。
 
 ## Callback 协议
 
@@ -58,7 +58,7 @@ Callback 返回非零表示取消，返回码为 `SQLITE_INTERRUPT`；host `sqli
 
 ## 字符串与内存所有权
 
-长度单位为 UTF-8 **bytes**，不是 Unicode 字符数。query 必须提供合法输入。**v0.1.0–v0.2.0 实际要求 params/options 显式使用 `"{}",2` 表示空 object；`NULL,0` 不会自动补成 `{}`，会被当作空 JSON 输入拒绝。**这与设计的默认值约定不同，详见 [Known Issues](known-issues.md)。不能传非零长度的空指针。callback 和 db 必须有效。
+长度单位为 UTF-8 **bytes**，不是 Unicode 字符数。query 必须提供合法输入。**v0.1.0–v0.2.1 实际要求 params/options 显式使用 `"{}",2` 表示空 object；`NULL,0` 不会自动补成 `{}`，会被当作空 JSON 输入拒绝。**这与设计的默认值约定不同，详见 [Known Issues](known-issues.md)。不能传非零长度的空指针。callback 和 db 必须有效。
 
 把 `char *result = NULL; char *error = NULL;` 的地址传给输出参数。非空输出由 Lithograph 分配，读取后恰好用 `lithograph_v1_free` 释放一次；不要用 `free`、Rust allocator、Python allocator 或 `sqlite3_free`。宿主 `sqlite3_load_extension` 返回的错误则属于 SQLite，使用 `sqlite3_free`。
 
@@ -80,6 +80,6 @@ begin options：`branch`、`expectedHead`、`author`、`message`。成功返回 
 
 tx_commit 成功返回 `{"commit":"commit/...","counters":{...}}`。有 mutation 时产生恰好一个 Commit；纯读取时为 base Commit，计数为零。tx_abort 丢弃全部 staged changes；任何 tx_execute 错误已经自动 abort，后续 commit/abort 不再有 active transaction。
 
-begin 要求 idle/autocommit connection；不能与 SQL BEGIN 叠加。Version Procedure、LOAD CSV、IN TRANSACTIONS 或普通 graph API 不得穿插到 active Native transaction。完整生命周期和重试规则见 [事务指南](../guide/transactions.md)。
+begin 要求 idle/autocommit connection；不能与 SQL BEGIN 叠加。Version Procedure、LOAD CSV、IN TRANSACTIONS 或普通 graph API 不得穿插到 active explicit transaction。完整生命周期、SQL 封装和重试规则见 [事务指南](../guide/transactions.md)。
 
 可运行 C 示例见 [应用集成](../guide/integration.md)。checkout 的 adapter 缺陷单独记录在 [Known Issues](known-issues.md)。依据：[公开 header](../../include/lithograph.h)、[Native implementation](../../crates/lithograph-extension/src/native.rs)、[Native C ABI](../design/interfaces.md#native-c-abi)。

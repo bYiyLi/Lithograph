@@ -1,6 +1,6 @@
 # SQL API 与结果合同
 
-**版本：v0.1.0。** SQL 入口作用于加载扩展的 connection 的 `main` database。查询/参数/options 均为 UTF-8 TEXT，省略的可选 JSON 参数等价于 `'{}'`；SQL `NULL` 不是省略参数的替代品。
+SQL 入口作用于加载扩展的 connection 的 `main` database。查询/参数/options 均为 UTF-8 TEXT，省略的可选 JSON 参数等价于 `'{}'`；SQL `NULL` 不是省略参数的替代品。
 
 ## 入口清单
 
@@ -11,6 +11,10 @@
 | `lithograph_validate(query)` | 一个 Cypher 文本 | 成功 `{valid:true,cypherProfile}`；失败为 SQLite error |
 | `lithograph_integrity_check()` | 无 | `{ok,errors,checked}`；完整检查，不是廉价请求前置检查 |
 | `lithograph(query[,params[,options]])` | Cypher + JSON object TEXT | 完整 result envelope |
+| `lithograph_tx_begin(options_json)` | begin options JSON object TEXT | `{baseCommit}` |
+| `lithograph_tx_execute(query[,params_json[,options_json]])` | Cypher + JSON object TEXT | staged execution 的完整 result envelope |
+| `lithograph_tx_commit()` | 无 | `{commit,counters}` |
+| `lithograph_tx_abort()` | 无 | `{aborted:true}` |
 | `lithograph_rows(query[,params[,options]])` | 同上，只读且无外部 I/O | 每行 `ordinal INTEGER, columns TEXT, row TEXT` |
 
 `lithograph_version()` 可在未初始化库调用；其他 graph API 需要初始化。加载扩展不会自动 init。init 的 `root` 是裸 hash；版本 procedure 的 `commit` 是带 `commit/` 前缀的 Descriptor。
@@ -66,12 +70,41 @@ Graph mutation 应作为独立调用执行一次。不要把带副作用的 `lit
 | 普通 graph / Schema / Index 写 | 新 Commit |
 | 一般 ref-only version 操作 | 操作后 active Branch 的 Commit；特定 ref 的结果以 procedure 返回列为准 |
 | Merge candidate query | `null`，同时 `mergeSession:{id,revision}` |
-| Native tx_execute | `null`；最终值由 tx_commit 返回 |
+| Native / SQL tx_execute | `null`；最终值由 tx_commit 返回 |
 | `lithograph.index.rebuild` | `null`；目标 anchor 在返回行的 `commit` 列 |
 
 v0.1.0 实际序列化在普通结果中包含 `mergeSession:null`；客户端应兼容 null / absence，而不能仅检查 key 存在就当作 candidate。
 
 `metrics` 固定含 `rows,dbHits,elapsedMicros`。`PROFILE` 额外返回 `summary.profile.operators`，每项 `id,operator,rows,dbHits`；它会执行查询。`EXPLAIN` 不执行图 mutation，也不构建索引缓存。正常耗时与 dbHits 随数据、缓存、查询而变，不把示例数字当性能保证。
+
+## SQL 显式事务
+
+四个 `lithograph_tx_*` function 从 v0.2.1 起可用，在同一 SQLite connection 上管理 Engine-owned transaction；不要额外包一层 SQL `BEGIN/COMMIT`：
+
+```sql
+SELECT lithograph_init();
+SELECT lithograph_tx_begin('{"author":"demo","message":"create people"}');
+SELECT lithograph_tx_execute('CREATE (:Person {name: ''张三''}) FINISH');
+SELECT lithograph_tx_execute('CREATE (:Person {name: ''李四''}) FINISH');
+SELECT lithograph_tx_execute(
+  'MATCH (p:Person) RETURN p.name AS name ORDER BY name'
+);
+SELECT lithograph_tx_commit();
+```
+
+`tx_begin` 内部进入 SQLite transaction；多次 `tx_execute` 共享 staged state，其 `summary.commit` 为 `null`；只有 `tx_commit` 生成并返回最终 graph Commit，然后提交 SQLite transaction。取消时调用：
+
+```sql
+SELECT lithograph_tx_begin('{}');
+SELECT lithograph_tx_execute('CREATE (:Discarded) FINISH');
+SELECT lithograph_tx_abort();
+```
+
+`tx_begin` 只接受一个 JSON object TEXT：`branch`、`expectedHead`、`author`、`message`。`tx_execute` 只接受 1–3 个参数，省略 params/options 时使用空 object；options 只允许 `graphView`。`NULL`、非 TEXT、malformed JSON、未知 option 与空 query 均是 `INVALID_ARGUMENT`。
+
+任一 `tx_execute` 失败会自动 rollback 整个 explicit transaction，包括先前成功的 staged writes；之后 commit/abort 会报“no active transaction”。结果 JSON 构造或 SQLite 长度检查失败也遵守这条 fail-closed 语义。connection 在 active transaction 期间关闭时，SQLite 回滚未提交内容。
+
+已处于 caller-owned SQLite transaction 时 `tx_begin` 返回 `TRANSACTION_BOUNDARY_REQUIRED`。纯读 transaction 的 commit 返回 base Commit 且不创建新 Commit；只要执行过 mutating query，即使最终净变化为空，也会生成一个 empty-delta Commit。详见[事务指南](../guide/transactions.md)。
 
 ## 行适配器
 
@@ -85,6 +118,6 @@ v0.1.0 实际序列化在普通结果中包含 `mergeSession:null`；客户端�
 
 SQL 错误文本是 `LITHOGRAPH_<CATEGORY>: <message>`，保留 SQLite primary result code。不会把失败包装成成功 envelope 的 `error` 字段。详见 [Errors](errors.md)。
 
-每次 mutating scalar 调用使用内部 savepoint。外层 SQL BEGIN/COMMIT 仍由宿主掌握；多次调用不会因此变成一个图 Commit。SQL Bridge 不支持 transaction-owning subquery，checkout 另见 [Known Issues](known-issues.md)。
+普通 mutating `lithograph()` 调用使用内部 savepoint。外层 SQL BEGIN/COMMIT 仍由宿主掌握；多次普通调用不会因此变成一个图 Commit。只有显式 `lithograph_tx_*` lifecycle 使用 Engine-owned transaction 组合一个 Commit。SQL Bridge 不支持 transaction-owning subquery，checkout 另见 [Known Issues](known-issues.md)。
 
 依据：[公开 SQL 实现](../../crates/lithograph-extension/src/scalar.rs)、[结果适配](../../crates/lithograph-extension/src/execution.rs)、[SQL Bridge](../design/interfaces.md#sql-bridge)。
