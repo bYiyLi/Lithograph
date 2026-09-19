@@ -74,7 +74,7 @@ Managed Semantic Provider 可能把 source/query String 发送给网络服务或
 - streaming query memory 与 executor batch / semantic barrier 相关，不与最终 row count 线性增长；
 - historical query 从 checkpoint + bounded overlay 解析，不要求从 Root 重放全部 history；
 - derived index / checkpoint 可 rebuild，不阻塞 canonical history correctness；
-- Managed Semantic 对重复 exact text 必须先做 embedding-space cache lookup + batch 去重；在固定 Provider/config 下，将同一文本复制到 N 个 owner 不得导致 N 次外部 Provider call。普通 query cache miss 只做 bounded TEMP/memory materialization，persistent cache 由显式 rebuild/maintenance 写入；
+- Managed Semantic 对 query/source 的重复 exact text 必须先做 embedding-space cache lookup + batch 去重；在固定 Provider/config 下，将同一文本复制到 N 个 owner 不得导致 N 次外部 Provider call。cache enabled 且 database 可写时，普通 query 对校验成功的 miss 自动执行短 persistent publish；只读或 cache disabled 时只做 bounded TEMP/memory materialization；
 - planner statistics 可以增量刷新，不能要求每个 query 扫描全图计算 cardinality；
 - Graph View 不能通过预先 materialize 整个子图实现；scan/seek/expand/search 必须在现有 Snapshot access path 上按需执行 visibility check，且不得因 view 导致本可 seek 的查询退化为无条件全图扫描；
 - 10M Node / 100M Relationship benchmark tier 必须作为 release hardening 的真实规模验证，覆盖 traversal、indexed lookup、write、history、diff 与 search；通过条件是正确完成、无 OOM、无意外全图扫描，并建立可持续 regression baseline。

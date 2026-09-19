@@ -218,6 +218,14 @@ pub fn embedding_cache_publish(
         return Ok(());
     }
     validate_dimension(dimensions)?;
+    for entry in entries {
+        validate_vector(&entry.vector, dimensions)?;
+        checked_i64(entry.text.len(), "embedding text length")?;
+        checked_i64(
+            std::mem::size_of_val(entry.vector.as_slice()),
+            "embedding payload",
+        )?;
+    }
     with_savepoint(connection, "lithograph_embedding_cache_publish", || {
         // Read the operational policy only after the write SAVEPOINT is
         // established. This serializes publish with concurrent configure
@@ -584,15 +592,43 @@ fn with_savepoint<T>(
 ) -> StorageResult<T> {
     connection.execute_batch(&format!("SAVEPOINT {name}"))?;
     match operation() {
-        Ok(value) => {
-            connection.execute_batch(&format!("RELEASE {name}"))?;
-            Ok(value)
-        }
+        Ok(value) => match connection.execute_batch(&format!("RELEASE {name}")) {
+            Ok(()) => Ok(value),
+            Err(release_error) => {
+                rollback_savepoint(connection, name)?;
+                Err(release_error.into())
+            }
+        },
         Err(error) => {
-            let _ = connection.execute_batch(&format!("ROLLBACK TO {name}; RELEASE {name}"));
+            rollback_savepoint(connection, name)?;
             Err(error)
         }
     }
+}
+
+fn rollback_savepoint(connection: &Connection, name: &str) -> StorageResult<()> {
+    if let Err(error) = connection.execute_batch(&format!("ROLLBACK TO {name}")) {
+        return fail_closed_after_savepoint_error(connection, "rollback", error);
+    }
+    if let Err(error) = connection.execute_batch(&format!("RELEASE {name}")) {
+        return fail_closed_after_savepoint_error(connection, "release", error);
+    }
+    Ok(())
+}
+
+fn fail_closed_after_savepoint_error(
+    connection: &Connection,
+    step: &str,
+    error: rusqlite::Error,
+) -> StorageResult<()> {
+    let outer_rollback = if connection.execute_batch("ROLLBACK").is_ok() {
+        "full SQLite rollback executed"
+    } else {
+        "full SQLite rollback also failed"
+    };
+    Err(StorageError::corrupt(format!(
+        "embedding cache savepoint {step} failed ({error}); {outer_rollback}"
+    )))
 }
 
 #[cfg(test)]
@@ -892,7 +928,34 @@ mod tests {
     }
 
     #[test]
-    fn query_lru_is_connection_local_and_never_populates_main() {
+    fn invalid_publish_batch_is_rejected_before_any_row_is_written() {
+        let connection = cache_connection();
+        let result = embedding_cache_publish(
+            &connection,
+            space(),
+            2,
+            &[
+                EmbeddingCacheEntry {
+                    text: "valid".to_owned(),
+                    vector: vec![1.0, 2.0],
+                },
+                EmbeddingCacheEntry {
+                    text: "invalid".to_owned(),
+                    vector: vec![f32::NAN, 3.0],
+                },
+            ],
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            embedding_cache_stats(&connection)
+                .expect("stats after rejected publish")
+                .entries,
+            0
+        );
+    }
+
+    #[test]
+    fn query_lru_remains_connection_local_without_persistent_publish() {
         let first = cache_connection();
         let second = cache_connection();
         embedding_query_cache_put(&first, space(), "query-only", &[5.0, 6.0])

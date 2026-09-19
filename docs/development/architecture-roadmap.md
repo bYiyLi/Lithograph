@@ -57,6 +57,8 @@ Phase 12 的目标由 [Full-text](../design/full-text.md) 定义，当前实现�
 
 Phase 13 的目标由 [Vector](../design/vector.md)、[Managed Semantic Storage Format 4](../design/storage.md#storage-format-4) 定义：保留 Phase 08 的 Raw Vector/Cypher 25 `SEARCH`，新增 SQLite Embedding Provider contract、Managed Semantic Index 与 persistent Embedding Result Cache。它依赖既有 SQLite extension、Schema/version、HNSW、format3/read guard 和 Full-text provider lifecycle，但不回开这些 Phase；具体顺序与验收见 [Phase 13计划](phases/13-managed-semantic-vector.md)。
 
+Phase 13 的实现从 v0.2.0 起进入正式发布基线；Native ABI 与 `CY25-2026.08` 保持不变，storage format 提升为 4。
+
 ## 2. 为什么 Version Storage 必须早于 Cypher Engine
 
 如果先把 Node/Relationship 作为 mutable current-state rows 实现，再在后期增加 Commit/Branch，会导致以下基础合同全部返工：
@@ -133,7 +135,7 @@ reproducible before + physical-work counters
 | Index base/delta、历史/staged/candidate可见性 | 07/09 | 11.5 |
 | Search/Merge与并发压力证据 | 08–10 | 11.7 |
 
-不因增加持久cache重新设计canonical history，不以性能为由改变Cypher类型/错误、Constraint或Native transaction合同。只读query不写main的cache，迁移与显式rebuild的副作用由其独立boundary承担。
+不因增加持久cache重新设计canonical history，不以性能为由改变Cypher类型/错误、Constraint或Native transaction合同。Phase 11 Standard Index read仍不隐式写`main`；Phase 13 Managed Semantic query按其独立external-I/O contract自动发布derived Embedding cache，但不写canonical graph/history/ref。迁移与显式rebuild的副作用继续由各自boundary承担。
 
 每个复杂子系统先形成最小真实纵向闭环，再扩 coverage。
 

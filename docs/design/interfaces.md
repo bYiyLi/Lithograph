@@ -295,7 +295,7 @@ I/O error、malformed CSV、type/constraint error 按 Cypher query failure 传�
 
 Native explicit transaction 已从 `tx_begin` 起持有 single-writer ownership，因此不接受 `LOAD CSV` 或 `db.index.semantic.query*` / `db.index.semantic.rebuild`；`tx_execute` 在 external I/O 开始前返回 `TRANSACTION_BOUNDARY_REQUIRED` 并按[Native Explicit Transaction](storage.md#native-explicit-transaction) fail-closed abort。需要批量导入时使用普通 `LOAD CSV` 或 Cypher `IN TRANSACTIONS`；需要 Semantic query/rebuild 时使用独立普通 execution，不把网络/文件/model 等待时间包进 multi-execution version-atomicity boundary。
 
-`db.index.semantic.query*`、`db.index.semantic.rebuild`、`db.index.semantic.cache.configure` 与 `db.index.semantic.cache.clear` 不能与 graph mutation 共用一个 Cypher execution，也不能嵌入 `CALL { ... } IN TRANSACTIONS` / `IN CONCURRENT TRANSACTIONS`；planner 必须在 Provider I/O 或 maintenance write 开始前返回 `TRANSACTION_BOUNDARY_REQUIRED`。Semantic Index create/drop 的纯本地 Schema operation 与 `cache.stats` read procedure 不属于该 external-I/O 禁止项。
+`db.index.semantic.query*`、`db.index.semantic.rebuild`、`db.index.semantic.cache.configure` 与 `db.index.semantic.cache.clear` 不能与 graph mutation 共用一个 Cypher execution，也不能嵌入 `CALL { ... } IN TRANSACTIONS` / `IN CONCURRENT TRANSACTIONS`；planner 必须在 Provider I/O 或 maintenance write 开始前返回 `TRANSACTION_BOUNDARY_REQUIRED`。普通 `query*` 可以在 Provider 成功后用短 SAVEPOINT 发布 query/source Embedding 到 format 4 的内部 persistent cache；该 derived-cache 写入不是 graph/schema/version mutation，不产生 Commit、不移动 Branch，因此 procedure mode 与 `summary.queryType` 仍为 `READ` / `read`。只读数据库与 cache disabled 跳过该 publish。Semantic Index create/drop 的纯本地 Schema operation 与 `cache.stats` read procedure 不属于该 external-I/O 禁止项。
 
 <a id="results-and-errors"></a>
 

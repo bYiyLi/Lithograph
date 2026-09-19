@@ -72,6 +72,12 @@ pub(super) fn branch_head_text(
     Ok(prefixed_value(&output, "head=")?.to_owned())
 }
 
+pub(super) fn commit_count(fixture: &FileDatabaseFixture) -> Result<u64, Box<dyn Error>> {
+    let output =
+        fixture.execute_script("SELECT 'commits=' || count(*) FROM main._lithograph_commits;")?;
+    Ok(prefixed_value(&output, "commits=")?.parse()?)
+}
+
 pub(super) fn require_persistent_cache_empty(
     fixture: &FileDatabaseFixture,
 ) -> Result<(), Box<dyn Error>> {

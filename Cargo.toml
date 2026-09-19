@@ -10,7 +10,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.98.1"
 license = "AGPL-3.0-only"
@@ -23,8 +23,8 @@ chrono = "0.4.45"
 chrono-tz = "0.10.4"
 getrandom = "0.4.3"
 httpdate = "1.0.3"
-lithograph-fts5 = { path = "crates/lithograph-fts5", version = "=0.1.1" }
-lithograph-embedding-provider = { path = "crates/lithograph-embedding-provider", version = "=0.1.1" }
+lithograph-fts5 = { path = "crates/lithograph-fts5", version = "=0.2.0" }
+lithograph-embedding-provider = { path = "crates/lithograph-embedding-provider", version = "=0.2.0" }
 pest = "=2.9.1"
 pest_derive = "=2.9.1"
 regex = "1.13.1"

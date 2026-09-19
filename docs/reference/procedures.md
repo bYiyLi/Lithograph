@@ -1,6 +1,6 @@
 # Procedure Reference
 
-**版本：正式 v0.1.1 + Unreleased Phase 13 supplemental。** v0.1.1 的 33 个公开签名与当前 `main` 新增的 8 个 `db.index.semantic.*` procedure 见 [Inventory](procedure-inventory.md)。本页补充参数语义、默认值、Commit 效果及限制；名称不省略 `lithograph.` / `db.` 前缀。
+**版本：v0.2.0。** 33 个既有公开签名与 v0.2.0 新增的 8 个 `db.index.semantic.*` procedure 见 [Inventory](procedure-inventory.md)。本页补充参数语义、默认值、Commit 效果及限制；名称不省略 `lithograph.` / `db.` 前缀。
 
 Procedure 通过 Cypher `CALL name(...)` 调用，返回行可接 `YIELD` / `RETURN`。本页的方括号表示可选位置参数，不是实际调用字符。可选参数通常通过省略提供默认值，不应把 null 当作任意可选参数的默认值。
 
@@ -18,9 +18,11 @@ Procedure 通过 Cypher `CALL name(...)` 调用，返回行可接 `YIELD` / `RET
 
 默认 tokenizer 为 `unicode61`；Porter stemming 使用 `porter unicode61`。`standard-no-stop-words` / `english` 不再有 Lithograph 特殊映射。第三方 tokenizer 通过宿主 SQLite extension 在每个实际 connection 上注册，不是 Neo4j/Lucene analyzer plugin。score 由检索语义定义，非概率；业务分页与 top-k 应显式限制结果量。例子见 [Search](../guide/search.md)。
 
-## Unreleased：Managed Semantic
+<a id="managed-semantic-procedures"></a>
 
-以下 8 个 procedure 属于当前 `main` 的 Phase 13，尚未进入 v0.1.1 Release：
+## Managed Semantic
+
+以下 8 个 procedure 从 v0.2.0 起正式发布：
 
 | Procedure | Mode | 输入 / 输出 |
 | --- | --- | --- |
@@ -35,11 +37,11 @@ Procedure 通过 Cypher `CALL name(...)` 调用，返回行可接 `YIELD` / `RET
 
 create 的 `labels` / `relationshipTypes` 是非空 `LIST<STRING>`；`sourceProperty` 只有实际 String 值参与。options 必须包含 `provider`、`providerConfig`、`dimensions`、`similarity`。dimensions 为 1–4096；v1 similarity 为 `cosine` / `euclidean`。CREATE 只执行当前 connection 上 Provider 的本地 `validate`，不调用 `embedBatch`。
 
-query options 必须包含非负 `limit`，可选非负 `skip`；未知 key / null / 错误类型返回 `INVALID_ARGUMENT`。实际 query/rebuild 每次都要求目标历史 Semantic definition 指定的 Provider 当前注册并通过 validation，即使 persistent cache 已 warm。query 是 graph read，summary commit 为 pinned Commit；query miss 只进入 TEMP/LRU，不隐式写 persistent cache。
+query options 必须包含非负 `limit`，可选非负 `skip`；未知 key / null / 错误类型返回 `INVALID_ARGUMENT`。实际 query/rebuild 每次都要求目标历史 Semantic definition 指定的 Provider 当前注册并通过 validation，即使 persistent cache 已 warm。query 是 graph read，summary commit 为 pinned Commit；cache enabled 且 database 可写时，query/source miss 的有效向量会自动写入 derived persistent cache。该写入不创建 Commit、不移动 Branch；只读或 cache disabled 时旁路 persistent publish并继续使用 TEMP/LRU。
 
 `cache.configure` 只接受 `enabled` / `maxBytes`；`cache.clear` 只删 Embedding Result Cache；`rebuild` 的 version 是现有 version descriptor。configure/clear/rebuild 都是 operational maintenance：成功时 `summary.queryType="version"`、`summary.commit=null`、不创建 graph Commit、不移动 ref。它们和 semantic query 都不能通过 `lithograph_rows()` 执行；Native explicit transaction 在 Provider I/O 前拒绝 semantic query/rebuild，maintenance 也要求独立 autocommit boundary。
 
-Provider/config/source 都属于 versioned IndexDefinition。Semantic definition 的 Diff/Patch 使用普通 Index logical slot；Patch/Merge/Rebase/Revert 发布新增/改变 definition 前会再次验证 Provider，失败不会移动 Branch。SHOW/DROP/history inspection 不要求 Provider 当前存在。完整示例见 [Search](../guide/search.md#unreleasedmanaged-semantic-文本检索)。
+Provider/config/source 都属于 versioned IndexDefinition。Semantic definition 的 Diff/Patch 使用普通 Index logical slot；Patch/Merge/Rebase/Revert 发布新增/改变 definition 前会再次验证 Provider，失败不会移动 Branch。SHOW/DROP/history inspection 不要求 Provider 当前存在。完整示例见 [Search](../guide/search.md#managed-semantic-text-search)。
 
 ## Branch 与 Tag
 
@@ -48,7 +50,7 @@ Provider/config/source 都属于 versioned IndexDefinition。Semantic definition
 | `lithograph.branch.create(name[,from])` | from 为 Descriptor，省略从 active Branch head 创建；返回 name,commit；不切换 active Branch |
 | `lithograph.branch.list()` | 返回 name,commit,active，按名称排序 |
 | `lithograph.branch.delete(name)` | 返回 name,previousCommit；不能删除 main 或 connection active Branch |
-| `lithograph.branch.checkout(name)` | 设计上改变 connection active Branch，要求 autocommit；**v0.1.0–v0.1.1 SQL / Native adapter 均有已知执行缺陷，使用 query options.branch** |
+| `lithograph.branch.checkout(name)` | 设计上改变 connection active Branch，要求 autocommit；**v0.1.0–v0.2.0 SQL / Native adapter 均有已知执行缺陷，使用 query options.branch** |
 | `lithograph.tag.create(name,target)` | target 为 Descriptor，返回 name,commit |
 | `lithograph.tag.list()` | 返回 name,commit |
 | `lithograph.tag.move(name,target)` | 显式移动已有 Tag，返回 name,previousCommit,commit |
@@ -116,7 +118,7 @@ Rebase resolutions 使用 conflicts 返回的 conflictId，并根据槽位选择
 
 ## 返回值类型与 introspection 注意事项
 
-v0.1.0–v0.1.1 的 `SHOW PROCEDURES.returnDescription[*].type` 把所有输出写成 STRING，`argumentDescription` 也未提供实际参数清单；见 [DOC-V010-03](known-issues.md)。不要把这些字段用于自动转换结果，或据空 argumentDescription 判断 procedure 没有参数。
+v0.1.0–v0.2.0 的 `SHOW PROCEDURES.returnDescription[*].type` 把所有输出写成 STRING，`argumentDescription` 也未提供实际参数清单；见 [DOC-V010-03](known-issues.md)。不要把这些字段用于自动转换结果，或据空 argumentDescription 判断 procedure 没有参数。
 
 | 字段 / 对象 | 实际值类型 |
 | --- | --- |

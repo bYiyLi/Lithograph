@@ -129,10 +129,10 @@
 
 ### D14 Raw Vector 与 Managed Semantic 并列，Provider 留在 SQLite Extension
 
-- 决定：保留 Cypher 25 Raw Vector Property/Index/`SEARCH` 全部语义，另加一个非 grammar 的 `db.index.semantic.*` managed surface。Semantic source 是一个 String Property，派生 Vector 只存在于 derived materialization；具体 Embedding 由同 connection 上的普通 SQLite loadable extension 按 `EmbeddingProviderV1` 提供，Lithograph Core 不内置 vendor/model runtime。Persistent text->Vector cache 使用 format 4，并以 embedding-space + exact-text hash 去重；普通 graph mutation 永不调用 Provider。
+- 决定：保留 Cypher 25 Raw Vector Property/Index/`SEARCH` 全部语义，另加一个非 grammar 的 `db.index.semantic.*` managed surface。Semantic source 是一个 String Property，派生 Vector 只存在于 derived materialization；具体 Embedding 由同 connection 上的普通 SQLite loadable extension 按 `EmbeddingProviderV1` 提供，Lithograph Core 不内置 vendor/model runtime。Persistent text->Vector cache 使用 format 4，并以 embedding-space + exact-text hash 去重；普通 Semantic query 在 cache enabled 且 database 可写时自动发布校验成功的 query/source Embedding，普通 graph mutation 永不调用 Provider。
 - 依据：标准 Vector Index 明确索引真实 vector property，Cypher 25 `SEARCH` 接受 query Vector/List；把 String `ON (...)` 偷换为自动 Embedding 会创建 Lithograph dialect/语义差异。SQLite 已提供 loadable extension 与 connection client-data pointer，最低 3.45.0 可直接复用；当前需求只缺 Embedding contract，不需要第二套 plugin loader。外部 API 成本又要求跨 owner/index/history 复用 exact text 的 Vector，而该结果不应成为 canonical graph truth。
-- 备选：废弃 Vector Property统一改自动 Embedding；给 Cypher 增加 `CREATE SEMANTIC INDEX` / `FOR TEXT`；让 KG OS 或应用维护 hidden vector Property；在 Lithograph Core 内置 OpenAI/HTTP/GPU；普通 query 隐式写 persistent cache；做万能 Tokenizer/Embedding/Reranker plugin ABI。
-- 取舍：产品存在 Raw Vector 与 Managed Semantic 两个明确入口，Semantic query在 cache 未预热时可能产生 external-I/O cost，历史 bit-identical rebuild 依赖部署固定 Provider runtime；换取的是标准 Cypher Vector 兼容不被破坏、任意正常 Cypher text mutation 不会留下 stale hidden vector、Provider 可替换/并存、重复文本能共享 cache，且 graph write 不被网络 latency 占住 writer。需要 Vector 本身成为历史真源或完全可复现时继续使用 Raw Vector。
+- 备选：废弃 Vector Property统一改自动 Embedding；给 Cypher 增加 `CREATE SEMANTIC INDEX` / `FOR TEXT`；让 KG OS 或应用维护 hidden vector Property；在 Lithograph Core 内置 OpenAI/HTTP/GPU；要求调用方先执行 rebuild/预热；做万能 Tokenizer/Embedding/Reranker plugin ABI。
+- 取舍：产品存在 Raw Vector 与 Managed Semantic 两个明确入口，首次 Semantic query 可能产生 external-I/O cost和短 derived-cache write，历史 bit-identical rebuild 依赖部署固定 Provider runtime；换取的是标准 Cypher Vector 兼容不被破坏、任意正常 Cypher text mutation 不会留下 stale hidden vector、Provider 可替换/并存、重复文本能跨 connection/process 共享 cache，且 Provider latency 不占住 writer。需要 Vector 本身成为历史真源或完全可复现时继续使用 Raw Vector。
 
 <a id="reference-baseline"></a>
 

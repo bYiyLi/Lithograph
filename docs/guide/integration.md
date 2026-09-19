@@ -69,7 +69,7 @@ Linux 编译时额外链接 `-ldl`，使用 `.so` 扩展。开发机需要 SQLit
 
 不取源码也可以下载这个 C 示例和 [v0.1.0 header](https://raw.githubusercontent.com/bYiyLi/Lithograph/v0.1.0/include/lithograph.h)，把编译命令的源文件/header 目录替换成保存位置。
 
-程序先在 `sqlite3*` 上通过 `sqlite3_load_extension` 完成注册，再用 dynamic loader 解析 Native symbol。只调用 `dlopen` 不够。v0.1.0 的 params/options 必须显式传 `"{}",2`，不能用 `NULL,0` 代替默认 object，见 [已知问题](../reference/known-issues.md)。两次 staged CREATE 的 SUMMARY 中 commit 为 null；tx_commit 返回最终 Commit；检查 log 只有 Root + 一个新 Commit。
+程序先在 `sqlite3*` 上通过 `sqlite3_load_extension` 完成注册，再用 dynamic loader 解析 Native symbol。只调用 `dlopen` 不够。v0.1.0–v0.2.0 的 params/options 必须显式传 `"{}",2`，不能用 `NULL,0` 代替默认 object，见 [已知问题](../reference/known-issues.md)。两次 staged CREATE 的 SUMMARY 中 commit 为 null；tx_commit 返回最终 Commit；检查 log 只有 Root + 一个新 Commit。
 
 示例还检查 callback cancellation 会自动 abort，并区分 SQLite 分配的错误（`sqlite3_free`）与 Lithograph 分配的 JSON（`lithograph_v1_free`）。生产程序应把示例的失败即退出改成所属应用的结构化错误路径，避免在有未完成事务时继续复用 connection。
 

@@ -1,6 +1,6 @@
 # Schema、Constraint 与 Index
 
-适用 v0.1.0 基线，并补充当前 Unreleased `main` 的 Phase 13 Semantic Index。目标：在一个新的演示库中定义业务键、字段类型与索引，并确认这些定义随图一起进入历史。已加载扩展后依次执行本页 SQL。
+适用 v0.1.0 基础接口与 v0.2.0 Semantic Index 增量。目标：在一个新的演示库中定义业务键、字段类型与索引，并确认这些定义随图一起进入历史。已加载扩展后依次执行本页 SQL。
 
 ## 从 schema-free 开始
 
@@ -51,11 +51,11 @@ SELECT lithograph('MATCH (p:Person) WHERE p.age >= 35 RETURN p.id AS id');
 | POINT | 空间条件 | `FOR (n:Label) ON (n.location)` |
 | FULLTEXT | 文本相关性检索 | `ON EACH [n.title, n.content]` |
 | VECTOR | 向量相似度检索 | `ON (n.embedding)`，可声明 filtering properties |
-| SEMANTIC | Unreleased：String Property → Provider-derived Vector | 通过 `db.index.semantic.createNodeIndex/createRelationshipIndex` 创建 |
+| SEMANTIC | v0.2.0：String Property → Provider-derived Vector | 通过 `db.index.semantic.createNodeIndex/createRelationshipIndex` 创建 |
 
 全文、向量索引的完整例子见 [Search](search.md)。Relationship 也可以拥有 Property index，例如 `FOR ()-[r:ROUTE]-() ON (r.distance)`。
 
-Semantic Index 不重载 `CREATE VECTOR INDEX`。它仍属于公共 Index namespace、Schema hash 与历史：`SHOW ALL INDEXES` 的 type 为 `SEMANTIC`，`DROP INDEX name` 使用通用 DDL；provider/config/source 变化在 Diff/Patch/Merge 中表现为同一个 `index/<name>` logical slot 更新。创建 Semantic definition 时当前 connection 必须加载对应 Embedding Provider 并通过本地 `validate`；纯历史 SHOW 与 DROP 不要求 Provider 当前存在。完整用法见 [Search：Managed Semantic](search.md#unreleasedmanaged-semantic-文本检索)。
+Semantic Index 不重载 `CREATE VECTOR INDEX`。它仍属于公共 Index namespace、Schema hash 与历史：`SHOW ALL INDEXES` 的 type 为 `SEMANTIC`，`DROP INDEX name` 使用通用 DDL；provider/config/source 变化在 Diff/Patch/Merge 中表现为同一个 `index/<name>` logical slot 更新。创建 Semantic definition 时当前 connection 必须加载对应 Embedding Provider 并通过本地 `validate`；纯历史 SHOW 与 DROP 不要求 Provider 当前存在。完整用法见 [Search：Managed Semantic](search.md#managed-semantic-text-search)。
 
 ## 查看计划，而不是猜测索引是否被使用
 

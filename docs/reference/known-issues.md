@@ -1,6 +1,6 @@
 # v0.1.0 已知问题与接入规避
 
-这些是编写手册时在**实际已发布 macOS arm64 制品**上复现的实现差异，不是新的设计要求，也不表示已在某个未发布版本修复。当前文档任务不修改引擎代码、已有 tag 或发布资产。
+这些问题最初在**实际已发布 v0.1.0 macOS arm64 制品**上复现，不是新的设计要求。v0.2.0 release-prep source build 重新确认 `branch.checkout` 仍返回 transaction-boundary error，Procedure introspection 仍为空 argument metadata / STRING return type；Native input decoder 仍把 `NULL,0` 解码为空字符串而不是默认 `{}`。因此 v0.2.0 继续保留以下规避路径。
 
 验证制品：`lithograph-macos-arm64.tar.gz`，SHA-256 `71a50eb3d7b745dc5a616a12ad1c4bc06578b0ee17a4f7f7e1d4c0c4f7c0e278`。SQL 入口在 SQLite 3.45.0 / 3.51.0 上复现；Native 入口使用 SQLite 3.51.0。其他平台共享相关代码，但本次没有逐个平台复现，不将推断写成实测。
 
@@ -53,4 +53,4 @@ SELECT lithograph('CALL lithograph.branch.list()');
 
 本机系统 Python 缺少 `enable_load_extension`；macOS SDK 的 SQLite header 不公开此次编译所需加载入口。手册因此要求选择明确支持 extension loading 的 Python/SQLite 构建，C 编译同时指定同一安装前缀的 include/lib。这些环境前提见 [安装](../guide/installation.md) 和 [集成](../guide/integration.md)。
 
-上述发布问题均有明确规避路径；这不代表已经修复。后续发布若修复，应针对新制品重新验证、更新该版本文档，不把 v0.1.0 的已知事实静默抹掉。
+上述发布问题均有明确规避路径；v0.2.0 未宣称修复。后续发布若修复，应针对新制品重新验证、更新该版本文档，不把 v0.1.0 的原始证据静默抹掉。

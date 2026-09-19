@@ -272,6 +272,31 @@ static void record_embed_execution_state(
     }
 }
 
+static int configure_publish_fault(
+    synthetic_state *state,
+    const unsigned char *config_json,
+    size_t config_len,
+    lithograph_embedding_error_v1 *error
+) {
+    if (!contains_bytes(
+            config_json,
+            config_len,
+            "\"publish_fail\":\"query_only\""
+        )) {
+        return LITHOGRAPH_EMBEDDING_OK_V1;
+    }
+    if (state->db == NULL
+        || sqlite3_exec(state->db, "PRAGMA query_only=ON", NULL, NULL, NULL)
+            != SQLITE_OK) {
+        return set_error(
+            error,
+            LITHOGRAPH_EMBEDDING_INTERNAL_ERROR_V1,
+            "synthetic cache publish fault injection failed"
+        );
+    }
+    return LITHOGRAPH_EMBEDDING_OK_V1;
+}
+
 static int allocate_embedding_values(
     const lithograph_embedding_text_v1 *texts,
     size_t text_count,
@@ -395,6 +420,12 @@ static int synthetic_embed_batch(
         config_len,
         "\"invalid\":\"dimension\""
     ) ? dimensions + 1 : dimensions;
+    status = configure_publish_fault(state, config_json, config_len, error);
+    if (status != LITHOGRAPH_EMBEDDING_OK_V1) {
+        sqlite3_free(result->values);
+        memset(result, 0, sizeof(*result));
+        return status;
+    }
     return LITHOGRAPH_EMBEDDING_OK_V1;
 }
 

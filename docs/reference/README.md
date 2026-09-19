@@ -1,6 +1,6 @@
 # Lithograph Reference
 
-本目录用于查找准确接口，不替代 [入门与任务指南](../guide/README.md)。正式 v0.1.1 继续使用 `CY25-2026.08` / Native ABI 1 / storage format 3；当前 Unreleased `main` 已加入 Phase 13 Managed Semantic / Embedding Provider 与 storage format 4。相关页面会明确区分 Release baseline 与 Unreleased surface，不把开发分支能力冒充成 v0.1.1。
+本目录用于查找准确接口，不替代 [入门与任务指南](../guide/README.md)。正式 v0.2.0 使用 `CY25-2026.08` / Native ABI 1 / storage format 4，并包含 Phase 13 Managed Semantic / Embedding Provider。
 
 | 需要查找 | 页面 |
 | --- | --- |
@@ -16,4 +16,4 @@
 | 名称、类型、索引配置与运行限制 | [Limits](limits.md) |
 | v0.1.0 发布制品与设计之间的已知差异 | [Known Issues](known-issues.md) |
 
-Inventory 主表仍保留真实 v0.1.0 `SHOW FUNCTIONS YIELD *` / `SHOW PROCEDURES YIELD *` 历史基线；[Procedure Inventory](procedure-inventory.md) 另列 Unreleased Phase 13 的 8 个 `db.index.semantic.*` procedure。重新生成方法见 [示例验证说明](../guide/examples/README.md)。这些 introspection 结果含兼容字段，不表示 Lithograph 实现了 Neo4j 的账号、角色、system database 或权限系统。
+Inventory 主表仍保留真实 v0.1.0 `SHOW FUNCTIONS YIELD *` / `SHOW PROCEDURES YIELD *` 历史基线；[Procedure Inventory](procedure-inventory.md) 另列 v0.2.0 新增的 8 个 `db.index.semantic.*` procedure。重新生成方法见 [示例验证说明](../guide/examples/README.md)。这些 introspection 结果含兼容字段，不表示 Lithograph 实现了 Neo4j 的账号、角色、system database 或权限系统。

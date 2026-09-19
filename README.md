@@ -9,17 +9,17 @@ Lithograph 为 SQLite 提供版本化 Property Graph 数据库能力。
 - **Property Graph**：Node、Relationship、Label、Relationship Type 与 Property。
 - **Cypher 25**：图查询、数据修改、路径、Schema、Constraint、Index 与现代 Cypher 类型系统。
 - **版本化状态管理**：immutable Commit、Branch、Tag、可修改 Commit Data、显式 empty-delta Commit、可分页历史查询、Time-travel、结构化 Diff/Patch、Merge、Rebase、Squash、Reset 与 Revert。
-- **全文与向量搜索**：Full-text Index、Raw Vector Index 与 Cypher 25 `SEARCH`；当前 Unreleased 开发分支另提供 Managed Semantic / Embedding Provider。
+- **全文与向量搜索**：Full-text Index、Raw Vector Index、Cypher 25 `SEARCH`，以及 Managed Semantic / Embedding Provider。
 - **SQLite 原生部署**：作为 loadable extension 使用同一个 SQLite database file，不需要独立数据库 Server。
 - **大规模单机图**：版本感知存储、索引化邻接访问、流式查询执行与 checkpointed history 面向大规模本地图数据设计。
 
 ## 安装与 Quickstart
 
-当前正式版本是 **v0.1.1**。GitHub Releases 提供 Linux x64/arm64、macOS x64/arm64、Windows x64/arm64 六个平台的预编译 extension；运行时需要支持 loadable extension 与 FTS5 的 SQLite 3.45.0 或更高版本。
+当前正式版本是 **v0.2.0**。GitHub Releases 提供 Linux x64/arm64、macOS x64/arm64、Windows x64/arm64 六个平台的预编译 extension；运行时需要支持 loadable extension 与 FTS5 的 SQLite 3.45.0 或更高版本。
 
-仓库当前 `main` 的 **Unreleased** 开发状态已经实现 Phase 13 Managed Semantic、独立 `lithograph-openai-compatible` Provider 与 storage format 4；这些能力尚未发布为新的 GitHub Release，不能把现有 v0.1.1 Release Asset 当作包含 Phase 13 Provider 的制品。源码使用与接口见 [Search 指南](docs/guide/search.md) 和 [Procedure Reference](docs/reference/procedures.md)。
+v0.2.0 发布 Phase 13 Managed Semantic、独立 `lithograph-openai-compatible` Provider 与 storage format 4。每个平台包同时包含 Lithograph 主 extension 与 OpenAI-compatible Provider extension；源码使用、加载顺序与接口见 [v0.2.0 Release Notes](docs/releases/v0.2.0.md)、[Search 指南](docs/guide/search.md) 和 [Procedure Reference](docs/reference/procedures.md)。
 
-基础接入从 [Developer Documentation](docs/guide/README.md) 开始。文档保留 v0.1.0/v0.1.1 的已发布基线，并把当前 Unreleased Phase 13 单独标注；v0.1.1 仍保持 Native ABI 1、`CY25-2026.08` 与 storage format 3。版本变化见 [CHANGELOG](CHANGELOG.md)、[v0.1.1 Release Notes](docs/releases/v0.1.1.md) 与 [Search 指南](docs/guide/search.md)；下面的 `latest` 地址会随未来 release 更新。
+基础接入从 [Developer Documentation](docs/guide/README.md) 开始。v0.2.0 保持 Native ABI 1 与 `CY25-2026.08`，并把新数据库 storage format 提升为 4。版本变化见 [CHANGELOG](CHANGELOG.md)、[v0.2.0 Release Notes](docs/releases/v0.2.0.md) 与 [Search 指南](docs/guide/search.md)；下面的 `latest` 地址会随未来 release 更新。
 
 稳定下载地址：
 
@@ -32,7 +32,7 @@ Lithograph 为 SQLite 提供版本化 Property Graph 数据库能力。
 | Windows x64 | `https://github.com/bYiyLi/Lithograph/releases/latest/download/lithograph-windows-x64.zip` |
 | Windows arm64 | `https://github.com/bYiyLi/Lithograph/releases/latest/download/lithograph-windows-arm64.zip` |
 
-每个包包含对应平台的 `lithograph.so` / `lithograph.dylib` / `lithograph.dll`、`README.md`、`LICENSE`、`COMMERCIAL-LICENSE.md` 与 `VERSION`。Release 同时提供 `SHA256SUMS` 用于校验下载内容。
+每个包包含对应平台的 `lithograph.so` / `lithograph.dylib` / `lithograph.dll`、`lithograph-openai-compatible.so` / `.dylib` / `.dll`、`README.md`、`LICENSE`、`COMMERCIAL-LICENSE.md` 与 `VERSION`。Release 同时提供 `SHA256SUMS` 用于校验下载内容。
 
 如果需要从源码构建，需要 Rust 1.98.1：
 
@@ -76,7 +76,7 @@ FROM lithograph_rows('MATCH (p:Person) RETURN p.name');
 
 ## 开发者文档
 
-完整入口：**[Lithograph Developer Documentation](docs/guide/README.md)**。文档明确区分 v0.1.0 基线与 v0.1.1 Full-text tokenizer 增量；不会把固定 v0.1.0 的示例、已知问题或历史证据静默改写成新版本事实。
+完整入口：**[Lithograph Developer Documentation](docs/guide/README.md)**。文档明确区分 v0.1.0 基础验证、v0.1.1 Full-text tokenizer 增量与 v0.2.0 Managed Semantic 增量；不会把固定旧版本的示例、已知问题或历史证据静默改写成新版本事实。
 
 | 任务 | 文档 |
 | --- | --- |
@@ -91,16 +91,16 @@ FROM lithograph_rows('MATCH (p:Person) RETURN p.name');
 
 ## 项目状态
 
-Lithograph 当前已经完成 Phase 00–13 的实现与开发验收，当前发布版本为 **v0.1.1**。当前 `main` 的 Phase 13 实现已经闭合 Managed Semantic 主路径：公开 Embedding Provider ABI、OpenAI-compatible reference Provider、versioned Semantic Index、文本 query、persistent cache / rebuild、format 4 migration、Graph View / history / Diff-Patch-Merge-Rebase-Revert publication validation、SQL/Native transaction boundary、真实 SQLite 3.45.0 / 3.53.4，以及 Linux/macOS/Windows x64/arm64 六目标 hosted Release Matrix 均已通过。Phase 13 的开发状态为 `done`，但仍属于 Unreleased 能力；正式发布状态仍以 v0.1.1 为准。
+Lithograph 当前已经完成 Phase 00–13 的实现与开发验收，当前发布版本为 **v0.2.0**。Phase 13 已闭合并发布 Managed Semantic 主路径：公开 Embedding Provider ABI、OpenAI-compatible reference Provider、versioned Semantic Index、文本 query、persistent cache / rebuild、format 4 migration、Graph View / history / Diff-Patch-Merge-Rebase-Revert publication validation、SQL/Native transaction boundary、真实 SQLite 3.45.0 / 3.53.4，以及 Linux/macOS/Windows x64/arm64 六目标 hosted Release Matrix。
 
-v0.1.1 仍属于 pre-1.0 版本。升级已有数据库前应保留完整备份；format 3 没有自动 downgrade。Full-text analyzer 从 v0.1.0 到 v0.1.1 存在明确的配置行为变化，详见 [CHANGELOG](CHANGELOG.md) 与 [v0.1.1 Release Notes](docs/releases/v0.1.1.md)。
+v0.2.0 仍属于 pre-1.0 版本。升级已有数据库前应保留完整备份；`lithograph_init()` 支持 format 3 → 4 原子迁移，但 format 4 没有自动 downgrade。详见 [CHANGELOG](CHANGELOG.md) 与 [v0.2.0 Release Notes](docs/releases/v0.2.0.md)。
 
 - [技术设计](docs/design.md)
 - [开发计划](docs/development/README.md)
 - [Phase 11 性能优化计划](docs/development/phases/11-performance-optimization.md)
 - [Phase 12 全文 Tokenizer 扩展计划](docs/development/phases/12-fulltext-tokenizer.md)
 - [Phase 13 Managed Semantic Vector / Embedding Provider](docs/development/phases/13-managed-semantic-vector.md)
-- 当前开发阶段：Phase 00–13 全部 `done`；Phase 13 的 repository CI 与六目标 hosted Release Matrix 已通过，但尚未发布为新的 GitHub Release。
+- 当前开发阶段：Phase 00–13 全部 `done`；Phase 13 从 v0.2.0 起进入正式发布基线。
 
 ## 许可
 

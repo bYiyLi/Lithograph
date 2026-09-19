@@ -29,20 +29,20 @@ scripts/phase13-semantic-concurrency.sh \
 | 场景 | 结果 |
 | --- | --- |
 | owners / unique texts | 64 / 16 |
-| cold query | 8 rows；16 provider inputs；2 provider calls；persistent cache 0 entries；构建 1 个 TEMP HNSW / 64 entries |
+| cold query | 8 rows；16 provider inputs；2 provider calls；自动写入 persistent cache 16 entries；构建 1 个 TEMP HNSW / 64 entries |
 | same-connection warm query | 0 provider inputs；复用 connection-local query/source cache + 同一 64-entry TEMP HNSW |
-| cold rebuild（同 connection） | indexed 64 owners；embedded 16 unique texts；1 provider batch / 16 inputs；验证并复用既有完整 HNSW |
-| rebuild 后 persistent cache | 16 entries；256 payload bytes；1 embedding space |
-| reopen 后 warm rebuild | embedded 0；cacheHits 16；0 provider inputs；从 persistent embeddings 构建 1 个 64-entry TEMP HNSW |
-| new-connection warm query | 0 provider inputs；复用 warm rebuild 建立的 TEMP HNSW |
+| new-connection/process-reopen warm query | 0 provider inputs；直接复用普通 query 写入的 16 个 persistent embeddings，并构建 1 个 64-entry TEMP HNSW |
+| query 后 rebuild | indexed 64 owners；embedded 0；cacheHits 16；0 provider inputs；复用既有完整 HNSW |
+| repeated rebuild | embedded 0；cacheHits 16；0 provider inputs |
+| persistent cache | 16 entries；256 payload bytes；1 embedding space |
 | TEMP HNSW materialization | 两个 connection 生命周期合计 2 次；每次 1 cache / 64 entries |
 
 这组结果直接证明：
 
 - exact source text 在同一 embedding space 内先去重，不因 owner 数量线性放大 Provider inputs；
-- ordinary query miss 不把 query-only/source embedding 隐式写入 persistent main cache；
-- explicit rebuild 可以把 source embedding 作为 derived persistent cache 预热；
-- persistent cache 可跨 connection 复用；
+- ordinary query miss 会把完整校验通过的 query/source embedding 自动写入 persistent cache；本 fixture 的 query `"0"` 与一个 source exact text 重合，因此 16 个 unique inputs 对应 16 个 entries；
+- normal search 不依赖 explicit rebuild/prewarm，随后 rebuild 全部命中 cache；
+- persistent cache 可跨 connection/process reopen 复用；
 - warm rebuild 不重复调用 Provider。
 - full-graph query/rebuild 会建立完整 connection-local TEMP HNSW；同 connection query/rebuild 不重复建立内容一致的 HNSW。
 
@@ -50,14 +50,14 @@ scripts/phase13-semantic-concurrency.sh \
 
 ## 3. Writer lifetime
 
-concurrency probe 让 synthetic Provider 在外部 embedding 阶段固定 sleep **1000 ms**，同时启动独立 writer。真实 SQLite 运行结果：
+concurrency probe 让普通 Semantic query 的 synthetic Provider 在外部 embedding 阶段固定 sleep **1000 ms**，同时启动独立 graph writer。真实 SQLite 运行结果：
 
 | SQLite runtime | provider sleep | writer wait | writer hold | non-autocommit provider calls |
 | --- | ---: | ---: | ---: | ---: |
 | 3.45.0 | 1000 ms | 0 ms | 4–14 ms（多次 probe 观测） | 0 |
 | 3.53.4 | 1000 ms | 0–1 ms | 4–9 ms（多次 probe 观测） | 0 |
 
-该结果证明当前 rebuild/query Provider I/O **不持有 SQLite single-writer ownership**，且 Native explicit transaction 在到达 Provider callback 前已经拒绝外部 I/O path。它不意味着长 Provider 调用没有成本：目标 Snapshot 仍由 read guard pin 住，WAL/read-view lifetime 应按实际 workload 评估。
+该结果证明当前 query Provider I/O **不持有 SQLite single-writer ownership**，且 Native explicit transaction 在到达 Provider callback 前已经拒绝外部 I/O path。并发 writer 在 Provider 期间提交后，原 query connection 的 WAL read snapshot 不能升级为 writer；实现通过同一 database file 的短生命周期 sibling connection 原子发布 query + 两个 source 共 3 个 cache entries，query 与 writer 都成功。它不意味着长 Provider 调用没有成本：目标 Snapshot 仍由 read guard pin 住，WAL/read-view lifetime 应按实际 workload 评估。
 
 ## 4. Runtime 与回归门禁
 
@@ -72,7 +72,7 @@ Phase 13 real-load 已在：
 
 - `scripts/ci.sh`：exit 0；
 - `cargo make quality`：exit 0；
-- quality coverage：regions **83.32%**、functions **84.14%**、lines **85.11%**；
+- quality coverage：regions **83.42%**、functions **84.22%**、lines **85.22%**；
 - applicable inherited openCypher TCK：**3,777 / 3,777**。
 
 六目标 hosted Release Matrix（Linux/macOS/Windows × x64/arm64）属于 [SV13-27](../development/phases/13-managed-semantic-vector.md#4-acceptance-matrix) 的独立发布制品证据，当前未在未提交 worktree 上执行，因此不由本文件声称完成。

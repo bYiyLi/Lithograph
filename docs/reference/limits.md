@@ -1,12 +1,12 @@
 # 版本边界、类型与配置限制
 
-**版本：正式 v0.1.1 + Unreleased Phase 13 supplemental。** 本页列出应用可依赖的入口约束，不把内部 cache budget、性能实测或机器容量当作通用硬上限。
+**版本：v0.2.0。** 本页列出应用可依赖的入口约束，不把内部 cache budget、性能实测或机器容量当作通用硬上限。
 
 ## 平台与存储
 
 SQLite 最低 3.45.0，必须可加载扩展并支持 FTS5。仅 connection 的 main 承载 graph repository；单文件多 Branch 仍共享 writer。预编译包提供 Linux/macOS/Windows x64/arm64，不等于保证任意 Linux libc、任意旧 OS 或所有 SQLite binding 都相容；必须在实际部署运行时 smoke-test。
 
-v0.1.1 读取支持格式 1–3，新建使用 3。当前 Unreleased `main` 读取支持格式 1–4，新建使用 4，并通过显式 init 支持 format 3 → 4；无法把已升级 format 4 自动降级给旧 binary。内部 `_lithograph_*` namespace 保留，不插入、删除、重命名或加 trigger/index。
+v0.2.0 读取支持格式 1–4，新建使用 4，并通过显式 init 支持 format 3 → 4；无法把已升级 format 4 自动降级给旧 binary。内部 `_lithograph_*` namespace 保留，不插入、删除、重命名或加 trigger/index。
 
 ## 名称、Descriptor 与 JSON
 
@@ -43,7 +43,7 @@ Vector 支持 I8/I16/I32/I64/F32/F64 坐标；输入也接受相应 `INTEGER8/16
 
 上述参数决定索引配置，不是延迟 SLA。合理维度、过滤条件、数据分布、Recall 与内存取舍应由应用自己的 workload 验证。
 
-## Unreleased Managed Semantic 限制
+## Managed Semantic 限制
 
 | 项目 | 当前限制 |
 | --- | --- |
@@ -55,7 +55,7 @@ Vector 支持 I8/I16/I32/I64/F32/F64 坐标；输入也接受相应 `INTEGER8/16
 | query options | 必需 `limit >= 0`；可选 `skip >= 0`；未知 key 拒绝 |
 | persistent cache default | enabled；`maxBytes = 1_073_741_824`（1 GiB） |
 | cache eviction | 写入时 oldest-entry/FIFO；普通 read hit 不写 main |
-| query-only cache | connection-local TEMP/LRU，connection close 后消失 |
+| query/source miss cache | enabled + writable 时自动写 persistent cache；只读或 disabled 时仅 connection-local TEMP/LRU |
 | OpenAI-compatible provider batch_size | 1–2048 items；不提供 tokenizer/chunk/truncate |
 | OpenAI-compatible timeout/retry | bounded positive timeout 与有限 retry；具体范围由 Provider 本地 validation 固定 |
 | OpenAI-compatible redirect | 不跟随；任何 3xx 作为 endpoint error 返回 |
@@ -65,6 +65,6 @@ Persistent cache key 包含完整 canonical `providerConfig`、Provider ABI sema
 
 ## 不属于此产品表面的能力
 
-没有独立 Server、远程图同步协议、Neo4j Bolt/HTTP 服务、账号角色管理、APOC 安装或 SDK 包安装承诺。正式 v0.1.1 不包含 embedding provider；当前 Unreleased `main` 提供的是**独立 SQLite extension** `lithograph-openai-compatible`，不是 Kernel 内嵌模型服务。Graph View 是执行子图边界，不是安全授权。
+没有独立 Server、远程图同步协议、Neo4j Bolt/HTTP 服务、账号角色管理、APOC 安装或 SDK 包安装承诺。v0.2.0 提供的是**独立 SQLite extension** `lithograph-openai-compatible`，不是 Kernel 内嵌模型服务。Graph View 是执行子图边界，不是安全授权。
 
 更多兼容范围见 [Cypher Compatibility](cypher-compatibility.md)。依据：[Index config parser](../../crates/lithograph-core/src/query/schema/command/index_config.rs)、[Value types](../../crates/lithograph-core/src/cypher/value.rs)、[设计](../design.md)。

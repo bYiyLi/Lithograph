@@ -87,6 +87,8 @@ fn run_primary_checks(
     checks.push("semantic-source-exact-type-and-limit");
     check_query_rebuild_cache(lithograph, synthetic)?;
     checks.push("query-rebuild-cache");
+    check_cache_disabled_query(lithograph, synthetic)?;
+    checks.push("cache-disabled-query-bypass");
     check_cache_identity(lithograph, synthetic)?;
     checks.push("embedding-space-identity");
     check_graph_view_nodes(lithograph, synthetic)?;
@@ -113,6 +115,8 @@ fn run_boundary_checks(
     checks.push("provider-missing-inspection-drop");
     check_failure_atomicity(lithograph, synthetic)?;
     checks.push("provider-failure-atomicity");
+    check_cache_publish_failure(lithograph, synthetic)?;
+    checks.push("query-cache-publish-failure-atomicity");
     check_graph_mutation_provider_boundary(lithograph, synthetic)?;
     checks.push("graph-mutation-provider-boundary");
     check_rows_adapter_authority(lithograph, synthetic)?;
@@ -306,11 +310,18 @@ fn check_query_rebuild_cache(lithograph: &str, provider: &str) -> Result<(), Box
     let fixture = FileDatabaseFixture::new(0x1303)?;
     let create = semantic_node_create("doc_sem", "Doc", "text", "synthetic-a", "{}", 4, "cosine");
     let query = "CALL db.index.semantic.queryNodes('doc_sem','hello',{skip:0,limit:3}) YIELD node, score RETURN node.name, score";
+    let query_only = "CALL db.index.semantic.queryNodes('doc_sem','search-only',{skip:0,limit:3}) YIELD node RETURN node.name";
     let rebuild = "CALL db.index.semantic.rebuild('doc_sem','branch/main') YIELD name, commit, indexedEntities, embeddedTexts, cacheHits RETURN name, commit, indexedEntities, embeddedTexts, cacheHits";
-    let output = fixture.execute_script(&format!(
-        "{lithograph}\n{provider}\n         SELECT lithograph_init();\n         SELECT lithograph('CREATE (:Doc {{name:''alpha'', text:''hello''}}), (:Doc {{name:''beta'', text:''world''}}), (:Doc {{name:''dup'', text:''hello''}}) FINISH');\n         SELECT lithograph({create});\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT 'cache-before=' || count(*) FROM main._lithograph_embedding_cache;\n         SELECT 'query=' || lithograph({query});\n         SELECT 'hnsw-after-query=' || count(*) || ':' || COALESCE(sum(entry_count),0) FROM temp._lithograph_vector_cache_meta;\n         SELECT 'query-validate=' || synthetic_embedding_validate_calls('synthetic-a');\n         SELECT 'query-embed=' || synthetic_embedding_embed_calls('synthetic-a');\n         SELECT 'cache-after-query=' || count(*) FROM main._lithograph_embedding_cache;\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT 'warm=' || lithograph({query});\n         SELECT 'hnsw-after-warm=' || count(*) || ':' || COALESCE(sum(entry_count),0) FROM temp._lithograph_vector_cache_meta;\n         SELECT 'warm-validate=' || synthetic_embedding_validate_calls('synthetic-a');\n         SELECT 'warm-embed=' || synthetic_embedding_embed_calls('synthetic-a');\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT 'rebuild=' || lithograph({rebuild});\n         SELECT 'hnsw-after-rebuild=' || count(*) || ':' || COALESCE(sum(entry_count),0) FROM temp._lithograph_vector_cache_meta;\n         SELECT 'rebuild-validate=' || synthetic_embedding_validate_calls('synthetic-a');\n         SELECT 'rebuild-embed=' || synthetic_embedding_embed_calls('synthetic-a');\n         SELECT 'rebuild-inputs=' || synthetic_embedding_last_inputs('synthetic-a');\n         SELECT 'cache-after-rebuild=' || count(*) FROM main._lithograph_embedding_cache;",
+    fixture.execute_script(&format!(
+        "{lithograph}\n{provider}\n         SELECT lithograph_init();\n         SELECT lithograph('CREATE (:Doc {{name:''alpha'', text:''hello''}}), (:Doc {{name:''beta'', text:''world''}}), (:Doc {{name:''dup'', text:''hello''}}) FINISH');\n         SELECT lithograph({create});",
         create = sql_literal(&create),
+    ))?;
+    let head_before = branch_head_text(&fixture, lithograph)?;
+    let commits_before = commit_count(&fixture)?;
+    let output = fixture.execute_script(&format!(
+        "{lithograph}\n{provider}\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT 'cache-before=' || count(*) FROM main._lithograph_embedding_cache;\n         SELECT 'query=' || lithograph({query});\n         SELECT 'hnsw-after-query=' || count(*) || ':' || COALESCE(sum(entry_count),0) FROM temp._lithograph_vector_cache_meta;\n         SELECT 'query-validate=' || synthetic_embedding_validate_calls('synthetic-a');\n         SELECT 'query-embed=' || synthetic_embedding_embed_calls('synthetic-a');\n         SELECT 'cache-after-query=' || count(*) FROM main._lithograph_embedding_cache;\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT 'warm=' || lithograph({query});\n         SELECT 'hnsw-after-warm=' || count(*) || ':' || COALESCE(sum(entry_count),0) FROM temp._lithograph_vector_cache_meta;\n         SELECT 'warm-validate=' || synthetic_embedding_validate_calls('synthetic-a');\n         SELECT 'warm-embed=' || synthetic_embedding_embed_calls('synthetic-a');\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT 'query-only=' || lithograph({query_only});\n         SELECT 'query-only-embed=' || synthetic_embedding_embed_calls('synthetic-a');\n         SELECT 'cache-after-query-only=' || count(*) FROM main._lithograph_embedding_cache;\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT 'query-only-reuse=' || lithograph({query_only});\n         SELECT 'query-only-reuse-embed=' || synthetic_embedding_embed_calls('synthetic-a');\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT 'rebuild=' || lithograph({rebuild});\n         SELECT 'hnsw-after-rebuild=' || count(*) || ':' || COALESCE(sum(entry_count),0) FROM temp._lithograph_vector_cache_meta;\n         SELECT 'rebuild-validate=' || synthetic_embedding_validate_calls('synthetic-a');\n         SELECT 'rebuild-embed=' || synthetic_embedding_embed_calls('synthetic-a');\n         SELECT 'cache-after-rebuild=' || count(*) FROM main._lithograph_embedding_cache;",
         query = sql_literal(query),
+        query_only = sql_literal(query_only),
         rebuild = sql_literal(rebuild),
     ))?;
 
@@ -319,15 +330,32 @@ fn check_query_rebuild_cache(lithograph: &str, provider: &str) -> Result<(), Box
     verify_rebuild_result(&output)?;
 
     let reopened = fixture.execute_script(&format!(
-        "{lithograph}\n{provider}\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT 'reopen=' || lithograph({query});\n         SELECT 'hnsw-reopen=' || count(*) || ':' || COALESCE(sum(entry_count),0) FROM temp._lithograph_vector_cache_meta;\n         SELECT 'reopen-validate=' || synthetic_embedding_validate_calls('synthetic-a');\n         SELECT 'reopen-embed=' || synthetic_embedding_embed_calls('synthetic-a');\n         SELECT 'stats=' || lithograph('CALL db.index.semantic.cache.stats()');",
-        query = sql_literal(query)
+        "{lithograph}\n{provider}\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT 'reopen=' || lithograph({query_only});\n         SELECT 'hnsw-reopen=' || count(*) || ':' || COALESCE(sum(entry_count),0) FROM temp._lithograph_vector_cache_meta;\n         SELECT 'reopen-validate=' || synthetic_embedding_validate_calls('synthetic-a');\n         SELECT 'reopen-embed=' || synthetic_embedding_embed_calls('synthetic-a');\n         SELECT 'stats=' || lithograph('CALL db.index.semantic.cache.stats()');",
+        query_only = sql_literal(query_only)
     ))?;
     verify_reopened_cache(&reopened)?;
+
+    let changed_query = "CALL db.index.semantic.queryNodes('doc_sem','changed-query',{limit:1}) YIELD node RETURN node.name";
+    let changed = fixture.execute_script(&format!(
+        "{lithograph}\n{provider}\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT lithograph({changed_query});\n         SELECT 'changed-embed=' || synthetic_embedding_embed_calls('synthetic-a');\n         SELECT 'changed-inputs=' || synthetic_embedding_embed_inputs('synthetic-a');\n         SELECT 'cache-after-changed=' || count(*) FROM main._lithograph_embedding_cache;",
+        changed_query = sql_literal(changed_query),
+    ))?;
+    require_line(&changed, "changed-embed=1")?;
+    require_line(&changed, "changed-inputs=1")?;
+    require_line(&changed, "cache-after-changed=4")?;
 
     let policy = fixture.execute_script(&format!(
         "{lithograph}\n         SELECT 'disabled=' || lithograph('CALL db.index.semantic.cache.configure({{enabled:false,maxBytes:16}})');\n         SELECT 'disabled-stats=' || lithograph('CALL db.index.semantic.cache.stats()');\n         SELECT 'enabled=' || lithograph('CALL db.index.semantic.cache.configure({{enabled:true}})');\n         SELECT 'enabled-stats=' || lithograph('CALL db.index.semantic.cache.stats()');"
     ))?;
-    verify_disabled_cache_retention(&policy)
+    verify_disabled_cache_retention(&policy)?;
+    require(
+        branch_head_text(&fixture, lithograph)? == head_before,
+        "Semantic query/rebuild cache publication moved the Branch head",
+    )?;
+    require(
+        commit_count(&fixture)? == commits_before,
+        "Semantic query/rebuild cache publication created a Commit",
+    )
 }
 
 fn verify_query_cache_counters(output: &str) -> Result<(), Box<dyn Error>> {
@@ -336,14 +364,17 @@ fn verify_query_cache_counters(output: &str) -> Result<(), Box<dyn Error>> {
         "hnsw-after-query=1:3",
         "query-validate=1",
         "query-embed=2",
-        "cache-after-query=0",
+        "cache-after-query=2",
         "hnsw-after-warm=1:3",
         "warm-validate=1",
         "warm-embed=0",
+        "query-only-embed=1",
+        "cache-after-query-only=3",
+        "query-only-reuse-embed=0",
         "hnsw-after-rebuild=1:3",
         "rebuild-validate=1",
-        "rebuild-embed=1",
-        "cache-after-rebuild=2",
+        "rebuild-embed=0",
+        "cache-after-rebuild=3",
     ] {
         require_line(output, expected)?;
     }
@@ -382,8 +413,8 @@ fn verify_rebuild_result(output: &str) -> Result<(), Box<dyn Error>> {
         "rebuild indexedEntities differs",
     )?;
     require(
-        rebuild_json["rows"][0][3] == 2,
-        "rebuild did not deduplicate source text",
+        rebuild_json["rows"][0][3] == 0 && rebuild_json["rows"][0][4] == 2,
+        "rebuild did not reuse source Embeddings populated by ordinary query",
     )?;
     require(
         rebuild_json["summary"]["queryType"] == "version",
@@ -393,11 +424,7 @@ fn verify_rebuild_result(output: &str) -> Result<(), Box<dyn Error>> {
         rebuild_json["summary"]["commit"].is_null(),
         "rebuild summary exposed a commit",
     )?;
-    let rebuild_inputs = prefixed_value(output, "rebuild-inputs=")?;
-    require(
-        rebuild_inputs.contains("5:hello") && rebuild_inputs.contains("5:world"),
-        "rebuild did not batch both unique exact source texts",
-    )
+    Ok(())
 }
 
 fn verify_reopened_cache(reopened: &str) -> Result<(), Box<dyn Error>> {
@@ -406,7 +433,7 @@ fn verify_reopened_cache(reopened: &str) -> Result<(), Box<dyn Error>> {
     require_line(reopened, "reopen-embed=0")?;
     let stats = prefixed_json(reopened, "stats=")?;
     require(
-        stats["rows"][0][3] == 2,
+        stats["rows"][0][3] == 3,
         "persistent cache entry count differs",
     )?;
     require(
@@ -420,8 +447,8 @@ fn verify_disabled_cache_retention(output: &str) -> Result<(), Box<dyn Error>> {
     require(
         disabled["rows"][0][0] == false
             && disabled["rows"][0][1] == 16
-            && disabled["rows"][0][2] == 32
-            && disabled["rows"][0][3] == 2,
+            && disabled["rows"][0][2] == 64
+            && disabled["rows"][0][3] == 4,
         "disabling cache unexpectedly evicted persistent rows",
     )?;
     let enabled = prefixed_json(output, "enabled-stats=")?;
@@ -431,6 +458,37 @@ fn verify_disabled_cache_retention(output: &str) -> Result<(), Box<dyn Error>> {
             && enabled["rows"][0][2] == 16
             && enabled["rows"][0][3] == 1,
         "re-enabling cache did not enforce the persisted capacity budget",
+    )
+}
+
+fn check_cache_disabled_query(lithograph: &str, provider: &str) -> Result<(), Box<dyn Error>> {
+    let fixture = FileDatabaseFixture::new(0x1314)?;
+    let create = semantic_node_create(
+        "disabled_sem",
+        "Doc",
+        "text",
+        "synthetic-a",
+        "{}",
+        4,
+        "cosine",
+    );
+    fixture.execute_script(&format!(
+        "{lithograph}\n{provider}\n         SELECT lithograph_init();\n         SELECT lithograph('CREATE (:Doc {{name:''a'', text:''alpha''}}) FINISH');\n         SELECT lithograph({create});\n         SELECT lithograph('CALL db.index.semantic.cache.configure({{enabled:false}})');",
+        create = sql_literal(&create),
+    ))?;
+    let head_before = branch_head_text(&fixture, lithograph)?;
+    let query = "CALL db.index.semantic.queryNodes('disabled_sem','probe',{limit:1}) YIELD node RETURN node.name";
+    for label in ["first", "reopened"] {
+        let output = fixture.execute_script(&format!(
+            "{lithograph}\n{provider}\n             SELECT synthetic_embedding_reset('synthetic-a');\n             SELECT '{label}=' || lithograph({query});\n             SELECT '{label}-embed=' || synthetic_embedding_embed_calls('synthetic-a');\n             SELECT '{label}-cache=' || count(*) FROM main._lithograph_embedding_cache;",
+            query = sql_literal(query),
+        ))?;
+        require_line(&output, &format!("{label}-embed=2"))?;
+        require_line(&output, &format!("{label}-cache=0"))?;
+    }
+    require(
+        branch_head_text(&fixture, lithograph)? == head_before,
+        "cache-disabled Semantic query moved the Branch head",
     )
 }
 
@@ -473,7 +531,7 @@ fn check_cache_identity(lithograph: &str, provider: &str) -> Result<(), Box<dyn 
         "cosine",
     );
     let output = fixture.execute_script(&format!(
-        "{lithograph}\n{provider}\n         SELECT lithograph_init();\n         SELECT lithograph('CREATE (:Doc {{text:''alpha''}}), (:Doc {{text:''beta''}}) FINISH');\n         SELECT lithograph({cosine});\n         SELECT lithograph({euclidean});\n         SELECT lithograph({changed});\n         SELECT lithograph({other_provider});\n         SELECT 'first=' || lithograph('CALL db.index.semantic.rebuild(''cosine_sem'',''branch/main'')');\n         SELECT 'second=' || lithograph('CALL db.index.semantic.rebuild(''euclidean_sem'',''branch/main'')');\n         SELECT 'third=' || lithograph('CALL db.index.semantic.rebuild(''changed_sem'',''branch/main'')');\n         SELECT 'fourth=' || lithograph('CALL db.index.semantic.rebuild(''provider_b_sem'',''branch/main'')');\n         SELECT 'stats=' || lithograph('CALL db.index.semantic.cache.stats()');",
+        "{lithograph}\n{provider}\n         SELECT lithograph_init();\n         SELECT lithograph('CREATE (:Doc {{text:''alpha''}}), (:Doc {{text:''beta''}}) FINISH');\n         SELECT lithograph({cosine});\n         SELECT lithograph({euclidean});\n         SELECT lithograph({changed});\n         SELECT lithograph({other_provider});\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT 'first=' || lithograph('CALL db.index.semantic.rebuild(''cosine_sem'',''branch/main'')');\n         SELECT 'first-calls=' || synthetic_embedding_embed_calls('synthetic-a') || ':' || synthetic_embedding_embed_inputs('synthetic-a');\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT 'second=' || lithograph('CALL db.index.semantic.rebuild(''euclidean_sem'',''branch/main'')');\n         SELECT 'second-calls=' || synthetic_embedding_embed_calls('synthetic-a') || ':' || synthetic_embedding_embed_inputs('synthetic-a');\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT 'third=' || lithograph('CALL db.index.semantic.rebuild(''changed_sem'',''branch/main'')');\n         SELECT 'third-calls=' || synthetic_embedding_embed_calls('synthetic-a') || ':' || synthetic_embedding_embed_inputs('synthetic-a');\n         SELECT synthetic_embedding_reset('synthetic-b');\n         SELECT 'fourth=' || lithograph('CALL db.index.semantic.rebuild(''provider_b_sem'',''branch/main'')');\n         SELECT 'fourth-calls=' || synthetic_embedding_embed_calls('synthetic-b') || ':' || synthetic_embedding_embed_inputs('synthetic-b');\n         SELECT 'stats=' || lithograph('CALL db.index.semantic.cache.stats()');",
         cosine = sql_literal(&cosine),
         euclidean = sql_literal(&euclidean),
         changed = sql_literal(&changed),
@@ -484,6 +542,14 @@ fn check_cache_identity(lithograph: &str, provider: &str) -> Result<(), Box<dyn 
         second["rows"][0][4] == 2,
         "similarity changed embedding-space identity",
     )?;
+    for expected in [
+        "first-calls=1:2",
+        "second-calls=0:0",
+        "third-calls=1:2",
+        "fourth-calls=1:2",
+    ] {
+        require_line(&output, expected)?;
+    }
     let stats = prefixed_json(&output, "stats=")?;
     require(
         stats["rows"][0][3] == 6,
@@ -818,11 +884,21 @@ fn check_provider_payload_failures(
         4,
         "cosine",
     );
+    let cancelled = semantic_node_create(
+        "bad_cancel",
+        "Doc",
+        "text",
+        "synthetic-a",
+        "{fail:'cancel'}",
+        4,
+        "cosine",
+    );
     fixture.execute_script(&format!(
-        "{lithograph}\n{provider}\nSELECT lithograph({nan});\nSELECT lithograph({zero});\nSELECT lithograph({io});",
+        "{lithograph}\n{provider}\nSELECT lithograph({nan});\nSELECT lithograph({zero});\nSELECT lithograph({io});\nSELECT lithograph({cancelled});",
         nan = sql_literal(&nan),
         zero = sql_literal(&zero),
         io = sql_literal(&io),
+        cancelled = sql_literal(&cancelled),
     ))?;
     let bad_query =
         "CALL db.index.semantic.queryNodes('bad_nan','probe',{limit:2}) YIELD node RETURN node";
@@ -862,17 +938,88 @@ fn check_provider_payload_failures(
     )?;
     require_persistent_cache_empty(fixture)?;
 
-    let bad_rebuild = "CALL db.index.semantic.rebuild('bad_io','branch/main')";
+    check_provider_error_failures(fixture, lithograph, provider)
+}
+
+fn check_provider_error_failures(
+    fixture: &FileDatabaseFixture,
+    lithograph: &str,
+    provider: &str,
+) -> Result<(), Box<dyn Error>> {
+    let bad_io_query =
+        "CALL db.index.semantic.queryNodes('bad_io','probe',{limit:2}) YIELD node RETURN node";
     let (success, _, stderr) = execute_script_allowing_failure(
         fixture.path(),
         &format!(
             "{lithograph}\n{provider}\nSELECT lithograph({});",
-            sql_literal(bad_rebuild)
+            sql_literal(bad_io_query)
         ),
     )?;
-    require(!success, "Provider I/O failure unexpectedly rebuilt cache")?;
+    require(
+        !success,
+        "Provider I/O failure unexpectedly completed query",
+    )?;
     require(stderr.contains("IO_ERROR"), "Provider I/O category differs")?;
+    require_persistent_cache_empty(fixture)?;
+
+    let cancelled_query =
+        "CALL db.index.semantic.queryNodes('bad_cancel','probe',{limit:2}) YIELD node RETURN node";
+    let (success, _, stderr) = execute_script_allowing_failure(
+        fixture.path(),
+        &format!(
+            "{lithograph}\n{provider}\nSELECT lithograph({});",
+            sql_literal(cancelled_query)
+        ),
+    )?;
+    require(
+        !success,
+        "cancelled Provider call unexpectedly completed query",
+    )?;
+    require(
+        stderr.contains("RESOURCE_ERROR") && stderr.contains("synthetic configured cancellation"),
+        &format!("Provider cancellation category differs: {stderr}"),
+    )?;
     require_persistent_cache_empty(fixture)
+}
+
+fn check_cache_publish_failure(lithograph: &str, provider: &str) -> Result<(), Box<dyn Error>> {
+    let fixture = FileDatabaseFixture::new(0x1315)?;
+    let create = semantic_node_create(
+        "publish_fail_sem",
+        "Doc",
+        "text",
+        "synthetic-a",
+        "{publish_fail:'query_only'}",
+        4,
+        "cosine",
+    );
+    fixture.execute_script(&format!(
+        "{lithograph}\n{provider}\n         SELECT lithograph_init();\n         SELECT lithograph('CREATE (:Doc {{name:''a'', text:''alpha''}}) FINISH');\n         SELECT lithograph({create});",
+        create = sql_literal(&create),
+    ))?;
+    let head_before = branch_head_text(&fixture, lithograph)?;
+    let query = "CALL db.index.semantic.queryNodes('publish_fail_sem','probe',{limit:1}) YIELD node RETURN node.name";
+    let (success, stdout, stderr) = execute_script_allowing_failure(
+        fixture.path(),
+        &format!(
+            "{lithograph}\n{provider}\n.bail off\n             SELECT synthetic_embedding_reset('synthetic-a');\n             SELECT lithograph({query});\n             PRAGMA query_only=OFF;\n             SELECT 'publish-fail-embed=' || synthetic_embedding_embed_calls('synthetic-a');",
+            query = sql_literal(query),
+        ),
+    )?;
+    require(
+        !success,
+        "fault-injected query unexpectedly published cache",
+    )?;
+    require(
+        stderr.contains("readonly database"),
+        &format!("cache publish failure lost stable storage category: {stderr}"),
+    )?;
+    require_line(&stdout, "publish-fail-embed=1")?;
+    require_persistent_cache_empty(&fixture)?;
+    require(
+        branch_head_text(&fixture, lithograph)? == head_before,
+        "failed cache publish moved the Branch head",
+    )
 }
 
 fn check_rows_adapter_authority(lithograph: &str, provider: &str) -> Result<(), Box<dyn Error>> {
@@ -977,7 +1124,7 @@ fn check_read_only_rebuild(lithograph: &str, provider: &str) -> Result<(), Box<d
     let (success, stdout, stderr) = execute_readonly_script_allowing_failure(
         fixture.path(),
         &format!(
-            "{lithograph}\n{provider}\n             SELECT 'query=' || lithograph({});",
+            "{lithograph}\n{provider}\n             SELECT synthetic_embedding_reset('synthetic-a');\n             SELECT 'query=' || lithograph({});\n             SELECT 'query-embed=' || synthetic_embedding_embed_calls('synthetic-a');",
             sql_literal(query)
         ),
     )?;
@@ -985,6 +1132,8 @@ fn check_read_only_rebuild(lithograph: &str, provider: &str) -> Result<(), Box<d
         success && stderr.is_empty() && stdout.contains("\"a\""),
         &format!("read-only Semantic query must remain executable: {stdout:?} {stderr:?}"),
     )?;
+    require_line(&stdout, "query-embed=2")?;
+    require_persistent_cache_empty(&fixture)?;
 
     let rebuild = "CALL db.index.semantic.rebuild('readonly_sem','branch/main')";
     let (success, stdout, stderr) = execute_readonly_script_allowing_failure(

@@ -1,6 +1,6 @@
 # Search 与数据导入
 
-适用正式 v0.1.1，并补充当前 Unreleased `main` 的 Phase 13 Managed Semantic。以下检索 SQL 在独立空库、已加载扩展的 connection 中依次运行。**Raw Vector** 路径仍由应用提供向量及其维度、坐标类型和模型来源；**Managed Semantic** 才通过独立 Embedding Provider extension 生成 derived Vector。
+适用正式 v0.2.0。以下检索 SQL 在独立空库、已加载扩展的 connection 中依次运行。**Raw Vector** 路径仍由应用提供向量及其维度、坐标类型和模型来源；**Managed Semantic** 才通过独立 Embedding Provider extension 生成 derived Vector。
 
 ## 准备文档与全文索引
 
@@ -77,9 +77,11 @@ SELECT lithograph(
 
 HNSW 是近似检索访问路径，缺少可用缓存时可以使用 exact scan fallback。不要假设所有 cache 状态的延迟相同，也不要把 ANN 返回结果当成任意数据集上 exact top-k 的保证。索引参数范围见 [Limits](../reference/limits.md)。
 
-## Unreleased：Managed Semantic 文本检索
+<a id="managed-semantic-text-search"></a>
 
-本节只适用于当前 `main`，尚未进入 v0.1.1 Release Asset。Managed Semantic 不改变上面的 Raw Vector / `SEARCH`：它为 String source Property 增加一条数据库托管 embedding 的并列路径。
+## Managed Semantic 文本检索
+
+本节从 v0.2.0 起可用。Managed Semantic 不改变上面的 Raw Vector / `SEARCH`：它为 String source Property 增加一条数据库托管 embedding 的并列路径。
 
 当前仓库提供独立的 `lithograph-openai-compatible` SQLite extension。源码构建：
 
@@ -145,7 +147,9 @@ SELECT lithograph(
 
 source 必须是实际 String；missing、`null` 与其它类型不参与索引。String 按精确 UTF-8 bytes 发送给 Provider，不 trim、lowercase、拼接或截断。Graph View 在 provider input 与 top-k 前生效，历史查询使用目标 Commit 的历史 Semantic definition。
 
-普通 `queryNodes/queryRelationships` 不因 cache miss 写入 `main`；query-only embedding 只进入 connection-local TEMP/LRU。需要跨 connection 预热 persistent source cache 时显式执行：
+普通 `queryNodes/queryRelationships` 对 query text 和可见 source text 使用相同的 persistent cache key。Cache enabled 且 database 可写时，miss 会调用 Provider、完整校验结果并自动写入 persistent cache；后续同 connection、新 connection 或 process restart 可直接复用。Cache 不保存原文副本。只读数据库或 cache disabled 时仍可查询，但 miss 只进入 connection-local TEMP/LRU。
+
+`rebuild` 是可选维护入口，不是正常搜索的前置步骤：
 
 ```sql
 SELECT lithograph(
@@ -160,13 +164,13 @@ SELECT lithograph(
 );
 ```
 
-`rebuild`、`cache.configure`、`cache.clear` 是 operational maintenance：不创建 graph Commit、不移动 ref，不能从 `lithograph_rows()` 或 Native explicit transaction 中执行。实际 semantic query/rebuild 每次都要求目标 Provider 当前可用并通过 validation，即使 persistent cache 已经 warm。详细签名见 [Procedure Reference](../reference/procedures.md)。
+`rebuild`、`cache.configure`、`cache.clear` 是 operational maintenance：不创建 graph Commit、不移动 ref，不能从 `lithograph_rows()` 或 Native explicit transaction 中执行。普通 semantic query 的 cache publish同样只修改derived cache，summary仍是`read`，不创建 graph Commit、不移动ref。实际 semantic query/rebuild 每次都要求目标 Provider 当前可用并通过 validation，即使 persistent cache 已经 warm。详细签名见 [Procedure Reference](../reference/procedures.md)。
 
 ## 历史检索和子图检索
 
 与普通查询相同，通过第三个参数 `options.at` 选择历史 Schema / 数据，通过 `options.graphView` 选择可见子图。历史上尚未创建的索引不能仅因为当前 Branch 有同名索引而使用。Graph View 在检索的可见结果与 top-k 边界内生效，不是结果返回后过滤。
 
-全文和向量可以在普通 Cypher 中组合过滤、子查询和投影；应用自己定义融合分数与排序逻辑。v0.1.1 不额外提供名为 `hybridSearch` 的专用 API，也不预定义 RAG 工作流。
+全文和向量可以在普通 Cypher 中组合过滤、子查询和投影；应用自己定义融合分数与排序逻辑。v0.2.0 不额外提供名为 `hybridSearch` 的专用 API，也不预定义 RAG 工作流。
 
 ## 导入 CSV
 

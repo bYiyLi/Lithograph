@@ -18,13 +18,13 @@ Lithograph v0.1.0 的语言基线是冻结的 **`CY25-2026.08`**：Cypher 25 cur
 
 完整 clause/feature 验收清单由 [Compatibility Matrix](../development/cypher25-compatibility.md) 管理。本页是用户侧范围摘要，不另设第二套验收状态。每个输入仍需满足准确 syntax、类型、作用域、adapter 与事务限制。
 
-[Function Reference](functions.md) 从 v0.1.0 真实 SHOW 输出生成，包含全部 172 条签名（含重载）；[Procedure Inventory](procedure-inventory.md) 包含全部 33 个公开 Procedure。客户端可以通过 SHOW 自检，但不能因为名称登记存在就忽略 [Known Issues](known-issues.md)。
+[Function Reference](functions.md) 从 v0.1.0 真实 SHOW 输出生成，包含全部 172 条签名（含重载）；[Procedure Inventory](procedure-inventory.md) 保留 33 个 v0.1.0 历史签名，并补充 v0.2.0 的 8 个 Managed Semantic procedure。客户端可以通过 SHOW 自检，但不能因为名称登记存在就忽略 [Known Issues](known-issues.md)。
 
 ## 不属于此 compatibility profile
 
 Neo4j DBMS 的 database/alias/server/cluster/user/role/privilege/auth 管理、system database 操作、Java UDF 部署 API，以及 `USE` / `graph.byName()` / `graph.names()` 的 composite-database graph selection 不在本产品合同内。
 
-Lithograph 不提供 Bolt/HTTP 数据库服务器或 Neo4j driver 协议。APOC 等外部过程库不因支持 Cypher 而自动存在。Kernel 不内置 embedding 模型、RAG 工作流、Agent 或 KG OS 领域对象；当前 Unreleased Phase 13 的 `lithograph-openai-compatible` 是独立 SQLite Provider extension，不属于 Cypher compatibility profile。
+Lithograph 不提供 Bolt/HTTP 数据库服务器或 Neo4j driver 协议。APOC 等外部过程库不因支持 Cypher 而自动存在。Kernel 不内置 embedding 模型、RAG 工作流、Agent 或 KG OS 领域对象；v0.2.0 的 `lithograph-openai-compatible` 是独立 SQLite Provider extension，不属于 Cypher compatibility profile。
 
 因此，将现有 Cypher 应用迁移过来时，query 本身与 transport、账号权限、procedure 库、Schema 管理和事务入口要分开核对，不能把“支持 Cypher 25”解释成整个 Neo4j 部署的无改动替换。
 

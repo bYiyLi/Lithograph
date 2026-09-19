@@ -58,7 +58,7 @@ Callback 返回非零表示取消，返回码为 `SQLITE_INTERRUPT`；host `sqli
 
 ## 字符串与内存所有权
 
-长度单位为 UTF-8 **bytes**，不是 Unicode 字符数。query 必须提供合法输入。**v0.1.0 实际要求 params/options 显式使用 `"{}",2` 表示空 object；`NULL,0` 不会自动补成 `{}`，会被当作空 JSON 输入拒绝。**这与设计的默认值约定不同，详见 [Known Issues](known-issues.md)。不能传非零长度的空指针。callback 和 db 必须有效。
+长度单位为 UTF-8 **bytes**，不是 Unicode 字符数。query 必须提供合法输入。**v0.1.0–v0.2.0 实际要求 params/options 显式使用 `"{}",2` 表示空 object；`NULL,0` 不会自动补成 `{}`，会被当作空 JSON 输入拒绝。**这与设计的默认值约定不同，详见 [Known Issues](known-issues.md)。不能传非零长度的空指针。callback 和 db 必须有效。
 
 把 `char *result = NULL; char *error = NULL;` 的地址传给输出参数。非空输出由 Lithograph 分配，读取后恰好用 `lithograph_v1_free` 释放一次；不要用 `free`、Rust allocator、Python allocator 或 `sqlite3_free`。宿主 `sqlite3_load_extension` 返回的错误则属于 SQLite，使用 `sqlite3_free`。
 

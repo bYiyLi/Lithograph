@@ -32,7 +32,7 @@ SELECT lithograph('CALL lithograph.branch.list()');
 
 `main` 是 `light`，`feature` 是 `dark`。Query-level Branch 不改变 connection 默认的 `main`。同一数据库不同连接可以执行不同分支，但写入仍共享 SQLite 单文件 writer。
 
-**v0.1.0 已知限制：**公开 inventory 包含 `lithograph.branch.checkout(name)`，但 SQL Bridge 与普通 Native execute 实际执行都会返回 `TRANSACTION_BOUNDARY_REQUIRED`。使用已验证的 `options.branch`；不要先 BEGIN、不要改内部表，也不要把这个错误解释成分支数据丢失。跟踪细节见 [已知问题](../reference/known-issues.md)。
+**v0.1.0–v0.2.0 已知限制：**公开 inventory 包含 `lithograph.branch.checkout(name)`，但 SQL Bridge 与普通 Native execute 实际执行都会返回 `TRANSACTION_BOUNDARY_REQUIRED`。使用已验证的 `options.branch`；不要先 BEGIN、不要改内部表，也不要把这个错误解释成分支数据丢失。跟踪细节见 [已知问题](../reference/known-issues.md)。
 
 ## 查看历史和时间旅行
 

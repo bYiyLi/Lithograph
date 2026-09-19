@@ -351,7 +351,7 @@ static void print_report(const performance_report *report) {
         (long long)report->hnsw_after_local_warm.entries
     );
     printf(
-        "\"coldRebuild\":{\"indexedEntities\":%lld,\"embeddedTexts\":%lld,\"cacheHits\":%lld,"
+        "\"postQueryRebuild\":{\"indexedEntities\":%lld,\"embeddedTexts\":%lld,\"cacheHits\":%lld,"
         "\"providerBatchCalls\":%lld,\"providerInputs\":%lld,\"elapsedMicros\":%llu,"
         "\"tempHnswCaches\":%lld,\"tempHnswEntries\":%lld},",
         (long long)report->cold_rebuild.indexed_entities,
@@ -382,7 +382,7 @@ static void print_report(const performance_report *report) {
         (long long)report->hnsw_after_persistent_query.entries
     );
     printf(
-        "\"warmRebuild\":{\"embeddedTexts\":%lld,\"cacheHits\":%lld,"
+        "\"repeatedRebuild\":{\"embeddedTexts\":%lld,\"cacheHits\":%lld,"
         "\"providerBatchCalls\":%lld,\"providerInputs\":%lld,\"elapsedMicros\":%llu,"
         "\"tempHnswCaches\":%lld,\"tempHnswEntries\":%lld},"
         "\"semanticSearchMode\":\"temp-hnsw-v1\",\"tempHnswBuilds\":2}\n",
@@ -431,7 +431,10 @@ int main(int argc, char **argv) {
     sqlite3_int64 cold_batches = scalar_int64(db, "SELECT synthetic_embedding_embed_calls('synthetic-a')");
     sqlite3_int64 cold_inputs = scalar_int64(db, "SELECT synthetic_embedding_embed_inputs('synthetic-a')");
     sqlite3_int64 cold_persistent = scalar_int64(db, "SELECT count(*) FROM main._lithograph_embedding_cache");
-    require(cold_persistent == 0, "ordinary Semantic query persisted Embeddings");
+    require(
+        cold_persistent == 16,
+        "ordinary Semantic query did not persist all deduplicated query/source Embeddings"
+    );
     require(
         hnsw_before_cold.caches == 0
             && hnsw_after_cold.caches == 1
@@ -451,39 +454,10 @@ int main(int argc, char **argv) {
         "same-connection warm query did not reuse the TEMP HNSW"
     );
 
-    reset_provider(db);
-    rebuild_sample cold_rebuild = run_rebuild(db);
-    hnsw_stats hnsw_after_cold_rebuild = read_hnsw_stats(db);
-    sqlite3_int64 rebuild_batches = scalar_int64(db, "SELECT synthetic_embedding_embed_calls('synthetic-a')");
-    sqlite3_int64 rebuild_inputs = scalar_int64(db, "SELECT synthetic_embedding_embed_inputs('synthetic-a')");
-    cache_stats stats = read_cache_stats(db);
-    require(cold_rebuild.indexed_entities == 64, "rebuild indexed entity count differs");
-    require(cold_rebuild.embedded_texts == 16, "rebuild did not deduplicate exact source text");
-    require(cold_rebuild.cache_hits == 0, "cold rebuild unexpectedly reported persistent hits");
-    require(rebuild_inputs == 16, "cold rebuild Provider input count differs from unique source count");
-    require(stats.entries == 16 && stats.spaces == 1 && stats.used_bytes > 0, "persistent cache stats differ");
-    require(
-        hnsw_after_cold_rebuild.caches == 1 && hnsw_after_cold_rebuild.entries == 64,
-        "cold rebuild changed or lost the existing TEMP HNSW"
-    );
     require(sqlite3_close(db) == SQLITE_OK, "failed to close cold performance connection");
 
     db = open_fixture(database, provider, lithograph);
-    hnsw_stats hnsw_before_reopen_rebuild = read_hnsw_stats(db);
-    reset_provider(db);
-    rebuild_sample warm_rebuild = run_rebuild(db);
-    hnsw_stats hnsw_after_warm_rebuild = read_hnsw_stats(db);
-    sqlite3_int64 warm_rebuild_batches = scalar_int64(db, "SELECT synthetic_embedding_embed_calls('synthetic-a')");
-    sqlite3_int64 warm_rebuild_inputs = scalar_int64(db, "SELECT synthetic_embedding_embed_inputs('synthetic-a')");
-    require(warm_rebuild.embedded_texts == 0 && warm_rebuild.cache_hits == 16, "warm rebuild cache accounting differs");
-    require(warm_rebuild_batches == 0 && warm_rebuild_inputs == 0, "warm rebuild called Provider");
-    require(
-        hnsw_before_reopen_rebuild.caches == 0
-            && hnsw_after_warm_rebuild.caches == 1
-            && hnsw_after_warm_rebuild.entries == 64,
-        "persistent-warm rebuild did not materialize one complete TEMP HNSW"
-    );
-
+    hnsw_stats hnsw_before_persistent_query = read_hnsw_stats(db);
     reset_provider(db);
     query_sample warm_persistent = run_native_query(db, execute, lithograph_free);
     hnsw_stats hnsw_after_persistent_query = read_hnsw_stats(db);
@@ -492,8 +466,41 @@ int main(int argc, char **argv) {
     sqlite3_int64 persistent_inputs = scalar_int64(db, "SELECT synthetic_embedding_embed_inputs('synthetic-a')");
     require(persistent_batches == 0 && persistent_inputs == 0, "persistent warm query called Provider");
     require(
-        hnsw_after_persistent_query.caches == 1 && hnsw_after_persistent_query.entries == 64,
-        "persistent warm query did not reuse rebuild's TEMP HNSW"
+        hnsw_before_persistent_query.caches == 0
+            && hnsw_after_persistent_query.caches == 1
+            && hnsw_after_persistent_query.entries == 64,
+        "persistent warm query did not rebuild one complete TEMP HNSW"
+    );
+
+    reset_provider(db);
+    rebuild_sample cold_rebuild = run_rebuild(db);
+    hnsw_stats hnsw_after_cold_rebuild = read_hnsw_stats(db);
+    sqlite3_int64 rebuild_batches = scalar_int64(db, "SELECT synthetic_embedding_embed_calls('synthetic-a')");
+    sqlite3_int64 rebuild_inputs = scalar_int64(db, "SELECT synthetic_embedding_embed_inputs('synthetic-a')");
+    cache_stats stats = read_cache_stats(db);
+    require(cold_rebuild.indexed_entities == 64, "rebuild indexed entity count differs");
+    require(
+        cold_rebuild.embedded_texts == 0 && cold_rebuild.cache_hits == 16,
+        "post-query rebuild did not reuse the persistent source cache"
+    );
+    require(rebuild_batches == 0 && rebuild_inputs == 0, "post-query rebuild called Provider");
+    require(stats.entries == 16 && stats.spaces == 1 && stats.used_bytes > 0, "persistent cache stats differ");
+    require(
+        hnsw_after_cold_rebuild.caches == 1 && hnsw_after_cold_rebuild.entries == 64,
+        "post-query rebuild changed or lost the existing TEMP HNSW"
+    );
+
+    reset_provider(db);
+    rebuild_sample warm_rebuild = run_rebuild(db);
+    hnsw_stats hnsw_after_warm_rebuild = read_hnsw_stats(db);
+    sqlite3_int64 warm_rebuild_batches = scalar_int64(db, "SELECT synthetic_embedding_embed_calls('synthetic-a')");
+    sqlite3_int64 warm_rebuild_inputs = scalar_int64(db, "SELECT synthetic_embedding_embed_inputs('synthetic-a')");
+    require(warm_rebuild.embedded_texts == 0 && warm_rebuild.cache_hits == 16, "warm rebuild cache accounting differs");
+    require(warm_rebuild_batches == 0 && warm_rebuild_inputs == 0, "warm rebuild called Provider");
+    require(
+        hnsw_after_warm_rebuild.caches == 1
+            && hnsw_after_warm_rebuild.entries == 64,
+        "repeated rebuild changed or lost the existing TEMP HNSW"
     );
 
     performance_report report = {

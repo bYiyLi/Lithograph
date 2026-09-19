@@ -14,11 +14,11 @@
 #include <unistd.h>
 #endif
 
-typedef struct rebuild_context {
+typedef struct query_context {
     sqlite3 *db;
     int rc;
     char *error;
-} rebuild_context;
+} query_context;
 
 typedef struct writer_sample {
     sqlite3_int64 wait_ms;
@@ -91,12 +91,13 @@ static void sleep_millis(long milliseconds) {
     require(nanosleep(&delay, NULL) == 0, "nanosleep failed");
 }
 
-static void *run_rebuild(void *user_data) {
-    rebuild_context *context = (rebuild_context *)user_data;
+static void *run_query(void *user_data) {
+    query_context *context = (query_context *)user_data;
     context->rc = sqlite3_exec(
         context->db,
         "SELECT lithograph("
-            "'CALL db.index.semantic.rebuild(''sleep_sem'',''branch/main'')'"
+            "'CALL db.index.semantic.queryNodes(''sleep_sem'',''probe'',{limit:2}) "
+            "YIELD node RETURN node'"
         ");",
         NULL,
         NULL,
@@ -165,7 +166,7 @@ static void wait_for_provider_call(sqlite3 *db) {
         }
         sleep_millis(5);
     }
-    require(active, "semantic rebuild never entered the synthetic Provider call");
+    require(active, "semantic query never entered the synthetic Provider call");
 }
 
 static writer_sample run_concurrent_writer(sqlite3 *db) {
@@ -184,7 +185,7 @@ static writer_sample run_concurrent_writer(sqlite3 *db) {
     error = NULL;
     require(
         rc == SQLITE_OK,
-        "semantic rebuild Provider stage held SQLite single-writer ownership"
+        "semantic query Provider stage held SQLite single-writer ownership"
     );
 
     rc = sqlite3_exec(
@@ -267,18 +268,18 @@ static checkpoint_sample observe_wal_checkpoint(sqlite3 *db) {
 
 static void verify_concurrency_result(
     sqlite3 *writer_db,
-    rebuild_context *context,
+    query_context *context,
     writer_sample writer,
     checkpoint_sample checkpoint
 ) {
     if (context->rc != SQLITE_OK) {
         fprintf(
             stderr,
-            "semantic rebuild failed: %s\n",
+            "semantic query failed: %s\n",
             context->error == NULL ? "unknown" : context->error
         );
     }
-    require(context->rc == SQLITE_OK, "semantic rebuild failed after concurrent writer");
+    require(context->rc == SQLITE_OK, "semantic query failed after concurrent writer");
     sqlite3_free(context->error);
     require(
         scalar_int64(writer_db, "SELECT synthetic_embedding_active_calls()") == 0,
@@ -289,14 +290,14 @@ static void verify_concurrency_result(
             writer_db,
             "SELECT synthetic_embedding_non_autocommit_calls()"
         ) == 0,
-        "semantic rebuild called Provider while its SQLite connection was in a transaction"
+        "semantic query called Provider while its SQLite connection was in a transaction"
     );
     require(
         scalar_int64(
             writer_db,
             "SELECT count(*) FROM main._lithograph_embedding_cache"
-        ) == 2,
-        "semantic rebuild did not atomically publish two deduplicated cache entries"
+        ) == 3,
+        "semantic query did not atomically publish its query and two source cache entries"
     );
     require(
         scalar_int64(
@@ -311,7 +312,7 @@ static void verify_concurrency_result(
         "{\"schemaVersion\":1,\"providerSleepMs\":1000,"
         "\"writerWaitMs\":%lld,\"writerHoldMs\":%lld,\"writerTotalMs\":%lld,"
         "\"walCheckpoint\":{\"busy\":%d,\"logFrames\":%d,\"checkpointedFrames\":%d},"
-        "\"nonAutocommitProviderCalls\":0,\"persistentCacheEntries\":2}\n",
+        "\"nonAutocommitProviderCalls\":0,\"persistentCacheEntries\":3}\n",
         (long long)writer.wait_ms,
         (long long)writer.hold_ms,
         (long long)writer.total_ms,
@@ -346,13 +347,13 @@ int main(int argc, char **argv) {
     sqlite3_snprintf((int)sizeof(shm_path), shm_path, "%s-shm", database);
     remove_database_files(database, wal_path, shm_path);
 
-    sqlite3 *rebuild_db = open_semantic_connection(
+    sqlite3 *query_db = open_semantic_connection(
         database,
         provider,
         lithograph,
-        "failed to open rebuild database"
+        "failed to open query database"
     );
-    seed_concurrency_fixture(rebuild_db);
+    seed_concurrency_fixture(query_db);
     sqlite3 *writer_db = open_semantic_connection(
         database,
         provider,
@@ -361,15 +362,15 @@ int main(int argc, char **argv) {
     );
     sqlite3_busy_timeout(writer_db, 0);
 
-    rebuild_context context = {
-        .db = rebuild_db,
+    query_context context = {
+        .db = query_db,
         .rc = SQLITE_ERROR,
         .error = NULL,
     };
-    pthread_t rebuild_thread;
+    pthread_t query_thread;
     require(
-        pthread_create(&rebuild_thread, NULL, run_rebuild, &context) == 0,
-        "failed to start semantic rebuild thread"
+        pthread_create(&query_thread, NULL, run_query, &context) == 0,
+        "failed to start semantic query thread"
     );
     wait_for_provider_call(writer_db);
     const writer_sample writer = run_concurrent_writer(writer_db);
@@ -379,13 +380,13 @@ int main(int argc, char **argv) {
     );
     const checkpoint_sample checkpoint = observe_wal_checkpoint(writer_db);
     require(
-        pthread_join(rebuild_thread, NULL) == 0,
-        "failed to join semantic rebuild thread"
+        pthread_join(query_thread, NULL) == 0,
+        "failed to join semantic query thread"
     );
     verify_concurrency_result(writer_db, &context, writer, checkpoint);
 
     require(sqlite3_close(writer_db) == SQLITE_OK, "failed to close writer database");
-    require(sqlite3_close(rebuild_db) == SQLITE_OK, "failed to close rebuild database");
+    require(sqlite3_close(query_db) == SQLITE_OK, "failed to close query database");
     remove_database_files(database, wal_path, shm_path);
     return 0;
 #endif

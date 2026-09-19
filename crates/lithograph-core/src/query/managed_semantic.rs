@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use lithograph_embedding_provider::{
     ProviderError, ProviderErrorKind, RegisteredEmbeddingProvider,
 };
-use rusqlite::{Connection, OptionalExtension as _, params};
+use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension as _, params};
 
 use crate::cypher::Value;
 use crate::storage::{
@@ -27,6 +27,7 @@ const REBUILD_PUBLISH_BATCH: usize = 256;
 type ManagedHnswEntries = Vec<(i64, Vec<f32>)>;
 type RebuildTextEntry = (Vec<u8>, String);
 type RebuildCacheResolution = (Vec<RebuildTextEntry>, u64);
+type CachedEmbeddingResolution = (BTreeMap<String, Vec<f32>>, Vec<String>);
 
 pub(crate) struct ManagedQueryInput<'a> {
     pub(crate) relationship_query: bool,
@@ -566,7 +567,35 @@ fn resolve_embeddings(
     texts: &[String],
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<BTreeMap<String, Vec<f32>>> {
-    let unique = texts.iter().cloned().collect::<BTreeSet<_>>();
+    let (mut resolved, misses) = resolve_cached_embeddings(
+        connection,
+        runtime,
+        texts.iter().cloned().collect(),
+        is_interrupted,
+    )?;
+    if misses.is_empty() {
+        return Ok(resolved);
+    }
+    let generated = generate_embeddings(runtime, misses, is_interrupted)?;
+    publish_query_embeddings(connection, runtime, &generated)?;
+    for entry in generated {
+        storage::embedding_query_cache_put(
+            connection,
+            runtime.space_hash,
+            &entry.text,
+            &entry.vector,
+        )?;
+        resolved.insert(entry.text, entry.vector);
+    }
+    Ok(resolved)
+}
+
+fn resolve_cached_embeddings(
+    connection: &Connection,
+    runtime: &ManagedRuntime<'_>,
+    unique: BTreeSet<String>,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<CachedEmbeddingResolution> {
     let mut resolved = BTreeMap::new();
     let mut misses = Vec::new();
     for text in unique {
@@ -595,9 +624,14 @@ fn resolve_embeddings(
         }
         misses.push(text);
     }
-    if misses.is_empty() {
-        return Ok(resolved);
-    }
+    Ok((resolved, misses))
+}
+
+fn generate_embeddings(
+    runtime: &ManagedRuntime<'_>,
+    misses: Vec<String>,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<Vec<EmbeddingCacheEntry>> {
     let refs = misses.iter().map(String::as_str).collect::<Vec<_>>();
     let values = runtime
         .provider
@@ -608,16 +642,64 @@ fn resolve_embeddings(
             is_interrupted,
         )
         .map_err(map_provider_error)?;
+    let mut generated = Vec::with_capacity(misses.len());
     for (text, vector) in misses
         .into_iter()
         .zip(values.chunks_exact(runtime.dimensions))
     {
         let vector = vector.to_vec();
         validate_runtime_embedding(runtime, &vector)?;
-        storage::embedding_query_cache_put(connection, runtime.space_hash, &text, &vector)?;
-        resolved.insert(text, vector);
+        generated.push(EmbeddingCacheEntry { text, vector });
     }
-    Ok(resolved)
+    Ok(generated)
+}
+
+fn publish_query_embeddings(
+    connection: &Connection,
+    runtime: &ManagedRuntime<'_>,
+    entries: &[EmbeddingCacheEntry],
+) -> QueryResult<()> {
+    if entries.is_empty() || connection.is_readonly("main")? {
+        return Ok(());
+    }
+    let publish = storage::embedding_cache_publish(
+        connection,
+        runtime.space_hash,
+        runtime.dimensions,
+        entries,
+    );
+    match publish {
+        Ok(()) => Ok(()),
+        Err(error) if embedding_cache_publish_needs_sibling(&error) => {
+            publish_query_embeddings_on_sibling(connection, runtime, entries, error)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn embedding_cache_publish_needs_sibling(error: &storage::StorageError) -> bool {
+    matches!(
+        error,
+        storage::StorageError::Sqlite(sqlite)
+            if sqlite.sqlite_error_code() == Some(ErrorCode::DatabaseBusy)
+    )
+}
+
+fn publish_query_embeddings_on_sibling(
+    connection: &Connection,
+    runtime: &ManagedRuntime<'_>,
+    entries: &[EmbeddingCacheEntry],
+    original_error: storage::StorageError,
+) -> QueryResult<()> {
+    let Some(path) = connection.path().filter(|path| !path.is_empty()) else {
+        return Err(original_error.into());
+    };
+    let sibling = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    storage::embedding_cache_publish(&sibling, runtime.space_hash, runtime.dimensions, entries)?;
+    Ok(())
 }
 
 fn validate_runtime_embedding(runtime: &ManagedRuntime<'_>, vector: &[f32]) -> QueryResult<()> {
