@@ -14,7 +14,7 @@ Lithograph 的用户可见版本变化记录在此文件。版本遵循 Semantic
 
 - current main 的新数据库 storage format 提升为 **4**；`lithograph_init()` 可把 format 3 数据库原子迁移到 format 4，并保留既有 canonical Commit/Layer/Schema/refs。
 - OpenAI-compatible Provider 的 HTTP route 现在完全由 versioned `base_url` 决定：不自动跟随 3xx redirect，也不从 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 等环境变量自动发现 proxy；底层 HTTP/TLS dependency logging 在 Provider artifact 中编译期关闭，避免 host TRACE 绕过 credential-safe diagnostics。
-- Release packaging / artifact inspection 已扩展为同时处理 Lithograph 主 extension 与 OpenAI-compatible Provider artifact；正式六目标 hosted Release Matrix 尚未在本 Unreleased revision 上通过。
+- Release packaging / artifact inspection 已扩展为同时处理 Lithograph 主 extension 与 OpenAI-compatible Provider artifact；当前 Unreleased revision 的 Linux/macOS/Windows x64/arm64 六目标 hosted Release Matrix 已全部通过。
 
 ### Compatibility
 

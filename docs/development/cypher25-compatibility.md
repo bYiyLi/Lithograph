@@ -112,7 +112,7 @@ Phase 12 当前完成证据绑定 `463fb7c5f372c097d7dae776d271936f8b25b68a` 基
 
 ### Phase 13 Managed Semantic supplemental inventory
 
-Managed Semantic 使用 Lithograph-specific `db.index.semantic.*` procedure 与 SQLite Embedding Provider ABI，不改变 Cypher 25 Raw Vector / `SEARCH` language contract，也不向 frozen inherited TCK 分母加入 vendor-specific embedding surface。当前本地 supplemental acceptance 已闭合；只有跨平台 hosted artifact matrix 仍为 `in_progress`。
+Managed Semantic 使用 Lithograph-specific `db.index.semantic.*` procedure 与 SQLite Embedding Provider ABI，不改变 Cypher 25 Raw Vector / `SEARCH` language contract，也不向 frozen inherited TCK 分母加入 vendor-specific embedding surface。当前 supplemental acceptance 已全部闭合，包括跨平台 hosted artifact matrix。
 
 | 验收面 | Acceptance 映射 | 状态 | Owner |
 | --- | --- | --- | --- |
@@ -123,9 +123,9 @@ Managed Semantic 使用 Lithograph-specific `db.index.semantic.*` procedure 与 
 | Raw Vector/Full-text/version regression、resource evidence、repository gates/docs | SV13-05、25–26、28 | `done` | 13.6 |
 | OpenAICompatible config/auth/request/response/retry/cache/multi-config | SV13-29–35 | `done` | 13.1、13.6 |
 | SQLite 3.45.0 / 3.53.4 dual-extension runtime | SV13-27 runtime 部分 | `done` | 13.6 |
-| Linux/macOS/Windows x64/arm64 hosted artifact build/load/migration | SV13-27 hosted 部分 | `in_progress` | 13.6 |
+| Linux/macOS/Windows x64/arm64 hosted artifact build/load/migration | SV13-27 hosted 部分 | `done` | 13.6 |
 
-当前 revision 的 `lithograph-phase13` probe、synthetic/OpenAI provider smoke、Native ABI、format migration、concurrency/performance、`cargo make quality` 与 `scripts/ci.sh` 均通过；OpenAI-compatible Provider unit/safety regression 为 22/22，quality coverage regions/functions/lines 为 83.47% / 84.27% / 85.25%。executable inherited openCypher TCK 继续为 3,777/3,777 applicable scenarios 通过、0 failure；Phase 13 没有修改 frozen Cypher grammar/profile。完整 acceptance 与未完成的 hosted matrix 见 [Phase 13](phases/13-managed-semantic-vector.md#4-acceptance-matrix)。
+实现 revision `672c36043b1b05805900220355876a5ae20b7a08` 的 `lithograph-phase13` probe、synthetic/OpenAI provider smoke、Native ABI、format migration、concurrency/performance、`cargo make quality` 与 `scripts/ci.sh` 均通过；OpenAI-compatible Provider unit/safety regression 为 22/22，quality coverage regions/functions/lines 为 83.44% / 84.24% / 85.23%。repository CI `35433504169` 与六目标 Release Matrix `35433504174` 全部成功。executable inherited openCypher TCK 继续为 3,777/3,777 applicable scenarios 通过、0 failure；Phase 13 没有修改 frozen Cypher grammar/profile。完整 acceptance 见 [Phase 13](phases/13-managed-semantic-vector.md#4-acceptance-matrix)。
 
 ### Phase 03 frontend evidence
 

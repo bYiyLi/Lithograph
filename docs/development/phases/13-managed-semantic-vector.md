@@ -1,6 +1,6 @@
 # Phase 13：Managed Semantic Vector / Embedding Provider
 
-**状态：`in_progress`**
+**状态：`done`**
 
 ## 1. 目标与范围
 
@@ -12,15 +12,15 @@
 
 本 Phase **不**交付：OpenAI-compatible Embeddings profile 之外的 Chat/Responses API、Azure/OpenAI vendor 特例、BGE/Ollama 专有 API、Reranker、通用 AI plugin framework、新 Cypher grammar、`CREATE SEMANTIC INDEX`、`SEARCH ... FOR TEXT`、multi-source concat/chunking、Semantic arbitrary filtered top-k、Raw Vector HNSW 持久化或 KG OS 特例。Commit、push、发布/部署仍需要各自独立授权。
 
-## 2. 前置条件与当前差距
+## 2. 前置条件与完成状态
 
 - Phase 00–12 全部 `done`；直接依赖 Phase 01 SQLite extension boundary、Phase 07 versioned IndexDefinition、Phase 08 Raw Vector/HNSW/Search、Phase 09 version operation/Native transaction、Phase 11 storage format3/cache/read guard 与 Phase 12 provider-binding经验。
-- 当前 worktree 已实现 public `EmbeddingProviderV1`、synthetic Provider oracle、独立 `openai-compatible` Provider、Semantic Index kind/config、create/query/rebuild/cache procedures、format4 inventory/migration 与 persistent Embedding Result Cache。
+- 实现 revision `672c36043b1b05805900220355876a5ae20b7a08` 已闭合 public `EmbeddingProviderV1`、synthetic Provider oracle、独立 `openai-compatible` Provider、Semantic Index kind/config、create/query/rebuild/cache procedures、format4 inventory/migration 与 persistent Embedding Result Cache。
 - Raw Vector 仍从真实 graph Property 读取向量，既有 Cypher 25 `SEARCH` / HNSW 行为保持独立；Managed Semantic cold path 以 correctness scan 产出结果并构建 connection-local TEMP HNSW，后续 matching Snapshot/definition/embedding-space query 可复用该 TEMP HNSW，不把它描述成 persistent Semantic HNSW。
-- 当前本地 Phase acceptance 已闭合 SV13-01–26、28–35；SV13-27 的 SQLite 3.45.0/current runtime 部分已通过，唯一剩余交付差距是 Linux/macOS/Windows x64/arm64 六目标 hosted artifact build/load/migration 尚未在当前 worktree 上真实执行。
+- Phase acceptance SV13-01–35 已全部闭合；SV13-27 的 SQLite 3.45.0/current runtime 与 Linux/macOS/Windows x64/arm64 六目标 hosted artifact build/load/migration 均已通过。
 - SQLite minimum 3.45.0 已覆盖 3.44.0 引入的 connection client-data API，因此不需要为了本 Phase 提高 SQLite minimum。
 
-Phase 13 当前状态仍为 `in_progress`。只有 SV13-27 hosted matrix 也有当前 worktree/revision 的真实证据后才能标记 `done`。
+Phase 13 状态为 `done`。实现 revision 的 repository CI `35433504169` 与 Release Matrix `35433504174` 提供了最终 hosted 证据；该能力仍属于 Unreleased，未进入 v0.1.1。
 
 ## 3. Feature 顺序
 
@@ -137,7 +137,7 @@ Graph View 必须在 top-k/skip/limit 之前约束 Node/Relationship/endpoint；
 | SV13-24 | failure/semanticIdentity drift | IO/resource/interrupt/invalid payload不negative-cache/不部分top-k；identity变化不读旧space | `done` |
 | SV13-25 | Raw Vector/HNSW/Full-text/version regression | Phase08/11/12 targeted suites与适用 compatibility inventory无未知退化 | `done` |
 | SV13-26 | provider-call/resource quantitative gate | duplicate/warm/query-LRU call counters、cache bytes、batch数、writer hold有可重复报告 | `done` |
-| SV13-27 | real SQLite + cross-platform ABI/storage | 3.45.0 + current/frozen runtime真实dual-extension smoke；六目标 artifact build/load/migration通过 | `in_progress` |
+| SV13-27 | real SQLite + cross-platform ABI/storage | 3.45.0 + current/frozen runtime真实dual-extension smoke；六目标 artifact build/load/migration通过 | `done` |
 | SV13-28 | repository gates/docs/final review | fmt/clippy/tests/quality/CI、links/diff-check/无secret/无产物；Phase-level review finding闭合 | `done` |
 | SV13-29 | OpenAICompatible config schema / persistence | `base_url/api_key/api_key_env/model/send_dimensions/encoding_format/user/organization/project/headers/timeout_ms/max_retries/batch_size/semantic_identity` 全部 round-trip；unknown/type/range 负例；config进入 Schema/SHOW/Diff/Patch，含显式 secret 原值；省略默认与显式默认不被偷偷改写 | `done` |
 | SV13-30 | Auth / environment / header precedence | custom `Authorization` > `api_key` > `api_key_env` > no Authorization；自定义Authorization存在时不解析env；仅显式env名被读取，必要env missing明确失败；organization/project映射header；custom headers大小写不敏感覆盖且case-duplicate拒绝 | `done` |
@@ -149,16 +149,17 @@ Graph View 必须在 top-k/skip/limit 之前约束 Node/Relationship/endpoint；
 
 ### 当前验收证据
 
-当前 `main` revision 的本地 Phase 13 验收已闭合 SV13-01–26、28–35；SV13-27 只剩 hosted 六目标 artifact matrix：
+实现 revision `672c36043b1b05805900220355876a5ae20b7a08` 的 Phase 13 验收已闭合 SV13-01–35：
 
 - `lithograph-phase13` real-SQLite probe 覆盖双 load order、multi-label/type、Schema 负例、exact String/Unicode、query/rebuild/cache、Graph View、历史 Provider、Semantic Diff/Patch/Merge/Rebase/Revert publication validation、warm-cache provider-missing、失败原子性、graph-mutation pre-provider boundary、rows/read-only query+rebuild 与 OpenAI config round-trip。
 - SQLite **3.45.0** 与 **3.53.4** 均完成 Lithograph + synthetic provider + OpenAI-compatible provider 真实 `.load`、format migration、Native ABI、Phase 12/13 双 extension、concurrency 与 performance smoke。
 - OpenAI-compatible Provider unit/integration safety closure 为 **22/22**：dependency `log::STATIC_MAX_LEVEL=Off` 且 extension load fail closed；3xx 不自动 redirect；HTTP client 环境 proxy autodiscovery 关闭；custom auth/header、`api_key` / `api_key_env` error path 继续保持 secret-safe diagnostics。
 - quantitative fixture：64 owners / 16 unique source texts；cold query 只提交 16 provider inputs，same-connection warm 与 new-connection persistent-warm query 均为 0 provider inputs；cold rebuild 写入 16 entries / 256 bytes，warm rebuild 为 16 cache hits / 0 provider inputs。该结果证明机制，不定义通用延迟 SLA；完整记录见 [Phase 13 Semantic performance evidence](../../research/phase13-semantic-performance-evidence.md)。
 - 1 秒 synthetic Provider wait 下，3.45.0/3.53.4 concurrency probe 的 writer wait/hold 维持毫秒级，并断言 non-autocommit provider call 为 0；它证明 Provider I/O 不持有 SQLite single-writer ownership，不等于 external-I/O 没有 read-view/WAL pin 成本。
-- `cargo make quality` 与 `scripts/ci.sh` 均在本轮 read-only rebuild、cache integrity 与 transaction boundary 修复后重新执行并 exit 0；quality coverage regions/functions/lines 为 **83.47% / 84.27% / 85.25%**，新增 Managed Semantic / Provider 文件均通过 per-file line coverage ≥ 50% 门禁；applicable inherited openCypher TCK 继续为 3,777/3,777。
+- `cargo make quality` 与 `scripts/ci.sh` 均在最终 portability 修复后重新执行并 exit 0；quality coverage regions/functions/lines 为 **83.44% / 84.24% / 85.23%**，新增 Managed Semantic / Provider 文件均通过 per-file line coverage ≥ 50% 门禁；applicable inherited openCypher TCK 继续为 3,777/3,777。
+- repository CI `35433504169` 的 quality、Linux、Windows 与 macOS jobs 全部成功；Release Matrix `35433504174` 的 storage fixture 与 Linux x64/arm64、macOS x64/arm64、Windows x64/arm64 artifact build/load/migration jobs 全部成功，非 tag revision 的 publish job 按预期跳过。
 
-SV13-27 的 SQLite 3.45.0/current runtime 部分已经通过；Linux x64/arm64、macOS x64/arm64、Windows x64/arm64 的 hosted Release Matrix 仍需对当前 revision 实际 build/load/migration 并全部成功。在这些远端证据落地前，该项保持 `in_progress`，Phase 总状态不提升为 `done`。
+SV13-27 的本地双 SQLite runtime 与六目标 hosted Release Matrix 均已通过，Phase 总状态提升为 `done`。这只表示开发验收完成，不表示已经 tag、发布或部署。
 
 ## 5. 验证执行计划
 
@@ -190,4 +191,4 @@ Phase review必须同时检查：Raw Vector compatibility、Semantic definition/
 
 重点反例：把 String `CREATE VECTOR INDEX` 偷换为managed、在 graph mutation 内调用provider、provider duplicate静默覆盖、OpenAICompatible 在 load 时冻结单一 endpoint、偷偷读取未配置环境变量、删除/脱敏调用方显式 `api_key`、漏掉官方 Embeddings request field、custom header precedence错误、query miss隐式写main、把query-only text持久化、cache key漏model/config/identity、similarity错误进入space key、外部调用持有writer、Graph View query给hidden source做embedding、Provider错误返回部分top-k、Raw Vector regression被semantic fallback掩盖、format4表在format3静默出现。
 
-SV13-01–35全部有当前 revision/worktree 的真实自动化/集成/人工 diff review证据，required repository gates通过，文档同步到实际实现，且当前 Phase scope无剩余 task-affecting finding后，才能把状态从 `in_progress` 改为 `done`。设计/计划完成本身不等于 Phase 13 实现完成。
+实现 revision `672c36043b1b05805900220355876a5ae20b7a08` 已满足上述完成标准：SV13-01–35均有真实自动化/集成/人工 diff review证据，required repository gates与六目标 hosted Release Matrix通过，文档同步到实际实现，且Phase scope无剩余task-affecting finding，因此状态为 `done`。设计/计划完成本身仍不等于Phase实现完成；本次状态由真实实现与验收证据支撑。

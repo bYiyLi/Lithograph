@@ -91,7 +91,7 @@ FROM lithograph_rows('MATCH (p:Person) RETURN p.name');
 
 ## 项目状态
 
-Lithograph 当前已经完成 Phase 00–12 的实现与开发验收，当前发布版本为 **v0.1.1**。当前 `main` 的 Phase 13 实现已经闭合 Managed Semantic 主路径：公开 Embedding Provider ABI、OpenAI-compatible reference Provider、versioned Semantic Index、文本 query、persistent cache / rebuild、format 4 migration、Graph View / history / Diff-Patch-Merge-Rebase-Revert publication validation、SQL/Native transaction boundary 与真实 SQLite 3.45.0 / 3.53.4 验收均已通过。Phase 13 仍保持 `in_progress`，因为本 Unreleased revision 尚未通过六目标 hosted Release Matrix；正式发布状态仍以 v0.1.1 为准。
+Lithograph 当前已经完成 Phase 00–13 的实现与开发验收，当前发布版本为 **v0.1.1**。当前 `main` 的 Phase 13 实现已经闭合 Managed Semantic 主路径：公开 Embedding Provider ABI、OpenAI-compatible reference Provider、versioned Semantic Index、文本 query、persistent cache / rebuild、format 4 migration、Graph View / history / Diff-Patch-Merge-Rebase-Revert publication validation、SQL/Native transaction boundary、真实 SQLite 3.45.0 / 3.53.4，以及 Linux/macOS/Windows x64/arm64 六目标 hosted Release Matrix 均已通过。Phase 13 的开发状态为 `done`，但仍属于 Unreleased 能力；正式发布状态仍以 v0.1.1 为准。
 
 v0.1.1 仍属于 pre-1.0 版本。升级已有数据库前应保留完整备份；format 3 没有自动 downgrade。Full-text analyzer 从 v0.1.0 到 v0.1.1 存在明确的配置行为变化，详见 [CHANGELOG](CHANGELOG.md) 与 [v0.1.1 Release Notes](docs/releases/v0.1.1.md)。
 
@@ -100,7 +100,7 @@ v0.1.1 仍属于 pre-1.0 版本。升级已有数据库前应保留完整备份�
 - [Phase 11 性能优化计划](docs/development/phases/11-performance-optimization.md)
 - [Phase 12 全文 Tokenizer 扩展计划](docs/development/phases/12-fulltext-tokenizer.md)
 - [Phase 13 Managed Semantic Vector / Embedding Provider](docs/development/phases/13-managed-semantic-vector.md)
-- 当前开发阶段：Phase 00–12 `done`；Phase 13 `in_progress`，本地/双 SQLite acceptance 已闭合，六目标 hosted Release Matrix 待真实执行。
+- 当前开发阶段：Phase 00–13 全部 `done`；Phase 13 的 repository CI 与六目标 hosted Release Matrix 已通过，但尚未发布为新的 GitHub Release。
 
 ## 许可
 
