@@ -1,6 +1,6 @@
 # Procedure Reference
 
-**版本：v0.1.1。** 所有 33 个公开签名、mode 和输出列见 [Inventory](procedure-inventory.md)。本页补充参数语义、默认值、Commit 效果及限制；名称不省略 `lithograph.` / `db.` 前缀。
+**版本：正式 v0.1.1 + Unreleased Phase 13 supplemental。** v0.1.1 的 33 个公开签名与当前 `main` 新增的 8 个 `db.index.semantic.*` procedure 见 [Inventory](procedure-inventory.md)。本页补充参数语义、默认值、Commit 效果及限制；名称不省略 `lithograph.` / `db.` 前缀。
 
 Procedure 通过 Cypher `CALL name(...)` 调用，返回行可接 `YIELD` / `RETURN`。本页的方括号表示可选位置参数，不是实际调用字符。可选参数通常通过省略提供默认值，不应把 null 当作任意可选参数的默认值。
 
@@ -17,6 +17,29 @@ Procedure 通过 Cypher `CALL name(...)` 调用，返回行可接 `YIELD` / `RET
 全文 options 默认 `{}`，支持 `skip`、`limit`、`analyzer`；skip 非负、limit 为合法非负整数，省略 limit 不额外施加该限制。`analyzer` 是当前 SQLite connection 可构造的完整 FTS5 tokenizer specification；省略时采用 IndexDefinition 的 specification。它只改变本次查询文本的分词，不改变 IndexDefinition 或已索引文档。名称必须对应当前选定版本的正确索引 target family。
 
 默认 tokenizer 为 `unicode61`；Porter stemming 使用 `porter unicode61`。`standard-no-stop-words` / `english` 不再有 Lithograph 特殊映射。第三方 tokenizer 通过宿主 SQLite extension 在每个实际 connection 上注册，不是 Neo4j/Lucene analyzer plugin。score 由检索语义定义，非概率；业务分页与 top-k 应显式限制结果量。例子见 [Search](../guide/search.md)。
+
+## Unreleased：Managed Semantic
+
+以下 8 个 procedure 属于当前 `main` 的 Phase 13，尚未进入 v0.1.1 Release：
+
+| Procedure | Mode | 输入 / 输出 |
+| --- | --- | --- |
+| `db.index.semantic.createNodeIndex(indexName,labels,sourceProperty,options)` | WRITE | 无输出列；创建 versioned Node Semantic Index |
+| `db.index.semantic.createRelationshipIndex(indexName,relationshipTypes,sourceProperty,options)` | WRITE | 无输出列；创建 versioned Relationship Semantic Index |
+| `db.index.semantic.queryNodes(indexName,queryString,options)` | READ | `node,score` |
+| `db.index.semantic.queryRelationships(indexName,queryString,options)` | READ | `relationship,score` |
+| `db.index.semantic.cache.configure(options)` | WRITE | `enabled,maxBytes` |
+| `db.index.semantic.cache.stats()` | READ | `enabled,maxBytes,usedBytes,entries,spaces` |
+| `db.index.semantic.cache.clear()` | WRITE | `deletedEntries,releasedPayloadBytes` |
+| `db.index.semantic.rebuild(name,version)` | WRITE | `name,commit,indexedEntities,embeddedTexts,cacheHits` |
+
+create 的 `labels` / `relationshipTypes` 是非空 `LIST<STRING>`；`sourceProperty` 只有实际 String 值参与。options 必须包含 `provider`、`providerConfig`、`dimensions`、`similarity`。dimensions 为 1–4096；v1 similarity 为 `cosine` / `euclidean`。CREATE 只执行当前 connection 上 Provider 的本地 `validate`，不调用 `embedBatch`。
+
+query options 必须包含非负 `limit`，可选非负 `skip`；未知 key / null / 错误类型返回 `INVALID_ARGUMENT`。实际 query/rebuild 每次都要求目标历史 Semantic definition 指定的 Provider 当前注册并通过 validation，即使 persistent cache 已 warm。query 是 graph read，summary commit 为 pinned Commit；query miss 只进入 TEMP/LRU，不隐式写 persistent cache。
+
+`cache.configure` 只接受 `enabled` / `maxBytes`；`cache.clear` 只删 Embedding Result Cache；`rebuild` 的 version 是现有 version descriptor。configure/clear/rebuild 都是 operational maintenance：成功时 `summary.queryType="version"`、`summary.commit=null`、不创建 graph Commit、不移动 ref。它们和 semantic query 都不能通过 `lithograph_rows()` 执行；Native explicit transaction 在 Provider I/O 前拒绝 semantic query/rebuild，maintenance 也要求独立 autocommit boundary。
+
+Provider/config/source 都属于 versioned IndexDefinition。Semantic definition 的 Diff/Patch 使用普通 Index logical slot；Patch/Merge/Rebase/Revert 发布新增/改变 definition 前会再次验证 Provider，失败不会移动 Branch。SHOW/DROP/history inspection 不要求 Provider 当前存在。完整示例见 [Search](../guide/search.md#unreleasedmanaged-semantic-文本检索)。
 
 ## Branch 与 Tag
 
@@ -106,6 +129,8 @@ v0.1.0–v0.1.1 的 `SHOW PROCEDURES.returnDescription[*].type` 把所有输出�
 | `commit.get.data`、`commit.data.set.data` | 任意 JSON value，可能为 null |
 | `diff.patch` | MAP，operations 为 LIST<MAP> |
 | Full-text node / relationship、score | 分别为 NODE / RELATIONSHIP、FLOAT |
+| Semantic node / relationship、score | 分别为 NODE / RELATIONSHIP、FLOAT |
+| Semantic cache counters / indexedEntities / embeddedTexts / cacheHits | INTEGER |
 | conflict.slot / base / ours / theirs / resolution | 由具体冲突槽位决定的 typed value / Map / null；不要 stringify 后丢失结构 |
 | `rebase.rewritten`、`rebase.conflicts` | LIST<MAP> |
 
@@ -116,6 +141,8 @@ v0.1.0–v0.1.1 的 `SHOW PROCEDURES.returnDescription[*].type` 把所有输出�
 `lithograph.index.rebuild(name,version)`：两个参数均为非空字符串，version 是明确 Descriptor。仅支持持久 Standard Index 的 RANGE/TEXT/POINT / Relationship LOOKUP family，不支持 Node LOOKUP、FULLTEXT、VECTOR。返回 `name,commit,indexedEntities`；commit 是实际 anchor，不创建新 Commit、不移动 Branch。
 
 rebuild 在普通 scalar / Native 上独立执行，可接只读结果投影，但不与其他 mutation/maintenance 合并。rows adapter 禁止，Native explicit transaction / transaction-owning subquery / candidate 中禁止，不接受 at 或不适用 execution options。全量重建可能长时间持有 writer，应安排维护窗口。
+
+Managed Semantic 不复用 `lithograph.index.rebuild`；使用上节的 `db.index.semantic.rebuild`。它先在 writer ownership 之外完成 Provider I/O，再在短 publish transaction 写入 persistent embedding cache，因此与 Standard Index rebuild 的锁持有模型不同。
 
 `lithograph.gc()`：无参数，显式删除所有 Branch、Tag、open Merge Session 都不可达的历史和相关 derived data。返回 `commits,layers,schemas,checkpoints,commitData` 的删除数量。不会以“压缩数据库文件”为理由忽略可达历史；文件物理空间处理仍属于 SQLite 运维。
 

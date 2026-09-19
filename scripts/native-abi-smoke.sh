@@ -1,13 +1,14 @@
 #!/usr/bin/env sh
 set -eu
 
-if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
-  echo "usage: scripts/native-abi-smoke.sh <extension-path> [phase12-tokenizer-extension-path]" >&2
+if [ "$#" -lt 1 ] || [ "$#" -gt 3 ]; then
+  echo "usage: scripts/native-abi-smoke.sh <extension-path> [phase12-tokenizer-extension-path] [phase13-synthetic-provider-path]" >&2
   exit 2
 fi
 
 extension=$1
 phase12_tokenizer=${2:-}
+phase13_provider=${3:-}
 sqlite_bin=${LITHOGRAPH_SQLITE3:-sqlite3}
 sqlite_source_dir=${LITHOGRAPH_SQLITE_SOURCE_DIR:-}
 output="${CARGO_TARGET_DIR:-target}/phase01/native-abi-smoke"
@@ -69,7 +70,9 @@ else
     -o "$output"
 fi
 
-if [ -n "$phase12_tokenizer" ]; then
+if [ -n "$phase13_provider" ]; then
+  "$output" "$extension" "$phase12_tokenizer" "$phase13_provider"
+elif [ -n "$phase12_tokenizer" ]; then
   "$output" "$extension" "$phase12_tokenizer"
 else
   "$output" "$extension"

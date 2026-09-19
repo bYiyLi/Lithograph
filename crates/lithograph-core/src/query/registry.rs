@@ -156,6 +156,84 @@ const PROCEDURES: &[ProcedureDefinition] = &[
         outputs: &["relationship", "score"],
     },
     ProcedureDefinition {
+        name: "db.index.semantic.createNodeIndex",
+        description: "Creates one versioned Managed Semantic Node Index definition.",
+        mode: "WRITE",
+        works_on_system: false,
+        signature: "db.index.semantic.createNodeIndex(indexName :: STRING, labels :: LIST<STRING>, sourceProperty :: STRING, options :: MAP)",
+        admin: false,
+        outputs: &[],
+    },
+    ProcedureDefinition {
+        name: "db.index.semantic.createRelationshipIndex",
+        description: "Creates one versioned Managed Semantic Relationship Index definition.",
+        mode: "WRITE",
+        works_on_system: false,
+        signature: "db.index.semantic.createRelationshipIndex(indexName :: STRING, relationshipTypes :: LIST<STRING>, sourceProperty :: STRING, options :: MAP)",
+        admin: false,
+        outputs: &[],
+    },
+    ProcedureDefinition {
+        name: "db.index.semantic.queryNodes",
+        description: "Queries one Managed Semantic Node Index with exact text embedding.",
+        mode: "READ",
+        works_on_system: false,
+        signature: "db.index.semantic.queryNodes(indexName :: STRING, queryString :: STRING, options :: MAP) :: (node :: NODE, score :: FLOAT)",
+        admin: false,
+        outputs: &["node", "score"],
+    },
+    ProcedureDefinition {
+        name: "db.index.semantic.queryRelationships",
+        description: "Queries one Managed Semantic Relationship Index with exact text embedding.",
+        mode: "READ",
+        works_on_system: false,
+        signature: "db.index.semantic.queryRelationships(indexName :: STRING, queryString :: STRING, options :: MAP) :: (relationship :: RELATIONSHIP, score :: FLOAT)",
+        admin: false,
+        outputs: &["relationship", "score"],
+    },
+    ProcedureDefinition {
+        name: "db.index.semantic.cache.configure",
+        description: "Configures the database-local persistent embedding cache policy.",
+        mode: "WRITE",
+        works_on_system: false,
+        signature: "db.index.semantic.cache.configure(options :: MAP) :: (enabled :: BOOLEAN, maxBytes :: INTEGER)",
+        admin: false,
+        outputs: &["enabled", "maxBytes"],
+    },
+    ProcedureDefinition {
+        name: "db.index.semantic.cache.stats",
+        description: "Returns persistent embedding cache policy and usage.",
+        mode: "READ",
+        works_on_system: false,
+        signature: "db.index.semantic.cache.stats() :: (enabled :: BOOLEAN, maxBytes :: INTEGER, usedBytes :: INTEGER, entries :: INTEGER, spaces :: INTEGER)",
+        admin: false,
+        outputs: &["enabled", "maxBytes", "usedBytes", "entries", "spaces"],
+    },
+    ProcedureDefinition {
+        name: "db.index.semantic.cache.clear",
+        description: "Clears only the database-local persistent embedding cache.",
+        mode: "WRITE",
+        works_on_system: false,
+        signature: "db.index.semantic.cache.clear() :: (deletedEntries :: INTEGER, releasedPayloadBytes :: INTEGER)",
+        admin: false,
+        outputs: &["deletedEntries", "releasedPayloadBytes"],
+    },
+    ProcedureDefinition {
+        name: "db.index.semantic.rebuild",
+        description: "Precomputes persistent embeddings for one Semantic Index at an explicit version.",
+        mode: "WRITE",
+        works_on_system: false,
+        signature: "db.index.semantic.rebuild(name :: STRING, version :: STRING) :: (name :: STRING, commit :: STRING, indexedEntities :: INTEGER, embeddedTexts :: INTEGER, cacheHits :: INTEGER)",
+        admin: false,
+        outputs: &[
+            "name",
+            "commit",
+            "indexedEntities",
+            "embeddedTexts",
+            "cacheHits",
+        ],
+    },
+    ProcedureDefinition {
         name: "lithograph.branch.create",
         description: "Lithograph versioned-state procedure.",
         mode: "WRITE",
@@ -501,6 +579,30 @@ pub(crate) fn is_version_procedure(name: &str) -> bool {
 
 pub(crate) fn is_version_mutation(name: &str) -> bool {
     procedure(name).is_some_and(|procedure| is_version_procedure(name) && procedure.mode == "WRITE")
+}
+
+pub(crate) fn is_semantic_procedure(name: &str) -> bool {
+    name.to_ascii_lowercase().starts_with("db.index.semantic.")
+}
+
+pub(crate) fn is_semantic_query(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "db.index.semantic.querynodes" | "db.index.semantic.queryrelationships"
+    )
+}
+
+pub(crate) fn is_semantic_maintenance(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "db.index.semantic.cache.configure"
+            | "db.index.semantic.cache.clear"
+            | "db.index.semantic.rebuild"
+    )
+}
+
+pub(crate) fn is_semantic_direct_only(name: &str) -> bool {
+    is_semantic_query(name) || is_semantic_maintenance(name)
 }
 
 fn function_overload_count(name: &str) -> u8 {

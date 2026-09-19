@@ -93,6 +93,7 @@ pub enum StandardIndexKind {
     Point,
     FullText,
     Vector,
+    Semantic,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,6 +124,12 @@ pub enum IndexConfiguration {
         default_search_expansion_factor: String,
         hnsw_m: u64,
         hnsw_ef_construction: u64,
+    },
+    Semantic {
+        provider: String,
+        provider_config: JsonValue,
+        dimensions: u64,
+        similarity_function: String,
     },
 }
 

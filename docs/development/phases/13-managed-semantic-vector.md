@@ -15,13 +15,12 @@
 ## 2. 前置条件与当前差距
 
 - Phase 00–12 全部 `done`；直接依赖 Phase 01 SQLite extension boundary、Phase 07 versioned IndexDefinition、Phase 08 Raw Vector/HNSW/Search、Phase 09 version operation/Native transaction、Phase 11 storage format3/cache/read guard 与 Phase 12 provider-binding经验。
-- 当前 `StandardIndexKind` 只有 Cypher 25 index families；`IndexConfiguration` 没有 Semantic provider config。
-- 当前 Raw Vector 从真实 graph Property 读取向量，HNSW 是 connection-local TEMP derived cache；调用方必须自己生成/写入/query Vector。
-- 提交基线 `1e6e078` 尚无 Provider ABI；当前未提交 worktree 已开始 public `EmbeddingProviderV1`、client-data registration fixture 与独立 OpenAICompatible Provider 的 13.1 实现，但尚未完成 Phase acceptance，不能按已交付能力引用。
-- 当前仍没有可验收的 Semantic Index kind/config、text->Vector persistent cache、Semantic create/query/rebuild/cache procedures 或 format4 inventory；这些继续是 13.2–13.5 的主体差距。
+- 当前 worktree 已实现 public `EmbeddingProviderV1`、synthetic Provider oracle、独立 `openai-compatible` Provider、Semantic Index kind/config、create/query/rebuild/cache procedures、format4 inventory/migration 与 persistent Embedding Result Cache。
+- Raw Vector 仍从真实 graph Property 读取向量，既有 Cypher 25 `SEARCH` / HNSW 行为保持独立；Managed Semantic cold path 以 correctness scan 产出结果并构建 connection-local TEMP HNSW，后续 matching Snapshot/definition/embedding-space query 可复用该 TEMP HNSW，不把它描述成 persistent Semantic HNSW。
+- 当前本地 Phase acceptance 已闭合 SV13-01–26、28–35；SV13-27 的 SQLite 3.45.0/current runtime 部分已通过，唯一剩余交付差距是 Linux/macOS/Windows x64/arm64 六目标 hosted artifact build/load/migration 尚未在当前 worktree 上真实执行。
 - SQLite minimum 3.45.0 已覆盖 3.44.0 引入的 connection client-data API，因此不需要为了本 Phase 提高 SQLite minimum。
 
-Phase 13 已开始实现，当前状态为 `in_progress`。只有 SV13 acceptance 全部有当前 worktree/revision 的真实证据后才能标记 `done`。
+Phase 13 当前状态仍为 `in_progress`。只有 SV13-27 hosted matrix 也有当前 worktree/revision 的真实证据后才能标记 `done`。
 
 ## 3. Feature 顺序
 
@@ -112,41 +111,54 @@ Graph View 必须在 top-k/skip/limit 之前约束 Node/Relationship/endpoint；
 
 | ID | 必须验证的场景 | 验收证据 / 判定 | 状态 |
 | --- | --- | --- | --- |
-| SV13-01 | client-data provider 注册、两种 load order、connection A/B 隔离 | 真实 SQLite extension probe；同 provider只在注册 connection可见 | `planned` |
-| SV13-02 | duplicate provider name | 第二次注册明确失败，旧 pointer/state继续有效；不得触发 silent replacement | `planned` |
-| SV13-03 | ABI version/struct size/callback/destructor | valid v1可调用；旧/大/缺 callback/malformed pointer fail closed；close exactly-once释放 | `planned` |
-| SV13-04 | `validate` 与 `embedBatch` contract | validate无网络/无embed；batch顺序/数量/dimension/FLOAT32/finite/cancel/error受 synthetic oracle断言 | `planned` |
-| SV13-05 | Raw Vector完全不依赖 Provider | Phase08 Vector/Search targeted tests无 provider仍全部通过；现有 DDL/SEARCH result不变 | `planned` |
-| SV13-06 | Node/Relationship create、single source、多 Label/Type | definition round-trip；非空/重复/类型/unknown option负例完整 | `planned` |
-| SV13-07 | providerConfig canonicalization | Map key order等价；非JSON-compatible value拒绝；config变化产生不同 Schema/index definition | `planned` |
-| SV13-08 | create只做本地 validation | corpus/provider call counter证明 CREATE/Patch planning不执行 embed；失败不发布 Schema/head | `planned` |
-| SV13-09 | SHOW/DROP 与 Raw Vector区分 | SHOW ALL返回 `SEMANTIC`；SHOW VECTOR排除；通用 DROP有效且无需 provider | `planned` |
-| SV13-10 | Diff/Patch/Merge/Rebase/Revert/Native staged schema | provider/config/source变化是单一 Index slot change；publication失败原子 rollback | `planned` |
-| SV13-11 | format3→4/fresh4/legacy/too-new | migration保留全部旧 hash/refs；只创建空 derived structures；旧 engine拒绝format4 | `planned` |
-| SV13-12 | embedding-space/text cache identity | 同 space+exact text跨 owner/index/history共享；provider/config/dimension/semanticIdentity隔离；similarity不分裂 | `planned` |
-| SV13-13 | persistent cache payload/integrity | 不保存 source raw text；dimension/FLOAT32/vector/blob/counter损坏不会产生正常 result | `planned` |
-| SV13-14 | configure/stats/FIFO capacity | enabled/maxBytes持久化但不进Commit；write时逐出oldest；hit不写main；used/entries/spaces准确 | `planned` |
-| SV13-15 | clear/read-only/cache-disabled/crash | clear只删embedding cache；SQLite file不承诺缩小；read-only/disabled仍可TEMP正确执行；失败无半entry | `planned` |
-| SV13-16 | queryNodes/queryRelationships 基本结果 | query text→provider→vector→HNSW/scan；score排序/skip/required limit/0 limit/空图正确 | `planned` |
-| SV13-17 | source type/exact text | STRING/empty/Unicode exact bytes；missing/null/non-string排除；无trim/lower/concat/truncate | `planned` |
-| SV13-18 | Graph View before top-k / TEMP cache isolation | hidden Node/Relationship/endpoint不占limit，on-demand provider不接收不可见source；view-local materialization不被更宽/无view查询复用 | `planned` |
-| SV13-19 | historical definition/provider missing | at Commit使用历史config；缺provider时SHOW/read可用、即使warm cache完整实际query/rebuild仍明确失败、无current-head借用 | `planned` |
-| SV13-20 | adapter/transaction boundary | scalar/Native semantic query可执行；rows拒绝external-I/O；configure/clear/rebuild按maintenance边界拒绝rows/explicit tx；query/rebuild在provider I/O前拒绝explicit tx | `planned` |
-| SV13-21 | batch dedup + cache hit | N个相同source同space最多一次provider input；已有persistent cache跨connection时仍验证provider/identity但零`embedBatch`调用 | `planned` |
-| SV13-22 | query memory privacy | query-only miss不进main；同connection重复query命中LRU；connection close后消失 | `planned` |
-| SV13-23 | rebuild两阶段外部I/O | provider调用期间不持single-writer；publish短transaction重新验证target；无Commit/ref move | `planned` |
-| SV13-24 | failure/semanticIdentity drift | IO/resource/interrupt/invalid payload不negative-cache/不部分top-k；identity变化不读旧space | `planned` |
-| SV13-25 | Raw Vector/HNSW/Full-text/version regression | Phase08/11/12 targeted suites与适用 compatibility inventory无未知退化 | `planned` |
-| SV13-26 | provider-call/resource quantitative gate | duplicate/warm/query-LRU call counters、cache bytes、batch数、writer hold有可重复报告 | `planned` |
-| SV13-27 | real SQLite + cross-platform ABI/storage | 3.45.0 + current/frozen runtime真实dual-extension smoke；六目标 artifact build/load/migration通过 | `planned` |
-| SV13-28 | repository gates/docs/final review | fmt/clippy/tests/quality/CI、links/diff-check/无secret/无产物；Phase-level review finding闭合 | `planned` |
-| SV13-29 | OpenAICompatible config schema / persistence | `base_url/api_key/api_key_env/model/send_dimensions/encoding_format/user/organization/project/headers/timeout_ms/max_retries/batch_size/semantic_identity` 全部 round-trip；unknown/type/range 负例；config进入 Schema/SHOW/Diff/Patch，含显式 secret 原值；省略默认与显式默认不被偷偷改写 | `planned` |
-| SV13-30 | Auth / environment / header precedence | custom `Authorization` > `api_key` > `api_key_env` > no Authorization；自定义Authorization存在时不解析env；仅显式env名被读取，必要env missing明确失败；organization/project映射header；custom headers大小写不敏感覆盖且case-duplicate拒绝 | `planned` |
-| SV13-31 | OpenAI Embeddings request completeness | local HTTP oracle断言 `POST <base_url>/embeddings`，body覆盖 `model/input/dimensions(optional)/encoding_format/user`；`send_dimensions` true/false均覆盖；input来自 exact String、dimension contract来自 Semantic Index，不建立重复 config field | `planned` |
-| SV13-32 | float/base64 response contract | 两种 encoding format 都转成 ABI FLOAT32；response按index重排并校验count/index/dimension/finite；unknown extra response fields不破坏解析 | `planned` |
-| SV13-33 | batch/token-limit/failure/retry/cancel / secret-safe diagnostics | batch_size 1–2048按item分批；不truncate/chunk/tokenize；empty/oversize由明确本地或endpoint错误；408/429/5xx/transport bounded retry，其他4xx不重试；Retry-After与cancel边界有oracle；sentinel api_key/env/header secret不出现在error/log/trace | `planned` |
-| SV13-34 | cache identity / config change | 完整 canonical providerConfig + 固定实现 ABI semantic identity + dimensions隔离 space；修改endpoint/model/header/auth/runtime字段均不误复用旧space；同env名secret rotation默认复用，语义路由改变时必须通过`semantic_identity`显式隔离 | `planned` |
-| SV13-35 | Provider独立 artifact / multi-config | crate不依赖`lithograph-core`；真实SQLite 3.45+/current可单独`.load`并注册；同connection两个Semantic Index可使用不同base_url/auth/model config，无process-global endpoint冻结 | `planned` |
+| SV13-01 | client-data provider 注册、两种 load order、connection A/B 隔离 | 真实 SQLite extension probe；同 provider只在注册 connection可见 | `done` |
+| SV13-02 | duplicate provider name | 第二次注册明确失败，旧 pointer/state继续有效；不得触发 silent replacement | `done` |
+| SV13-03 | ABI version/struct size/callback/destructor | valid v1可调用；旧/大/缺 callback/malformed pointer fail closed；close exactly-once释放 | `done` |
+| SV13-04 | `validate` 与 `embedBatch` contract | validate无网络/无embed；batch顺序/数量/dimension/FLOAT32/finite/cancel/error受 synthetic oracle断言 | `done` |
+| SV13-05 | Raw Vector完全不依赖 Provider | Phase08 Vector/Search targeted tests无 provider仍全部通过；现有 DDL/SEARCH result不变 | `done` |
+| SV13-06 | Node/Relationship create、single source、多 Label/Type | definition round-trip；非空/重复/类型/unknown option负例完整 | `done` |
+| SV13-07 | providerConfig canonicalization | Map key order等价；非JSON-compatible value拒绝；config变化产生不同 Schema/index definition | `done` |
+| SV13-08 | create只做本地 validation | corpus/provider call counter证明 CREATE/Patch planning不执行 embed；失败不发布 Schema/head | `done` |
+| SV13-09 | SHOW/DROP 与 Raw Vector区分 | SHOW ALL返回 `SEMANTIC`；SHOW VECTOR排除；通用 DROP有效且无需 provider | `done` |
+| SV13-10 | Diff/Patch/Merge/Rebase/Revert/Native staged schema | provider/config/source变化是单一 Index slot change；publication失败原子 rollback | `done` |
+| SV13-11 | format3→4/fresh4/legacy/too-new | migration保留全部旧 hash/refs；只创建空 derived structures；旧 engine拒绝format4 | `done` |
+| SV13-12 | embedding-space/text cache identity | 同 space+exact text跨 owner/index/history共享；provider/config/dimension/semanticIdentity隔离；similarity不分裂 | `done` |
+| SV13-13 | persistent cache payload/integrity | 不保存 source raw text；dimension/FLOAT32/vector/blob/counter损坏不会产生正常 result | `done` |
+| SV13-14 | configure/stats/FIFO capacity | enabled/maxBytes持久化但不进Commit；write时逐出oldest；hit不写main；used/entries/spaces准确 | `done` |
+| SV13-15 | clear/read-only/cache-disabled/crash | clear只删embedding cache；SQLite file不承诺缩小；read-only/disabled仍可TEMP正确执行；失败无半entry | `done` |
+| SV13-16 | queryNodes/queryRelationships 基本结果 | query text→provider→vector→HNSW/scan；score排序/skip/required limit/0 limit/空图正确 | `done` |
+| SV13-17 | source type/exact text | STRING/empty/Unicode exact bytes；missing/null/non-string排除；无trim/lower/concat/truncate | `done` |
+| SV13-18 | Graph View before top-k / TEMP cache isolation | hidden Node/Relationship/endpoint不占limit，on-demand provider不接收不可见source；view-local materialization不被更宽/无view查询复用 | `done` |
+| SV13-19 | historical definition/provider missing | at Commit使用历史config；缺provider时SHOW/read可用、即使warm cache完整实际query/rebuild仍明确失败、无current-head借用 | `done` |
+| SV13-20 | adapter/transaction boundary | scalar/Native semantic query可执行；rows拒绝external-I/O；configure/clear/rebuild按maintenance边界拒绝rows/explicit tx；Semantic external-I/O 与 graph mutation / transaction-owning subquery 的组合在provider I/O前拒绝 | `done` |
+| SV13-21 | batch dedup + cache hit | N个相同source同space最多一次provider input；已有persistent cache跨connection时仍验证provider/identity但零`embedBatch`调用 | `done` |
+| SV13-22 | query memory privacy | query-only miss不进main；同connection重复query命中LRU；connection close后消失 | `done` |
+| SV13-23 | rebuild两阶段外部I/O | provider调用期间不持single-writer；publish短transaction重新验证target；无Commit/ref move | `done` |
+| SV13-24 | failure/semanticIdentity drift | IO/resource/interrupt/invalid payload不negative-cache/不部分top-k；identity变化不读旧space | `done` |
+| SV13-25 | Raw Vector/HNSW/Full-text/version regression | Phase08/11/12 targeted suites与适用 compatibility inventory无未知退化 | `done` |
+| SV13-26 | provider-call/resource quantitative gate | duplicate/warm/query-LRU call counters、cache bytes、batch数、writer hold有可重复报告 | `done` |
+| SV13-27 | real SQLite + cross-platform ABI/storage | 3.45.0 + current/frozen runtime真实dual-extension smoke；六目标 artifact build/load/migration通过 | `in_progress` |
+| SV13-28 | repository gates/docs/final review | fmt/clippy/tests/quality/CI、links/diff-check/无secret/无产物；Phase-level review finding闭合 | `done` |
+| SV13-29 | OpenAICompatible config schema / persistence | `base_url/api_key/api_key_env/model/send_dimensions/encoding_format/user/organization/project/headers/timeout_ms/max_retries/batch_size/semantic_identity` 全部 round-trip；unknown/type/range 负例；config进入 Schema/SHOW/Diff/Patch，含显式 secret 原值；省略默认与显式默认不被偷偷改写 | `done` |
+| SV13-30 | Auth / environment / header precedence | custom `Authorization` > `api_key` > `api_key_env` > no Authorization；自定义Authorization存在时不解析env；仅显式env名被读取，必要env missing明确失败；organization/project映射header；custom headers大小写不敏感覆盖且case-duplicate拒绝 | `done` |
+| SV13-31 | OpenAI Embeddings request completeness | local HTTP oracle断言 `POST <base_url>/embeddings`，body覆盖 `model/input/dimensions(optional)/encoding_format/user`；`send_dimensions` true/false均覆盖；input来自 exact String、dimension contract来自 Semantic Index，不建立重复 config field；3xx 不自动 redirect；环境 proxy autodiscovery关闭 | `done` |
+| SV13-32 | float/base64 response contract | 两种 encoding format 都转成 ABI FLOAT32；response按index重排并校验count/index/dimension/finite；unknown extra response fields不破坏解析 | `done` |
+| SV13-33 | batch/token-limit/failure/retry/cancel / secret-safe diagnostics | batch_size 1–2048按item分批；不truncate/chunk/tokenize；empty/oversize由明确本地或endpoint错误；408/429/5xx/transport bounded retry，其他4xx不重试；Retry-After与cancel边界有oracle；sentinel api_key/env/header secret不出现在error/log/trace；HTTP dependency `STATIC_MAX_LEVEL=Off` 且 load-time fail closed | `done` |
+| SV13-34 | cache identity / config change | 完整 canonical providerConfig + 固定实现 ABI semantic identity + dimensions隔离 space；修改endpoint/model/header/auth/runtime字段均不误复用旧space；同env名secret rotation默认复用，语义路由改变时必须通过`semantic_identity`显式隔离 | `done` |
+| SV13-35 | Provider独立 artifact / multi-config | crate不依赖`lithograph-core`；真实SQLite 3.45+/current可单独`.load`并注册；同connection两个Semantic Index可使用不同base_url/auth/model config，无process-global endpoint冻结 | `done` |
+
+### 当前验收证据
+
+当前 `main` revision 的本地 Phase 13 验收已闭合 SV13-01–26、28–35；SV13-27 只剩 hosted 六目标 artifact matrix：
+
+- `lithograph-phase13` real-SQLite probe 覆盖双 load order、multi-label/type、Schema 负例、exact String/Unicode、query/rebuild/cache、Graph View、历史 Provider、Semantic Diff/Patch/Merge/Rebase/Revert publication validation、warm-cache provider-missing、失败原子性、graph-mutation pre-provider boundary、rows/read-only query+rebuild 与 OpenAI config round-trip。
+- SQLite **3.45.0** 与 **3.53.4** 均完成 Lithograph + synthetic provider + OpenAI-compatible provider 真实 `.load`、format migration、Native ABI、Phase 12/13 双 extension、concurrency 与 performance smoke。
+- OpenAI-compatible Provider unit/integration safety closure 为 **22/22**：dependency `log::STATIC_MAX_LEVEL=Off` 且 extension load fail closed；3xx 不自动 redirect；HTTP client 环境 proxy autodiscovery 关闭；custom auth/header、`api_key` / `api_key_env` error path 继续保持 secret-safe diagnostics。
+- quantitative fixture：64 owners / 16 unique source texts；cold query 只提交 16 provider inputs，same-connection warm 与 new-connection persistent-warm query 均为 0 provider inputs；cold rebuild 写入 16 entries / 256 bytes，warm rebuild 为 16 cache hits / 0 provider inputs。该结果证明机制，不定义通用延迟 SLA；完整记录见 [Phase 13 Semantic performance evidence](../../research/phase13-semantic-performance-evidence.md)。
+- 1 秒 synthetic Provider wait 下，3.45.0/3.53.4 concurrency probe 的 writer wait/hold 维持毫秒级，并断言 non-autocommit provider call 为 0；它证明 Provider I/O 不持有 SQLite single-writer ownership，不等于 external-I/O 没有 read-view/WAL pin 成本。
+- `cargo make quality` 与 `scripts/ci.sh` 均在本轮 read-only rebuild、cache integrity 与 transaction boundary 修复后重新执行并 exit 0；quality coverage regions/functions/lines 为 **83.47% / 84.27% / 85.25%**，新增 Managed Semantic / Provider 文件均通过 per-file line coverage ≥ 50% 门禁；applicable inherited openCypher TCK 继续为 3,777/3,777。
+
+SV13-27 的 SQLite 3.45.0/current runtime 部分已经通过；Linux x64/arm64、macOS x64/arm64、Windows x64/arm64 的 hosted Release Matrix 仍需对当前 revision 实际 build/load/migration 并全部成功。在这些远端证据落地前，该项保持 `in_progress`，Phase 总状态不提升为 `done`。
 
 ## 5. 验证执行计划
 

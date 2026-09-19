@@ -2,12 +2,13 @@
 
 use std::collections::BTreeMap;
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, types::Value as SqlValue};
 
 use super::integrity_graph::graph_integrity_issues;
 use super::integrity_history::history_integrity_issues;
 use super::schema::{
-    FORMAT2_SCHEMA_STATEMENTS, FORMAT3_SCHEMA_STATEMENTS, STORAGE_SCHEMA_STATEMENTS,
+    FORMAT2_SCHEMA_STATEMENTS, FORMAT3_SCHEMA_STATEMENTS, FORMAT4_SCHEMA_STATEMENTS,
+    STORAGE_SCHEMA_STATEMENTS,
 };
 use super::{
     HashId, IndexDefinition, STANDARD_INDEX_ENCODING_VERSION, SchemaState, StorageError,
@@ -53,10 +54,191 @@ pub fn integrity_check(connection: &Connection) -> StorageResult<Vec<IntegrityIs
     issues.extend(graph_integrity_issues(connection, &references)?);
     if issues.is_empty() {
         issues.extend(persistent_index_integrity_issues(connection)?);
+        issues.extend(embedding_cache_integrity_issues(connection)?);
     }
     issues.sort_by(|left, right| (&left.code, &left.message).cmp(&(&right.code, &right.message)));
     issues.dedup();
     Ok(issues)
+}
+
+fn embedding_cache_integrity_issues(connection: &Connection) -> StorageResult<Vec<IntegrityIssue>> {
+    if integrity_storage_format(connection)? < 4 {
+        return Ok(Vec::new());
+    }
+    let mut statement = connection.prepare(
+        "SELECT entry_id, space_hash, text_hash, text_bytes, dimension, coordinate_type, \
+                vector_blob, payload_bytes \
+         FROM main._lithograph_embedding_cache ORDER BY entry_id",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut issues = Vec::new();
+    while let Some(row) = rows.next()? {
+        let entry = EmbeddingCacheIntegrityRow {
+            id: row.get(0)?,
+            space_hash: row.get(1)?,
+            text_hash: row.get(2)?,
+            text_bytes: row.get(3)?,
+            dimension: row.get(4)?,
+            coordinate_type: row.get(5)?,
+            vector_blob: row.get(6)?,
+            payload_bytes: row.get(7)?,
+        };
+        validate_embedding_cache_row(&entry, &mut issues);
+    }
+    Ok(issues)
+}
+
+struct EmbeddingCacheIntegrityRow {
+    id: i64,
+    space_hash: SqlValue,
+    text_hash: SqlValue,
+    text_bytes: SqlValue,
+    dimension: SqlValue,
+    coordinate_type: SqlValue,
+    vector_blob: SqlValue,
+    payload_bytes: SqlValue,
+}
+
+fn validate_embedding_cache_row(
+    entry: &EmbeddingCacheIntegrityRow,
+    issues: &mut Vec<IntegrityIssue>,
+) {
+    validate_embedding_cache_hash(entry, &entry.space_hash, "space_hash", "space", issues);
+    validate_embedding_cache_hash(entry, &entry.text_hash, "text_hash", "text", issues);
+    validate_embedding_cache_text_bytes(entry, issues);
+    let dimension = validate_embedding_cache_dimension(entry, issues);
+    validate_embedding_cache_coordinate_type(entry, issues);
+    let expected_payload = dimension.and_then(|value| value.checked_mul(4));
+    validate_embedding_cache_payload_bytes(entry, expected_payload, issues);
+    validate_embedding_cache_vector(entry, expected_payload, issues);
+}
+
+fn validate_embedding_cache_hash(
+    entry: &EmbeddingCacheIntegrityRow,
+    value: &SqlValue,
+    code: &str,
+    label: &str,
+    issues: &mut Vec<IntegrityIssue>,
+) {
+    if !matches!(value, SqlValue::Blob(bytes) if bytes.len() == 32) {
+        issues.push(embedding_cache_issue(
+            entry.id,
+            code,
+            format!("has an invalid {label} hash"),
+        ));
+    }
+}
+
+fn validate_embedding_cache_text_bytes(
+    entry: &EmbeddingCacheIntegrityRow,
+    issues: &mut Vec<IntegrityIssue>,
+) {
+    if !matches!(&entry.text_bytes, SqlValue::Integer(value) if *value >= 0) {
+        issues.push(embedding_cache_issue(
+            entry.id,
+            "text_bytes",
+            "has an invalid text byte count",
+        ));
+    }
+}
+
+fn validate_embedding_cache_dimension(
+    entry: &EmbeddingCacheIntegrityRow,
+    issues: &mut Vec<IntegrityIssue>,
+) -> Option<usize> {
+    let SqlValue::Integer(value) = &entry.dimension else {
+        issues.push(embedding_cache_issue(
+            entry.id,
+            "dimension",
+            "has an invalid dimension",
+        ));
+        return None;
+    };
+    if !(1..=4096).contains(value) {
+        issues.push(embedding_cache_issue(
+            entry.id,
+            "dimension",
+            "has an invalid dimension",
+        ));
+        return None;
+    }
+    Some(*value as usize)
+}
+
+fn validate_embedding_cache_coordinate_type(
+    entry: &EmbeddingCacheIntegrityRow,
+    issues: &mut Vec<IntegrityIssue>,
+) {
+    if !matches!(&entry.coordinate_type, SqlValue::Integer(5)) {
+        issues.push(embedding_cache_issue(
+            entry.id,
+            "coordinate_type",
+            "is not encoded as FLOAT32",
+        ));
+    }
+}
+
+fn validate_embedding_cache_payload_bytes(
+    entry: &EmbeddingCacheIntegrityRow,
+    expected: Option<usize>,
+    issues: &mut Vec<IntegrityIssue>,
+) {
+    if !matches!(
+        (&entry.payload_bytes, expected),
+        (SqlValue::Integer(actual), Some(expected)) if *actual == expected as i64
+    ) {
+        issues.push(embedding_cache_issue(
+            entry.id,
+            "payload_bytes",
+            "has an invalid payload byte count",
+        ));
+    }
+}
+
+fn validate_embedding_cache_vector(
+    entry: &EmbeddingCacheIntegrityRow,
+    expected: Option<usize>,
+    issues: &mut Vec<IntegrityIssue>,
+) {
+    let (SqlValue::Blob(blob), Some(expected)) = (&entry.vector_blob, expected) else {
+        issues.push(embedding_cache_issue(
+            entry.id,
+            "vector_blob",
+            "has an invalid vector payload",
+        ));
+        return;
+    };
+    if blob.len() != expected {
+        issues.push(embedding_cache_issue(
+            entry.id,
+            "vector_blob",
+            "has an invalid vector payload",
+        ));
+        return;
+    }
+    if blob
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .any(|chunk| !f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).is_finite())
+    {
+        issues.push(embedding_cache_issue(
+            entry.id,
+            "coordinate",
+            "contains a non-finite coordinate",
+        ));
+    }
+}
+
+fn embedding_cache_issue(
+    entry_id: i64,
+    code: &str,
+    message: impl std::fmt::Display,
+) -> IntegrityIssue {
+    IntegrityIssue::new(
+        &format!("embedding_cache.{code}"),
+        format!("embedding cache entry {entry_id} {message}"),
+    )
 }
 
 fn persistent_index_integrity_issues(
@@ -324,6 +506,14 @@ fn integrity_storage_format(connection: &Connection) -> StorageResult<i64> {
     if let Some(format) = marker {
         return Ok(format);
     }
+    let format4: i64 = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name='_lithograph_embedding_cache')",
+        [],
+        |row| row.get(0),
+    )?;
+    if format4 == 1 {
+        return Ok(4);
+    }
     let format3: i64 = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name='_lithograph_index_generations')",
         [],
@@ -367,12 +557,19 @@ fn expected_objects(storage_format: i64) -> BTreeMap<String, ObjectSpec> {
         .iter()
         .map(|sql| object_name(sql))
         .collect::<std::collections::BTreeSet<_>>();
+    let format4 = FORMAT4_SCHEMA_STATEMENTS
+        .iter()
+        .map(|sql| object_name(sql))
+        .collect::<std::collections::BTreeSet<_>>();
     for sql in STORAGE_SCHEMA_STATEMENTS {
         let name = object_name(sql);
         if storage_format < 2 && format2.contains(&name) {
             continue;
         }
         if storage_format < 3 && format3.contains(&name) {
+            continue;
+        }
+        if storage_format < 4 && format4.contains(&name) {
             continue;
         }
         let spec = parse_expected_object(sql);

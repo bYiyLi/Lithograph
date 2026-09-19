@@ -9,7 +9,7 @@ Lithograph 为 SQLite 提供版本化 Property Graph 数据库能力。
 - **Property Graph**：Node、Relationship、Label、Relationship Type 与 Property。
 - **Cypher 25**：图查询、数据修改、路径、Schema、Constraint、Index 与现代 Cypher 类型系统。
 - **版本化状态管理**：immutable Commit、Branch、Tag、可修改 Commit Data、显式 empty-delta Commit、可分页历史查询、Time-travel、结构化 Diff/Patch、Merge、Rebase、Squash、Reset 与 Revert。
-- **全文与向量搜索**：Full-text Index、Vector Index 与 Cypher 25 `SEARCH`。
+- **全文与向量搜索**：Full-text Index、Raw Vector Index 与 Cypher 25 `SEARCH`；当前 Unreleased 开发分支另提供 Managed Semantic / Embedding Provider。
 - **SQLite 原生部署**：作为 loadable extension 使用同一个 SQLite database file，不需要独立数据库 Server。
 - **大规模单机图**：版本感知存储、索引化邻接访问、流式查询执行与 checkpointed history 面向大规模本地图数据设计。
 
@@ -17,7 +17,9 @@ Lithograph 为 SQLite 提供版本化 Property Graph 数据库能力。
 
 当前正式版本是 **v0.1.1**。GitHub Releases 提供 Linux x64/arm64、macOS x64/arm64、Windows x64/arm64 六个平台的预编译 extension；运行时需要支持 loadable extension 与 FTS5 的 SQLite 3.45.0 或更高版本。
 
-基础接入从 [Developer Documentation](docs/guide/README.md) 开始。当前文档以 v0.1.0 已验证接口为基线，并对 v0.1.1 的 Phase 12 Full-text tokenizer binding 单独标注增量；v0.1.1 保持 Native ABI 1、`CY25-2026.08` 与 storage format 3。版本变化见 [Release Notes](docs/releases/v0.1.1.md) 与 [Search 指南](docs/guide/search.md)；下面的 `latest` 地址会随未来 release 更新。
+仓库当前 `main` 的 **Unreleased** 开发状态已经实现 Phase 13 Managed Semantic、独立 `lithograph-openai-compatible` Provider 与 storage format 4；这些能力尚未发布为新的 GitHub Release，不能把现有 v0.1.1 Release Asset 当作包含 Phase 13 Provider 的制品。源码使用与接口见 [Search 指南](docs/guide/search.md) 和 [Procedure Reference](docs/reference/procedures.md)。
+
+基础接入从 [Developer Documentation](docs/guide/README.md) 开始。文档保留 v0.1.0/v0.1.1 的已发布基线，并把当前 Unreleased Phase 13 单独标注；v0.1.1 仍保持 Native ABI 1、`CY25-2026.08` 与 storage format 3。版本变化见 [CHANGELOG](CHANGELOG.md)、[v0.1.1 Release Notes](docs/releases/v0.1.1.md) 与 [Search 指南](docs/guide/search.md)；下面的 `latest` 地址会随未来 release 更新。
 
 稳定下载地址：
 
@@ -89,7 +91,7 @@ FROM lithograph_rows('MATCH (p:Person) RETURN p.name');
 
 ## 项目状态
 
-Lithograph 当前已经完成 Phase 00–12 的实现与开发验收，当前发布版本为 **v0.1.1**。现有实现已具备标准 SQLite loadable-extension / Native ABI boundary、version-aware immutable storage、Graph View、Cypher 25 parser/type/value、真实 read planner/executor、mutation/Commit path、versioned Graph Type/Constraint、lookup/range/text/point/full-text/vector index、`SEARCH`、`LOAD CSV`、Cypher transaction batching，以及 Branch/Tag/Commit Data/Diff/Patch/Merge/Rebase/Squash/Reset/Revert/GC 等 Version operations。Phase 10 已完成 compatibility、recovery/migration、10M Node / 100M Relationship scale、architecture/security hardening。Phase 11 在此基础上完成 storage format 3、persistent Standard Index、物理邻接 keyset、query-owned resolved state/read guard、增量 index overlay 与实测性能热点优化；固定性能机的10M Node / 100M Relationship、1M/100K Search、10K-conflict Merge、1/4/8-reader 30分钟压力以及 repository-wide quality/coverage/真实 SQLite CI 均已通过。Phase 12 进一步完成宿主 FTS5 tokenizer specification、历史/cache、query-time analyzer、失败原子性与 SQL/Native 集成，并从 v0.1.1 起进入发布基线。
+Lithograph 当前已经完成 Phase 00–12 的实现与开发验收，当前发布版本为 **v0.1.1**。当前 `main` 的 Phase 13 实现已经闭合 Managed Semantic 主路径：公开 Embedding Provider ABI、OpenAI-compatible reference Provider、versioned Semantic Index、文本 query、persistent cache / rebuild、format 4 migration、Graph View / history / Diff-Patch-Merge-Rebase-Revert publication validation、SQL/Native transaction boundary 与真实 SQLite 3.45.0 / 3.53.4 验收均已通过。Phase 13 仍保持 `in_progress`，因为本 Unreleased revision 尚未通过六目标 hosted Release Matrix；正式发布状态仍以 v0.1.1 为准。
 
 v0.1.1 仍属于 pre-1.0 版本。升级已有数据库前应保留完整备份；format 3 没有自动 downgrade。Full-text analyzer 从 v0.1.0 到 v0.1.1 存在明确的配置行为变化，详见 [CHANGELOG](CHANGELOG.md) 与 [v0.1.1 Release Notes](docs/releases/v0.1.1.md)。
 
@@ -97,7 +99,8 @@ v0.1.1 仍属于 pre-1.0 版本。升级已有数据库前应保留完整备份�
 - [开发计划](docs/development/README.md)
 - [Phase 11 性能优化计划](docs/development/phases/11-performance-optimization.md)
 - [Phase 12 全文 Tokenizer 扩展计划](docs/development/phases/12-fulltext-tokenizer.md)
-- 当前开发阶段：Phase 00–12 `done`；Phase 12 Full-text tokenizer binding 从 v0.1.1 起进入发布基线。
+- [Phase 13 Managed Semantic Vector / Embedding Provider](docs/development/phases/13-managed-semantic-vector.md)
+- 当前开发阶段：Phase 00–12 `done`；Phase 13 `in_progress`，本地/双 SQLite acceptance 已闭合，六目标 hosted Release Matrix 待真实执行。
 
 ## 许可
 

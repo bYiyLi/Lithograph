@@ -1,6 +1,6 @@
 # 部署、备份与维护
 
-适用 v0.1.0。Lithograph 运行在应用的 SQLite connection 中，没有独立管理 Server。以下操作涉及已有数据时，先确认文件路径、扩展版本、目标 Branch 与保留策略；不要直接修改 `_lithograph_*` 表。
+适用 v0.1.0/v0.1.1 发布基线，并补充当前 Unreleased `main` 的 format 4 / Managed Semantic 运维。Lithograph 运行在应用的 SQLite connection 中，没有独立管理 Server。以下操作涉及已有数据时，先确认文件路径、扩展版本、目标 Branch 与保留策略；不要直接修改 `_lithograph_*` 表。
 
 ## 部署前检查
 
@@ -44,11 +44,11 @@ SQLite CLI 也提供 `.backup`；它是 CLI 命令而不是 Cypher。无论使�
 
 ## 存储格式升级
 
-v0.1.0 新建 format 3，支持读取 formats 1–3。格式 1/2 的写入需要显式 `lithograph_init()` 迁移；加载扩展与普通读取不会自动升级文件。未来格式高于此版本支持范围时停止使用旧扩展，不修改内部 version marker 来强行打开。
+v0.1.0/v0.1.1 新建 format 3，支持读取 formats 1–3。当前 Unreleased `main` 新建 format **4**，并通过显式 `lithograph_init()` 支持 format 3 → 4；format 4 新增的 persistent Embedding Result Cache 是 derived data，不改变既有 Commit/Layer/Schema hash 或历史语义。加载扩展与普通读取不会自动升级文件。未来格式高于当前 binary 支持范围时停止使用旧扩展，不修改内部 version marker 来强行打开。
 
 升级步骤：建立并验证一致性备份；在备份副本上验证新扩展与迁移；安排停止写入的维护窗口；运行 init 并检查结果；执行完整性和应用回归；再恢复业务流量。迁移可能扫描较大历史并占用显著时间、空间和 writer，不将幂等初始化描述为常数时间。
 
-迁移后的 format 3 没有自动降级为旧格式的接口。回退方案是相容的旧应用/扩展加升级前备份，不是在已升级文件上运行更旧 binary。pre-1.0 升级前还需审查 API / profile 变化，不能只比较 ABI 大版本数字。
+format 3/4 都没有自动降级接口。回退方案是相容的旧应用/扩展加升级前备份，不是在已升级文件上运行更旧 binary。尤其 format 4 文件不能交给只支持 format 3 的 v0.1.1 binary 继续写。pre-1.0 升级前还需审查 API / profile 变化，不能只比较 ABI 大版本数字。
 
 ## 完整性检查与损坏处理
 
@@ -74,6 +74,23 @@ SELECT lithograph(
 
 重建在同一写事务中原子发布，失败不会暴露半成品。全量扫描/构建可能长时间占用 writer，安排维护窗口并测量真实空间和耗时。普通只读查询遇到标准索引缓存缺失时可以使用正确但更慢的 fallback；不要通过手工删除内部表来触发重建。
 
+## Unreleased：Managed Semantic cache 维护
+
+Phase 13 的 persistent Embedding Result Cache 是 database-local derived data。它不属于某个 Branch/Commit，也不进入 Schema hash；默认容量策略为 enabled、1 GiB。公开维护入口：
+
+```cypher
+CALL db.index.semantic.cache.stats()
+CALL db.index.semantic.cache.configure({enabled:true, maxBytes:1073741824})
+CALL db.index.semantic.cache.clear()
+CALL db.index.semantic.rebuild('document_semantic', 'branch/main')
+```
+
+`stats` 只读；`configure`、`clear`、`rebuild` 是独立 maintenance write，只能从普通 `lithograph()` 或 autocommit Native execution 调用，不能放入 `lithograph_rows()`、Native explicit transaction、transaction-owning subquery 或 Merge candidate。它们成功时不创建 Commit、不移动 Branch/Tag。
+
+`rebuild` 会 pin 指定 immutable Snapshot，在 SQLite single-writer ownership 之外调用 Provider 计算缺失 embedding；全部成功后才进入短 publish transaction，把完整结果写入 persistent cache。Provider I/O / cancel / payload validation 失败不会留下可复用半 entry。普通 semantic query 即使发生 Provider miss，也只写 connection-local TEMP/LRU，不把任意查询文本持久化到数据库。
+
+需要使用 Managed Semantic 的每个真实 connection 都必须加载目标 Provider；persistent cache 已 warm 也不能绕过 Provider registration/validation。Provider 未加载时，普通 graph/history/SHOW 仍可用，但实际 semantic query/rebuild 明确失败。完整用法与 secret 边界见 [Search](search.md#unreleasedmanaged-semantic-文本检索)。
+
 ## 历史保留与 GC
 
 Branch head、Tag 和未结束的 Merge Session 都保护相应可达历史。仅在应用日志里保存一个 `commit/...` 字符串不会阻止回收。需要长期留存的状态应建立明确的保留 Tag，同时维持外部备份。
@@ -96,6 +113,6 @@ WAL、synchronous、busy timeout、线程模式和 TEMP 位置由宿主 SQLite �
 
 扩展是本机代码，仅加载可信、校验过的文件，加载后关闭动态加载入口。SQL / Cypher 参数都使用绑定；query parser 不是应用认证、权限或沙箱。Graph View 不能阻止有原始 API 权限的调用方省略 selector。
 
-LOAD CSV 可以访问宿主文件/网络，运行权限与数据来源由上层控制。不要给不可信请求无限制提交 SQL、Cypher、文件 URI 或网络 URL 的能力。应用负责请求取消、并发上限、敏感日志脱敏，以及数据与备份的加密策略。
+LOAD CSV 与 remote Embedding Provider 都可能访问宿主文件/网络。不要给不可信请求无限制提交 SQL、Cypher、文件 URI、Provider endpoint/config 或网络 URL 的能力。应用负责请求取消、并发上限、敏感日志脱敏，以及数据与备份的加密策略。显式写入 Semantic `providerConfig.api_key` / secret header 会进入 versioned Schema/history/backup；需要避免持久化 credential 时使用 Provider 支持的 indirection（例如 `api_key_env`）。
 
 备份机制依据 [SQLite Online Backup API](https://www.sqlite.org/backup.html) 与 [Python sqlite3](https://docs.python.org/3/library/sqlite3.html)。产品行为依据 [SQL API](../reference/sql-api.md)、[维护 Procedure](../reference/procedures.md) 与 [技术设计](../design.md)。

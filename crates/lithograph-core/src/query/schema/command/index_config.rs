@@ -51,6 +51,20 @@ pub(super) fn parse_index_configuration(
     }
 }
 
+pub(super) fn parse_index_metadata(
+    clause: &AstNode,
+    kind: StandardIndexKind,
+) -> QueryResult<Vec<String>> {
+    if matches!(
+        kind,
+        StandardIndexKind::FullText | StandardIndexKind::Vector
+    ) {
+        super::semantic_index_labels_or_types(clause)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
 fn parse_fulltext_configuration(
     mut config: BTreeMap<String, Value>,
 ) -> QueryResult<IndexConfiguration> {

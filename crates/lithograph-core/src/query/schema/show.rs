@@ -398,7 +398,7 @@ fn index_rows(schema: &SchemaState, clause: &AstNode) -> QueryResult<Vec<Binding
             ("properties".to_owned(), string_list(properties)),
             (
                 "indexProvider".to_owned(),
-                Value::String(index_provider(index.kind).to_owned()),
+                Value::String(index_provider(index)),
             ),
             (
                 "owningConstraint".to_owned(),
@@ -414,7 +414,7 @@ fn index_rows(schema: &SchemaState, clause: &AstNode) -> QueryResult<Vec<Binding
             ("failureMessage".to_owned(), Value::String(String::new())),
             (
                 "createStatement".to_owned(),
-                Value::String(index_create_statement(index)),
+                Value::String(index_create_statement(index)?),
             ),
         ])));
     }
@@ -932,11 +932,14 @@ fn index_kind_matches(requested: Option<IndexKind>, actual: StandardIndexKind) -
     }
 }
 
-fn index_provider(kind: StandardIndexKind) -> &'static str {
-    match kind {
-        StandardIndexKind::FullText => "lithograph-fts5-1.0",
-        StandardIndexKind::Vector => "lithograph-hnsw-1.0",
-        _ => "lithograph-standard-1.0",
+fn index_provider(index: &IndexDefinition) -> String {
+    match (&index.kind, &index.configuration) {
+        (StandardIndexKind::Semantic, Some(IndexConfiguration::Semantic { provider, .. })) => {
+            provider.clone()
+        }
+        (StandardIndexKind::FullText, _) => "lithograph-fts5-1.0".to_owned(),
+        (StandardIndexKind::Vector, _) => "lithograph-hnsw-1.0".to_owned(),
+        _ => "lithograph-standard-1.0".to_owned(),
     }
 }
 
@@ -982,6 +985,26 @@ fn index_configuration_map(
             *hnsw_m,
             *hnsw_ef_construction,
         ),
+        IndexConfiguration::Semantic {
+            provider,
+            provider_config,
+            dimensions,
+            similarity_function,
+        } => Ok(BTreeMap::from([
+            ("provider".to_owned(), Value::String(provider.clone())),
+            (
+                "providerConfig".to_owned(),
+                super::super::version::json_to_value(provider_config.clone())?,
+            ),
+            (
+                "dimensions".to_owned(),
+                Value::Integer(i64::try_from(*dimensions).unwrap_or(i64::MAX)),
+            ),
+            (
+                "similarity".to_owned(),
+                Value::String(similarity_function.clone()),
+            ),
+        ])),
     }
 }
 
@@ -1054,9 +1077,12 @@ fn constraint_target_columns(target: &SchemaTarget) -> (&'static str, Vec<String
     }
 }
 
-fn index_create_statement(index: &IndexDefinition) -> String {
+fn index_create_statement(index: &IndexDefinition) -> QueryResult<String> {
+    if index.kind == StandardIndexKind::Semantic {
+        return semantic_index_create_statement(index);
+    }
     let name = quote_identifier(&index.name);
-    match &index.target {
+    Ok(match &index.target {
         IndexTarget::NodeLookup => format!("CREATE LOOKUP INDEX {name} FOR (n) ON EACH labels(n)"),
         IndexTarget::RelationshipLookup => {
             format!("CREATE LOOKUP INDEX {name} FOR ()-[r]-() ON EACH type(r)")
@@ -1084,7 +1110,90 @@ fn index_create_statement(index: &IndexDefinition) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-    }
+    })
+}
+
+fn semantic_index_create_statement(index: &IndexDefinition) -> QueryResult<String> {
+    let Some(IndexConfiguration::Semantic {
+        provider,
+        provider_config,
+        dimensions,
+        similarity_function,
+    }) = index.configuration.as_ref()
+    else {
+        return Err(QueryError::internal(
+            "Semantic Index is missing Semantic configuration",
+        ));
+    };
+    let (procedure, properties) = match &index.target {
+        IndexTarget::NodeProperties { properties, .. } => {
+            ("db.index.semantic.createNodeIndex", properties)
+        }
+        IndexTarget::RelationshipProperties { properties, .. } => {
+            ("db.index.semantic.createRelationshipIndex", properties)
+        }
+        IndexTarget::NodeLookup | IndexTarget::RelationshipLookup => {
+            return Err(QueryError::internal(
+                "Semantic Index has an invalid lookup target",
+            ));
+        }
+    };
+    let source_property = properties
+        .first()
+        .ok_or_else(|| QueryError::internal("Semantic Index is missing its source Property"))?;
+    let targets = index
+        .labels_or_types
+        .iter()
+        .map(|target| cypher_string(target))
+        .collect::<QueryResult<Vec<_>>>()?
+        .join(", ");
+    Ok(format!(
+        "CALL {procedure}({}, [{targets}], {}, {{provider: {}, providerConfig: {}, dimensions: {dimensions}, similarity: {}}})",
+        cypher_string(&index.name)?,
+        cypher_string(source_property)?,
+        cypher_string(provider)?,
+        semantic_json_literal(provider_config)?,
+        cypher_string(similarity_function)?,
+    ))
+}
+
+fn semantic_json_literal(value: &serde_json::Value) -> QueryResult<String> {
+    Ok(match value {
+        serde_json::Value::Null => "null".to_owned(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::String(value) => cypher_string(value)?,
+        serde_json::Value::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(semantic_json_literal)
+                .collect::<QueryResult<Vec<_>>>()?
+                .join(", ")
+        ),
+        serde_json::Value::Object(values) => format!(
+            "{{{}}}",
+            values
+                .iter()
+                .map(|(key, value)| {
+                    Ok(format!(
+                        "{}: {}",
+                        quote_identifier(key),
+                        semantic_json_literal(value)?
+                    ))
+                })
+                .collect::<QueryResult<Vec<_>>>()?
+                .join(", ")
+        ),
+    })
+}
+
+fn cypher_string(value: &str) -> QueryResult<String> {
+    serde_json::to_string(value).map_err(|error| {
+        QueryError::internal(format!(
+            "failed to serialize a Semantic Index string literal: {error}"
+        ))
+    })
 }
 
 fn constraint_create_statement(constraint: &ConstraintDefinition) -> String {

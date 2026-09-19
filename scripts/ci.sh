@@ -55,22 +55,27 @@ cargo clippy --locked --workspace --all-targets --all-features
 # integration tests if all packages were tested in one workspace invocation.
 cargo test --locked -p lithograph-core -p lithograph-test-support
 cargo test --locked -p lithograph-extension
+cargo test --locked -p lithograph-embedding-provider -p lithograph-openai-compatible
 cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase10-tck >/dev/null
 cargo build --locked -p lithograph-extension
+cargo build --locked -p lithograph-openai-compatible
 
 target_dir=${CARGO_TARGET_DIR:-target}
 case "$(uname -s)" in
   Darwin)
     built_extension="$target_dir/debug/liblithograph.dylib"
     extension="$target_dir/debug/lithograph.dylib"
+    openai_provider="$target_dir/debug/liblithograph_openai_compatible.dylib"
     ;;
   Linux)
     built_extension="$target_dir/debug/liblithograph.so"
     extension="$target_dir/debug/lithograph.so"
+    openai_provider="$target_dir/debug/liblithograph_openai_compatible.so"
     ;;
   *)
     built_extension=""
     extension=""
+    openai_provider=""
     ;;
 esac
 
@@ -91,8 +96,9 @@ if [ -n "$extension" ]; then
   cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase07 -- "$extension"
   cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase08 -- "$extension"
   cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase09 -- "$extension"
-  scripts/sqlite-345-smoke.sh "$extension"
-  scripts/sqlite-3534-smoke.sh "$extension"
+  scripts/openai-compatible-provider-smoke.sh "$openai_provider"
+  scripts/sqlite-345-smoke.sh "$extension" "$openai_provider"
+  scripts/sqlite-3534-smoke.sh "$extension" "$openai_provider"
   case "$(uname -s)" in
     Darwin) phase12_tokenizer="$target_dir/phase10/sqlite-3.53.4/phase12_tokenizer.dylib" ;;
     Linux) phase12_tokenizer="$target_dir/phase10/sqlite-3.53.4/phase12_tokenizer.so" ;;

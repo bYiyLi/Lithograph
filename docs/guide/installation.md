@@ -89,4 +89,20 @@ cargo build --locked --release -p lithograph-extension
 
 Cargo 输出 Linux `target/release/liblithograph.so`、macOS `target/release/liblithograph.dylib`、Windows `target/release/lithograph.dll`，与发布包无 `lib` 前缀的文件名不同。加载实际文件路径，不要假定存在 `pip install lithograph`、npm SDK 或独立 `lithograph` CLI。
 
+当前 Unreleased `main` 若要试用 Phase 13 Managed Semantic，请使用当前 `main` checkout，而不是上面固定的 v0.1.0 tag；还需要单独构建并加载 OpenAI-compatible Provider：
+
+```sh
+cargo build --locked --release -p lithograph-extension
+cargo build --locked --release -p lithograph-openai-compatible
+```
+
+Cargo 会额外生成 `liblithograph_openai_compatible.so` / `.dylib` 或 Windows 对应 DLL。Provider 与 Lithograph 是两个平级 SQLite extension；每个真正执行 Semantic create/query/rebuild 的 connection 都要加载所需 Provider。例如 SQLite CLI：
+
+```text
+.load ./target/release/liblithograph.dylib sqlite3_lithograph_init
+.load ./target/release/liblithograph_openai_compatible.dylib sqlite3_lithographopenaicompatible_init
+```
+
+这两个文件目前只属于 Unreleased 源码构建/开发验收范围；现有 v0.1.1 GitHub Release package 不包含 Provider artifact。
+
 加载失败时转到 [排障](troubleshooting.md)。SQLite 加载机制依据 [SQLite 官方说明](https://www.sqlite.org/loadext.html)；版本依据 [v0.1.0 Release Notes](../releases/v0.1.0.md)。

@@ -24,5 +24,6 @@ pub(crate) fn standard_index_kind_name(kind: crate::storage::StandardIndexKind) 
         crate::storage::StandardIndexKind::Point => "POINT",
         crate::storage::StandardIndexKind::FullText => "FULLTEXT",
         crate::storage::StandardIndexKind::Vector => "VECTOR",
+        crate::storage::StandardIndexKind::Semantic => "SEMANTIC",
     }
 }

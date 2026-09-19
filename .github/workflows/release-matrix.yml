@@ -51,18 +51,26 @@ jobs:
             os: ubuntu-24.04
             built: target/release/liblithograph.so
             artifact: target/release/lithograph.so
+            provider_built: target/release/liblithograph_openai_compatible.so
+            provider_artifact: target/release/lithograph-openai-compatible.so
           - name: linux-arm64
             os: ubuntu-24.04-arm
             built: target/release/liblithograph.so
             artifact: target/release/lithograph.so
+            provider_built: target/release/liblithograph_openai_compatible.so
+            provider_artifact: target/release/lithograph-openai-compatible.so
           - name: macos-x64
             os: macos-15-intel
             built: target/release/liblithograph.dylib
             artifact: target/release/lithograph.dylib
+            provider_built: target/release/liblithograph_openai_compatible.dylib
+            provider_artifact: target/release/lithograph-openai-compatible.dylib
           - name: macos-arm64
             os: macos-15
             built: target/release/liblithograph.dylib
             artifact: target/release/lithograph.dylib
+            provider_built: target/release/liblithograph_openai_compatible.dylib
+            provider_artifact: target/release/lithograph-openai-compatible.dylib
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -83,26 +91,31 @@ jobs:
         run: |
           mkdir -p target/phase10-interop
           python3 -c 'import base64,gzip,os,pathlib; pathlib.Path("target/phase10-interop/interop.sqlite").write_bytes(gzip.decompress(base64.b64decode(os.environ["PHASE10_FIXTURE_GZIP_BASE64"])))'
-      - name: Build release artifact
+      - name: Build release artifacts
         run: |
           cargo build --release --locked -p lithograph-extension
+          cargo build --release --locked -p lithograph-openai-compatible
           cp "${{ matrix.built }}" "${{ matrix.artifact }}"
+          cp "${{ matrix.provider_built }}" "${{ matrix.provider_artifact }}"
       - name: Run Phase 09 version regressions
         run: cargo test --release --locked -p lithograph-core --test phase09_version
       - name: Run release load, ABI, runtime, and interoperability gates
-        run: scripts/release-artifact-smoke.sh "${{ matrix.artifact }}" target/phase10-interop/interop.sqlite
+        run: scripts/release-artifact-smoke.sh "${{ matrix.artifact }}" target/phase10-interop/interop.sqlite "${{ matrix.provider_artifact }}"
       - name: Package distributable release asset
         run: |
           python3 scripts/package-release.py \
             --tag "v$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)" \
             --binary "${{ matrix.artifact }}" \
+            --binary "${{ matrix.provider_artifact }}" \
             --output "target/release/lithograph-${{ matrix.name }}.tar.gz"
       - name: Upload release artifact
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: lithograph-${{ matrix.name }}
-          path: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}
+            ${{ matrix.provider_artifact }}
           if-no-files-found: error
       - name: Upload distributable release package
         if: startsWith(github.ref, 'refs/tags/v')
@@ -147,11 +160,15 @@ jobs:
             $gzipStream.Dispose()
             $inputStream.Dispose()
           }
-      - name: Build release artifact
-        run: cargo build --release --locked -p lithograph-extension
+      - name: Build release artifacts
+        shell: pwsh
+        run: |
+          cargo build --release --locked -p lithograph-extension
+          cargo build --release --locked -p lithograph-openai-compatible
+          Copy-Item target/release/lithograph_openai_compatible.dll target/release/lithograph-openai-compatible.dll
       - name: Run Phase 09, release load, ABI, runtime, and interoperability gates
         shell: pwsh
-        run: ./scripts/windows-release-smoke.ps1 -ExtensionPath target/release/lithograph.dll -InteropFixture target/phase10-interop/interop.sqlite
+        run: ./scripts/windows-release-smoke.ps1 -ExtensionPath target/release/lithograph.dll -InteropFixture target/phase10-interop/interop.sqlite -OpenAIProviderPath target/release/lithograph-openai-compatible.dll
       - name: Package distributable release asset
         shell: pwsh
         run: |
@@ -159,13 +176,16 @@ jobs:
           python scripts/package-release.py `
             --tag "v$version" `
             --binary target/release/lithograph.dll `
+            --binary target/release/lithograph-openai-compatible.dll `
             --output "target/release/lithograph-${{ matrix.name }}.zip"
       - name: Upload release artifact
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: lithograph-${{ matrix.name }}
-          path: target/release/lithograph.dll
+          path: |
+            target/release/lithograph.dll
+            target/release/lithograph-openai-compatible.dll
           if-no-files-found: error
       - name: Upload distributable release package
         if: startsWith(github.ref, 'refs/tags/v')

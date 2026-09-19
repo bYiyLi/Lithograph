@@ -50,7 +50,7 @@ pub(crate) fn ensure_standard_indexes_for_commit(
         }
         if !matches!(
             index.kind,
-            StandardIndexKind::FullText | StandardIndexKind::Vector
+            StandardIndexKind::FullText | StandardIndexKind::Vector | StandardIndexKind::Semantic
         ) && !matches!(index.target, IndexTarget::NodeLookup)
         {
             if persistent_index_storage_available(connection)? {
@@ -901,7 +901,9 @@ fn ensure_cache_indexes(connection: &Connection, kind: StandardIndexKind) -> Que
              CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_point_y \
              ON _lithograph_standard_index_cache_local(snapshot_hash, index_name, owner_kind, property_ordinal, point_crs, point_y, point_x, point_z, owner_id);"
         }
-        StandardIndexKind::FullText | StandardIndexKind::Vector => return Ok(()),
+        StandardIndexKind::FullText | StandardIndexKind::Vector | StandardIndexKind::Semantic => {
+            return Ok(());
+        }
     };
     connection.execute_batch(sql)?;
     Ok(())
@@ -1202,9 +1204,10 @@ fn insert_cache_value(
 
 fn cache_value_supported(kind: StandardIndexKind, value: &storage::PropertyValue) -> bool {
     match kind {
-        StandardIndexKind::Lookup | StandardIndexKind::FullText | StandardIndexKind::Vector => {
-            false
-        }
+        StandardIndexKind::Lookup
+        | StandardIndexKind::FullText
+        | StandardIndexKind::Vector
+        | StandardIndexKind::Semantic => false,
         StandardIndexKind::Text => matches!(value, storage::PropertyValue::String(_)),
         StandardIndexKind::Point => matches!(value, storage::PropertyValue::Point(_)),
         StandardIndexKind::Range => true,

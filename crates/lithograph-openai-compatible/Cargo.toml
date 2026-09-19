@@ -1,0 +1,25 @@
+[package]
+name = "lithograph-openai-compatible"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "lithograph_openai_compatible"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+base64.workspace = true
+httpdate.workspace = true
+lithograph-embedding-provider.workspace = true
+log = { version = "0.4.34", features = ["max_level_off", "release_max_level_off"] }
+rusqlite = { workspace = true, features = ["loadable_extension"] }
+serde.workspace = true
+serde_json.workspace = true
+ureq.workspace = true
+
+[lints]
+workspace = true

@@ -66,7 +66,9 @@ args = [
     "-L", "100",
     "-a", "10",
     "crates/lithograph-core/src",
+    "crates/lithograph-embedding-provider/src",
     "crates/lithograph-extension/src",
+    "crates/lithograph-openai-compatible/src",
     "-x", "crates/lithograph-extension/src/tests.rs",
     "-w",
 ]
@@ -91,9 +93,14 @@ args = [
     "-L", "150",
     "-a", "10",
     "tests/native_abi_smoke.c",
+    "tests/openai_compatible_provider_smoke.c",
+    "tests/phase13_semantic_concurrency.c",
+    "tests/phase13_semantic_performance.c",
     "tests/phase11_adapter_bench.c",
     "tests/phase11_mixed_stress.c",
     "tests/phase11_stream_bench.c",
+    "tests/synthetic_embedding_provider.c",
+    "tests/synthetic_embedding_provider_smoke.c",
     "-w",
 ]
 
@@ -101,7 +108,9 @@ args = [
 command = "jscpd"
 args = [
     "crates/lithograph-core/src",
+    "crates/lithograph-embedding-provider/src",
     "crates/lithograph-extension/src",
+    "crates/lithograph-openai-compatible/src",
     "--format", "rust",
     "--min-lines", "5",
     "--min-tokens", "50",
@@ -127,6 +136,7 @@ set -eu
 # Keep extension unit tests in the quality gate, but measure production
 # coverage from the same real SQLite load/ABI paths used by Phase 01.
 cargo test --locked -p lithograph-extension --all-features
+cargo test --locked -p lithograph-embedding-provider -p lithograph-openai-compatible --all-features
 
 base_target=${CARGO_TARGET_DIR:-target}
 mkdir -p "$base_target"
@@ -150,16 +160,22 @@ export LITHOGRAPH_SQLITE3
 
 eval "$(cargo llvm-cov show-env --sh)"
 cargo test --locked -p lithograph-core -p lithograph-test-support --all-features
+cargo test --locked -p lithograph-embedding-provider -p lithograph-openai-compatible --all-features
 cargo build --locked -p lithograph-extension
+cargo build --locked -p lithograph-openai-compatible
 
 case "$(uname -s)" in
   Darwin)
     built_extension="$CARGO_TARGET_DIR/debug/liblithograph.dylib"
     extension="$CARGO_TARGET_DIR/debug/lithograph.dylib"
+    openai_provider="$CARGO_TARGET_DIR/debug/liblithograph_openai_compatible.dylib"
+    synthetic_provider="$CARGO_TARGET_DIR/phase13/synthetic_embedding_provider.dylib"
     ;;
   Linux)
     built_extension="$CARGO_TARGET_DIR/debug/liblithograph.so"
     extension="$CARGO_TARGET_DIR/debug/lithograph.so"
+    openai_provider="$CARGO_TARGET_DIR/debug/liblithograph_openai_compatible.so"
+    synthetic_provider="$CARGO_TARGET_DIR/phase13/synthetic_embedding_provider.so"
     ;;
   *)
     echo "quality coverage integration is supported on macOS and Linux" >&2
@@ -168,6 +184,8 @@ case "$(uname -s)" in
 esac
 
 cp "$built_extension" "$extension"
+sqlite_prefix=$(CDPATH= cd -- "$(dirname -- "$LITHOGRAPH_SQLITE3")/.." && pwd)
+scripts/build-phase13-synthetic-provider.sh "$sqlite_prefix/include" "$synthetic_provider"
 cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase01 -- "$extension"
 cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase02 -- "$extension"
 cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase03 -- "$extension"
@@ -187,6 +205,10 @@ LITHOGRAPH_PHASE11_SEARCH_PROGRESS=256 \
   cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase11-search
 cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase10-tck
 scripts/native-abi-smoke.sh "$extension"
+scripts/synthetic-embedding-provider-smoke.sh "$synthetic_provider"
+scripts/openai-compatible-provider-smoke.sh "$openai_provider"
+cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase13 -- \
+  "$extension" "$synthetic_provider" "$openai_provider"
 
 cargo llvm-cov report \
   --ignore-filename-regex 'crates/lithograph-test-support/src/bin/|crates/lithograph-extension/src/tests.rs' \

@@ -9,13 +9,14 @@
 | 当前 Release | **v0.1.1** |
 | 基础接口 / 示例基线 | **v0.1.0**；未受 v0.1.1 影响的页面继续保留原版本标记 |
 | v0.1.1 增量 | Full-text tokenizer： [Search](search.md)、[Procedure](../reference/procedures.md)、[Limits](../reference/limits.md)、[Release Notes](../releases/v0.1.1.md) |
+| Unreleased `main` 增量 | Phase 13 Managed Semantic / Embedding Provider、storage format 4；尚未发布为新的 Release |
 | Cypher compatibility profile | `CY25-2026.08` |
 | Native ABI | `lithograph_v1_*`，ABI version `1` |
-| 新数据库格式 | Storage format `3` |
+| 新数据库格式 | 正式 v0.1.1：`3`；Unreleased `main`：`4` |
 | SQLite | `3.45.0+`，支持 loadable extension、FTS5 |
 | 部署 | Linux、macOS、Windows，分别提供 x64 / arm64 制品 |
 
-v0.1.1 没有改变 Native ABI、Cypher profile 或 storage format；因此未受 Full-text tokenizer 变更影响的 v0.1.0 指南与示例继续作为已验证基线。标记为 v0.1.0 的可执行示例仍会检查精确版本，不应拿 v0.1.1 binary 强行通过这些旧版本断言。v0.1.1 的安装包使用根 [README](../../README.md) 的 `latest` 下载入口或 [v0.1.1 Release Notes](../releases/v0.1.1.md)。
+v0.1.1 没有改变 Native ABI、Cypher profile 或 storage format；因此未受 Full-text tokenizer 变更影响的 v0.1.0 指南与示例继续作为已验证基线。标记为 v0.1.0 的可执行示例仍会检查精确版本，不应拿 v0.1.1 binary 强行通过这些旧版本断言。当前 `main` 的 Phase 13 页面明确标记为 Unreleased，不表示 `latest` Release 已经包含 Managed Semantic 或 format 4。
 
 Lithograph 是嵌入式数据库扩展，不是独立 Server、Neo4j 客户端、Agent 框架或 embedding 服务。一个 SQLite connection 的 `main` database 承载一个版本化 Property Graph；同一文件仍可保存宿主自己的普通 SQL 表，但不得使用保留的 `_lithograph_*` 名称。
 
@@ -27,7 +28,7 @@ Lithograph 是嵌入式数据库扩展，不是独立 Server、Neo4j 客户端�
 | --- | --- |
 | 创建节点和关系、查询、修改、删除 | [Graph 与 Cypher](graph-and-cypher.md) |
 | 定义类型与约束、创建和查看索引 | [Schema 与 Index](schema-and-indexes.md) |
-| 全文检索、向量检索、导入 CSV | [Search 与数据导入](search.md) |
+| 全文检索、Raw Vector、Unreleased Managed Semantic、导入 CSV | [Search 与数据导入](search.md) |
 | Commit、Branch、Tag、历史、Diff/Patch、Rebase、Squash、Reset、Revert | [版本管理](versioning.md) |
 | 分批解决冲突，检查候选图后再合并 | [Merge Session](merge.md) |
 | 一次写入、SQL 外层事务、多次查询形成一个 Commit | [事务与并发](transactions.md) |
@@ -54,7 +55,7 @@ v0.1.1 仍是 pre-1.0 版本。固定版本、保留升级前备份，不把当�
 
 ## 文档依据与验证
 
-本手册以 v0.1.0 发布行为作为基础验证集，并在明确标记的页面加入 v0.1.1 Full-text tokenizer 增量，不定义新的产品合同。v0.1.0 历史事实依据 [v0.1.0 Release](https://github.com/bYiyLi/Lithograph/releases/tag/v0.1.0)；v0.1.1 增量依据 [v0.1.1 Release Notes](../releases/v0.1.1.md)、当前 [技术设计](../design.md)、公开 C header、实现与 release gates。Reference 提供对应来源，读者不需要阅读内部实现才能使用产品。
+本手册以 v0.1.0 发布行为作为基础验证集，并在明确标记的页面加入 v0.1.1 Full-text tokenizer 与当前 Unreleased Phase 13 增量，不把开发分支能力冒充为已发布版本。v0.1.1 历史事实依据 [v0.1.1 Release Notes](../releases/v0.1.1.md)；Unreleased Phase 13 依据当前 [技术设计](../design.md)、实现、Phase acceptance 与真实 SQLite gates。
 
 本次验证的命令、平台和范围记录在 [示例验证说明](examples/README.md)。验证范围不等同于重新运行全部发布压测，也不代表所有第三方 SQLite binding 已逐一验证。
 

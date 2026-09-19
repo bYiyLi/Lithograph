@@ -362,3 +362,26 @@ fn transaction_subqueries_are_classified_for_the_phase08_transaction_executor() 
         vec![vec![Value::Integer(0)]]
     );
 }
+
+#[test]
+fn semantic_external_io_requires_an_independent_execution_boundary() {
+    let connection = fresh_storage();
+    for query in [
+        "CALL db.index.semantic.queryNodes('semantic','probe',{limit:1}) YIELD node CREATE (:Audit) RETURN node",
+        "CALL db.index.semantic.cache.clear() YIELD deletedEntries CREATE (:Audit) RETURN deletedEntries",
+        "UNWIND [1] AS value CALL (value) { CALL db.index.semantic.queryNodes('semantic','probe',{limit:1}) YIELD node RETURN node } IN TRANSACTIONS RETURN value",
+    ] {
+        let error = prepare(
+            &connection,
+            query,
+            BTreeMap::new(),
+            ExecutionOptions::default(),
+        )
+        .expect_err("Semantic external I/O must be rejected before execution");
+        assert_eq!(
+            error.kind,
+            lithograph_core::query::QueryErrorKind::TransactionBoundaryRequired,
+            "unexpected error for {query:?}: {error}",
+        );
+    }
+}

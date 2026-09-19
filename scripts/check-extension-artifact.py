@@ -17,6 +17,10 @@ REQUIRED_SYMBOLS = {
     "lithograph_v1_tx_abort",
     "lithograph_v1_free",
 }
+PROVIDER_REQUIRED_SYMBOLS = {
+    "sqlite3_extension_init",
+    "sqlite3_lithographopenaicompatible_init",
+}
 
 
 def run(*args: str) -> str:
@@ -25,11 +29,15 @@ def run(*args: str) -> str:
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
-        print("usage: scripts/check-extension-artifact.py <extension-path>", file=sys.stderr)
+    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] != "--provider"):
+        print(
+            "usage: scripts/check-extension-artifact.py <extension-path> [--provider]",
+            file=sys.stderr,
+        )
         return 2
 
     artifact = Path(sys.argv[1]).resolve()
+    required_symbols = PROVIDER_REQUIRED_SYMBOLS if len(sys.argv) == 3 else REQUIRED_SYMBOLS
     if not artifact.is_file():
         print(f"extension artifact does not exist: {artifact}", file=sys.stderr)
         return 1
@@ -75,7 +83,7 @@ def main() -> int:
         print("\n".join(sqlite_imports), file=sys.stderr)
         return 1
 
-    missing = sorted(REQUIRED_SYMBOLS - exported)
+    missing = sorted(required_symbols - exported)
     if missing:
         print(f"missing required exported symbols: {', '.join(missing)}", file=sys.stderr)
         return 1

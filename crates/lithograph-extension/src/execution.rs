@@ -20,9 +20,10 @@ impl AdapterExecution {
         let options = query::ExecutionOptions::parse_text(options_text).map_err(map_query_error)?;
         let prepared =
             query::prepare(connection, query_text, params, options).map_err(map_query_error)?;
+        let semantic_maintenance = prepared.has_semantic_maintenance();
         let columns = prepared.columns.clone();
         let cursor = query::QueryCursor::new(prepared);
-        if cursor.is_write() {
+        if cursor.is_write() || semantic_maintenance {
             read_guard.take();
             require_no_active_readers(connection)?;
             require_current_storage_format(&metadata)?;

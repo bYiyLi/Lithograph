@@ -18,18 +18,22 @@ PACKAGE_FILES = ("README.md", "LICENSE", "COMMERCIAL-LICENSE.md")
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tag", required=True)
-    parser.add_argument("--binary", required=True, type=Path)
+    parser.add_argument("--binary", required=True, action="append", type=Path)
     parser.add_argument("--output", required=True, type=Path)
     return parser.parse_args()
 
 
-def stage_package(tag: str, binary: Path, directory: Path) -> None:
+def stage_package(tag: str, binaries: list[Path], directory: Path) -> None:
     if not tag.startswith("v") or len(tag) < 2:
         raise ValueError(f"invalid release tag: {tag}")
-    if not binary.is_file():
-        raise FileNotFoundError(binary)
+    if len({binary.name for binary in binaries}) != len(binaries):
+        raise ValueError("release binaries must have distinct file names")
+    for binary in binaries:
+        if not binary.is_file():
+            raise FileNotFoundError(binary)
 
-    shutil.copy2(binary, directory / binary.name)
+    for binary in binaries:
+        shutil.copy2(binary, directory / binary.name)
     for name in PACKAGE_FILES:
         shutil.copy2(ROOT / name, directory / name)
     (directory / "VERSION").write_text(f"{tag[1:]}\n", encoding="utf-8")
@@ -53,11 +57,11 @@ def write_archive(source: Path, output: Path) -> None:
 
 def main() -> None:
     args = parse_args()
-    binary = args.binary.resolve()
+    binaries = [binary.resolve() for binary in args.binary]
     output = args.output.resolve()
     with tempfile.TemporaryDirectory(prefix="lithograph-release-") as temporary:
         staging = Path(temporary)
-        stage_package(args.tag, binary, staging)
+        stage_package(args.tag, binaries, staging)
         write_archive(staging, output)
     print(output)
 

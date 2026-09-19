@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 lithograph-core = { path = "../lithograph-core", version = "=0.1.1" }
+lithograph-embedding-provider.workspace = true
 rusqlite = { workspace = true, features = ["functions", "loadable_extension", "vtab"] }
 serde_json.workspace = true
 

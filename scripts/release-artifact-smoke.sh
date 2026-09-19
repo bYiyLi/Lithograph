@@ -1,13 +1,14 @@
 #!/usr/bin/env sh
 set -eu
 
-if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
-  echo "usage: scripts/release-artifact-smoke.sh <extension-path> [interop-fixture]" >&2
+if [ "$#" -lt 1 ] || [ "$#" -gt 3 ]; then
+  echo "usage: scripts/release-artifact-smoke.sh <extension-path> [interop-fixture] [openai-provider-path]" >&2
   exit 2
 fi
 
 extension=$1
 interop_fixture=${2:-}
+openai_provider=${3:-}
 if [ ! -f "$extension" ]; then
   echo "extension artifact does not exist: $extension" >&2
   exit 1
@@ -27,13 +28,17 @@ done
 
 python3 scripts/check-extension-artifact.py "$extension"
 scripts/native-abi-smoke.sh "$extension"
+if [ -n "$openai_provider" ]; then
+  python3 scripts/check-extension-artifact.py "$openai_provider" --provider
+  scripts/openai-compatible-provider-smoke.sh "$openai_provider"
+fi
 
 # Same artifact, two independently built host runtimes: the frozen minimum and
 # the current release candidate. These probes intentionally focus on
 # load/init/read/write because the full feature/ABI smoke above already ran on
 # the native runner runtime.
-scripts/sqlite-345-smoke.sh "$extension"
-scripts/sqlite-3534-smoke.sh "$extension"
+scripts/sqlite-345-smoke.sh "$extension" "$openai_provider"
+scripts/sqlite-3534-smoke.sh "$extension" "$openai_provider"
 
 if [ -n "$interop_fixture" ]; then
   cargo run --locked --quiet -p lithograph-test-support \

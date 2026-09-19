@@ -86,6 +86,10 @@ impl ResolvedGraphView {
         self.required_unknown
     }
 
+    pub(crate) fn is_full_graph(&self) -> bool {
+        !self.required_unknown && self.required.is_empty() && self.excluded.is_empty()
+    }
+
     pub(crate) fn scan_label(&self) -> Option<LabelId> {
         if self.required_unknown {
             None

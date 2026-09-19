@@ -24,6 +24,10 @@ pub(crate) const FORMAT3_SCHEMA_STATEMENTS: &[&str] = &[
     "CREATE INDEX main._lithograph_index_entries_point_y ON _lithograph_index_entries(generation_id, owner_kind, property_ordinal, point_crs, point_y, point_x, point_z, owner_id) WHERE point_crs IS NOT NULL",
 ];
 
+pub(crate) const FORMAT4_SCHEMA_STATEMENTS: &[&str] = &[
+    "CREATE TABLE main._lithograph_embedding_cache(entry_id INTEGER PRIMARY KEY AUTOINCREMENT, space_hash BLOB NOT NULL CHECK(length(space_hash) = 32), text_hash BLOB NOT NULL CHECK(length(text_hash) = 32), text_bytes INTEGER NOT NULL CHECK(text_bytes >= 0), dimension INTEGER NOT NULL CHECK(dimension BETWEEN 1 AND 4096), coordinate_type INTEGER NOT NULL CHECK(coordinate_type = 5), vector_blob BLOB NOT NULL, payload_bytes INTEGER NOT NULL CHECK(payload_bytes >= 0), UNIQUE(space_hash, text_hash))",
+];
+
 pub(crate) const STORAGE_SCHEMA_STATEMENTS: &[&str] = &[
     "CREATE TABLE main._lithograph_sequences(kind INTEGER PRIMARY KEY CHECK(kind BETWEEN 1 AND 6), next_id INTEGER NOT NULL CHECK(next_id > 0))",
     "CREATE TABLE main._lithograph_labels(id INTEGER PRIMARY KEY CHECK(id > 0), name TEXT NOT NULL)",
@@ -67,6 +71,7 @@ pub(crate) const STORAGE_SCHEMA_STATEMENTS: &[&str] = &[
     FORMAT3_SCHEMA_STATEMENTS[7],
     FORMAT3_SCHEMA_STATEMENTS[8],
     FORMAT3_SCHEMA_STATEMENTS[9],
+    FORMAT4_SCHEMA_STATEMENTS[0],
 ];
 
 pub fn create_storage_schema(connection: &Connection) -> StorageResult<()> {
@@ -93,6 +98,14 @@ pub fn create_format2_schema(connection: &Connection) -> StorageResult<()> {
 /// Adds only the storage-format-3 persistent Standard Index structures.
 pub fn create_format3_schema(connection: &Connection) -> StorageResult<()> {
     for statement in FORMAT3_SCHEMA_STATEMENTS {
+        connection.execute_batch(statement)?;
+    }
+    Ok(())
+}
+
+/// Adds only the storage-format-4 persistent Managed Semantic cache structure.
+pub fn create_format4_schema(connection: &Connection) -> StorageResult<()> {
+    for statement in FORMAT4_SCHEMA_STATEMENTS {
         connection.execute_batch(statement)?;
     }
     Ok(())

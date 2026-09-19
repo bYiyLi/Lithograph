@@ -1,5 +1,6 @@
 use crate::storage::{self, OwnerKind, StandardIndexKind};
 
+use super::super::super::managed_semantic::{self, ManagedQueryInput};
 use super::super::super::semantic_index::{
     FullTextQueryInput, SemanticEntity, fulltext_query, resolve_semantic_index,
 };
@@ -52,6 +53,14 @@ fn validate_procedure_arguments(
             "procedure {name} expects 2 or 3 arguments"
         )));
     }
+    if let Some(expected) = semantic_argument_count(name) {
+        if count == expected {
+            return Ok(());
+        }
+        return Err(QueryError::semantic(format!(
+            "procedure {name} expects {expected} arguments"
+        )));
+    }
     if let Some((minimum, maximum)) = version_argument_range(name) {
         if (minimum..=maximum).contains(&count) {
             return Ok(());
@@ -79,6 +88,17 @@ fn is_fulltext_procedure(name: &str) -> bool {
         name.to_ascii_lowercase().as_str(),
         "db.index.fulltext.querynodes" | "db.index.fulltext.queryrelationships"
     )
+}
+
+fn semantic_argument_count(name: &str) -> Option<usize> {
+    Some(match name.to_ascii_lowercase().as_str() {
+        "db.index.semantic.createnodeindex" | "db.index.semantic.createrelationshipindex" => 4,
+        "db.index.semantic.querynodes" | "db.index.semantic.queryrelationships" => 3,
+        "db.index.semantic.cache.configure" => 1,
+        "db.index.semantic.cache.stats" | "db.index.semantic.cache.clear" => 0,
+        "db.index.semantic.rebuild" => 2,
+        _ => return None,
+    })
 }
 
 fn version_argument_range(name: &str) -> Option<(usize, usize)> {
@@ -131,6 +151,16 @@ fn procedure_columns(mut columns: Vec<String>, yield_items: &[(String, String)])
     columns
 }
 
+fn procedure_projection(
+    columns: Vec<String>,
+    clause: &AstNode,
+    outputs: &[&str],
+) -> (Vec<(String, String)>, Vec<String>) {
+    let yield_items = resolved_yield_items(clause, outputs);
+    let columns = procedure_columns(columns, &yield_items);
+    (yield_items, columns)
+}
+
 fn show_registry_rows(
     connection: &Connection,
     snapshot: &Snapshot<'_>,
@@ -181,11 +211,25 @@ struct FullTextQueryOptions {
     analyzer: Option<String>,
 }
 
+struct SemanticQueryOptions {
+    skip: usize,
+    limit: usize,
+}
+
 fn require_string_argument(value: Value, procedure: &str, argument: &str) -> QueryResult<String> {
     match value {
         Value::String(value) => Ok(value),
         _ => Err(QueryError::semantic(format!(
             "procedure {procedure} argument {argument} must be String"
+        ))),
+    }
+}
+
+fn require_semantic_string(value: Value, argument: &str) -> QueryResult<String> {
+    match value {
+        Value::String(value) => Ok(value),
+        _ => Err(QueryError::invalid_argument(format!(
+            "semantic procedure argument {argument} must be STRING"
         ))),
     }
 }
@@ -196,8 +240,9 @@ fn parse_fulltext_options(value: Value) -> QueryResult<FullTextQueryOptions> {
             "full-text query options must be a Map",
         ));
     };
-    let skip = take_nonnegative_option(&mut options, "skip")?.unwrap_or(0);
-    let limit = take_nonnegative_option(&mut options, "limit")?;
+    let skip =
+        take_nonnegative_integer(&mut options, "skip", IntegerOptionFamily::FullText)?.unwrap_or(0);
+    let limit = take_nonnegative_integer(&mut options, "limit", IntegerOptionFamily::FullText)?;
     let analyzer = match options.remove("analyzer") {
         None => None,
         Some(Value::String(value)) => {
@@ -222,21 +267,88 @@ fn parse_fulltext_options(value: Value) -> QueryResult<FullTextQueryOptions> {
     })
 }
 
-fn take_nonnegative_option(
+fn parse_semantic_options(value: Value) -> QueryResult<SemanticQueryOptions> {
+    let Value::Map(mut options) = value else {
+        return Err(QueryError::invalid_argument(
+            "semantic query options must be a MAP",
+        ));
+    };
+    let skip =
+        take_nonnegative_integer(&mut options, "skip", IntegerOptionFamily::Semantic)?.unwrap_or(0);
+    let limit = take_nonnegative_integer(&mut options, "limit", IntegerOptionFamily::Semantic)?
+        .ok_or_else(|| QueryError::invalid_argument("semantic query options require limit"))?;
+    if let Some(key) = options.keys().next() {
+        return Err(QueryError::invalid_argument(format!(
+            "unsupported semantic query option {key:?}"
+        )));
+    }
+    Ok(SemanticQueryOptions { skip, limit })
+}
+
+fn parse_cache_configure_options(value: Value) -> QueryResult<(Option<bool>, Option<u64>)> {
+    let Value::Map(mut options) = value else {
+        return Err(QueryError::invalid_argument(
+            "semantic cache configure options must be a MAP",
+        ));
+    };
+    let enabled = match options.remove("enabled") {
+        None => None,
+        Some(Value::Boolean(value)) => Some(value),
+        Some(_) => {
+            return Err(QueryError::invalid_argument(
+                "semantic cache enabled must be BOOLEAN",
+            ));
+        }
+    };
+    let max_bytes = match options.remove("maxBytes") {
+        None => None,
+        Some(Value::Integer(value)) if value > 0 => Some(value as u64),
+        Some(_) => {
+            return Err(QueryError::invalid_argument(
+                "semantic cache maxBytes must be a positive INTEGER",
+            ));
+        }
+    };
+    if let Some(key) = options.keys().next() {
+        return Err(QueryError::invalid_argument(format!(
+            "unsupported semantic cache option {key:?}"
+        )));
+    }
+    Ok((enabled, max_bytes))
+}
+
+#[derive(Clone, Copy)]
+enum IntegerOptionFamily {
+    Semantic,
+    FullText,
+}
+
+fn take_nonnegative_integer(
     options: &mut BTreeMap<String, Value>,
     key: &str,
+    family: IntegerOptionFamily,
 ) -> QueryResult<Option<usize>> {
     let Some(value) = options.remove(key) else {
         return Ok(None);
     };
     let Value::Integer(value) = value else {
-        return Err(QueryError::semantic(format!(
-            "full-text option {key} must be Integer"
-        )));
+        return Err(match family {
+            IntegerOptionFamily::Semantic => {
+                QueryError::invalid_argument(format!("semantic query option {key} must be INTEGER"))
+            }
+            IntegerOptionFamily::FullText => {
+                QueryError::semantic(format!("full-text option {key} must be Integer"))
+            }
+        });
     };
-    usize::try_from(value)
-        .map(Some)
-        .map_err(|_| QueryError::semantic(format!("full-text option {key} cannot be negative")))
+    usize::try_from(value).map(Some).map_err(|_| match family {
+        IntegerOptionFamily::Semantic => {
+            QueryError::invalid_argument(format!("semantic query option {key} cannot be negative"))
+        }
+        IntegerOptionFamily::FullText => {
+            QueryError::semantic(format!("full-text option {key} cannot be negative"))
+        }
+    })
 }
 
 fn procedure_argument_expressions(clause: &AstNode) -> QueryResult<Vec<expression::Expr>> {
@@ -250,6 +362,26 @@ fn procedure_argument_expressions(clause: &AstNode) -> QueryResult<Vec<expressio
         .into_iter()
         .map(compile_expression)
         .collect()
+}
+
+struct ProcedureSetup {
+    expressions: Vec<expression::Expr>,
+    yield_items: Vec<(String, String)>,
+    columns: Vec<String>,
+}
+
+fn procedure_setup(
+    columns: Vec<String>,
+    clause: &AstNode,
+    outputs: &[&str],
+) -> QueryResult<ProcedureSetup> {
+    let expressions = procedure_argument_expressions(clause)?;
+    let (yield_items, columns) = procedure_projection(columns, clause, outputs);
+    Ok(ProcedureSetup {
+        expressions,
+        yield_items,
+        columns,
+    })
 }
 
 fn fulltext_argument_expressions(
@@ -279,9 +411,12 @@ impl ReadExecutor<'_, '_> {
         if is_fulltext_procedure(name) {
             return self.execute_fulltext_procedure(clause, input, name, procedure);
         }
+        if super::super::super::registry::is_semantic_procedure(name) {
+            return self.execute_semantic_procedure(clause, input, name, procedure);
+        }
         let procedure_rows = self.current_graph_procedure(name)?;
-        let yield_items = resolved_yield_items(clause, procedure.outputs);
-        let columns = procedure_columns(input.columns.clone(), &yield_items);
+        let (yield_items, columns) =
+            procedure_projection(input.columns.clone(), clause, procedure.outputs);
         let rows = self.join_procedure_rows(input.rows, &procedure_rows, &yield_items, name)?;
         let rows = self.filter_yield_rows(clause, rows)?;
         Ok(RowSet { columns, rows })
@@ -294,9 +429,11 @@ impl ReadExecutor<'_, '_> {
         name: &str,
         procedure: super::super::super::registry::ProcedureDefinition,
     ) -> QueryResult<RowSet> {
-        let expressions = procedure_argument_expressions(clause)?;
-        let yield_items = resolved_yield_items(clause, procedure.outputs);
-        let columns = procedure_columns(input.columns.clone(), &yield_items);
+        let ProcedureSetup {
+            expressions,
+            yield_items,
+            columns,
+        } = procedure_setup(input.columns.clone(), clause, procedure.outputs)?;
         let options = self.options.ok_or_else(|| {
             QueryError::invalid_argument(
                 "Version Procedures cannot execute inside a graph-mutation clause program",
@@ -339,6 +476,217 @@ impl ReadExecutor<'_, '_> {
         Ok(RowSet { columns, rows })
     }
 
+    fn execute_semantic_procedure(
+        &mut self,
+        clause: &AstNode,
+        input: RowSet,
+        name: &str,
+        procedure: super::super::super::registry::ProcedureDefinition,
+    ) -> QueryResult<RowSet> {
+        let ProcedureSetup {
+            expressions,
+            yield_items,
+            columns,
+        } = procedure_setup(input.columns.clone(), clause, procedure.outputs)?;
+        let rows = if super::super::super::registry::is_semantic_query(name) {
+            self.semantic_query_rows(input.rows, &expressions, &yield_items, name)?
+        } else {
+            self.validate_semantic_maintenance_options(name)?;
+            self.semantic_maintenance_rows(input.rows, &expressions, &yield_items, name)?
+        };
+        let rows = self.filter_yield_rows(clause, rows)?;
+        Ok(RowSet { columns, rows })
+    }
+
+    fn semantic_query_rows(
+        &mut self,
+        input_rows: Vec<BindingRow>,
+        expressions: &[expression::Expr],
+        yield_items: &[(String, String)],
+        name: &str,
+    ) -> QueryResult<Vec<BindingRow>> {
+        let relationship_query = name.eq_ignore_ascii_case("db.index.semantic.queryRelationships");
+        let mut rows = Vec::new();
+        for input_row in input_rows {
+            let index_name =
+                require_semantic_string(self.evaluate(&expressions[0], &input_row)?, "indexName")?;
+            let query_text = require_semantic_string(
+                self.evaluate(&expressions[1], &input_row)?,
+                "queryString",
+            )?;
+            let options = parse_semantic_options(self.evaluate(&expressions[2], &input_row)?)?;
+            let index = resolve_semantic_index(
+                self.connection,
+                &self.snapshot,
+                &index_name,
+                StandardIndexKind::Semantic,
+            )?;
+            let hits = managed_semantic::query(
+                self.connection,
+                &self.snapshot,
+                self.graph_view,
+                &index,
+                &ManagedQueryInput {
+                    relationship_query,
+                    query: &query_text,
+                    skip: options.skip,
+                    limit: options.limit,
+                },
+                self.is_interrupted,
+            )?;
+            for hit in hits {
+                let procedure_row = self.semantic_hit_row(hit)?;
+                rows.push(self.join_procedure_row(
+                    &input_row,
+                    &procedure_row,
+                    yield_items,
+                    name,
+                )?);
+            }
+        }
+        Ok(rows)
+    }
+
+    fn validate_semantic_maintenance_options(&self, name: &str) -> QueryResult<()> {
+        let options = self.options.ok_or_else(|| {
+            QueryError::invalid_argument(
+                "Semantic maintenance cannot execute inside a graph-mutation clause program",
+            )
+        })?;
+        if !super::super::super::registry::is_semantic_maintenance(name) {
+            return Ok(());
+        }
+        if !options.graph_view.is_full_graph() {
+            return Err(QueryError::invalid_argument(
+                "Semantic maintenance does not accept options.graphView",
+            ));
+        }
+        if !matches!(options.snapshot, crate::query::SnapshotSelector::Current) {
+            return Err(QueryError::invalid_argument(
+                "Semantic maintenance does not accept options.at",
+            ));
+        }
+        Ok(())
+    }
+
+    fn semantic_maintenance_rows(
+        &mut self,
+        input_rows: Vec<BindingRow>,
+        expressions: &[expression::Expr],
+        yield_items: &[(String, String)],
+        name: &str,
+    ) -> QueryResult<Vec<BindingRow>> {
+        let mut rows = Vec::new();
+        for input_row in input_rows {
+            let args = expressions
+                .iter()
+                .map(|expression| self.evaluate(expression, &input_row))
+                .collect::<QueryResult<Vec<_>>>()?;
+            let procedure_row = self.semantic_maintenance_row(name, args)?;
+            rows.push(self.join_procedure_row(&input_row, &procedure_row, yield_items, name)?);
+        }
+        Ok(rows)
+    }
+
+    fn semantic_maintenance_row(
+        &self,
+        name: &str,
+        args: Vec<Value>,
+    ) -> QueryResult<BTreeMap<String, Value>> {
+        match name.to_ascii_lowercase().as_str() {
+            "db.index.semantic.cache.stats" => self.semantic_cache_stats_row(),
+            "db.index.semantic.cache.configure" => {
+                let value = args.into_iter().next().ok_or_else(|| {
+                    QueryError::invalid_argument("semantic cache configure requires options")
+                })?;
+                let (enabled, max_bytes) = parse_cache_configure_options(value)?;
+                let policy =
+                    storage::embedding_cache_configure(self.connection, enabled, max_bytes)?;
+                Ok(BTreeMap::from([
+                    ("enabled".to_owned(), Value::Boolean(policy.enabled)),
+                    (
+                        "maxBytes".to_owned(),
+                        Value::Integer(i64::try_from(policy.max_bytes).unwrap_or(i64::MAX)),
+                    ),
+                ]))
+            }
+            "db.index.semantic.cache.clear" => {
+                let outcome = storage::embedding_cache_clear(self.connection)?;
+                Ok(BTreeMap::from([
+                    (
+                        "deletedEntries".to_owned(),
+                        Value::Integer(i64::try_from(outcome.deleted_entries).unwrap_or(i64::MAX)),
+                    ),
+                    (
+                        "releasedPayloadBytes".to_owned(),
+                        Value::Integer(
+                            i64::try_from(outcome.released_payload_bytes).unwrap_or(i64::MAX),
+                        ),
+                    ),
+                ]))
+            }
+            "db.index.semantic.rebuild" => {
+                let index_name =
+                    require_semantic_string(args.first().cloned().unwrap_or(Value::Null), "name")?;
+                let version = require_semantic_string(
+                    args.get(1).cloned().unwrap_or(Value::Null),
+                    "version",
+                )?;
+                let outcome = managed_semantic::rebuild(
+                    self.connection,
+                    &index_name,
+                    &version,
+                    self.is_interrupted,
+                )?;
+                Ok(BTreeMap::from([
+                    ("name".to_owned(), Value::String(index_name)),
+                    (
+                        "commit".to_owned(),
+                        Value::String(format!("commit/{}", outcome.commit.to_hex())),
+                    ),
+                    (
+                        "indexedEntities".to_owned(),
+                        Value::Integer(i64::try_from(outcome.indexed_entities).unwrap_or(i64::MAX)),
+                    ),
+                    (
+                        "embeddedTexts".to_owned(),
+                        Value::Integer(i64::try_from(outcome.embedded_texts).unwrap_or(i64::MAX)),
+                    ),
+                    (
+                        "cacheHits".to_owned(),
+                        Value::Integer(i64::try_from(outcome.cache_hits).unwrap_or(i64::MAX)),
+                    ),
+                ]))
+            }
+            _ => Err(QueryError::internal(format!(
+                "registered Semantic procedure {name} has no executor"
+            ))),
+        }
+    }
+
+    fn semantic_cache_stats_row(&self) -> QueryResult<BTreeMap<String, Value>> {
+        let stats = storage::embedding_cache_stats(self.connection)?;
+        Ok(BTreeMap::from([
+            ("enabled".to_owned(), Value::Boolean(stats.policy.enabled)),
+            (
+                "maxBytes".to_owned(),
+                Value::Integer(i64::try_from(stats.policy.max_bytes).unwrap_or(i64::MAX)),
+            ),
+            (
+                "usedBytes".to_owned(),
+                Value::Integer(i64::try_from(stats.used_bytes).unwrap_or(i64::MAX)),
+            ),
+            (
+                "entries".to_owned(),
+                Value::Integer(i64::try_from(stats.entries).unwrap_or(i64::MAX)),
+            ),
+            (
+                "spaces".to_owned(),
+                Value::Integer(i64::try_from(stats.spaces).unwrap_or(i64::MAX)),
+            ),
+        ]))
+    }
+
     fn execute_fulltext_procedure(
         &mut self,
         clause: &AstNode,
@@ -348,8 +696,8 @@ impl ReadExecutor<'_, '_> {
     ) -> QueryResult<RowSet> {
         let expressions = fulltext_argument_expressions(clause, name)?;
         let relationship_query = name.eq_ignore_ascii_case("db.index.fulltext.queryRelationships");
-        let yield_items = resolved_yield_items(clause, procedure.outputs);
-        let columns = procedure_columns(input.columns.clone(), &yield_items);
+        let (yield_items, columns) =
+            procedure_projection(input.columns.clone(), clause, procedure.outputs);
         let mut rows = Vec::new();
         for input_row in input.rows {
             rows.extend(self.fulltext_rows_for_input(
@@ -396,7 +744,7 @@ impl ReadExecutor<'_, '_> {
         )?;
         hits.into_iter()
             .map(|hit| {
-                let procedure_row = self.fulltext_procedure_row(hit)?;
+                let procedure_row = self.semantic_hit_row(hit)?;
                 self.join_procedure_row(input_row, &procedure_row, yield_items, name)
             })
             .collect()
@@ -428,7 +776,7 @@ impl ReadExecutor<'_, '_> {
         Ok((index_name, query, options))
     }
 
-    fn fulltext_procedure_row(&self, hit: SemanticHit) -> QueryResult<BTreeMap<String, Value>> {
+    fn semantic_hit_row(&self, hit: SemanticHit) -> QueryResult<BTreeMap<String, Value>> {
         let (field, value) = match hit.entity {
             SemanticEntity::Node(node) => (
                 "node",

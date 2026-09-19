@@ -478,16 +478,17 @@ fn check_temp_schema_shadowing(load: &str) -> Result<(), Box<dyn Error>> {
 fn check_format_boundaries(load: &str) -> Result<(), Box<dyn Error>> {
     let fixture = FileDatabaseFixture::new(0x0106)?;
     fixture.execute_script(&format!("{load}\nSELECT lithograph_init();"))?;
-    fixture.execute_script(
-        "UPDATE _lithograph_meta SET storage_format = 4 WHERE id = 1;\
-         CREATE TABLE main._lithograph_future(v INTEGER);",
-    )?;
+    let too_new = STORAGE_FORMAT + 1;
+    fixture.execute_script(&format!(
+        "UPDATE _lithograph_meta SET storage_format = {too_new} WHERE id = 1;\
+         CREATE TABLE main._lithograph_future(v INTEGER);"
+    ))?;
 
     let version = fixture.execute_script(&format!("{load}\nSELECT lithograph_version();"))?;
     let version = parse_json(&version, "version on newer format")?;
     require_equal(
         &version["storageFormat"]["current"].as_i64(),
-        &Some(4),
+        &Some(too_new),
         "version must remain readable on a newer format with unknown future schema objects",
     )?;
     assert_sqlite_error(
@@ -534,7 +535,7 @@ fn check_metadata_integrity_contract(load: &str) -> Result<(), Box<dyn Error>> {
     schema_fixture.execute_script(
         "ALTER TABLE main._lithograph_meta RENAME TO _lithograph_meta_backup;\
          CREATE TABLE main._lithograph_meta(id INTEGER, magic TEXT, database_id TEXT, storage_format INTEGER);\
-         INSERT INTO main._lithograph_meta SELECT * FROM main._lithograph_meta_backup;\
+         INSERT INTO main._lithograph_meta(id, magic, database_id, storage_format) SELECT id, magic, database_id, storage_format FROM main._lithograph_meta_backup;\
          INSERT INTO main._lithograph_meta VALUES(2, 'junk', 'junk', 999);\
          DROP TABLE main._lithograph_meta_backup;",
     )?;

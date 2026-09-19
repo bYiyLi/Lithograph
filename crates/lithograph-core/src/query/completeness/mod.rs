@@ -237,6 +237,24 @@ fn has_aggregating_function(root: &AstNode) -> bool {
         .any(crate::cypher::is_aggregating_function)
 }
 
+fn validate_semantic_external_io_program(
+    root: &AstNode,
+    writes: bool,
+    transaction_owning: bool,
+) -> QueryResult<()> {
+    let has_semantic_external_io = root
+        .descendants()
+        .filter(|node| node.kind == AstKind::FunctionName)
+        .filter_map(|node| node.text.as_deref())
+        .any(super::registry::is_semantic_direct_only);
+    if has_semantic_external_io && (writes || transaction_owning) {
+        return Err(QueryError::transaction_boundary_required(
+            "Semantic query and maintenance cannot execute with graph mutation or transaction-owning Cypher",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn prepare_program(
     connection: &Connection,
     ast: &QueryAst,
@@ -255,6 +273,7 @@ pub(crate) fn prepare_program(
     let public_result = query_body_has_public_result(&ast.root);
     let columns = output_columns(&ast.root, source, public_result)?;
     let writes = contains_mutation(&ast.root);
+    validate_semantic_external_io_program(&ast.root, writes, transaction_owning)?;
     let version =
         version::validate_version_program(&ast.root, options, writes, transaction_owning)?;
     let write_options = writes

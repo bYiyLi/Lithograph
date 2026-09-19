@@ -721,7 +721,8 @@ pub(crate) fn validate_candidate(
     snapshot.validate_graph_invariants()?;
     crate::query::schema::validate_snapshot(connection, schema, &snapshot)?;
     let previous = SchemaState::load(connection, base_commit)?;
-    crate::query::semantic_index::validate_fulltext_transition(connection, &previous, schema)
+    crate::query::semantic_index::validate_fulltext_transition(connection, &previous, schema)?;
+    crate::query::managed_semantic::validate_transition(connection, &previous, schema)
 }
 
 fn append_schema_operations(

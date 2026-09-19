@@ -8,6 +8,7 @@ mod expression;
 mod functions;
 mod graph;
 mod ingestion;
+mod managed_semantic;
 mod mutation;
 mod name_expression;
 mod options;

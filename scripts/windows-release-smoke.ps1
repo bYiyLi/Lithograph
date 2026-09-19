@@ -1,7 +1,8 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$ExtensionPath,
-    [string]$InteropFixture = ""
+    [string]$InteropFixture = "",
+    [string]$OpenAIProviderPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -9,6 +10,8 @@ $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $extension = (Resolve-Path $ExtensionPath).Path
 $extensionForSqlite = $extension.Replace('\', '/')
+$openaiProvider = if ($OpenAIProviderPath) { (Resolve-Path $OpenAIProviderPath).Path } else { "" }
+$openaiProviderForSqlite = $openaiProvider.Replace('\', '/')
 $targetRoot = if ($env:CARGO_TARGET_DIR) {
     if ([IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) {
         $env:CARGO_TARGET_DIR
@@ -126,6 +129,37 @@ function Invoke-LithographProbe {
     }
 }
 
+function Invoke-Phase13Probe {
+    param(
+        [Parameter(Mandatory = $true)]$Runtime,
+        [Parameter(Mandatory = $true)][string]$SyntheticProvider,
+        [string]$OpenAIProvider = ""
+    )
+    $previousSqlite3 = $env:LITHOGRAPH_SQLITE3
+    $previousLibDir = $env:SQLITE3_LIB_DIR
+    $previousIncludeDir = $env:SQLITE3_INCLUDE_DIR
+    $previousStatic = $env:SQLITE3_STATIC
+    try {
+        $env:LITHOGRAPH_SQLITE3 = $Runtime.Exe
+        $env:SQLITE3_LIB_DIR = $Runtime.LibDir
+        $env:SQLITE3_INCLUDE_DIR = $Runtime.Include
+        $env:SQLITE3_STATIC = "1"
+        if ($OpenAIProvider) {
+            & cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase13 -- $extension $SyntheticProvider $OpenAIProvider
+        } else {
+            & cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase13 -- $extension $SyntheticProvider
+        }
+        if ($LASTEXITCODE -ne 0) {
+            throw "Phase 13 probe failed with $($Runtime.Exe)"
+        }
+    } finally {
+        $env:LITHOGRAPH_SQLITE3 = $previousSqlite3
+        $env:SQLITE3_LIB_DIR = $previousLibDir
+        $env:SQLITE3_INCLUDE_DIR = $previousIncludeDir
+        $env:SQLITE3_STATIC = $previousStatic
+    }
+}
+
 function Invoke-Phase09Regressions {
     param(
         [Parameter(Mandatory = $true)]$Runtime
@@ -153,6 +187,10 @@ function Invoke-Phase09Regressions {
 
 $minimum = Build-SqliteRuntime -Version "3.45.0" -ArchiveVersion "3450000" -Year "2024" -Sha256 "72887d57a1d8f89f52be38ef84a6353ce8c3ed55ada7864eb944abd9a495e436"
 $current = Build-SqliteRuntime -Version "3.53.4" -ArchiveVersion "3530400" -Year "2026" -Sha256 "0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c"
+$lithographInclude = Join-Path $repoRoot "include"
+$syntheticSource = Join-Path $repoRoot "tests\synthetic_embedding_provider.c"
+$syntheticProvider = Join-Path $root "phase13_synthetic_embedding_provider.dll"
+Invoke-VcCommand -Name "phase13-synthetic-provider" -Command "cd /d `"$root`" && cl /nologo /LD /std:c11 /W4 /WX /I`"$lithographInclude`" /I`"$($minimum.Include)`" `"$syntheticSource`" /Fe`"$syntheticProvider`""
 
 Invoke-Phase09Regressions -Runtime $minimum
 
@@ -161,6 +199,26 @@ foreach ($runtime in @($minimum, $current)) {
     if ($loadResult -ne "1") {
         throw "SQLite runtime failed real Lithograph .load smoke: $($runtime.Exe)"
     }
+    if ($openaiProvider) {
+        foreach ($providerFirst in @($true, $false)) {
+            $loadCommands = if ($providerFirst) {
+                @(".load `"$openaiProviderForSqlite`" sqlite3_lithographopenaicompatible_init", ".load `"$extensionForSqlite`"")
+            } else {
+                @(".load `"$extensionForSqlite`"", ".load `"$openaiProviderForSqlite`" sqlite3_lithographopenaicompatible_init")
+            }
+            $semanticOutput = @(
+                & $runtime.Exe -batch -noheader `
+                    -cmd $loadCommands[0] `
+                    -cmd $loadCommands[1] `
+                    ":memory:" `
+                    "SELECT lithograph_init(); SELECT json_extract(lithograph('CALL db.index.semantic.createNodeIndex(''release_sem'', [''Doc''], ''text'', {provider:''openai-compatible'', providerConfig:{model:''release-smoke''}, dimensions:3, similarity:''cosine''})'), '$.summary.counters.indexesAdded');"
+            )
+            if ($LASTEXITCODE -ne 0 -or $semanticOutput[-1].Trim() -ne "1") {
+                throw "SQLite runtime failed Lithograph/OpenAI Provider dual-load smoke: $($runtime.Exe)"
+            }
+        }
+    }
+    Invoke-Phase13Probe -Runtime $runtime -SyntheticProvider $syntheticProvider -OpenAIProvider $openaiProvider
 }
 
 foreach ($probe in @(
@@ -210,12 +268,11 @@ if ($InteropFixture) {
 }
 
 $nativeSource = Join-Path $repoRoot "tests\native_abi_smoke.c"
-$lithographInclude = Join-Path $repoRoot "include"
 $nativeObj = Join-Path $root "native-abi-smoke.obj"
 $nativeExe = Join-Path $root "native-abi-smoke.exe"
 Invoke-VcCommand -Name "native-compile" -Command "cd /d `"$root`" && cl /nologo /c /std:c11 /W4 /WX /I`"$lithographInclude`" /I`"$($minimum.Include)`" `"$nativeSource`" /Fo`"$nativeObj`""
 Invoke-VcCommand -Name "native-link" -Command "cd /d `"$root`" && link /nologo `"$nativeObj`" `"$($minimum.Obj)`" /OUT:`"$nativeExe`""
-& $nativeExe $extension
+& $nativeExe $extension "" $syntheticProvider
 if ($LASTEXITCODE -ne 0) {
     throw "Windows Native C ABI smoke failed"
 }
@@ -250,4 +307,25 @@ if ($dependencies -match "(?i)sqlite.*\.dll") {
     throw "Windows extension artifact links a private SQLite runtime"
 }
 
-Write-Host "Windows Phase 10 release artifact smoke passed ($architecture): $extension"
+if ($openaiProvider) {
+    $providerExportsFile = Join-Path $root "provider-exports.txt"
+    $providerImportsFile = Join-Path $root "provider-imports.txt"
+    $providerDependenciesFile = Join-Path $root "provider-dependencies.txt"
+    Invoke-VcCommand -Name "provider-artifact-inspect" -Command "dumpbin /nologo /exports `"$openaiProvider`" > `"$providerExportsFile`" && dumpbin /nologo /imports `"$openaiProvider`" > `"$providerImportsFile`" && dumpbin /nologo /dependents `"$openaiProvider`" > `"$providerDependenciesFile`""
+    $providerExports = Get-Content -Raw $providerExportsFile
+    foreach ($symbol in @("sqlite3_extension_init", "sqlite3_lithographopenaicompatible_init")) {
+        if ($providerExports -notmatch [regex]::Escape($symbol)) {
+            throw "Windows OpenAI-compatible Provider artifact is missing required export: $symbol"
+        }
+    }
+    $providerImports = Get-Content -Raw $providerImportsFile
+    if ($providerImports -match "sqlite3_") {
+        throw "Windows OpenAI-compatible Provider artifact has direct SQLite imports"
+    }
+    $providerDependencies = Get-Content -Raw $providerDependenciesFile
+    if ($providerDependencies -match "(?i)sqlite.*\.dll") {
+        throw "Windows OpenAI-compatible Provider artifact links a private SQLite runtime"
+    }
+}
+
+Write-Host "Windows Phase 13 release artifact smoke passed ($architecture): $extension"

@@ -1,6 +1,6 @@
 # SQLite Embedding Provider / Cypher Vector Contract 研究证据
 
-核验记录：2026-09-18 UTC；仓库检查基线 `1e6e078`。本页保存 Phase 13 使用的外部合同、当前仓库观察和采用限制，不定义 Lithograph 产品行为；设计真源见 [Vector](../design/vector.md)。
+核验记录：2026-09-18 UTC；2026-09-19 UTC 补充 HTTP dependency logging 核验。仓库检查基线最初为 `1e6e078`；补充检查基于当前 Phase 13 worktree。本页保存 Phase 13 使用的外部合同、当前仓库观察和采用限制，不定义 Lithograph 产品行为；设计真源见 [Vector](../design/vector.md)。
 
 ## 1. 权威来源
 
@@ -13,6 +13,9 @@
 | S5 | [Cypher 25 Vector values](https://neo4j.com/docs/cypher-manual/25/values-and-types/vector/) | `VECTOR` dimension / coordinate type 与持久 Property 语义 |
 | S6 | [OpenAI Create embeddings](https://developers.openai.com/api/reference/resources/embeddings/methods/create) | OpenAICompatible reference Provider 的 `/embeddings` request/response profile、input/model/dimensions/encoding_format/user 与 token/batch limits |
 | S7 | [OpenAI API authentication](https://developers.openai.com/api/reference/overview#authentication) | Bearer credential、OpenAI-Organization/OpenAI-Project 与 custom request-header boundary |
+| S8 | [ureq 3.x logging](https://docs.rs/ureq/3.4.1/ureq/#log-levels) | 当前 lockfile HTTP client 的 TRACE 为 wire-level 且不保证 redaction；secret-safe Provider 不能依赖 host logger filter |
+| S9 | [log compile-time filters](https://docs.rs/log/latest/log/#compile-time-filters) | `max_level_off` / `release_max_level_off` 可在编译期移除 logging invocation；适用于独立 Provider artifact 的 fail-closed secret boundary |
+| S10 | [ureq agent configuration](https://docs.rs/ureq/3.4.1/ureq/config/struct.Config.html) | 默认最多跟随 10 次 redirect；`max_redirects=0` 明确关闭 redirect；默认 Config 会从环境发现 proxy，`proxy(None)` 可显式关闭 |
 
 网页会更新。本页只记录 2026-09-18 核验到的相关边界；Lithograph 的冻结兼容目标仍由仓库 `CY25-2026.08` Profile 与 Design 决定，不把 Neo4j/OpenAI 后续 additions 自动变成 Lithograph contract。
 
@@ -71,3 +74,17 @@ caller 生成/保存 Vector Property
 S6 的当前 OpenAI Embeddings API 接受 string/string-array 或 token-array `input`、`model`、可选正整数 `dimensions`、`encoding_format = "float"|"base64"` 与可选 `user`；response 的 `data[]` 提供 `index` 与 embedding。官方同时明确空字符串非法、单 input 最多 8192 tokens、单 request 总计最多 300000 tokens、input array 最多 2048 项。Managed Semantic 的 source contract 固定为 String，所以 Provider 不暴露 token-array input；其它静态 request fields 全部由 Design 映射，`dimensions` 由 Semantic Index 顶层拥有并可通过 `send_dimensions` 决定是否发到 HTTP request。
 
 S7 使用 Bearer credential，并支持 `OpenAI-Organization`、`OpenAI-Project` 与 custom request headers；官方建议 custom header values 总量不超过 60 KiB、request headers 总量不超过 64 KiB。Reference Provider 因此支持 `api_key` / `api_key_env`、organization/project 和 custom headers。按照当前产品决定，这些都是 versioned `providerConfig`；Lithograph 不替用户移除 secret。只有 `api_key_env` 实际解析出的环境变量值不进入 SQLite。
+
+## 8. HTTP dependency logging 与 secret-safe diagnostics
+
+当前 Phase 13 lockfile 解析到 `ureq 3.4.1`。S8 明确区分 DEBUG 与 TRACE：DEBUG 只展示 allow-listed header，而 TRACE 是 wire-level 且 **not redacted**。因此仅保证 Lithograph/OpenAICompatible 自己的 error string 不回显 credential，并不足以满足 Design 的“secret 不进入 log/trace”合同；如果 host 安装全局 logger 并打开 TRACE，底层 HTTP dependency 仍可能观察 request wire data。
+
+S9 提供的 compile-time filter 会让被禁用级别的 logging invocation 不进入最终 binary。OpenAICompatible 是独立 SQLite `cdylib`，不是供上层 Rust 应用链接的通用 library；因此当前最小方案是在该 Provider crate 的 dependency graph 上显式启用 `log/max_level_off` 与 `release_max_level_off`，并由 extension init 校验 `STATIC_MAX_LEVEL == Off`，否则拒绝加载。Release 构建应把 Lithograph extension 与 OpenAICompatible Provider 分开执行 Cargo build，避免 workspace 多 package feature unification 把这一 Provider-specific logging policy带入 Lithograph Core artifact。该措施不调用 `log::set_max_level`，不会在运行时修改 host process 的全局 logger。
+
+## 9. Redirect 与 credential destination
+
+S10 记录 ureq 默认最多跟随 10 次 redirect，并允许通过 `max_redirects=0` 禁用。进一步检查当前 lockfile 的 `ureq-proto 0.6.2` redirect implementation：重定向时会按策略移除标准 `Authorization`，并移除 Cookie/Content-Length，但其它 custom header 会从原 request 保留到 redirect request。由于 OpenAICompatible 的 `headers` 明确允许兼容 endpoint 使用 `X-API-Key` 等自定义认证字段，默认 redirect 会让这些 credential 的实际 destination 脱离 versioned `base_url`。
+
+因此 reference Provider 将 redirect 固定关闭，不新增 redirect 配置项；3xx 直接按非成功 endpoint response 处理。这既避免 custom secret header 跨 destination 转发，也保持 `<base_url>/embeddings` 是实际 request destination。若兼容服务需要重定向，调用方应直接把最终 endpoint 写入 `base_url`。
+
+同一个 S10 还明确说明默认 Config 会从 process environment 发现 proxy。该行为与 OpenAICompatible 的 versioned config/cache identity 模型不兼容：环境中的 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 变化会改变实际网络 route，却不进入 `providerConfig`。因此 Provider agent 固定使用 `proxy(None)`，不读取环境 proxy。v1 没有已经确认的 proxy 配置需求，所以不为此新增一组 proxy schema；需要代理的部署应把代理/网关暴露为明确的 `base_url`。

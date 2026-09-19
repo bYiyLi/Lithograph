@@ -15,7 +15,14 @@ use super::graph::{self, ResolvedGraphView};
 use super::{QueryError, QueryErrorKind, QueryResult};
 
 mod hnsw;
-use hnsw::{build_vector_cache, query_vector_cache};
+mod similarity;
+#[cfg(test)]
+mod tests;
+use hnsw::{
+    ManagedHnswEntry, build_managed_vector_cache, build_vector_cache,
+    invalidate_managed_vector_cache, query_managed_vector_cache, query_vector_cache,
+};
+pub(crate) use similarity::{has_finite_nonzero_norm, vector_similarity_numbers};
 
 const SEMANTIC_SCAN_PAGE_SIZE: usize = 4_096;
 
@@ -34,6 +41,52 @@ pub(crate) struct SemanticHit {
 pub(crate) struct VectorCandidateResult {
     pub(crate) hits: Vec<SemanticHit>,
     pub(crate) exhaustive: bool,
+}
+
+pub(crate) fn build_managed_hnsw_cache(
+    connection: &Connection,
+    cache_key: &str,
+    similarity: &str,
+    entries: Vec<(i64, Vec<f32>)>,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<bool> {
+    build_managed_vector_cache(
+        connection,
+        cache_key,
+        similarity,
+        entries
+            .into_iter()
+            .map(|(owner_id, vector)| ManagedHnswEntry { owner_id, vector })
+            .collect(),
+        is_interrupted,
+    )
+}
+
+pub(crate) fn invalidate_managed_hnsw_cache(
+    connection: &Connection,
+    cache_key: &str,
+) -> QueryResult<()> {
+    invalidate_managed_vector_cache(connection, cache_key)
+}
+
+pub(crate) fn query_managed_hnsw_cache(
+    connection: &Connection,
+    cache_key: &str,
+    query: &[f32],
+    similarity: &str,
+    candidate_limit: usize,
+    is_interrupted: &dyn Fn() -> bool,
+    resolve_entity: impl FnMut(i64) -> QueryResult<Option<SemanticEntity>>,
+) -> QueryResult<Option<VectorCandidateResult>> {
+    query_managed_vector_cache(
+        connection,
+        cache_key,
+        query,
+        similarity,
+        candidate_limit,
+        is_interrupted,
+        resolve_entity,
+    )
 }
 
 struct FullTextCandidate {
@@ -194,7 +247,7 @@ fn scan_vector_candidates(
     Ok(hits)
 }
 
-fn sort_semantic_hits(hits: &mut [SemanticHit]) {
+pub(crate) fn sort_semantic_hits(hits: &mut [SemanticHit]) {
     hits.sort_by(|left, right| {
         right
             .score
@@ -239,7 +292,7 @@ fn vector_hit(
     }))
 }
 
-fn visit_indexed_entities(
+pub(crate) fn visit_indexed_entities(
     connection: &Connection,
     snapshot: &Snapshot<'_>,
     index: &IndexDefinition,
@@ -249,31 +302,21 @@ fn visit_indexed_entities(
 ) -> QueryResult<()> {
     let membership = semantic_membership(connection, index)?;
     match membership {
-        SemanticMembership::NodeLabels(labels) => visit_semantic_nodes(
-            connection,
-            snapshot,
-            &labels,
-            graph_view,
-            is_interrupted,
-            &mut visit,
-        ),
-        SemanticMembership::RelationshipTypes(types) => visit_semantic_relationships(
-            connection,
-            snapshot,
-            &types,
-            graph_view,
-            is_interrupted,
-            &mut visit,
-        ),
+        SemanticMembership::NodeLabels(labels) => {
+            visit_semantic_nodes(snapshot, &labels, graph_view, is_interrupted, &mut visit)
+        }
+        SemanticMembership::RelationshipTypes(types) => {
+            visit_semantic_relationships(snapshot, &types, graph_view, is_interrupted, &mut visit)
+        }
     }
 }
 
-enum SemanticMembership {
+pub(crate) enum SemanticMembership {
     NodeLabels(BTreeSet<i64>),
     RelationshipTypes(BTreeSet<i64>),
 }
 
-fn semantic_membership(
+pub(crate) fn semantic_membership(
     connection: &Connection,
     index: &IndexDefinition,
 ) -> QueryResult<SemanticMembership> {
@@ -291,76 +334,78 @@ fn semantic_membership(
 }
 
 fn visit_semantic_nodes(
-    connection: &Connection,
     snapshot: &Snapshot<'_>,
     labels: &BTreeSet<i64>,
     graph_view: Option<&ResolvedGraphView>,
     is_interrupted: &dyn Fn() -> bool,
     visit: &mut impl FnMut(SemanticEntity) -> QueryResult<()>,
 ) -> QueryResult<()> {
-    with_semantic_seen_state(connection, labels.len() > 1, || {
-        for label_id in labels {
-            let mut after = 0_i64;
-            loop {
-                let page = snapshot.scan_label_after(*label_id, after, SEMANTIC_SCAN_PAGE_SIZE)?;
-                for node in page.items {
-                    if is_interrupted() {
-                        return Err(QueryError::interrupted());
-                    }
-                    if labels.len() > 1 && !mark_semantic_seen(connection, 1, node)? {
-                        continue;
-                    }
-                    visit_visible_entity(snapshot, graph_view, SemanticEntity::Node(node), visit)?;
+    for label_id in labels {
+        let mut after = 0_i64;
+        loop {
+            let page = snapshot.scan_label_after(*label_id, after, SEMANTIC_SCAN_PAGE_SIZE)?;
+            for node in page.items {
+                if is_interrupted() {
+                    return Err(QueryError::interrupted());
                 }
-                let Some(next_after) = page.next_after else {
-                    break;
-                };
-                after = next_after;
+                if labels.len() > 1
+                    && first_matching_label(snapshot, node, labels)? != Some(*label_id)
+                {
+                    continue;
+                }
+                visit_visible_entity(snapshot, graph_view, SemanticEntity::Node(node), visit)?;
             }
+            let Some(next_after) = page.next_after else {
+                break;
+            };
+            after = next_after;
         }
-        Ok(())
-    })
+    }
+    Ok(())
 }
 
 fn visit_semantic_relationships(
-    connection: &Connection,
     snapshot: &Snapshot<'_>,
     types: &BTreeSet<i64>,
     graph_view: Option<&ResolvedGraphView>,
     is_interrupted: &dyn Fn() -> bool,
     visit: &mut impl FnMut(SemanticEntity) -> QueryResult<()>,
 ) -> QueryResult<()> {
-    with_semantic_seen_state(connection, types.len() > 1, || {
-        for type_id in types {
-            let mut after = 0_i64;
-            loop {
-                let page = snapshot.scan_relationship_type_after(
-                    *type_id,
-                    after,
-                    SEMANTIC_SCAN_PAGE_SIZE,
-                )?;
-                for relationship in page.items {
-                    if is_interrupted() {
-                        return Err(QueryError::interrupted());
-                    }
-                    if types.len() > 1 && !mark_semantic_seen(connection, 2, relationship.id)? {
-                        continue;
-                    }
-                    visit_visible_entity(
-                        snapshot,
-                        graph_view,
-                        SemanticEntity::Relationship(relationship),
-                        visit,
-                    )?;
+    for type_id in types {
+        let mut after = 0_i64;
+        loop {
+            let page =
+                snapshot.scan_relationship_type_after(*type_id, after, SEMANTIC_SCAN_PAGE_SIZE)?;
+            for relationship in page.items {
+                if is_interrupted() {
+                    return Err(QueryError::interrupted());
                 }
-                let Some(next_after) = page.next_after else {
-                    break;
-                };
-                after = next_after;
+                visit_visible_entity(
+                    snapshot,
+                    graph_view,
+                    SemanticEntity::Relationship(relationship),
+                    visit,
+                )?;
             }
+            let Some(next_after) = page.next_after else {
+                break;
+            };
+            after = next_after;
         }
-        Ok(())
-    })
+    }
+    Ok(())
+}
+
+fn first_matching_label(
+    snapshot: &Snapshot<'_>,
+    node: i64,
+    labels: &BTreeSet<i64>,
+) -> QueryResult<Option<i64>> {
+    Ok(snapshot
+        .labels(node)?
+        .into_iter()
+        .filter(|label| labels.contains(label))
+        .min())
 }
 
 fn visit_visible_entity(
@@ -377,47 +422,7 @@ fn visit_visible_entity(
     visit(entity)
 }
 
-fn with_semantic_seen_state(
-    connection: &Connection,
-    enabled: bool,
-    visit: impl FnOnce() -> QueryResult<()>,
-) -> QueryResult<()> {
-    if !enabled {
-        return visit();
-    }
-    connection.execute_batch(
-        "CREATE TEMP TABLE IF NOT EXISTS _lithograph_semantic_scan_seen(\
-             owner_kind INTEGER NOT NULL, owner_id INTEGER NOT NULL,\
-             PRIMARY KEY(owner_kind, owner_id)\
-         ) WITHOUT ROWID;\
-         DELETE FROM temp._lithograph_semantic_scan_seen;",
-    )?;
-    let result = visit();
-    let cleanup = connection.execute_batch("DROP TABLE temp._lithograph_semantic_scan_seen");
-    match result {
-        Ok(()) => {
-            cleanup?;
-            Ok(())
-        }
-        Err(error) => {
-            let _ = cleanup;
-            Err(error)
-        }
-    }
-}
-
-fn mark_semantic_seen(
-    connection: &Connection,
-    owner_kind: i64,
-    owner_id: i64,
-) -> QueryResult<bool> {
-    Ok(connection.execute(
-        "INSERT OR IGNORE INTO temp._lithograph_semantic_scan_seen(owner_kind, owner_id) VALUES(?1, ?2)",
-        rusqlite::params![owner_kind, owner_id],
-    )? == 1)
-}
-
-fn semantic_entity_matches(
+pub(crate) fn semantic_entity_matches(
     snapshot: &Snapshot<'_>,
     entity: SemanticEntity,
     membership: &SemanticMembership,
@@ -435,7 +440,7 @@ fn semantic_entity_matches(
     }
 }
 
-fn semantic_entity_visible(
+pub(crate) fn semantic_entity_visible(
     snapshot: &Snapshot<'_>,
     graph_view: &ResolvedGraphView,
     entity: SemanticEntity,
@@ -448,7 +453,7 @@ fn semantic_entity_visible(
     }
 }
 
-fn semantic_property(
+pub(crate) fn semantic_property(
     snapshot: &Snapshot<'_>,
     entity: SemanticEntity,
     property: &str,
@@ -486,7 +491,7 @@ fn resolve_dictionary_ids(
     Ok(ids)
 }
 
-fn entity_id(entity: SemanticEntity) -> i64 {
+pub(crate) fn entity_id(entity: SemanticEntity) -> i64 {
     match entity {
         SemanticEntity::Node(id) => id,
         SemanticEntity::Relationship(relationship) => relationship.id,
@@ -1277,7 +1282,7 @@ fn render_lucene_flat_clauses(clauses: &[(LuceneClauseMode, String)]) -> String 
     rendered
 }
 
-fn semantic_cache_digest(
+pub(crate) fn semantic_cache_digest(
     snapshot: &Snapshot<'_>,
     index: &IndexDefinition,
     namespace: &[u8],
@@ -1352,44 +1357,4 @@ fn stored_vector_valid(vector: &[f32], index: &IndexDefinition) -> QueryResult<b
         return Ok(false);
     }
     Ok(true)
-}
-
-fn has_finite_nonzero_norm(vector: &[f32]) -> bool {
-    let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
-    norm != 0.0 && norm.is_finite()
-}
-
-fn vector_similarity_numbers(left: &[f32], right: &[f32], similarity: &str) -> QueryResult<f64> {
-    if left.len() != right.len() {
-        return Err(QueryError::semantic("vector dimensions must match"));
-    }
-    match similarity {
-        "cosine" => {
-            let dot = left.iter().zip(right).map(|(a, b)| a * b).sum::<f32>();
-            let left_norm = left.iter().map(|value| value * value).sum::<f32>().sqrt();
-            let right_norm = right.iter().map(|value| value * value).sum::<f32>().sqrt();
-            if left_norm == 0.0 || right_norm == 0.0 {
-                return Err(QueryError::semantic(
-                    "cosine similarity requires non-zero vectors",
-                ));
-            }
-            Ok(f64::from(
-                ((1.0 + dot / (left_norm * right_norm)) / 2.0).clamp(0.0, 1.0),
-            ))
-        }
-        "euclidean" => {
-            let distance = left
-                .iter()
-                .zip(right)
-                .map(|(a, b)| {
-                    let delta = a - b;
-                    delta * delta
-                })
-                .sum::<f32>();
-            Ok(f64::from(1.0 / (1.0 + distance)))
-        }
-        other => Err(QueryError::internal(format!(
-            "unsupported persisted vector similarity {other:?}"
-        ))),
-    }
 }

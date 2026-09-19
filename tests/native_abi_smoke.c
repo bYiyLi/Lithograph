@@ -748,6 +748,15 @@ static int64_t commit_count(sqlite3 *db) {
     return count;
 }
 
+static int64_t scalar_int64(sqlite3 *db, const char *sql, const char *message) {
+    sqlite3_stmt *statement = NULL;
+    require(sqlite3_prepare_v2(db, sql, -1, &statement, NULL) == SQLITE_OK, message);
+    require(sqlite3_step(statement) == SQLITE_ROW, message);
+    int64_t value = sqlite3_column_int64(statement, 0);
+    sqlite3_finalize(statement);
+    return value;
+}
+
 static void check_same_connection_read_guard(sqlite3 *db) {
     char *error = NULL;
     require(
@@ -1950,17 +1959,27 @@ static void make_format1_root_fixture(sqlite3 *db) {
     sqlite3_free(error);
     const char *legacy_root =
         "23e60794878d0ce1fa5bb1d102507a6589ea7a8cd84d530a8d77302d771b119a";
-    char sql[2048];
+    char sql[4096];
     int written = snprintf(
         sql,
         sizeof(sql),
+        "DROP TABLE main._lithograph_embedding_cache;"
         "DROP TABLE main._lithograph_index_entries;"
         "DROP TABLE main._lithograph_index_generations;"
         "DROP TABLE main._lithograph_merge_resolutions;"
         "DROP TABLE main._lithograph_merge_sessions;"
         "DROP TABLE main._lithograph_tags;"
         "DROP TABLE main._lithograph_commit_data;"
-        "UPDATE main._lithograph_meta SET storage_format=1 WHERE id=1;"
+        "ALTER TABLE main._lithograph_meta RENAME TO _lithograph_meta_format4;"
+        "CREATE TABLE main._lithograph_meta("
+        "id INTEGER PRIMARY KEY CHECK(id=1),"
+        "magic TEXT NOT NULL,"
+        "database_id TEXT NOT NULL,"
+        "storage_format INTEGER NOT NULL"
+        ");"
+        "INSERT INTO main._lithograph_meta(id,magic,database_id,storage_format) "
+        "SELECT id,magic,database_id,1 FROM main._lithograph_meta_format4;"
+        "DROP TABLE main._lithograph_meta_format4;"
         "UPDATE main._lithograph_commits SET id=X'%s', format_version=1 WHERE parent1 IS NULL;"
         "UPDATE main._lithograph_branches SET commit_id=X'%s' WHERE name='main';",
         legacy_root,
@@ -2027,7 +2046,7 @@ static void check_format1_migration_preserves_history(const char *path) {
         "failed to prepare migration verification"
     );
     require(sqlite3_step(statement) == SQLITE_ROW, "migration verification returned no row");
-    require(sqlite3_column_int(statement, 0) == 3, "format1 migration did not advance to format3");
+    require(sqlite3_column_int(statement, 0) == 4, "format1 migration did not advance to format4");
     require(
         strcmp(
             (const char *)sqlite3_column_text(statement, 1),
@@ -2523,13 +2542,226 @@ static void check_phase12_native_fulltext(
     sqlite3_close(db);
 }
 
+static void seed_phase13_native_semantic(
+    sqlite3 *db,
+    const char *path,
+    const char *provider_path
+) {
+    load_extension_entry(db, provider_path, "sqlite3_syntheticembedding_init");
+    load_extension(db, path);
+
+    char *sqlite_error = NULL;
+    require(
+        sqlite3_exec(
+            db,
+            "SELECT lithograph_init();"
+            "SELECT lithograph('CREATE (:Doc {name:''native'', text:''alpha''}) FINISH');"
+            "SELECT lithograph('CALL db.index.semantic.createNodeIndex("
+                "''native_sem'', [''Doc''], ''text'', "
+                "{provider:''synthetic-a'', providerConfig:{}, dimensions:4, similarity:''cosine''}"
+            ")');"
+            "SELECT synthetic_embedding_reset('synthetic-a');",
+            NULL,
+            NULL,
+            &sqlite_error
+        ) == SQLITE_OK,
+        sqlite_error == NULL ? "failed to seed Phase 13 Native semantic fixture" : sqlite_error
+    );
+    sqlite3_free(sqlite_error);
+}
+
+static void check_phase13_native_staged_create(
+    sqlite3 *db,
+    tx_begin_fn tx_begin,
+    execute_fn tx_execute,
+    tx_commit_fn tx_commit,
+    free_fn lithograph_free
+) {
+    const int64_t before = commit_count(db);
+    char *result_json = NULL;
+    char *error_json = NULL;
+    int rc = tx_begin(db, "{}", 2, &result_json, &error_json);
+    require(rc == SQLITE_OK, "Phase 13 staged semantic tx_begin failed");
+    require(error_json == NULL, "Phase 13 staged semantic tx_begin returned error_json");
+    lithograph_free(result_json);
+
+    const char *staged_create =
+        "CALL db.index.semantic.createNodeIndex("
+        "'native_staged_sem', ['Doc'], 'name', "
+        "{provider:'synthetic-a', providerConfig:{}, dimensions:4, similarity:'cosine'}"
+        ")";
+    reset_callback_capture();
+    result_json = NULL;
+    rc = tx_execute(
+        db,
+        staged_create,
+        strlen(staged_create),
+        "{}",
+        2,
+        "{}",
+        2,
+        event_callback,
+        NULL,
+        &error_json
+    );
+    if (rc != SQLITE_OK) {
+        fprintf(
+            stderr,
+            "Phase 13 staged Semantic create error: %s\n",
+            error_json == NULL ? "<none>" : error_json
+        );
+    }
+    require(rc == SQLITE_OK, "Phase 13 staged Semantic create failed");
+    require(error_json == NULL, "Phase 13 staged Semantic create returned error_json");
+    require(
+        scalar_int64(
+            db,
+            "SELECT synthetic_embedding_validate_calls('synthetic-a')",
+            "failed to read staged Semantic validate counter"
+        ) > 0,
+        "Native staged Semantic create did not validate Provider"
+    );
+    require(
+        scalar_int64(
+            db,
+            "SELECT synthetic_embedding_embed_calls('synthetic-a')",
+            "failed to read staged Semantic embed counter"
+        ) == 0,
+        "Native staged Semantic create called embedBatch"
+    );
+
+    rc = tx_commit(db, &result_json, &error_json);
+    require(rc == SQLITE_OK, "Phase 13 staged Semantic tx_commit failed");
+    require(error_json == NULL, "Phase 13 staged Semantic tx_commit returned error_json");
+    require(
+        result_json != NULL && strstr(result_json, "\"commit\":\"commit/") != NULL,
+        "Phase 13 staged Semantic tx_commit did not return a Commit"
+    );
+    lithograph_free(result_json);
+    require(
+        commit_count(db) == before + 1,
+        "Native staged Semantic create did not publish exactly one Commit"
+    );
+    require(
+        scalar_int64(
+            db,
+            "SELECT json_extract(lithograph("
+                "'SHOW ALL INDEXES YIELD name WHERE name = ''native_staged_sem'' RETURN count(*)'"
+            "), '$.rows[0][0]')",
+            "failed to inspect staged Semantic Index after commit"
+        ) == 1,
+        "Native staged Semantic Index was not published"
+    );
+}
+
+static void reset_phase13_provider_counter(sqlite3 *db) {
+    char *sqlite_error = NULL;
+    require(
+        sqlite3_exec(
+            db,
+            "SELECT synthetic_embedding_reset('synthetic-a');",
+            NULL,
+            NULL,
+            &sqlite_error
+        ) == SQLITE_OK,
+        sqlite_error == NULL ? "failed to reset Phase 13 provider counter" : sqlite_error
+    );
+    sqlite3_free(sqlite_error);
+}
+
+static void check_phase13_native_explicit_boundaries(
+    sqlite3 *db,
+    tx_begin_fn tx_begin,
+    execute_fn tx_execute,
+    free_fn lithograph_free
+) {
+    reset_phase13_provider_counter(db);
+    expect_explicit_tx_execute_failure(
+        tx_begin,
+        tx_execute,
+        lithograph_free,
+        db,
+        "CALL db.index.semantic.queryNodes('native_sem','probe',{limit:1}) "
+        "YIELD node RETURN node.name",
+        "{}",
+        "TRANSACTION_BOUNDARY_REQUIRED"
+    );
+    require(
+        scalar_int64(
+            db,
+            "SELECT synthetic_embedding_embed_calls('synthetic-a')",
+            "failed to read Phase 13 semantic query provider counter"
+        ) == 0,
+        "Native explicit transaction semantic query reached Provider I/O before rejection"
+    );
+
+    reset_phase13_provider_counter(db);
+    expect_explicit_tx_execute_failure(
+        tx_begin,
+        tx_execute,
+        lithograph_free,
+        db,
+        "CALL db.index.semantic.rebuild('native_sem','branch/main')",
+        "{}",
+        "TRANSACTION_BOUNDARY_REQUIRED"
+    );
+    require(
+        scalar_int64(
+            db,
+            "SELECT synthetic_embedding_embed_calls('synthetic-a')",
+            "failed to read Phase 13 semantic rebuild provider counter"
+        ) == 0,
+        "Native explicit transaction semantic rebuild reached Provider I/O before rejection"
+    );
+}
+
+static void check_phase13_native_semantic_boundaries(
+    const char *path,
+    const char *provider_path,
+    tx_begin_fn tx_begin,
+    execute_fn tx_execute,
+    tx_commit_fn tx_commit,
+    free_fn lithograph_free
+) {
+    sqlite3 *db = NULL;
+    require(
+        sqlite3_open(":memory:", &db) == SQLITE_OK,
+        "failed to open Phase 13 Native database"
+    );
+    seed_phase13_native_semantic(db, path, provider_path);
+    check_phase13_native_staged_create(
+        db,
+        tx_begin,
+        tx_execute,
+        tx_commit,
+        lithograph_free
+    );
+    check_phase13_native_explicit_boundaries(
+        db,
+        tx_begin,
+        tx_execute,
+        lithograph_free
+    );
+    require(
+        sqlite3_close(db) == SQLITE_OK,
+        "failed to close Phase 13 Native database"
+    );
+}
+
 int main(int argc, char **argv) {
-    if (argc != 2 && argc != 3) {
-        fprintf(stderr, "usage: native-abi-smoke <extension-path> [phase12-tokenizer-extension-path]\n");
+    if (argc < 2 || argc > 4) {
+        fprintf(
+            stderr,
+            "usage: native-abi-smoke <extension-path> "
+            "[phase12-tokenizer-extension-path] [phase13-synthetic-provider-path]\n"
+        );
         return 2;
     }
     const char *path = argv[1];
-    const char *phase12_tokenizer_path = argc == 3 ? argv[2] : NULL;
+    const char *phase12_tokenizer_path =
+        argc >= 3 && argv[2][0] != '\0' ? argv[2] : NULL;
+    const char *phase13_provider_path =
+        argc >= 4 && argv[3][0] != '\0' ? argv[3] : NULL;
 
     library_handle library = open_library(path);
     if (library == NULL) {
@@ -2600,6 +2832,16 @@ int main(int argc, char **argv) {
             path,
             phase12_tokenizer_path,
             execute,
+            tx_begin,
+            tx_execute,
+            tx_commit,
+            lithograph_free
+        );
+    }
+    if (phase13_provider_path != NULL) {
+        check_phase13_native_semantic_boundaries(
+            path,
+            phase13_provider_path,
             tx_begin,
             tx_execute,
             tx_commit,

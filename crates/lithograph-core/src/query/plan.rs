@@ -285,10 +285,31 @@ impl PreparedQuery {
 
     pub fn has_external_io(&self) -> bool {
         self.program.as_ref().is_some_and(|program| {
-            program
-                .root
-                .descendants()
-                .any(|node| node.kind == AstKind::Clause(ClauseKind::LoadCsv))
+            program.root.descendants().any(|node| {
+                node.kind == AstKind::Clause(ClauseKind::LoadCsv)
+                    || matches!(
+                        node.kind,
+                        AstKind::FunctionName
+                            if node.text.as_deref().is_some_and(
+                                super::registry::is_semantic_direct_only
+                            )
+                    )
+            })
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn has_semantic_maintenance(&self) -> bool {
+        self.program.as_ref().is_some_and(|program| {
+            program.root.descendants().any(|node| {
+                matches!(
+                    node.kind,
+                    AstKind::FunctionName
+                        if node.text.as_deref().is_some_and(
+                            super::registry::is_semantic_maintenance
+                        )
+                )
+            })
         })
     }
 }
@@ -311,9 +332,14 @@ pub fn prepare(
     cypher::analyze(&ast, query)?;
     validate_parameters(&ast.root, &params)?;
     let context = prepare_context(connection, &ast, params, &options)?;
-    if let Some(schema) =
-        super::schema::prepare_schema(connection, context.commit, &ast, query, &options)?
-    {
+    if let Some(schema) = super::schema::prepare_schema(
+        connection,
+        context.commit,
+        &ast,
+        query,
+        &context.params,
+        &options,
+    )? {
         return prepare_schema_query(context, schema);
     }
     if super::completeness::requires_program(&ast.root) {
@@ -402,10 +428,16 @@ fn validate_candidate_program(
     }
     let owns_transaction = program.version_operation
         || program.transaction_options.is_some()
-        || program
-            .root
-            .descendants()
-            .any(|node| node.kind == AstKind::Clause(ClauseKind::LoadCsv));
+        || program.root.descendants().any(|node| {
+            node.kind == AstKind::Clause(ClauseKind::LoadCsv)
+                || matches!(
+                    node.kind,
+                    AstKind::FunctionName
+                        if node.text.as_deref().is_some_and(
+                            super::registry::is_semantic_maintenance
+                        )
+                )
+        });
     if owns_transaction {
         return Err(QueryError::transaction_boundary_required(
             "Merge Session candidate context cannot execute Version Procedures, external I/O, or transaction-owning Cypher",

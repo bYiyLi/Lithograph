@@ -4,6 +4,23 @@ Lithograph 的用户可见版本变化记录在此文件。版本遵循 Semantic
 
 ## Unreleased
 
+### Added
+
+- Managed Semantic Index：Node / Relationship 的一个 String source Property 可通过 connection-local `EmbeddingProviderV1` 生成 derived FLOAT32 Vector，并通过 `db.index.semantic.queryNodes` / `queryRelationships` 查询。
+- 新增独立 SQLite loadable extension `lithograph-openai-compatible`，提供 `openai-compatible` Embedding Provider；endpoint/model/auth/header/retry/batch 等配置全部来自 versioned `providerConfig`。
+- 新增 persistent Embedding Result Cache 与 `db.index.semantic.cache.configure/stats/clear`、`db.index.semantic.rebuild` 运维入口；普通 semantic query 的 query-only miss 仍只进入 connection-local TEMP/LRU。
+
+### Changed
+
+- current main 的新数据库 storage format 提升为 **4**；`lithograph_init()` 可把 format 3 数据库原子迁移到 format 4，并保留既有 canonical Commit/Layer/Schema/refs。
+- OpenAI-compatible Provider 的 HTTP route 现在完全由 versioned `base_url` 决定：不自动跟随 3xx redirect，也不从 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 等环境变量自动发现 proxy；底层 HTTP/TLS dependency logging 在 Provider artifact 中编译期关闭，避免 host TRACE 绕过 credential-safe diagnostics。
+- Release packaging / artifact inspection 已扩展为同时处理 Lithograph 主 extension 与 OpenAI-compatible Provider artifact；正式六目标 hosted Release Matrix 尚未在本 Unreleased revision 上通过。
+
+### Compatibility
+
+- Raw Vector Property / Vector Index / Cypher 25 `SEARCH` 行为保持不变；Managed Semantic 是并列的 Lithograph procedure extension，不改变 `CY25-2026.08` 语言 coverage 分母。
+- v0.1.1 正式发布仍使用 storage format 3 且不包含 Managed Semantic；本节只描述当前 Unreleased 开发分支。
+
 ## 0.1.1 - 2026-09-17
 
 Full-text tokenizer provider binding update.

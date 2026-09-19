@@ -1,12 +1,13 @@
 #!/usr/bin/env sh
 set -eu
 
-if [ "$#" -ne 1 ]; then
-  echo "usage: scripts/sqlite-3534-smoke.sh <extension-path>" >&2
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+  echo "usage: scripts/sqlite-3534-smoke.sh <extension-path> [openai-compatible-provider-path]" >&2
   exit 2
 fi
 
 extension=$1
+openai_provider=${2:-}
 root="${CARGO_TARGET_DIR:-target}/phase10/sqlite-3.53.4"
 archive="$root/sqlite-autoconf-3530400.tar.gz"
 source_dir="$root/sqlite-autoconf-3530400"
@@ -63,6 +64,15 @@ if [ -n "$tokenizer_extension" ]; then
   scripts/build-phase12-tokenizer.sh "$source_dir" "$tokenizer_extension"
 fi
 
+case "$(uname -s)" in
+  Darwin) synthetic_provider="$root/phase13_synthetic_embedding_provider.dylib" ;;
+  Linux) synthetic_provider="$root/phase13_synthetic_embedding_provider.so" ;;
+  *) synthetic_provider="" ;;
+esac
+if [ -n "$synthetic_provider" ]; then
+  scripts/build-phase13-synthetic-provider.sh "$source_dir" "$synthetic_provider"
+fi
+
 LITHOGRAPH_SQLITE3="$sqlite_bin" \
   cargo run --locked --quiet -p lithograph-test-support --bin lithograph-sqlite-probe -- "$extension"
 LITHOGRAPH_SQLITE3="$sqlite_bin" \
@@ -76,5 +86,30 @@ if [ -n "$tokenizer_extension" ]; then
     cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase12 -- "$extension" "$tokenizer_extension"
   LITHOGRAPH_SQLITE3="$sqlite_bin" \
     LITHOGRAPH_SQLITE_SOURCE_DIR="$source_dir" \
-    scripts/native-abi-smoke.sh "$extension" "$tokenizer_extension"
+    scripts/native-abi-smoke.sh "$extension" "$tokenizer_extension" "$synthetic_provider"
+fi
+if [ -n "$openai_provider" ]; then
+  LITHOGRAPH_SQLITE3="$sqlite_bin" \
+    LITHOGRAPH_SQLITE_SOURCE_DIR="$source_dir" \
+    scripts/openai-compatible-provider-smoke.sh "$openai_provider"
+fi
+if [ -n "$synthetic_provider" ]; then
+  LITHOGRAPH_SQLITE3="$sqlite_bin" \
+    LITHOGRAPH_SQLITE_SOURCE_DIR="$source_dir" \
+    scripts/synthetic-embedding-provider-smoke.sh "$synthetic_provider"
+  if [ -n "$openai_provider" ]; then
+    LITHOGRAPH_SQLITE3="$sqlite_bin" \
+      cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase13 -- \
+      "$extension" "$synthetic_provider" "$openai_provider"
+  else
+    LITHOGRAPH_SQLITE3="$sqlite_bin" \
+      cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase13 -- \
+      "$extension" "$synthetic_provider"
+  fi
+  LITHOGRAPH_SQLITE3="$sqlite_bin" \
+    LITHOGRAPH_SQLITE_SOURCE_DIR="$source_dir" \
+    scripts/phase13-semantic-concurrency.sh "$extension" "$synthetic_provider"
+  LITHOGRAPH_SQLITE3="$sqlite_bin" \
+    LITHOGRAPH_SQLITE_SOURCE_DIR="$source_dir" \
+    scripts/phase13-semantic-performance.sh "$extension" "$synthetic_provider"
 fi

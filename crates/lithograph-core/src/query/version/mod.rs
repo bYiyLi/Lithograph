@@ -307,7 +307,9 @@ fn index_rebuild(
     })?;
     if matches!(
         index.kind,
-        storage::StandardIndexKind::FullText | storage::StandardIndexKind::Vector
+        storage::StandardIndexKind::FullText
+            | storage::StandardIndexKind::Vector
+            | storage::StandardIndexKind::Semantic
     ) || matches!(index.target, storage::IndexTarget::NodeLookup)
     {
         return Err(QueryError::invalid_argument(format!(

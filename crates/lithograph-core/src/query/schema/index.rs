@@ -261,7 +261,10 @@ fn index_seek_priority(seek: &StandardIndexSeek) -> (u8, Reverse<usize>, String)
         (StandardIndexKind::Range, _) | (StandardIndexKind::Point, _) => 1,
         (StandardIndexKind::Text, _) => 2,
         (StandardIndexKind::Lookup, _) => 3,
-        (StandardIndexKind::FullText | StandardIndexKind::Vector, _) => 4,
+        (
+            StandardIndexKind::FullText | StandardIndexKind::Vector | StandardIndexKind::Semantic,
+            _,
+        ) => 4,
     };
     (
         kind,

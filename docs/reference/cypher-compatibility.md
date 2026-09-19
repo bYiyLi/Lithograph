@@ -24,7 +24,7 @@ Lithograph v0.1.0 的语言基线是冻结的 **`CY25-2026.08`**：Cypher 25 cur
 
 Neo4j DBMS 的 database/alias/server/cluster/user/role/privilege/auth 管理、system database 操作、Java UDF 部署 API，以及 `USE` / `graph.byName()` / `graph.names()` 的 composite-database graph selection 不在本产品合同内。
 
-Lithograph 不提供 Bolt/HTTP 数据库服务器或 Neo4j driver 协议。APOC 等外部过程库不因支持 Cypher 而自动存在。没有内置 embedding provider、RAG 工作流、Agent 或 KG OS 领域对象；应用提供自己的模型、数据和授权层。
+Lithograph 不提供 Bolt/HTTP 数据库服务器或 Neo4j driver 协议。APOC 等外部过程库不因支持 Cypher 而自动存在。Kernel 不内置 embedding 模型、RAG 工作流、Agent 或 KG OS 领域对象；当前 Unreleased Phase 13 的 `lithograph-openai-compatible` 是独立 SQLite Provider extension，不属于 Cypher compatibility profile。
 
 因此，将现有 Cypher 应用迁移过来时，query 本身与 transport、账号权限、procedure 库、Schema 管理和事务入口要分开核对，不能把“支持 Cypher 25”解释成整个 Neo4j 部署的无改动替换。
 

@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 use crate::cypher::{
     self, AstKind, AstNode, ClauseKind, ConstraintKind, ExistenceModifierKind,
-    GraphTypeOperationKind, IndexKind, QueryAst,
+    GraphTypeOperationKind, IndexKind, QueryAst, Value,
 };
 use crate::storage::{
     ConstraintDefinition, ConstraintDefinitionKind, GraphNodeType, GraphRelationshipType, HashId,
@@ -14,10 +14,12 @@ use crate::storage::{
 use super::super::options::writable_branch;
 use super::super::{ExecutionOptions, QueryError, QueryErrorKind, QueryResult};
 
+mod dispatch;
 mod index_config;
 mod property_type;
+mod semantic;
 
-use index_config::parse_index_configuration;
+use index_config::{parse_index_configuration, parse_index_metadata};
 use property_type::parse_property_rule;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -43,43 +45,28 @@ pub(crate) fn prepare_schema(
     base_commit: HashId,
     ast: &QueryAst,
     source: &str,
+    params: &BTreeMap<String, Value>,
     options: &ExecutionOptions,
 ) -> QueryResult<Option<PreparedSchema>> {
-    let clauses = ast
-        .root
-        .descendants()
-        .filter(|node| matches!(node.kind, AstKind::Clause(kind) if is_schema_ddl(kind)))
-        .collect::<Vec<_>>();
-    if clauses.is_empty() {
+    let Some(command) = dispatch::find_schema_command(&ast.root)? else {
         return Ok(None);
-    }
-    if clauses.len() != 1 {
-        return Err(schema_error(
-            "schema DDL must contain exactly one schema command",
-        ));
-    }
+    };
     if !options.graph_view.is_full_graph() {
         return Err(QueryError::invalid_argument(
             "schema DDL cannot execute with options.graphView",
         ));
     }
     let branch = writable_branch(connection, options)?;
-    let clause = clauses[0];
-    let AstKind::Clause(kind) = clause.kind else {
-        return Err(QueryError::internal(
-            "schema command is missing its clause kind",
-        ));
-    };
     let current = SchemaState::load(connection, base_commit)?;
     let mut state = current.clone();
-    match kind {
-        ClauseKind::GraphType => apply_graph_type(&mut state, clause, source)?,
-        ClauseKind::CreateConstraint => apply_create_constraint(&mut state, clause, source)?,
-        ClauseKind::DropConstraint => apply_drop_constraint(&mut state, clause)?,
-        ClauseKind::CreateIndex => apply_create_index(&mut state, clause)?,
-        ClauseKind::DropIndex => apply_drop_index(&mut state, clause)?,
-        _ => return Err(QueryError::internal("unexpected schema command kind")),
-    }
+    let kind = dispatch::apply_schema_command(
+        connection,
+        base_commit,
+        &mut state,
+        command,
+        source,
+        params,
+    )?;
     refresh_backing_indexes(&mut state)?;
     validate_schema_state(&state)?;
     let counters = schema_counters(&current, &state);
@@ -91,17 +78,6 @@ pub(crate) fn prepare_schema(
         counters,
         kind,
     }))
-}
-
-fn is_schema_ddl(kind: ClauseKind) -> bool {
-    matches!(
-        kind,
-        ClauseKind::GraphType
-            | ClauseKind::CreateConstraint
-            | ClauseKind::DropConstraint
-            | ClauseKind::CreateIndex
-            | ClauseKind::DropIndex
-    )
 }
 
 pub(super) fn schema_error(message: impl Into<String>) -> QueryError {
@@ -867,7 +843,7 @@ fn build_index_definition(clause: &AstNode) -> QueryResult<IndexDefinition> {
         .unwrap_or(IndexKind::Range);
     let kind = standard_index_kind(kind);
     let target = parse_index_target(clause, kind)?;
-    let labels_or_types = semantic_index_metadata(clause, kind)?;
+    let labels_or_types = parse_index_metadata(clause, kind)?;
     let additional_properties = if kind == StandardIndexKind::Vector {
         index_additional_properties(clause)?
     } else {
@@ -906,17 +882,6 @@ fn standard_index_kind(kind: IndexKind) -> StandardIndexKind {
         IndexKind::Point => StandardIndexKind::Point,
         IndexKind::FullText => StandardIndexKind::FullText,
         IndexKind::Vector => StandardIndexKind::Vector,
-    }
-}
-
-fn semantic_index_metadata(clause: &AstNode, kind: StandardIndexKind) -> QueryResult<Vec<String>> {
-    if matches!(
-        kind,
-        StandardIndexKind::FullText | StandardIndexKind::Vector
-    ) {
-        semantic_index_labels_or_types(clause)
-    } else {
-        Ok(Vec::new())
     }
 }
 
@@ -1252,7 +1217,10 @@ fn validate_index_definition(state: &SchemaState, index: &IndexDefinition) -> Qu
             )));
         }
         (
-            StandardIndexKind::Text | StandardIndexKind::Point | StandardIndexKind::Vector,
+            StandardIndexKind::Text
+            | StandardIndexKind::Point
+            | StandardIndexKind::Vector
+            | StandardIndexKind::Semantic,
             IndexTarget::NodeProperties { properties, .. }
             | IndexTarget::RelationshipProperties { properties, .. },
         ) if properties.len() != 1 => {
@@ -1264,7 +1232,7 @@ fn validate_index_definition(state: &SchemaState, index: &IndexDefinition) -> Qu
     }
     if matches!(
         index.kind,
-        StandardIndexKind::FullText | StandardIndexKind::Vector
+        StandardIndexKind::FullText | StandardIndexKind::Vector | StandardIndexKind::Semantic
     ) && index.labels_or_types.is_empty()
     {
         return Err(schema_error(format!(
@@ -1276,6 +1244,9 @@ fn validate_index_definition(state: &SchemaState, index: &IndexDefinition) -> Qu
             "non-VECTOR Index {name} cannot have additional properties"
         )));
     }
+    if index.kind == StandardIndexKind::Semantic {
+        semantic::validate_definition(index)?;
+    }
     Ok(())
 }
 
@@ -1284,6 +1255,7 @@ fn same_index_schema(left: &IndexDefinition, right: &IndexDefinition) -> bool {
         && left.target == right.target
         && left.labels_or_types == right.labels_or_types
         && left.additional_properties == right.additional_properties
+        && left.configuration == right.configuration
 }
 
 fn type_constraint(

@@ -110,6 +110,23 @@ Phase 03 已交付 parser/AST/scope/type/value frontend foundation；Phase 04/05
 
 Phase 12 当前完成证据绑定 `463fb7c5f372c097d7dae776d271936f8b25b68a` 基础上的未提交 worktree：`lithograph-fts5` unit tests 4/4、Phase 12 Core targeted tests 11/11、真实双 extension `lithograph-phase12` probe、SQLite 3.45.0/3.53.4 smoke 与 Native ABI 全部通过；`cargo make quality` exit 0，coverage regions/functions/lines 83.26% / 84.35% / 85.26%；最终 `scripts/ci.sh` exit 0。executable inherited openCypher TCK 继续为 3,777/3,777 applicable scenarios 通过、0 failure，120 个非 applicable scenario 的 machine-readable exclusion reason 未变化。该结果是开发验收，不表示新版本已经发布或重新跑过 hosted Release Matrix。
 
+### Phase 13 Managed Semantic supplemental inventory
+
+Managed Semantic 使用 Lithograph-specific `db.index.semantic.*` procedure 与 SQLite Embedding Provider ABI，不改变 Cypher 25 Raw Vector / `SEARCH` language contract，也不向 frozen inherited TCK 分母加入 vendor-specific embedding surface。当前本地 supplemental acceptance 已闭合；只有跨平台 hosted artifact matrix 仍为 `in_progress`。
+
+| 验收面 | Acceptance 映射 | 状态 | Owner |
+| --- | --- | --- | --- |
+| Provider ABI / load order / validation / lifetime | SV13-01–04 | `done` | 13.1 |
+| Semantic Schema / SHOW / Diff-Patch-Merge-Rebase-Revert / Native staged create | SV13-06–10 | `done` | 13.2、13.5 |
+| format4 / embedding cache identity、integrity、policy、read-only/failure | SV13-11–15、21–24 | `done` | 13.3、13.5 |
+| query Node/Relationship、exact text、Graph View、history、adapter boundary | SV13-16–20 | `done` | 13.4–13.5 |
+| Raw Vector/Full-text/version regression、resource evidence、repository gates/docs | SV13-05、25–26、28 | `done` | 13.6 |
+| OpenAICompatible config/auth/request/response/retry/cache/multi-config | SV13-29–35 | `done` | 13.1、13.6 |
+| SQLite 3.45.0 / 3.53.4 dual-extension runtime | SV13-27 runtime 部分 | `done` | 13.6 |
+| Linux/macOS/Windows x64/arm64 hosted artifact build/load/migration | SV13-27 hosted 部分 | `in_progress` | 13.6 |
+
+当前 revision 的 `lithograph-phase13` probe、synthetic/OpenAI provider smoke、Native ABI、format migration、concurrency/performance、`cargo make quality` 与 `scripts/ci.sh` 均通过；OpenAI-compatible Provider unit/safety regression 为 22/22，quality coverage regions/functions/lines 为 83.47% / 84.27% / 85.25%。executable inherited openCypher TCK 继续为 3,777/3,777 applicable scenarios 通过、0 failure；Phase 13 没有修改 frozen Cypher grammar/profile。完整 acceptance 与未完成的 hosted matrix 见 [Phase 13](phases/13-managed-semantic-vector.md#4-acceptance-matrix)。
+
 ### Phase 03 frontend evidence
 
 Phase 03 的 inherited openCypher frontend regression 固定为：4,224 个合法 query/query-precondition parser inputs 全部 parse；3,312 个非 compile-error `executing query` 全部通过 frontend validation；585 个 compile-time-error `executing query` 中，Phase 06 已关闭 function inventory 与 aggregation/DISTINCT `ORDER BY` visibility/grouping gap。当前仅剩 7 个 procedure catalog/signature scenario 由后续 procedure owner 接管；另有 1 个旧 openCypher “同一 pattern 重用 relationship 必须失败”scenario 已被 Cypher 25 Match Mode 语义取代，因而显式列为 superseded，而不是 deferred 或静默 skip。`phase03_parser_tck` 锁定这两个精确集合，不能通过等量替换掩盖 regression。

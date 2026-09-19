@@ -36,12 +36,14 @@ use serde_json::{Value, json};
 
 const ABI_VERSION: u32 = 1;
 const STORAGE_FORMAT_MIN: i64 = 1;
-const STORAGE_FORMAT_MAX: i64 = 3;
-const STORAGE_FORMAT_CURRENT: i64 = 3;
+const STORAGE_FORMAT_MAX: i64 = 4;
+const STORAGE_FORMAT_CURRENT: i64 = 4;
 const SQLITE_MIN_VERSION_NUMBER: c_int = 3_045_000;
 const META_TABLE: &str = "_lithograph_meta";
 const INTERNAL_PREFIX: &str = "_lithograph_";
 const MAGIC: &str = "lithograph-format-v1";
+const SEMANTIC_CACHE_ENABLED_COLUMN: &str = "semantic.embedding_cache.enabled";
+const SEMANTIC_CACHE_MAX_BYTES_COLUMN: &str = "semantic.embedding_cache.max_bytes";
 const ROWS_MODULE_NAME: &CStr = c"lithograph_rows";
 
 static NEXT_SAVEPOINT: AtomicU64 = AtomicU64::new(1);
@@ -495,6 +497,13 @@ fn capture_required_host_apis(p_api: *mut ffi::sqlite3_api_routines) -> bool {
         && SQLITE_GET_CLIENTDATA.get().is_some()
         && SQLITE_SET_CLIENTDATA.get().is_some()
     {
+        if let Some(get_clientdata) = SQLITE_GET_CLIENTDATA.get().copied() {
+            // SAFETY: this pointer was captured from SQLite's process-lifetime
+            // host API table with the documented sqlite3_get_clientdata ABI.
+            unsafe {
+                lithograph_embedding_provider::install_sqlite_get_clientdata(get_clientdata);
+            }
+        }
         return true;
     }
     if p_api.is_null() {
@@ -531,6 +540,11 @@ fn capture_required_host_apis(p_api: *mut ffi::sqlite3_api_routines) -> bool {
     // SAFETY: see the API-slot contract above.
     let set_clientdata =
         unsafe { std::mem::transmute::<*const c_void, SqliteSetClientdata>(set_clientdata) };
+    // SAFETY: get_clientdata was read from SQLite 3.45+'s documented
+    // append-only API slot and has the matching ABI signature.
+    unsafe {
+        lithograph_embedding_provider::install_sqlite_get_clientdata(get_clientdata);
+    }
     let _ = SQLITE_IS_INTERRUPTED.set(interrupted);
     let _ = SQLITE_GET_CLIENTDATA.set(get_clientdata);
     let _ = SQLITE_SET_CLIENTDATA.set(set_clientdata);
@@ -619,6 +633,7 @@ fn migrate_phase01_bootstrap(connection: &Connection, source_format: i64) -> Lit
     storage::create_storage_schema(connection).map_err(|error| {
         map_storage_error(error, "failed to migrate Phase 01 storage bootstrap")
     })?;
+    add_format4_metadata_columns(connection)?;
     storage::initialize_root(connection).map_err(|error| {
         map_storage_error(error, "failed to initialize Root Commit during migration")
     })?;
@@ -643,6 +658,15 @@ fn migrate_versioned_storage(connection: &Connection, source_format: i64) -> Lit
         advance_storage_format(connection, 2, 3)?;
         ensure_current_metadata_integrity(connection)?;
         current = 3;
+    }
+    if current == 3 {
+        storage::create_format4_schema(connection).map_err(|error| {
+            map_storage_error(error, "failed to create storage-format-4 schema")
+        })?;
+        add_format4_metadata_columns(connection)?;
+        advance_storage_format(connection, 3, 4)?;
+        ensure_current_metadata_integrity(connection)?;
+        current = 4;
     }
     if current == STORAGE_FORMAT_CURRENT {
         Ok(())
@@ -753,10 +777,27 @@ fn create_metadata_table(connection: &Connection) -> LithographResult<()> {
                 id INTEGER PRIMARY KEY CHECK(id = 1),\
                 magic TEXT NOT NULL,\
                 database_id TEXT NOT NULL,\
-                storage_format INTEGER NOT NULL\
+                storage_format INTEGER NOT NULL,\
+                \"semantic.embedding_cache.enabled\" INTEGER NULL CHECK(\"semantic.embedding_cache.enabled\" IN (0, 1)),\
+                \"semantic.embedding_cache.max_bytes\" INTEGER NULL CHECK(\"semantic.embedding_cache.max_bytes\" > 0)\
             );",
         )
         .map_err(|error| map_sqlite_error(error, "failed to create Lithograph metadata"))
+}
+
+fn add_format4_metadata_columns(connection: &Connection) -> LithographResult<()> {
+    connection
+        .execute_batch(
+            "ALTER TABLE main._lithograph_meta \
+                 ADD COLUMN \"semantic.embedding_cache.enabled\" INTEGER NULL \
+                 CHECK(\"semantic.embedding_cache.enabled\" IN (0, 1));\
+             ALTER TABLE main._lithograph_meta \
+                 ADD COLUMN \"semantic.embedding_cache.max_bytes\" INTEGER NULL \
+                 CHECK(\"semantic.embedding_cache.max_bytes\" > 0);",
+        )
+        .map_err(|error| {
+            map_sqlite_error(error, "failed to add storage-format-4 operational metadata")
+        })
 }
 
 fn read_metadata(connection: &Connection) -> LithographResult<Option<Metadata>> {

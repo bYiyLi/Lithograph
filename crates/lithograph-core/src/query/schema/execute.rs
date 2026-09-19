@@ -21,6 +21,7 @@ pub(crate) fn persist_validated_blob(
     let previous = SchemaState::load(connection, base_commit)?;
     let next = SchemaState::from_canonical_blob(schema_blob)?;
     super::super::semantic_index::validate_fulltext_transition(connection, &previous, &next)?;
+    super::super::managed_semantic::validate_transition(connection, &previous, &next)?;
     Ok(storage::persist_schema_blob(connection, schema_blob)?)
 }
 
@@ -39,6 +40,7 @@ pub(crate) fn execute_schema(
         &previous,
         &prepared.state,
     )?;
+    super::super::managed_semantic::validate_transition(connection, &previous, &prepared.state)?;
     check_interrupted(is_interrupted)?;
     let schema_hash = prepared.state.persist(connection)?;
     let metadata = CommitMetadata {

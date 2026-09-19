@@ -2,6 +2,7 @@
 
 mod checkpoint;
 mod commit;
+mod embedding_cache;
 mod encoding;
 #[cfg(feature = "test-support")]
 mod fixture_support;
@@ -39,6 +40,14 @@ pub use commit::{
     branch_head, commit_exists, commit_layer, commit_layer_with_schema, commit_schema,
     create_branch,
 };
+pub(crate) use embedding_cache::encode_embedding_vector;
+pub use embedding_cache::{
+    EmbeddingCacheClear, EmbeddingCacheEntry, EmbeddingCachePolicy, EmbeddingCacheStats,
+    embedding_cache_clear, embedding_cache_configure, embedding_cache_lookup,
+    embedding_cache_policy, embedding_cache_publish, embedding_cache_space_hash,
+    embedding_cache_stats, embedding_query_cache_lookup, embedding_query_cache_put,
+    embedding_text_hash, require_embedding_cache_format,
+};
 pub use identity::{
     allocate_node_id, allocate_relationship_id, find_label, find_property_key,
     find_relationship_type, intern_label, intern_property_key, intern_relationship_type,
@@ -50,8 +59,8 @@ pub use identity::{allocate_node_id_range, allocate_relationship_id_range};
 pub use integrity::{IntegrityIssue, integrity_check, structural_integrity_issues};
 pub use layer::{LayerBuilder, LayerDeltaCounts, RelationshipRecord};
 pub use schema::{
-    create_format2_schema, create_format3_schema, create_storage_schema, initialize_root,
-    load_schema_blob, persist_schema_blob, root_commit, schema_hash_for_commit,
+    create_format2_schema, create_format3_schema, create_format4_schema, create_storage_schema,
+    initialize_root, load_schema_blob, persist_schema_blob, root_commit, schema_hash_for_commit,
 };
 pub use schema_state::{
     ConstraintDefinition, ConstraintDefinitionKind, GraphNodeType, GraphRelationshipType,
@@ -82,7 +91,7 @@ pub use version::{
 };
 
 /// Current immutable storage format.
-pub const STORAGE_FORMAT: i64 = 3;
+pub const STORAGE_FORMAT: i64 = 4;
 /// Physical encoding version for persistent Standard Index generations.
 pub const STANDARD_INDEX_ENCODING_VERSION: i64 = 1;
 

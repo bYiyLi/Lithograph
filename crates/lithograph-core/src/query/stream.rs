@@ -1356,18 +1356,20 @@ impl QueryCursor {
     }
 
     fn read_summary(&self) -> QuerySummary {
+        let semantic_maintenance = self.prepared.has_semantic_maintenance();
         QuerySummary {
             query_type: if self
                 .prepared
                 .program
                 .as_ref()
                 .is_some_and(|program| program.version_operation)
+                || semantic_maintenance
             {
                 QueryType::Version
             } else {
                 QueryType::Read
             },
-            commit: if self.prepared.candidate.is_some() {
+            commit: if self.prepared.candidate.is_some() || semantic_maintenance {
                 None
             } else {
                 (!self.suppress_summary_commit)

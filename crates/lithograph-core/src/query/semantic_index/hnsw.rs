@@ -110,6 +110,12 @@ struct HnswLayerResult {
     visited_count: usize,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct ManagedHnswEntry {
+    pub(super) owner_id: i64,
+    pub(super) vector: Vec<f32>,
+}
+
 struct SqlSearchState {
     visited: BTreeSet<i64>,
     candidates: BinaryHeap<VectorQueueItem>,
@@ -136,6 +142,195 @@ fn ensure_vector_cache_tables(connection: &Connection) -> QueryResult<()> {
          ) WITHOUT ROWID;",
     )?;
     Ok(())
+}
+
+pub(super) fn build_managed_vector_cache(
+    connection: &Connection,
+    cache_key: &str,
+    similarity: &str,
+    entries: Vec<ManagedHnswEntry>,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<bool> {
+    ensure_vector_cache_tables(connection)?;
+    if let Some(meta) = vector_cache_meta(connection, cache_key)?
+        && managed_vector_cache_matches(connection, cache_key, meta, &entries, is_interrupted)?
+    {
+        return Ok(false);
+    }
+    invalidate_vector_cache(connection, cache_key)?;
+    let mut entries = entries
+        .into_iter()
+        .map(|entry| VectorCacheEntry {
+            owner_id: entry.owner_id,
+            vector: entry.vector,
+            level: 0,
+            neighbors: vec![Vec::new()],
+        })
+        .collect::<Vec<_>>();
+    build_hnsw_graph_with_parameters(similarity, 16, 100, &mut entries, is_interrupted)?;
+    let result = persist_vector_cache(connection, cache_key, &entries, is_interrupted);
+    if result.is_err() {
+        let _ = invalidate_vector_cache(connection, cache_key);
+    }
+    result.map(|()| true)
+}
+
+fn managed_vector_cache_matches(
+    connection: &Connection,
+    cache_key: &str,
+    meta: VectorCacheMeta,
+    expected: &[ManagedHnswEntry],
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<bool> {
+    if meta.entry_count != expected.len() {
+        return Ok(false);
+    }
+    let stored_count = connection.query_row(
+        "SELECT count(*) FROM temp._lithograph_vector_cache WHERE cache_key=?1",
+        [cache_key],
+        |row| row.get::<_, i64>(0),
+    )?;
+    if usize::try_from(stored_count).ok() != Some(expected.len()) {
+        return Ok(false);
+    }
+    if expected.is_empty() {
+        return Ok(meta.entry_owner_id.is_none() && meta.max_level == 0);
+    }
+    let mut cache = SqlVectorCache {
+        connection,
+        cache_key,
+        loaded: BTreeMap::new(),
+    };
+    for expected_entry in expected {
+        if is_interrupted() {
+            return Err(QueryError::interrupted());
+        }
+        let Some(entry) = cache.entry(expected_entry.owner_id)? else {
+            return Ok(false);
+        };
+        if entry.vector != expected_entry.vector {
+            return Ok(false);
+        }
+    }
+    Ok(vector_cache_graph_valid(&cache.loaded, meta))
+}
+
+pub(super) fn invalidate_managed_vector_cache(
+    connection: &Connection,
+    cache_key: &str,
+) -> QueryResult<()> {
+    ensure_vector_cache_tables(connection)?;
+    invalidate_vector_cache(connection, cache_key)
+}
+
+pub(super) fn query_managed_vector_cache(
+    connection: &Connection,
+    cache_key: &str,
+    query: &[f32],
+    similarity: &str,
+    candidate_limit: usize,
+    is_interrupted: &dyn Fn() -> bool,
+    mut resolve_entity: impl FnMut(i64) -> QueryResult<Option<SemanticEntity>>,
+) -> QueryResult<Option<VectorCandidateResult>> {
+    ensure_vector_cache_tables(connection)?;
+    let Some(meta) = vector_cache_meta(connection, cache_key)? else {
+        return Ok(None);
+    };
+    if meta.entry_count == 0 {
+        if !empty_vector_cache_valid(connection, cache_key, meta)? {
+            invalidate_vector_cache(connection, cache_key)?;
+            return Ok(None);
+        }
+        return Ok(Some(VectorCandidateResult {
+            hits: Vec::new(),
+            exhaustive: true,
+        }));
+    }
+    let Some(mut cache) = open_sql_vector_cache(connection, cache_key, meta, query.len())? else {
+        return Ok(None);
+    };
+    let entry_owner_id = meta
+        .entry_owner_id
+        .ok_or_else(|| QueryError::internal("validated HNSW cache is missing its entry point"))?;
+    let desired = candidate_limit.max(1).min(meta.entry_count);
+    search_managed_vector_cache(
+        connection,
+        cache_key,
+        query,
+        similarity,
+        desired,
+        meta,
+        &mut cache,
+        entry_owner_id,
+        is_interrupted,
+        &mut resolve_entity,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "managed HNSW search keeps cache state, query semantics and candidate validation explicit"
+)]
+fn search_managed_vector_cache(
+    connection: &Connection,
+    cache_key: &str,
+    query: &[f32],
+    similarity: &str,
+    desired: usize,
+    meta: VectorCacheMeta,
+    cache: &mut SqlVectorCache<'_, '_>,
+    entry_owner_id: i64,
+    is_interrupted: &dyn Fn() -> bool,
+    resolve_entity: &mut impl FnMut(i64) -> QueryResult<Option<SemanticEntity>>,
+) -> QueryResult<Option<VectorCandidateResult>> {
+    let mut ef_search = desired;
+    loop {
+        let Some(layer) = hnsw_search_sql(
+            cache,
+            entry_owner_id,
+            meta.max_level,
+            query,
+            similarity,
+            ef_search,
+            is_interrupted,
+        )?
+        else {
+            invalidate_vector_cache(connection, cache_key)?;
+            return Ok(None);
+        };
+        let exhaustive = ef_search >= meta.entry_count && layer.visited_count == meta.entry_count;
+        let mut hits = managed_hits_from_layer(layer.items, is_interrupted, resolve_entity)?;
+        sort_semantic_hits(&mut hits);
+        if hits.len() >= desired || exhaustive {
+            return Ok(Some(VectorCandidateResult { hits, exhaustive }));
+        }
+        if ef_search == meta.entry_count {
+            invalidate_vector_cache(connection, cache_key)?;
+            return Ok(None);
+        }
+        let next = ef_search.saturating_mul(2).max(ef_search.saturating_add(1));
+        ef_search = next.min(meta.entry_count);
+    }
+}
+
+fn managed_hits_from_layer(
+    items: Vec<VectorQueueItem>,
+    is_interrupted: &dyn Fn() -> bool,
+    resolve_entity: &mut impl FnMut(i64) -> QueryResult<Option<SemanticEntity>>,
+) -> QueryResult<Vec<SemanticHit>> {
+    let mut hits = Vec::new();
+    for item in items {
+        if is_interrupted() {
+            return Err(QueryError::interrupted());
+        }
+        if let Some(entity) = resolve_entity(item.owner_id)? {
+            hits.push(SemanticHit {
+                entity,
+                score: item.score,
+            });
+        }
+    }
+    Ok(hits)
 }
 
 fn vector_cache_meta(
@@ -195,7 +390,7 @@ pub(super) fn query_vector_cache(
         return Ok(None);
     };
     if meta.entry_count == 0 {
-        if meta.entry_owner_id.is_some() || meta.max_level != 0 {
+        if !empty_vector_cache_valid(connection, &cache_key, meta)? {
             invalidate_vector_cache(connection, &cache_key)?;
             return Ok(None);
         }
@@ -304,7 +499,22 @@ fn search_vector_cache(
     }
 }
 
-#[cfg(test)]
+fn empty_vector_cache_valid(
+    connection: &Connection,
+    cache_key: &str,
+    meta: VectorCacheMeta,
+) -> QueryResult<bool> {
+    if meta.entry_owner_id.is_some() || meta.max_level != 0 {
+        return Ok(false);
+    }
+    let stored_count = connection.query_row(
+        "SELECT count(*) FROM temp._lithograph_vector_cache WHERE cache_key=?1",
+        [cache_key],
+        |row| row.get::<_, i64>(0),
+    )?;
+    Ok(stored_count == 0)
+}
+
 fn vector_cache_graph_valid(
     entries: &BTreeMap<i64, VectorCacheEntry>,
     meta: VectorCacheMeta,
@@ -315,6 +525,9 @@ fn vector_cache_graph_valid(
     let Some(entry_owner_id) = meta.entry_owner_id else {
         return false;
     };
+    if entries.len() != meta.entry_count {
+        return false;
+    }
     let Some(entry) = entries.get(&entry_owner_id) else {
         return false;
     };
@@ -694,7 +907,10 @@ pub(super) fn build_vector_cache(
     let mut entries =
         collect_vector_cache_entries(connection, snapshot, index, query_dimension, is_interrupted)?;
     build_hnsw_graph(index, &mut entries, is_interrupted)?;
-    let result = persist_vector_cache(connection, &cache_key, &entries);
+    let result = persist_vector_cache(connection, &cache_key, &entries, is_interrupted);
+    if result.is_err() {
+        let _ = invalidate_vector_cache(connection, &cache_key);
+    }
     #[cfg(feature = "test-support")]
     if result.is_ok() {
         crate::performance::record_vector_cache_build(build_started.elapsed().as_micros());
@@ -774,6 +990,22 @@ fn build_hnsw_graph(
     let ef_construction = usize::try_from(*hnsw_ef_construction)
         .map_err(|_| QueryError::internal("VECTOR Index HNSW ef_construction is too large"))?
         .max(maximum);
+    build_hnsw_graph_with_parameters(
+        similarity_function,
+        maximum,
+        ef_construction,
+        entries,
+        is_interrupted,
+    )
+}
+
+fn build_hnsw_graph_with_parameters(
+    similarity_function: &str,
+    maximum: usize,
+    ef_construction: usize,
+    entries: &mut Vec<VectorCacheEntry>,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<()> {
     entries.sort_by_key(|entry| entry.owner_id);
     initialize_hnsw_entries(entries, maximum, is_interrupted)?;
     if maximum == 1 {
@@ -1027,8 +1259,12 @@ fn persist_vector_cache(
     connection: &Connection,
     cache_key: &str,
     entries: &[VectorCacheEntry],
+    is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<()> {
     for entry in entries {
+        if is_interrupted() {
+            return Err(QueryError::interrupted());
+        }
         let vector_json = serde_json::to_string(&entry.vector).map_err(|error| {
             QueryError::internal(format!("failed to encode HNSW vector: {error}"))
         })?;
@@ -1052,6 +1288,9 @@ fn persist_vector_cache(
         .map_err(|_| QueryError::internal("HNSW maximum level is too large to persist"))?;
     let entry_count = i64::try_from(entries.len())
         .map_err(|_| QueryError::internal("HNSW entry count is too large to persist"))?;
+    if is_interrupted() {
+        return Err(QueryError::interrupted());
+    }
     connection.execute(
         "INSERT OR REPLACE INTO temp._lithograph_vector_cache_meta(cache_key, entry_owner_id, max_level, entry_count, complete) VALUES(?1, ?2, ?3, ?4, 1)",
         rusqlite::params![cache_key, entry_owner_id, max_level, entry_count],

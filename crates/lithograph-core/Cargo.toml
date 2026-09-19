@@ -19,6 +19,7 @@ chrono.workspace = true
 chrono-tz.workspace = true
 getrandom.workspace = true
 lithograph-fts5.workspace = true
+lithograph-embedding-provider.workspace = true
 pest.workspace = true
 pest_derive.workspace = true
 regex.workspace = true
