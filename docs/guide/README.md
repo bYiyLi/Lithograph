@@ -6,7 +6,7 @@
 
 | 项目 | 当前文档范围 |
 | --- | --- |
-| 当前正式 Release | **v0.2.0**；仓库正在准备 v0.2.1 release candidate |
+| 当前正式 Release | **v0.2.1** |
 | 基础接口 / 示例基线 | **v0.1.0**；未受后续版本影响的历史验证页面继续保留原版本标记 |
 | v0.1.1 增量 | Full-text tokenizer： [Search](search.md)、[Procedure](../reference/procedures.md)、[Limits](../reference/limits.md)、[Release Notes](../releases/v0.1.1.md) |
 | v0.2.0 增量 | Managed Semantic / Embedding Provider、storage format 4：[Search](search.md)、[Operations](operations.md)、[Procedure](../reference/procedures.md)、[Release Notes](../releases/v0.2.0.md) |
@@ -17,7 +17,7 @@
 | SQLite | `3.45.0+`，支持 loadable extension、FTS5 |
 | 部署 | Linux、macOS、Windows，分别提供 x64 / arm64 制品 |
 
-v0.2.0 把 storage format 提升为 4 并发布 Managed Semantic / Embedding Provider；待发布的 v0.2.1 保持 Native ABI、Cypher profile 和 storage format 不变，新增 SQL explicit transaction adapter。标记为旧版本的可执行示例仍检查精确历史版本，不应拿 v0.2.1 binary 强行通过旧版本断言；v0.2.1 候选行为以其 Release Notes 和明确标记的增量页面为准。
+v0.2.0 把 storage format 提升为 4 并发布 Managed Semantic / Embedding Provider；v0.2.1 保持 Native ABI、Cypher profile 和 storage format 不变，新增 SQL explicit transaction adapter。标记为旧版本的可执行示例仍检查精确历史版本，不应拿 v0.2.1 binary 强行通过旧版本断言；v0.2.1 行为以其 Release Notes 和明确标记的增量页面为准。
 
 Lithograph 是嵌入式数据库扩展，不是独立 Server、Neo4j 客户端、Agent 框架或 embedding 服务。一个 SQLite connection 的 `main` database 承载一个版本化 Property Graph；同一文件仍可保存宿主自己的普通 SQL 表，但不得使用保留的 `_lithograph_*` 名称。
 

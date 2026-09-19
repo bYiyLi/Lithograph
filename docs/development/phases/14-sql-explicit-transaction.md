@@ -1,6 +1,6 @@
 # Phase 14：SQL Explicit Transaction Adapter
 
-**状态：`in_progress`**
+**状态：`done`**
 
 ## 1. 目标与范围
 
@@ -64,8 +64,8 @@
 | TX14-07 | 现有行为不变 | 普通 `lithograph()` / outer SQLite tx 继续 per-query Commit；Native ABI regression 通过 | `done` |
 | TX14-08 | minimum/current SQLite 与 repository gates | SQLite 3.45.0/current real-load、targeted Rust、Native ABI、format/clippy/diff checks 通过 | `done` |
 | TX14-09 | 用户文档与可运行示例 | SQL reference、transaction guide、example 与 development record 与真实行为一致 | `done` |
-| TX14-10 | 六目标 release artifact | Linux/macOS/Windows x64/arm64 hosted Release Matrix 通过，Windows minimum/current SQLite 都执行真实 SQL tx smoke | `pending` |
+| TX14-10 | 六目标 release artifact | Linux/macOS/Windows x64/arm64 hosted Release Matrix 通过，Windows minimum/current SQLite 都执行真实 SQL tx smoke | `done` |
 
 ## 5. 完成条件
 
-TX14-01–09 已由真实 SQLite 3.45.0、3.51.0、3.53.4 extension smoke、Native ABI regression、repository quality/coverage 与 full CI 闭合；release review 发现的 canonical-history 回滚断言与 Windows SQL smoke 缺口已修复。TX14-10 等待本次 revision 的 hosted Release Matrix 真实结果；该 gate 通过并完成 final diff review 后才将 Phase 14 恢复为 `done`。
+TX14-01–10 全部闭合。实现 revision `2f617f13e007ce713bd48078396c40bf0a963c7c` 的 repository CI [`35448157779`](https://github.com/bYiyLi/Lithograph/actions/runs/35448157779) 与六目标 Release Matrix [`35448157766`](https://github.com/bYiyLi/Lithograph/actions/runs/35448157766) 均通过；Windows x64/arm64 在 SQLite 3.45.0 与 3.53.4 上各自编译并执行同一真实 C SQL transaction smoke。Release review 发现的 canonical-history 回滚断言、Windows SQL smoke 与 C complexity gate 缺口均已修复，Phase 14 状态为 `done`。

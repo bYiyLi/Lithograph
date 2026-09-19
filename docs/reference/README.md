@@ -1,6 +1,6 @@
 # Lithograph Reference
 
-本目录用于查找准确接口，不替代 [入门与任务指南](../guide/README.md)。v0.2.1 release candidate 使用 `CY25-2026.08` / Native ABI 1 / storage format 4，包含 Phase 13 Managed Semantic / Embedding Provider 与 Phase 14 SQL explicit transaction adapter；当前正式 Release 仍为 v0.2.0。
+本目录用于查找准确接口，不替代 [入门与任务指南](../guide/README.md)。当前正式 Release v0.2.1 使用 `CY25-2026.08` / Native ABI 1 / storage format 4，包含 Phase 13 Managed Semantic / Embedding Provider 与 Phase 14 SQL explicit transaction adapter。
 
 | 需要查找 | 页面 |
 | --- | --- |

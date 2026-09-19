@@ -4,7 +4,7 @@ Lithograph 的用户可见版本变化记录在此文件。版本遵循 Semantic
 
 ## Unreleased
 
-## 0.2.1 - Unreleased
+## 0.2.1 - 2026-09-19
 
 SQL explicit transaction adapter release.
 

@@ -1,6 +1,6 @@
 # v0.1.0 已知问题与接入规避
 
-这些问题最初在**实际已发布 v0.1.0 macOS arm64 制品**上复现，不是新的设计要求。v0.2.1 release-prep source build 重新确认 `branch.checkout` 仍返回 transaction-boundary error，Procedure introspection 仍为空 argument metadata / STRING return type；Native input decoder 仍把 `NULL,0` 解码为空字符串而不是默认 `{}`。因此 v0.2.1 继续保留以下规避路径。
+这些问题最初在**实际已发布 v0.1.0 macOS arm64 制品**上复现，不是新的设计要求。v0.2.1 release gate 重新确认 `branch.checkout` 仍返回 transaction-boundary error，Procedure introspection 仍为空 argument metadata / STRING return type；Native input decoder 仍把 `NULL,0` 解码为空字符串而不是默认 `{}`。因此 v0.2.1 继续保留以下规避路径。
 
 验证制品：`lithograph-macos-arm64.tar.gz`，SHA-256 `71a50eb3d7b745dc5a616a12ad1c4bc06578b0ee17a4f7f7e1d4c0c4f7c0e278`。SQL 入口在 SQLite 3.45.0 / 3.51.0 上复现；Native 入口使用 SQLite 3.51.0。其他平台共享相关代码，但本次没有逐个平台复现，不将推断写成实测。
 
