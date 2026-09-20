@@ -86,7 +86,7 @@ Phase 03 已交付 parser/AST/scope/type/value frontend foundation；Phase 04/05
 | Vector index | DDL、dimension/similarity/quantization/filter properties、SHOW | `done` | 08 |
 | SEARCH | MATCH/OPTIONAL MATCH vector ANN subclause、filter、LIMIT、SCORE | `done` | 08 |
 | LOAD CSV | headers、field parsing、URI source、periodic transaction composition | `done` | 08 |
-| IN TRANSACTIONS | batch size、error behavior、status output、native transaction boundaries | `done` | 08, 10 |
+| IN TRANSACTIONS | batch size、error behavior、status output、independent batch transaction boundaries | `done` | 08, 10 |
 | IN CONCURRENT TRANSACTIONS | concurrent batching、DISJOINT BY semantics、SQLite serialized commit | `done` | 08, 10 |
 | EXPLAIN | semantic validation + plan without execution | `done` | 04, 10 |
 | PROFILE | execution + operator runtime counters | `done` | 04, 10 |
@@ -126,6 +126,22 @@ Managed Semantic 使用 Lithograph-specific `db.index.semantic.*` procedure 与 
 | Linux/macOS/Windows x64/arm64 hosted artifact build/load/migration | SV13-27 hosted 部分 | `done` | 13.6 |
 
 实现 revision `672c36043b1b05805900220355876a5ae20b7a08` 的 `lithograph-phase13` probe、synthetic/OpenAI provider smoke、Native ABI、format migration、concurrency/performance、`cargo make quality` 与 `scripts/ci.sh` 均通过；OpenAI-compatible Provider unit/safety regression 为 22/22，quality coverage regions/functions/lines 为 83.44% / 84.24% / 85.23%。repository CI `35433504169` 与六目标 Release Matrix `35433504174` 全部成功。executable inherited openCypher TCK 继续为 3,777/3,777 applicable scenarios 通过、0 failure；Phase 13 没有修改 frozen Cypher grammar/profile。完整 acceptance 见 [Phase 13](phases/13-managed-semantic-vector.md#4-acceptance-matrix)。
+
+### Phase 15 SQL execution / Provider cache supplemental inventory
+
+Phase 15 不改变 `CY25-2026.08` language coverage 分母；它重新闭合 execution adapter、transaction boundary、resource semantics 与 Managed Semantic backend ownership。Phase 00–14 的 `done` 仍表示当时已有语言/功能证据，但下列最新产品边界在 Phase 15 真正实现并验收前保持 `planned`。
+
+| 验收面 | Acceptance 映射 | 状态 | Owner |
+| --- | --- | --- | --- |
+| `columns -> row* -> summary` event schema、zero-row、scalar/stream parity | EX15-01、09 | `planned` | 15.1–15.2 |
+| read/write true streaming、cancel/early-close/resource boundary | EX15-02–03、16 | `planned` | 15.1–15.2、15.6 |
+| SQL `IN TRANSACTIONS` / external I/O / read-only main | EX15-04、07–08 | `planned` | 15.3 |
+| normal execution surfaces 复用 SQL explicit transaction、删除 tx-execute | EX15-06 | `planned` | 15.3 |
+| application Native query ABI removal、Provider SPI preservation | EX15-10 | `planned` | 15.4 |
+| Lithograph format3/Core cache removal、OpenAI Provider 独立 cache DB | EX15-11–14 | `planned` | 15.5 |
+| frozen TCK/CY25 + release/runtime/documentation regression | EX15-15、17–19 | `planned` | 15.6 |
+
+完整证据要求见 [Phase 15 acceptance](phases/15-sql-execution-provider-cache.md#4-acceptance-matrix)。在这些项目完成前，不得用 Phase 13/14 的 Native/format4 acceptance 证明最新 SQL-only/Provider-cache 设计已经实现。
 
 ### Phase 03 frontend evidence
 

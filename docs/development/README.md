@@ -38,7 +38,7 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 
 ## 3. 当前基线
 
-**状态分界：Phase 00–14 全部 `done`。** Phase 11 是在已完成的基础功能/规模验收之上增加的性能专项，不回开Phase 10，也不把Phase 10单次scale通过解释成全场景低延迟保证。Phase 11 已完成format3、persistent Standard Index、邻接keyset、query-owned resolved state/read guard、增量index overlay、实测热点优化以及固定性能机/并发/repository gate。Phase 12 在实现提交 `ec3be9ae26f0d756135cb838008971b1eeb5a4ff` 中闭合原生 FTS5 tokenizer specification、versioned definition、历史/cache、query-time analyzer、失败原子性及 SQL/Native/真实 SQLite 3.45.0/3.53.4 验收；后续 `a76fdbcfb26bfd811c2845a1039b11be88bcae56` 修正 Linux Native ABI gate 对 SQLite 上游 amalgamation warning 的处理。该 revision 的 repository CI 与六目标 hosted Release Matrix 均已通过。
+**状态分界：Phase 00–14 全部 `done`；Phase 15 `ready`。** Phase 11 是在已完成的基础功能/规模验收之上增加的性能专项，不回开Phase 10，也不把Phase 10单次scale通过解释成全场景低延迟保证。Phase 11 已完成format3、persistent Standard Index、邻接keyset、query-owned resolved state/read guard、增量index overlay、实测热点优化以及固定性能机/并发/repository gate。Phase 12–14 的 Native/format4/SQL tx adapter 记录保留当时真实完成证据，不作为最新目标合同；最新 Design 已由 Phase 15 接管 application SQL-only、true streaming、explicit transaction execution surface 与 Provider-owned embedding cache 的实现收敛。
 
 **Phase 12 已完成并进入 v0.1.1 发布基线。** [Full-text / FTS5 Tokenizer 扩展](phases/12-fulltext-tokenizer.md) 根据 [Full-text](../design/full-text.md) 接入宿主 connection 已注册 tokenizer 的原生 specification，移除两个旧 analyzer 名称的特殊映射，并闭合配置、历史/cache、query-time analyzer、失败原子性、version publication 与 Native/SQL integration。
 
@@ -46,9 +46,11 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 
 **Phase 14 已完成开发验收并进入 v0.2.1 发布基线。** [SQL Explicit Transaction Adapter](phases/14-sql-explicit-transaction.md) 在不改变 C ABI 和既有 transaction 语义的前提下，为普通 SQLite driver 增加 `lithograph_tx_begin/execute/commit/abort` SQL 入口；SQLite 3.45.0/3.51.0/3.53.4 real-load、Native ABI、repository quality/coverage 与六目标 Release Matrix 均已通过。实现 revision `2f617f13e007ce713bd48078396c40bf0a963c7c` 的 repository CI `35448157779` 与 Release Matrix `35448157766` 均成功。
 
-当前仓库已经完成 Phase 00 Engineering Foundation、Phase 01 SQLite Extension Boundary、Phase 02 Version-aware Storage Core、Phase 03 Cypher Frontend and Value Semantics、Phase 04 Read Query Engine、Phase 05 Mutation, Transaction and Commit、Phase 06 Cypher 25 Query Completeness、Phase 07 Schema, Constraint and Standard Indexes、Phase 08 Search and Data Ingestion、Phase 09 Versioned State Operations、Phase 10 Compatibility Closure and Release Hardening、Phase 11 Performance Optimization、Phase 12 Full-text / FTS5 Tokenizer 扩展、Phase 13 Managed Semantic Vector / Embedding Provider 与 Phase 14 SQL Explicit Transaction Adapter。现有 current-graph engine 已闭合 query composition、aggregation、advanced path、expression/function/value、mutation、versioned Graph Type/Constraint、lookup/range/text/point/full-text/vector index、Raw Vector `SEARCH`、Managed Semantic、`LOAD CSV`、Cypher transaction batching 与 SQL/Native explicit transaction，并在同一 Graph View、version-aware storage、Commit/savepoint 与 SQL Bridge/Native 边界上执行。Phase 13 从 v0.2.0 起属于正式发布能力。
+**Phase 15 已具备完整 Design input 与 acceptance，状态为 `ready`，尚未开始代码实现。** [SQL Execution Surface、True Streaming 与 Provider-owned Cache](phases/15-sql-execution-provider-cache.md) 将删除 application-facing Native query ABI 与 `lithograph_tx_execute()`，让 `lithograph()` / `lithograph_rows()` 成为唯一两种 execution consumption surface；`lithograph_rows()` 要求 Core 真正增量执行 read/write/transaction program；Managed Semantic text -> Vector cache 从 Lithograph Core/format4 移入具体 Provider，OpenAI-compatible Provider 使用独立 SQLite cache DB。用户已明确本轮不承担旧 Native/format4 历史兼容，因此 implementation 以最新 Design 为准。
 
-当前 Design 进一步确认了通用版本化状态能力：Commit 保持 immutable；Commit Data 是可修改 JSON sidecar；Tag 是显式可移动但不会随写入自动前进的 named ref；允许显式创建 empty-delta Commit；History 需要 opaque cursor 做 bounded DAG traversal；SQL / Native explicit transaction 可以把多个标准 Cypher current-graph execution 组合为一个最终 Commit，并通过 `expectedHead` 提供 transaction-start CAS；Merge 使用 durable Merge Session，把大量 conflict 的分页/逐步 resolution 与最终 Commit/Branch move 分开，并通过 session revision + target-head CAS 支持上层在 finalize 前验证 exact candidate。它们不回开已完成的 Phase 02/05：Phase 05 保持“一次普通 top-level mutating query -> 一个 Commit”的 auto-commit foundation，Phase 08 的 `IN TRANSACTIONS` 继续“每个 mutating batch -> 一个 Commit”，多 execution 单 Commit与 Merge Session 的 version-atomicity completion owner 都是 Phase 09。Phase 09 同时把 storage format 从 development baseline `1` 显式迁移到首个公开 release 的 format `2`；Phase 10 负责 migration/scale/recovery closure。
+当前仓库实现已经完成 Phase 00–14；现有 current-graph engine 已闭合 query composition、aggregation、advanced path、expression/function/value、mutation、versioned Graph Type/Constraint、lookup/range/text/point/full-text/vector index、Raw Vector `SEARCH`、Managed Semantic、`LOAD CSV`、Cypher transaction batching 与 Phase 14 的 SQL/Native explicit transaction adapter。**但实现尚未满足最新 Design**：rows 仍有 read-only/external-I/O gate，write/transaction-program result 仍存在完整 materialization，Native query ABI 与 `tx_execute` 仍存在，Core 仍拥有 format4 embedding result cache。以上差距全部由 Phase 15 接管；在其 acceptance 闭合前不能把最新 SQL-only/true-streaming/Provider-cache 设计描述成已实现或已发布。
+
+当前 Design 进一步确认了通用版本化状态能力：Commit 保持 immutable；Commit Data 是可修改 JSON sidecar；Tag 是显式可移动但不会随写入自动前进的 named ref；允许显式创建 empty-delta Commit；History 需要 opaque cursor 做 bounded DAG traversal；SQL explicit transaction 可以把多个标准 Cypher current-graph execution 组合为一个最终 Commit，并通过 `expectedHead` 提供 transaction-start CAS；Merge 使用 durable Merge Session，把大量 conflict 的分页/逐步 resolution 与最终 Commit/Branch move 分开，并通过 session revision + target-head CAS 支持上层在 finalize 前验证 exact candidate。它们不回开已完成的 Phase 02/05：Phase 05 保持“一次普通 top-level mutating query -> 一个 Commit”的 auto-commit foundation，Phase 08 的 `IN TRANSACTIONS` 继续“每个 mutating batch -> 一个 Commit”，多 execution 单 Commit与 Merge Session 的 version-atomicity foundation来自 Phase 09，Phase 15 负责把 normal SQL execution surface 接到同一 staged lifecycle。Phase 09 同时把 storage format 从 development baseline `1` 显式迁移到首个公开 release 的 format `2`；Phase 10 负责当时的 migration/scale/recovery closure。
 
 - Phase 00：`done`；
 - Phase 01：`done`；
@@ -65,6 +67,7 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 - Phase 12：`done`；
 - Phase 13：`done`；
 - Phase 14：`done`；
+- Phase 15：`ready`；
 - `docs/development/cypher25-compatibility.md` 保留 Phase 00–14 已执行证据；Full-text family、Phase 12 provider supplemental inventory 与 Phase 13 Managed Semantic supplemental inventory 均已闭合为 `done`。Phase 14 是 adapter 扩展，不改变冻结 Cypher 语言 coverage 分母。
 
 ## 4. 路线总览
@@ -86,8 +89,9 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 | [12 Full-text / FTS5 Tokenizer 扩展](phases/12-fulltext-tokenizer.md) | `done` | 原生 tokenizer specification、Schema/历史/cache、query analyzer、失败原子性与真实 SQLite/Native 扩展验收 | 08、09、11 |
 | [13 Managed Semantic Vector / Embedding Provider](phases/13-managed-semantic-vector.md) | `done` | 保留 Raw Vector；新增 SQLite Embedding Provider、Semantic Index、format4 Embedding cache、文本 query/rebuild/cache maintenance | 01、07–12 |
 | [14 SQL Explicit Transaction Adapter](phases/14-sql-explicit-transaction.md) | `done` | 新增四个 SQL `tx_*` scalar，复用既有 Native explicit transaction core；真实 SQLite、Native ABI、quality/coverage 与六目标 hosted Release Matrix 全部闭合 | 01、05、09 |
+| [15 SQL Execution Surface、True Streaming 与 Provider-owned Cache](phases/15-sql-execution-provider-cache.md) | `ready` | SQL-only application surface、真正 rows execution stream、normal surfaces 复用 explicit tx、删除 Native query ABI、Provider-owned embedding cache | 01、04–14 |
 
-关键依赖原则：**Version-aware graph storage 在 Phase 02 建立，不能拖到后期再 retrofit。** Phase 09 在该 immutable history foundation 上完成 transaction -> Commit 行为：增加 Native explicit transaction，把多个 execution 的最终 net delta 写成一个 Layer/Commit；增加 Merge Session，把长时间 conflict resolution 保存在非历史 operational workspace 中并只在 finalize 形成最终 Merge Commit/ref move；同时增加用户级状态 sidecar/ref 与版本操作，并通过显式 `1 -> 2` migration 增加 Commit Data / Tag / Merge Session storage。这不改变 Phase 02 的 Layer / Commit / Snapshot 核心合同，也不要求重开 Phase 02/05。Phase 13 同样不回开 Phase 08 Raw Vector：它只在既有 Index/History/HNSW foundation 上增加 String -> derived Vector 的 managed path，Raw Vector 继续作为标准 Cypher 25 contract。
+关键依赖原则：**Version-aware graph storage 在 Phase 02 建立，不能拖到后期再 retrofit。** Phase 09 的历史实现建立 explicit transaction / Merge Session/version operations；Phase 14 增加 SQL tx adapter；Phase 15 不重做 version model，而是让正常 SQL execution surface 直接使用同一 staged transaction state，并删除重复 Native/tx-execute adapter。Phase 13 的 Managed Semantic Schema/Provider/HNSW foundation继续保留，但其 Lithograph-owned embedding result cache/format4 被 Phase 15 最新设计替代；Raw Vector 继续作为标准 Cypher 25 contract。
 
 ## 5. Phase 完成标准
 
@@ -104,7 +108,7 @@ Phase 11 的Feature顺序与量化验收由其独立计划引用[Large-scale Inv
 7. Phase status 与仓库事实同步；
 8. final diff 无临时文件、无 unrelated refactor、无 secret、无 generated junk；
 9. 文档链接、Markdown、`git diff --check` 与新文件 trailing-whitespace 检查通过。
-10. repository-wide `cargo make quality` 通过；如果 Phase 修改了 SQLite Extension 行为，再同时通过 `scripts/ci.sh` 对应的真实 SQLite/ABI/compatibility gate。
+10. repository-wide `cargo make quality` 通过；如果 Phase 修改了 SQLite Extension 行为，再同时通过 `scripts/ci.sh` 对应的真实 SQLite runtime/load、application SQL surface、适用的 extension/Embedding Provider SPI 与 Cypher compatibility gate。Application-facing Native query ABI 在 Phase 15 后不再属于通用门禁。
 
 Commit / push 是独立 repository action。只有真实执行后才记录对应状态。
 
@@ -114,14 +118,16 @@ Commit / push 是独立 repository action。只有真实执行后才记录对应
 
 `graphView` 是 Lithograph-specific execution option，不属于 Cypher grammar/compatibility inventory；它的 correctness 由 Phase 04–10 acceptance 单独验证，不能为了实现它修改 Cypher 25 语法或把 `USE` 纳入不同语义。
 
-最终 Phase 10 必须同时满足：
+Phase 10 当时的 compatibility closure 必须同时满足：
 
 - openCypher TCK 中适用于 Lithograph current-graph Profile 的 scenario 全部通过；
 - `CY25-2026.08` 新增/改变 feature matrix 全部通过；
 - 所有 built-in current-graph function/procedure/type/index/schema surface 均有自动化 inventory 和测试；
 - 没有未解释 expected-failure、skip 或 compatibility waiver；
-- SQL Bridge 与 Native API 对两者共同支持的 query 返回相同 Cypher semantic result；
-- Native API 的 transaction-owning query path 通过独立 transaction acceptance。
+- 当时 SQL Bridge 与 Native API 对两者共同支持的 query 返回相同 Cypher semantic result；
+- 当时 Native API 的 transaction-owning query path 通过独立 transaction acceptance。
+
+Phase 15 完成后，current product gate 不再要求 Native query parity，而要求 `lithograph()` 与 `lithograph_rows()` 对两者共同执行的 query 保持相同 Cypher/transaction semantics，并由 SQL autocommit path完成 transaction-owning query acceptance。
 
 ## 7. Storage / Version 完成规则
 
@@ -132,7 +138,7 @@ Commit / push 是独立 repository action。只有真实执行后才记录对应
 - fresh DB -> Root -> main；
 - Node/Relationship/Property/Label/Type 全版本 identity；
 - transaction rollback 不产生 durable commit/ref move；
-- SQL / Native explicit transaction 中多个 current-graph execution 共享 staged state，成功时至多形成一个最终 Commit；任一 execution/commit failure 原子 abort，`expectedHead` mismatch 在写入前失败；
+- SQL explicit transaction 中多个 `lithograph()` / `lithograph_rows()` execution 共享 staged state，成功时至多形成一个最终 Commit；任一 execution/commit failure 原子 abort，`expectedHead` mismatch 在写入前失败；
 - concurrent stale branch head detection；
 - checkpoint 删除后历史 snapshot 仍可重建；
 - schema/index definition 在 time-travel 中与 commit 一致；
@@ -190,6 +196,7 @@ full repository gates
 - [Phase 12](phases/12-fulltext-tokenizer.md)
 - [Phase 13](phases/13-managed-semantic-vector.md)
 - [Phase 14](phases/14-sql-explicit-transaction.md)
+- [Phase 15](phases/15-sql-execution-provider-cache.md)
 - [FTS5 Tokenizer 研究证据](../research/fts5-tokenizer-contract.md)
 - [Embedding Provider / Cypher Vector 研究证据](../research/embedding-provider-contract.md)
 - [性能证据与测量限制](../research/phase11-performance-evidence.md)
@@ -197,14 +204,16 @@ full repository gates
 
 ## 10. 最终产品完成条件
 
-以下保留Phase00–10的首个功能版本完成标准。Phase11另需满足其性能验收与[Performance Evidence Contract](../design/runtime.md#performance-evidence)、[固定基线性能目标](../design/runtime.md#performance-targets)、[扩展压力场景与范围控制](../design/runtime.md#stress-workloads)，Phase12另需满足其FTS5 provider验收与[Full-text](../design/full-text.md)；Phase13完成时还必须满足其Managed Semantic/format4验收与[Vector](../design/vector.md)、[Managed Semantic Storage Format 4](../design/storage.md#storage-format-4)。不能以基础功能版本或 v0.1.1 已经完成代替后续专项完成。
+以下保留Phase00–10的首个功能版本完成标准。Phase11另需满足其性能验收与[Performance Evidence Contract](../design/runtime.md#performance-evidence)、[固定基线性能目标](../design/runtime.md#performance-targets)、[扩展压力场景与范围控制](../design/runtime.md#stress-workloads)，Phase12另需满足其FTS5 provider验收与[Full-text](../design/full-text.md)。Phase13 的 format4/Core cache 是历史完成状态；最新最终产品还必须完成 Phase15 的 SQL-only/true-streaming/Provider-cache acceptance，不能以 Phase13/14 已 done 代替。
 
 Lithograph 可以宣告首个完整版本完成，只有以下事实同时成立：
 
 - 可在支持平台的 stock SQLite 上加载，不需要 SQLite fork 或 server；
 - `CY25-2026.08` current-graph compatibility acceptance 全部通过；
 - graph/schema/index write 全部具有 immutable Commit-DAG history；
-- SQL / Native explicit transaction 可把多个标准 Cypher current-graph execution 原子组合成一个 Commit，而 caller-owned SQLite transaction 与 `IN TRANSACTIONS` 保持各自独立语义；
+- SQL explicit transaction 可通过正常 `lithograph()` / `lithograph_rows()` execution 把多个标准 Cypher current-graph execution 原子组合成一个 Commit，而 caller-owned SQLite transaction 与 `IN TRANSACTIONS` 保持各自独立语义；
+- Application-facing execution 只需要标准 SQLite SQL；没有第二套 Native Cypher query ABI，`lithograph_rows()` 对 read/write/external-I/O/transaction-owning query 提供真正的 bounded execution stream；
+- Managed Semantic text -> Vector cache 不写 Lithograph database；OpenAI-compatible Provider 的可选 persistent cache 使用其独立 SQLite DB，`EmbeddingProviderV1` SPI 保持可用；
 - Branch、Tag、Commit Data、explicit Commit、可分页 History、Time-travel、Diff、Patch、可恢复/可逐步解决冲突的 Merge Session、Rebase、Squash、Reset 与 Revert 可用；
 - Full-text 与 Vector `SEARCH` 可用且历史 Snapshot correctness 保持；
 - transaction、crash recovery、format migration、integrity check 通过；

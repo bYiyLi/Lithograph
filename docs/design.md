@@ -12,17 +12,17 @@
 | --- | --- |
 | 产品定位、全局边界与设计驱动 | 本文的 [产品定义](#product-definition) 与 [设计驱动](#design-drivers) |
 | Cypher 25 Profile、兼容范围、oracle | [Compatibility](design/compatibility.md) |
-| SQL Bridge / Native C ABI、options、外部 I/O、结果与错误 | [Interfaces](design/interfaces.md) |
+| SQLite SQL execution surface、options、外部 I/O、结果与错误 | [Interfaces](design/interfaces.md) |
 | 图元素与值语义、Frontend、Planner、Executor、Graph View | [Query Engine](design/query-engine.md) |
 | Canonical storage、编码、Snapshot、事务、恢复与格式迁移 | [Storage](design/storage.md) |
 | Commit、Branch、Tag、Diff/Patch、Merge 及版本操作 | [Versioning](design/versioning.md) |
 | Schema、Constraint、Index 公共规则与 Standard Index | [Schema and Indexes](design/schema-and-indexes.md) |
 | FTS5 specification、全文查询与 cache | [Full-text](design/full-text.md) |
-| Raw Vector、Managed Semantic、Embedding Provider 与 cache | [Vector](design/vector.md) |
+| Raw Vector、Managed Semantic、Embedding Provider 与 Provider-owned cache | [Vector](design/vector.md) |
 | 部署、SQLite ABI、安全、规模与性能目标 | [Runtime](design/runtime.md) |
 | 已采用架构决策的依据、备选与取舍；外部参考入口 | [Decisions](design/decisions.md) |
 
-先读本文，再按任务读取拥有该合同的专题；跨域任务继续跟随专题内的依赖链接。例如 Provider/config 改动从 Vector 开始，涉及持久布局时再读 Storage format 4；Merge 改动从 Versioning 开始，涉及事务或结果时再读 Storage / Interfaces。
+先读本文，再按任务读取拥有该合同的专题；跨域任务继续跟随专题内的依赖链接。例如 Provider/config 改动从 Vector 开始，只有真正改变 Lithograph canonical/derived storage 时才继续读 Storage；Merge 改动从 Versioning 开始，涉及事务或结果时再读 Storage / Interfaces。
 
 <a id="source-discipline"></a>
 
@@ -40,13 +40,12 @@ Lithograph 是一个运行在标准 SQLite 上的、可加载的 Property Graph 
 
 1. 完整的 Cypher 25 当前图查询与数据库语义；
 2. 面向大规模单机图的 Property Graph 存储、执行、Schema、Index、Full-text、Raw Vector Search 与 Managed Semantic Search；
-3. 基于 immutable Commit DAG 的版本化状态图：每个 graph / Schema / Index **逻辑写单元**形成 Commit；普通 auto-commit query 是一个写单元，SQL / Native explicit transaction 可以把多个独立 execution 组合成一个写单元。系统同时提供 Branch、Tag、可修改的 Commit Data、显式 empty-delta Commit、可分页 History、Time-travel、Diff、Patch、Merge、Rebase、Squash、Reset 与 Revert。Git / TerminusDB 是机制参考，不限定调用方如何解释这些状态。
+3. 基于 immutable Commit DAG 的版本化状态图：每个 graph / Schema / Index **逻辑写单元**形成 Commit；普通 auto-commit query 是一个写单元，SQL explicit transaction 可以把多个独立 execution 组合成一个写单元。系统同时提供 Branch、Tag、可修改的 Commit Data、显式 empty-delta Commit、可分页 History、Time-travel、Diff、Patch、Merge、Rebase、Squash、Reset 与 Revert。Git / TerminusDB 是机制参考，不限定调用方如何解释这些状态。
 
 ```text
 Application / SQLite client
             |
             | SQLite loadable extension API
-            | Native Lithograph C ABI
             v
 +-------------------------------------------+
 | Lithograph SQLite Extension               |
@@ -81,6 +80,12 @@ Lithograph 不包含 Knowledge、Ontology 业务模型、Agent、Memory、RAG �
 
 Lithograph 必须是标准 SQLite loadable extension，不维护 SQLite fork，不要求独立 Server 或 Daemon。扩展通过 `sqlite3_lithograph_init` 注册公开接口，并使用 SQLite 自身事务、WAL、B-tree、文件格式与并发控制。
 
+<a id="sql-only-execution"></a>
+
+### Application-facing execution 只通过 SQLite SQL
+
+Application / Database Client 只通过标准 SQLite SQL surface 调用 Lithograph，不同时维护另一套 application-facing Native query ABI。完整结果由 `lithograph()` 返回，增量 execution event stream 由 `lithograph_rows()` 返回；两者必须共享同一个 Cypher execution core 和事务语义，只允许结果消费方式不同。Embedding Provider 的 `EmbeddingProviderV1` 是 Lithograph extension 与 Provider extension 之间的插件 SPI，不属于 application-facing query API，也不受本边界删除。
+
 <a id="cypher-semantics"></a>
 
 ### Cypher 25 语义兼容
@@ -93,7 +98,7 @@ Lithograph 不创建“类似 Cypher”的查询语言。公开图查询语言�
 
 版本历史从第一条图数据开始存在。图数据、Schema 与 Index 定义共同进入 Commit 历史。Branch 只移动引用，不复制完整数据库。历史 Commit 不被后续写入修改。
 
-Commit boundary 属于版本模型的一部分：普通 mutating Cypher execution 默认各自产生 Commit；需要把多个 execution 视为一次逻辑状态变化时，调用方使用 SQL 或 Native explicit transaction，在同一 staged Snapshot 上执行并只 finalize 一个 Commit。caller-owned SQLite transaction 只改变 durability visibility，Cypher `IN TRANSACTIONS` 只改变 batch transaction boundary，二者都不隐式重写 Commit 粒度。
+Commit boundary 属于版本模型的一部分：普通 mutating Cypher execution 默认各自产生 Commit；需要把多个 execution 视为一次逻辑状态变化时，调用方使用 SQL explicit transaction，在同一 staged Snapshot 上执行并只 finalize 一个 Commit。caller-owned SQLite transaction 只改变 durability visibility，Cypher `IN TRANSACTIONS` 只改变 batch transaction boundary，二者都不隐式重写 Commit 粒度。
 
 Commit 的 graph / Schema / Index Snapshot 与 DAG lineage 是 immutable canonical history。调用方可以另外给已有 Commit 保存可修改的 **Commit Data**，也可以用 **Tag** 给 Commit 建立显式命名引用；Commit Data 与 Tag 都是 version-control sidecar state，不进入 Snapshot、Commit hash、Diff / Patch 或 Merge correctness。若某项业务数据本身必须随 Snapshot versioning、Cypher query、Constraint、Diff 或 Merge 一起演进，它必须保存为正常 graph / Schema 数据，而不是 Commit Data。
 
@@ -101,4 +106,4 @@ Commit 的 graph / Schema / Index Snapshot 与 DAG lineage 是 immutable canonic
 
 ### 大规模单机图
 
-遍历、索引、历史查询和结果返回不能依赖把完整图或完整结果集加载到内存。邻接访问的成本必须与命中的邻接数据相关，而不是与全部 Relationship 数量相关。
+遍历、索引、历史查询和结果返回不能依赖把完整图或完整结果集加载到内存。邻接访问的成本必须与命中的邻接数据相关，而不是与全部 Relationship 数量相关。`lithograph_rows()` 是真正的 pull-based execution stream：除 `ORDER BY`、`DISTINCT`、aggregation 等 Cypher operator 自身要求的 semantic barrier 外，Engine 不得为了 adapter 结果返回而先物化完整最终 row set；需要 barrier 时使用 bounded memory 与必要的 TEMP/disk spill。

@@ -52,19 +52,24 @@ Phase 13 Managed Semantic Vector / Embedding Provider (done)
         |
         v
 Phase 14 SQL Explicit Transaction Adapter (done)
+        |
+        v
+Phase 15 SQL Execution / True Streaming / Provider Cache (ready)
 ```
 
-Phase 00–14均已完成开发验收。Phase 13 已闭合 Provider ABI、OpenAI-compatible Provider、Semantic Schema/query/rebuild、format4 persistent Embedding cache、Graph View/history/version publication、TEMP HNSW reuse、SQLite 3.45.0 / 3.53.4 dual-extension/concurrency/performance acceptance，以及 Linux/macOS/Windows x64/arm64 六目标 hosted Release Matrix；Phase 14 已闭合 SQL explicit transaction adapter、真实 SQLite 3.45.0/3.51.0/3.53.4、Native ABI/quality/coverage 与当前 revision 的六目标 hosted Release Matrix。具体状态与证据分别见 [Phase 13计划](phases/13-managed-semantic-vector.md)与 [Phase 14 计划](phases/14-sql-explicit-transaction.md)。Phase 11既有 performance/release acceptance 仍保持已完成状态。
+Phase 00–14均已完成当时的开发验收；Phase 15 已有完整设计输入和 acceptance，状态为 `ready`。Phase 13/14 的 Provider/format4/Native/SQL tx adapter 记录继续作为历史实现证据，但最新 Design 已改变 execution/cache ownership，因此当前实现必须通过 Phase 15 收敛后才满足最新产品合同。具体 Phase 15 顺序与验收见 [Phase 15 计划](phases/15-sql-execution-provider-cache.md)。
 
 Phase 12 的目标由 [Full-text](../design/full-text.md) 定义，当前实现与 FT12-01–20 开发验收已经闭合；依赖 Phase 08/09/11，不重开已完成 Phase。具体实现顺序与证据见 [Phase 12计划](phases/12-fulltext-tokenizer.md)。该成果已经进入 v0.1.1 发布基线，对应 repository CI 与六目标 hosted Release Matrix 均已通过。
 
-Phase 13 的目标由 [Vector](../design/vector.md)、[Managed Semantic Storage Format 4](../design/storage.md#storage-format-4) 定义：保留 Phase 08 的 Raw Vector/Cypher 25 `SEARCH`，新增 SQLite Embedding Provider contract、Managed Semantic Index 与 persistent Embedding Result Cache。它依赖既有 SQLite extension、Schema/version、HNSW、format3/read guard 和 Full-text provider lifecycle，但不回开这些 Phase；具体顺序与验收见 [Phase 13计划](phases/13-managed-semantic-vector.md)。
+Phase 13 **当时的实现基线**保留 Phase 08 的 Raw Vector/Cypher 25 `SEARCH`，新增 SQLite Embedding Provider contract、Managed Semantic Index 与 Lithograph-owned persistent Embedding Result Cache，并把 storage format 提升到 4；具体历史范围与验收见 [Phase 13计划](phases/13-managed-semantic-vector.md)。最新 Vector/Storage 合同已经由 Phase 15 变更，不能用当前 Design 链接反推 Phase 13 当时的 cache ownership。
 
 Phase 13 的实现从 v0.2.0 起进入正式发布基线；Native ABI 与 `CY25-2026.08` 保持不变，storage format 提升为 4。
 
-Phase 14 的目标由 [SQL Bridge](../design/interfaces.md#sql-bridge) 与 [Explicit Transaction](../design/storage.md#native-explicit-transaction) 定义：在 Phase 09 已有 state machine 上增加 SQL adapter，不新建 transaction/storage abstraction，不改变普通 `lithograph()` 与 caller-owned transaction 语义。具体顺序与验收见 [Phase 14 计划](phases/14-sql-explicit-transaction.md)。
+Phase 14 **当时的实现基线**是在 Phase 09 已有 state machine 上增加 `lithograph_tx_begin/execute/commit/abort` SQL adapter，不新建 transaction/storage abstraction；具体历史顺序与验收见 [Phase 14 计划](phases/14-sql-explicit-transaction.md)。最新 Design 已由 Phase 15 删除专用 `tx_execute`，因此 Phase 14 只作为实现来源，不再作为当前 transaction API 合同。
 
 Phase 14 已进入 v0.2.1 正式发布基线。实现 revision `2f617f13e007ce713bd48078396c40bf0a963c7c` 的 repository CI `35448157779` 与六目标 Release Matrix `35448157766` 均通过。
+
+Phase 15 的目标由 [Interfaces](../design/interfaces.md)、[Explicit Transaction](../design/storage.md#native-explicit-transaction)、[Vector](../design/vector.md) 与 [Runtime](../design/runtime.md#large-scale-invariants) 共同提供输入：Application execution 只保留 SQLite SQL；`lithograph_rows()` 成为 read/write/external-I/O/transaction-owning query 的真正 pull-based execution stream；normal execution surface 直接加入 active explicit transaction；Native query ABI 与 `tx_execute` 删除；Lithograph-owned embedding cache/format4 删除，OpenAI-compatible Provider 自己使用独立 SQLite cache DB。它不回开 Cypher 语言 Profile，也不修改 KG OS。
 
 ## 2. 为什么 Version Storage 必须早于 Cypher Engine
 
@@ -84,9 +89,9 @@ Phase 14 已进入 v0.2.1 正式发布基线。实现 revision `2f617f13e007ce71
 | Component | First owning Phase | Completion Phase |
 | --- | --- | --- |
 | Rust workspace / CI / test harness | 00 | 10 |
-| SQLite loadable extension ABI | 01 | 10 |
-| SQL Bridge / Native ABI | 01 | 14 |
-| internal storage metadata/migration | 01 | 10 |
+| SQLite loadable extension / SQL application surface | 01 | 15 |
+| Application-facing Native query ABI | 01 | 15（删除） |
+| internal storage metadata/migration | 01 | 15 |
 | IDs / dictionaries | 02 | 02 |
 | immutable Layer / Commit | 02 | 05 |
 | Branch `main` / checkout context | 02 | 09 |
@@ -97,7 +102,7 @@ Phase 14 已进入 v0.2.1 正式发布基线。实现 revision `2f617f13e007ce71
 | Logical / physical planner | 04 | 10 |
 | Row/path executor | 04 | 06 |
 | Mutating operators | 05 | 06 |
-| Transaction -> Commit behavior（auto-commit + Native explicit transaction） | 05 | 09 |
+| Transaction -> Commit behavior（auto-commit + SQL explicit transaction） | 05 | 15 |
 | Complete clause/expression/function coverage | 06 | 10 |
 | Graph Type / constraints | 07 | 07 |
 | lookup/range/text/point index | 07 | 10 |
@@ -105,7 +110,8 @@ Phase 14 已进入 v0.2.1 正式发布基线。实现 revision `2f617f13e007ce71
 | HNSW / vector SEARCH | 08 | 10 |
 | Embedding Provider C ABI / SQLite client-data binding | 13 | 13 |
 | Managed Semantic Index / `db.index.semantic.*` | 13 | 13 |
-| Persistent Embedding Result Cache / storage format 4 | 13 | 13 |
+| Lithograph-owned Persistent Embedding Result Cache / storage format 4 | 13 | 15（删除） |
+| OpenAI-compatible Provider-owned SQLite embedding cache | 15 | 15 |
 | LOAD CSV / transaction batching | 08 | 10 |
 | Diff / Patch | 09 | 09 |
 | Three-way Merge / Merge Session / conflict resolution | 09 | 09 |
@@ -114,7 +120,7 @@ Phase 14 已进入 v0.2.1 正式发布基线。实现 revision `2f617f13e007ce71
 | Commit Data / Tag / Merge Session operational storage + storage format 1→2 migration | 09 | 09 |
 | Explicit empty-delta Commit / cursor-based DAG history | 09 | 09 |
 | Compatibility closure | 10 | 10 |
-| Scale / crash / migration / cross-platform release | 10 | 10 |
+| Scale / crash / migration / cross-platform release | 10 | 15 |
 
 ## 4. Vertical Slice 顺序
 
@@ -142,7 +148,7 @@ reproducible before + physical-work counters
 | Index base/delta、历史/staged/candidate可见性 | 07/09 | 11.5 |
 | Search/Merge与并发压力证据 | 08–10 | 11.7 |
 
-不因增加持久cache重新设计canonical history，不以性能为由改变Cypher类型/错误、Constraint或Native transaction合同。Phase 11 Standard Index read仍不隐式写`main`；Phase 13 Managed Semantic query按其独立external-I/O contract自动发布derived Embedding cache，但不写canonical graph/history/ref。迁移与显式rebuild的副作用继续由各自boundary承担。
+Phase 11 当时不因增加持久cache重新设计canonical history，也不以性能为由改变Cypher类型/错误或Constraint。Phase 15 进一步把 Managed Semantic text->Vector cache移出 Lithograph `main`；Standard Index 的 format3/persistent generation仍属于 Lithograph derived storage，Provider cache则不属于 canonical/derived graph storage。
 
 每个复杂子系统先形成最小真实纵向闭环，再扩 coverage。
 
@@ -188,7 +194,34 @@ SQLite provider extension + client-data ABI oracle
 | Rebuild、batch去重、external-I/O transaction boundary | 09/12 | 13.5 |
 | Raw Vector/compat/performance/CI/六目标artifact回归 | 10–12 | 13.6 |
 
-Phase 13 不复制 [Vector](../design/vector.md) 的 providerConfig/cache-key/procedure 语义；本表只说明实现依赖。Raw Vector Property/`CREATE VECTOR INDEX`/`SEARCH` 继续由 Phase 08/10 的既有实现拥有，Phase 13 只能追加 managed path，不能把旧入口重解释成自动 Embedding。
+上表只记录 Phase 13 当时的实现依赖，不作为当前 providerConfig/cache/procedure 合同；最新行为只看 [Vector](../design/vector.md) 与 Phase 15。Raw Vector Property/`CREATE VECTOR INDEX`/`SEARCH` 继续由 Phase 08/10 的既有实现拥有，Phase 15 同样不能把旧入口重解释成自动 Embedding。
+
+### Phase 15 SQL execution / streaming / Provider cache 纵向闭环
+
+```text
+minimum/current SQLite same-connection feasibility gate
+ -> vtab write SAVEPOINT / xClose error propagation / repeated inner transaction boundary
+ -> shared QueryCursor / execution state
+ -> read + mutation + transaction-program incremental production
+ -> lithograph_rows columns/row*/summary SQL stream
+ -> normal SQL execution joins active explicit transaction
+ -> autocommit IN TRANSACTIONS + external-I/O closure
+ -> remove application Native query ABI / tx_execute
+ -> remove Core embedding cache / format4
+ -> OpenAI-compatible independent SQLite cache
+ -> resource / compatibility / six-platform closure
+```
+
+| 追加变更 | 当前实现基线 | Phase 15 owner |
+| --- | --- | --- |
+| read/write/transaction-program true streaming core | 04/05/08 | 15.1 |
+| `ordinal/event/data` rows surface 与 cursor cleanup | 01/04 | 15.2 |
+| normal SQL surfaces 复用 explicit tx、SQL transaction subquery/external I/O | 08/09/14 | 15.3 |
+| 删除 application Native query ABI / `tx_execute` | 01/09/14 | 15.4 |
+| 删除 Core format4 embedding cache；OpenAI Provider 独立 cache DB | 13 | 15.5 |
+| compatibility/performance/release/docs closure | 10–14 | 15.6 |
+
+Phase 15 只安排实现依赖；SQL event、transaction、Provider cache 与 storage contract 仍分别由 Design 专题拥有。Phase 13/14 的旧行为只作为历史基线，不作为 Phase 15 目标语义。
 
 ### Cypher vertical slice
 

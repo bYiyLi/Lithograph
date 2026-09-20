@@ -2,7 +2,7 @@
 
 [设计入口](../design.md) · [开发状态与验收](../development/README.md)
 
-本文件拥有 SQL Bridge、Native C ABI、options、外部 I/O、结果编码与错误映射。事务状态机由 [Storage](storage.md#transactions-and-concurrency) 定义；Procedure 的专用参数分别由 [Versioning](versioning.md)、[Standard Index maintenance](schema-and-indexes.md#build-publish-maintenance)、[Full-text](full-text.md)、[Vector](vector.md) 定义，不在此复制。
+本文件拥有 application-facing SQLite SQL execution surface、options、外部 I/O、结果编码与错误映射。事务状态机由 [Storage](storage.md#transactions-and-concurrency) 定义；Procedure 的专用参数分别由 [Versioning](versioning.md)、[Standard Index maintenance](schema-and-indexes.md#build-publish-maintenance)、[Full-text](full-text.md)、[Vector](vector.md) 定义，不在此复制。Embedding Provider 的 C ABI 由 [Vector](vector.md#embedding-provider) 拥有，它是 extension-to-extension SPI，不是 application query API。
 
 <a id="sqlite-extension"></a>
 
@@ -37,7 +37,7 @@ Lithograph v1 的 canonical graph storage 固定属于目标 connection 的 SQLi
 
 首次初始化生成一个 RFC 9562 UUID 作为 `databaseId`，保存在 `_lithograph_meta`，在该 database 的整个生命周期和 storage migration 中保持不变。Storage format `1` 是首个 canonical graph-storage baseline；format `2` 增加 Commit Data / Tag sidecar 与 Merge Session operational storage。支持到 format `2` 的 Engine 对 fresh database 直接创建 format `2`；已存在 format `1` database 只能通过[Storage Migration](storage.md#storage-migration)定义的显式 `1 -> 2` migration 升级，既有 Commit ID 不重算。
 
-在 format `2` 基础上，持久 derived Standard Index 使用 format `3`，其 fresh/init、旧格式读取、exact internal-schema inventory 与迁移边界由[Performance Storage Format 3](storage.md#storage-format-3)统一定义；Managed Semantic persistent Embedding cache 使用[Managed Semantic Storage Format 4](storage.md#storage-format-4)定义的 format `4`。任何更高格式都不能在旧 format 中静默添加未声明的 reserved table/index。公开 Native execution ABI 和 Cypher 25 grammar/Profile 不因此升级；Embedding Provider contract 是独立的 additive SQLite-extension ABI。
+在 format `2` 基础上，持久 derived Standard Index 使用 format `3`，其 fresh/init、旧格式读取、exact internal-schema inventory 与迁移边界由[Performance Storage Format 3](storage.md#storage-format-3)统一定义。Managed Semantic 的 text -> Vector result cache 由具体 Embedding Provider 自己拥有，不增加 Lithograph main database 的 reserved table、operational metadata 或 storage format；当前目标 storage format 因此仍为 format `3`。Embedding Provider contract 是独立的 SQLite-extension SPI。
 
 重复执行 `lithograph_init()` 是幂等的。数据库格式高于当前 Extension 可理解版本时直接返回 `FORMAT_TOO_NEW`，不得自动降级或重写历史。
 
@@ -47,7 +47,7 @@ Lithograph v1 的 canonical graph storage 固定属于目标 connection 的 SQLi
 
 Lithograph 不使用 `PRAGMA user_version`，避免占用宿主应用的数据库版本字段；内部格式版本保存在 `_lithograph_meta`。
 
-除 `lithograph_version()` 外，所有要求 graph state 的 API 在尚未执行 `lithograph_init()` 时返回 `NOT_INITIALIZED`。`lithograph_version()` 不要求先初始化，并分别返回 Extension version、ABI version、支持的 storage-format range 与当前 database 的 storage-format version；`main` 中不存在 Lithograph metadata 时当前 format 与 `databaseId` 为 `null`，更高但 marker 可读的 format 仍报告其实际版本。若 metadata 已存在但损坏，或 metadata 读取本身发生 `BUSY` / resource / I/O 等错误，则返回对应稳定 error，不把失败静默伪装成未初始化。
+除 `lithograph_version()` 外，所有要求 graph state 的 API 在尚未执行 `lithograph_init()` 时返回 `NOT_INITIALIZED`。`lithograph_version()` 不要求先初始化，并分别返回 Extension version、Cypher Profile、支持的 storage-format range 与当前 database 的 storage-format version；`main` 中不存在 Lithograph metadata 时当前 format 与 `databaseId` 为 `null`，更高但 marker 可读的 format 仍报告其实际版本。若 metadata 已存在但损坏，或 metadata 读取本身发生 `BUSY` / resource / I/O 等错误，则返回对应稳定 error，不把失败静默伪装成未初始化。
 
 普通 graph/query/transaction API 的每次 invocation 只执行**结构性初始化校验**：验证 metadata marker、当前 storage-format 可理解、canonical internal-schema inventory / metadata shape 正确，并拒绝会截获 internal write 的 unsafe TEMP trigger。它们**不得**在每次调用前重算完整 Commit / Layer / Schema hash、遍历完整 Commit DAG 或扫描完整 graph 来证明 canonical history integrity；否则 query latency 会随 database 总规模线性增长并违反[Large-scale Invariants](runtime.md#large-scale-invariants) large-scale invariant。完整 canonical-history / graph integrity scan 由显式 `lithograph_integrity_check()`、初始化/迁移验收和其它明确要求完整 integrity evidence 的维护路径负责。普通执行仍依赖 canonical storage primitives 自身的 point/overlay invariant 校验，并在实际访问到损坏记录时 fail closed。
 
@@ -60,7 +60,7 @@ lithograph_init()
   -> {databaseId, storageFormat, root, branch}
 
 lithograph_version()
-  -> {extension, abi, cypherProfile,
+  -> {extension, cypherProfile,
       storageFormat: {min, max, current}, databaseId}
 
 lithograph_validate(query)
@@ -85,7 +85,7 @@ SELECT lithograph(
   '{}'
 );
 
-SELECT ordinal, row
+SELECT ordinal, event, data
 FROM lithograph_rows(
   'MATCH (p:Person) RETURN p.name AS name',
   '{}',
@@ -100,42 +100,98 @@ FROM lithograph_rows(
 | `lithograph_init()` | 初始化或迁移当前 database |
 | `lithograph(query [, params [, options]])` | 执行一个 Cypher query，返回完整 Lithograph JSON envelope |
 | `lithograph_tx_begin(options_json)` | 开始当前 connection 的 Lithograph explicit transaction，返回 pinned base Commit |
-| `lithograph_tx_execute(query [, params_json [, options_json]])` | 在 active explicit transaction 内执行一个 Cypher query，返回完整 Lithograph JSON envelope |
 | `lithograph_tx_commit()` | finalize 唯一最终 Commit 并提交 Engine-owned SQLite transaction |
 | `lithograph_tx_abort()` | rollback Engine-owned SQLite transaction，返回 `{"aborted":true}` |
-| `lithograph_rows(query [, params [, options]])` | eponymous-only table-valued function，流式返回 `ordinal`、`columns` 与 `row` |
+| `lithograph_rows(query [, params [, options]])` | eponymous-only table-valued function，真正流式返回 `ordinal`、`event` 与 JSON `data` |
 | `lithograph_validate(query)` | 只执行 parse + semantic/type/schema validation，不执行 query |
 | `lithograph_version()` | 返回 Extension 与 storage-format version |
 | `lithograph_integrity_check()` | 检查 Commit DAG、Branch ref、Layer hash、referential integrity 与内部表结构 |
 
-`lithograph_rows` 的输入通过 hidden columns 实现，结果逐行拉取，不物化完整 result set。
+`lithograph()` 与 `lithograph_rows()` 共用完全相同的 execution-input contract：`query` 必须提供且是非 `NULL` SQL TEXT，去除首尾 whitespace 后不能为空；`params` / `options` 可以省略，省略时分别等价于 `'{}'`，但**显式 SQL `NULL` 不等价于省略**，非 TEXT/NULL 都返回 `INVALID_ARGUMENT`。`params` TEXT 必须解析为 JSON object，key 是 parameter name，value 使用 [Lithograph JSON](#lithograph-json) parameter encoding且不能包含不能作为 Cypher parameter 的 structural graph value；`options` TEXT 同样必须是 JSON object并遵守 [Query Options](#query-options)，未知 key/type/shape 返回 `INVALID_ARGUMENT`。Scalar 接受 1–3 个参数；rows 的 hidden `query` 必需，hidden `params/options` 可省略且使用同一默认/错误规则。两种 surface 不允许因 adapter 不同而接受不同 input JSON。
 
-`lithograph_rows` 的 `columns` 是 JSON string array，`row` 是按同一顺序排列的 JSON value array；`columns` 在每一结果行重复，因此即使存在相同显示名也不会丢失列位置。该 adapter 只接受**无副作用、无外部 I/O、无 connection-state mutation** 的 read-only query / procedure。Graph/schema/version mutation、`LOAD CSV`、Branch checkout、GC 或其它会产生 SQLite/OS/network side effect 的 query 返回 `READ_ONLY_ADAPTER`，避免 SQLite query planner 重复扫描 virtual table 时重复执行副作用。此类 Cypher 使用 `lithograph()` 的一次函数调用或 Native C ABI。
+`lithograph()` 与 `lithograph_rows()` 是同一个 Cypher execution core 的两种结果消费方式，不维护两套 query capability。只要 Query Engine 在当前 execution context 支持该 Cypher，两个 surface 都可以执行，包括 read、graph/schema/version mutation、Full-text、Raw Vector、Managed Semantic、`LOAD CSV` 与 transaction-owning subquery；是否可写由 SQLite connection / 当前 transaction context 和 Engine 自身语义决定，`lithograph_rows()` 不再实现第二套 read-only 分类。
+
+`lithograph_rows` 的公开 virtual-table shape 固定为：
+
+```text
+ordinal INTEGER
+event   TEXT
+data    TEXT
+query   HIDDEN
+params  HIDDEN
+options HIDDEN
+```
+
+该 eponymous-only virtual table 必须通过 SQLite virtual-table direct-only 机制注册为 `SQLITE_VTAB_DIRECTONLY`；不能从持久化 view、trigger、generated/schema expression 或其它 schema-stored SQL 间接执行。现在 rows surface 可以拥有 graph/schema/version mutation、filesystem/network I/O 与 transaction boundary，这一限制是安全/副作用入口合同，不因 query 自身恰好只读而放宽。
+
+每个 scan 对应一次独立 Cypher execution，event 顺序固定为：
+
+```text
+0       | columns | ["name", ...]
+1..N    | row     | [<Lithograph JSON values>...]
+N + 1   | summary | {<summary object>}
+```
+
+`columns` event 恰好一次，`data` 是 column-name JSON array；`row` 零到多次，`data` 是按 columns 顺序排列的 Lithograph JSON value array；`summary` 只有 execution 最终成功后才出现，`data` 使用与 `lithograph()` envelope 相同的 summary object。零行 query 仍返回 `columns -> summary`，没有 `RETURN` / `YIELD` 的 statement 返回 `columns=[] -> summary`。失败、interrupt、cancel 或未完成 cursor close 通过 SQLite statement error / lifecycle cleanup 表达，不增加 `error` event，也不得伪造 success summary。
+
+Execution 是否 incomplete 只由内部是否已经到达 **finalize-success** 判断，不由调用方最终是否成功拿到 summary bytes 判断。正常路径中，cursor 先 finalize-success、进入不可回退的 terminal-success state，再向 SQLite 暴露最后一个 `summary` row；调用方拿到 summary 因此可以证明 execution 已成功，也不需要再额外 `xNext` 到 EOF。finalize-success 之后发生的 `xClose`、statement finalize、connection 正常释放，甚至 summary `xColumn` 的 post-finalize host handoff failure，都只回收 adapter/read/spill 资源，不再次调用 cancel/rollback，也不把 active explicit transaction 的已成功 staged statement改成 abort。只有 **finalize-success 尚未发生** 时的 early-close/drop 才属于 incomplete execution并触发 cancel/rollback。因而“没有收到 summary”通常表示失败/未完成，但在明确的 post-finalize result-delivery failure场景不能作为无 side effect 的证明。
+
+因为 incomplete side-effecting stream 的 `xClose` 可能需要执行 `ROLLBACK TO/RELEASE` 或 explicit-transaction abort，并且 cleanup 本身可能失败，rows virtual-table implementation 必须拥有**能够把 close/cancel cleanup failure作为 SQLite result code/error传播给 host 的真实 `xClose` boundary**。不能只依赖 Rust object `Drop` 做正常 rollback，也不能在 destructor 中吞掉 cleanup failure后固定向 SQLite返回成功；destructor只能作为 connection/process teardown 的最后兜底。若所用 vtab wrapper 的默认 `xClose` 不允许实现返回错误，Lithograph 必须在最小 SQLite FFI/module shim 层接管该 callback，而不是降低 fail-closed transaction contract。
+
+Public `summary` 的共同含义是“本次 Lithograph execution 已成功到达自己的 terminal boundary”，不是跨所有 transaction context 的统一 durability 承诺：
+
+| Execution context | `summary` 后的含义 |
+| --- | --- |
+| SQLite autocommit 的普通 read/write | 本次 Lithograph execution 已成功 finalize；普通 write 的新 Commit/ref 已 publication |
+| caller-owned SQLite `BEGIN ... COMMIT/ROLLBACK` | 本次 execution 已在 outer SQLite transaction 内成功并形成其逻辑 Commit/ref state，但最终文件 durability / other-connection visibility仍由 caller 后续 `COMMIT` 或 `ROLLBACK` 决定；outer rollback可以删除这些 Commit |
+| active Lithograph explicit transaction | statement `summary.commit = null`，只表示 staged execution 成功；最终 durable Commit只由 `lithograph_tx_commit()` 返回 |
+| `CALL ... IN TRANSACTIONS` | outer summary表示整个 Cypher execution按 Profile成功完成；各成功 inner batch在此前已经独立 durable，outer failure/no-summary也不撤销这些 batch |
+
+因此“收到 row”从不等于普通 write 已成功；“收到 summary”表示该 execution 的 Lithograph boundary成功，但调用方仍必须按自己选择的 outer transaction context判断最终 durability。
+
+`xFilter` 只解析 hidden inputs、prepare execution 并把 cursor 定位到 `columns` event；为了得到 columns metadata 不得提前执行 graph/schema/version mutation、Provider/file I/O 或 transaction subquery batch。调用方只有在继续推进 cursor 时才开始/继续 Cypher runtime work。因此只消费 `columns` 后立即停止的 scan 不产生 execution side effect；success `summary` 则必须在对应普通 write SAVEPOINT 已成功 release、或该 execution 的其它成功 boundary 已完成之后才可观察。
+
+`lithograph_rows` 是 pull-based **execution stream**，不是“先把完整结果收集后再分批输出”的 adapter。除 Cypher operator / transaction semantics自身要求的 semantic barrier 外，Engine必须随着 SQLite cursor消费增量推进 execution，最终 row count增长不得导致 retained final-result collection同阶增长；`ORDER BY`、`DISTINCT`、aggregation，以及 [Cypher Transaction Subqueries](storage.md#transaction-subqueries) 中“必须先知道一个 inner batch最终 transaction/error outcome 才能决定 outer result”的 boundary，都使用 bounded memory与必要的 TEMP/disk spill。普通单 transaction mutating execution可以在最终提交前流出 provisional result rows；只有生成最终 `summary` 时才完成本 execution的 success/commit boundary。transaction subquery则不得公开尚未确定 batch outcome 的 provisional successful rows，成功 batch commit后再增量排出该 batch结果。若 cursor在 summary前被关闭或取消，尚未 durable 的普通 execution/current inner batch必须 rollback；已经 durable 的 transaction-subquery batch按其 Cypher语义保留。
+
+这里的 success/commit boundary 约束 Lithograph 自己拥有的 execution state：既包括可纳入当前 SQLite transaction 的 `main` graph/schema/index/ref/maintenance state，也包括本次 execution 要修改的 connection-local Lithograph state（例如 active Branch checkout）。除 `IN TRANSACTIONS` 明确定义的 intermediate durable batch 外，普通 execution 的这些 Lithograph-owned side effect 在 success `summary` 可观察前必须仍可 rollback/defer；即使 procedure/result row 已经先流给 caller，error/cancel/early-close 也不能留下 checkout 已改变、ref 已移动或 maintenance 已发布的“无 SUMMARY 成功”状态。外部世界不属于这个原子边界：已经完成的 HTTP/file read、第三方服务计费，以及 Provider 按自己配置写入的独立 cache database 可以在 outer Lithograph execution 最终失败或被取消后继续存在；它们不得被描述成已被 Lithograph rollback。反过来，这些外部/Provider side effect 也不能让失败的 Lithograph canonical write 被当作成功提交。
+
+SQLite planner / outer SQL 如果让同一 virtual table 发生多次 scan，则每次 scan 都是一次独立 execution；Lithograph 只保证单个 `xFilter -> xNext* -> xClose` cursor lifecycle 内 execution 恰好 prepare 一次、随消费增量推进并正确完成/取消，不承诺“一条任意 outer SQL text 永远只执行一次 Cypher”。需要 mutation 只发生一次的调用方应让 outer SQL 只产生一次 scan。
+
+`ordinal/event/data` 是普通 visible virtual-table columns，因此外层 SQLite 可以对它们执行 projection、`WHERE`、`ORDER BY`、`LIMIT` 等关系操作。**这些 visible-column 条件不是 Lithograph execution options。** v1 的 `xBestIndex` 只把 hidden `query/params/options` 作为 execution inputs，不以 `ordinal/event/data` constraint 做会改变 Cypher work 的 predicate/limit pushdown：即使 outer SQL 最终只保留 `event='summary'`，cursor 仍必须按正常顺序推进完整 execution；即使只投影 `data`，event lifecycle 也不改变。未来若增加 visible-column optimization，也只能跳过已证明无副作用的 adapter serialization，不能跳过 Cypher operator/transaction work 或改变 terminal boundary。
+
+Outer SQL 自己仍会影响**消费**：例如 `LIMIT 1` 在 `columns` 后关闭 cursor，因此普通 side-effect execution 不会运行；`WHERE event='row'` 会让 SQLite 继续扫描到 EOF、使 underlying execution 可以成功 terminal，但 outer filter 可以把 `summary` row 从最终 SQL result 隐藏。因而“summary event 只在成功后由 vtab 产生”不等于任意 outer SELECT 都保证把 summary 交给 application。需要以 summary 作为 terminal success evidence 的调用方必须消费不会过滤/截断该 event 的 rows stream，或使用 `lithograph()` 完整 envelope。
+
+“多次 scan”允许**顺序**重复 execution，不允许同一 `sqlite3*` 上把两个拥有 Lithograph `main` side effect / maintenance / transaction boundary 的 execution cursor 生命周期互相嵌套。一个 side-effecting streaming execution 从第一次真正 runtime side effect 开始到 terminal summary/error/close 期间，另一个会读取或修改 graph/version state 的 Lithograph execution 在开始副作用/建立第二个含糊 Snapshot 前返回 `TRANSACTION_BOUNDARY_REQUIRED`；否则 nested SAVEPOINT 可能让内层已经报告成功的 execution 被外层随后 rollback。多个纯 read cursor 仍可按 [Query Engine](query-engine.md#query-scoped-resolved-state) 的 read-guard 规则共存。前一个 execution 完整 terminal 后，同一 SQL planner 后续 rescan 可以正常创建下一次独立 execution。
 
 `lithograph()` 每一次 SQLite scalar-function invocation 都对应一次 Cypher execution。用于 mutating Cypher 时，调用方应把它作为独立的 `SELECT lithograph(...)` statement 调用；如果 SQL 本身产生多次 scalar invocation，每次 invocation 都是独立 Cypher write 并各自遵守[Transaction 与 Concurrency Model](storage.md#transactions-and-concurrency) transaction/Commit 语义。这条普通 SQL Bridge 语义不因下述 explicit-transaction 封装而改变；Lithograph 不在 caller-owned `BEGIN ... COMMIT` 结束时自动合并已形成的 graph Commits。
 
-`lithograph()` 返回完整 JSON envelope，因此受 SQLite 单值长度限制和宿主可用内存约束。结果可能较大时，read query 应使用 `lithograph_rows()` 或 Native streaming API；超过 SQLite/Engine 可用资源时返回 `RESOURCE_ERROR`，不得截断结果。
+`lithograph()` 返回完整 JSON envelope，因此明确允许**adapter collector** 为了单值结果收集全部 rows，并受 SQLite 单值长度限制和宿主可用内存约束；但它必须驱动与 `lithograph_rows()` 相同的 incremental execution state machine，不能保留另一套“完整执行/完整物化后才产生结果”的 scalar-only Query Engine。大结果使用 `lithograph_rows()`。超过 SQLite/Engine 可用资源时返回 `RESOURCE_ERROR`，不得截断结果。
 
-每个会产生 SQLite side effect 的 SQL Bridge invocation（包括 `lithograph_init()`、mutating `lithograph()` 和 version-ref mutation）必须创建唯一内部 SAVEPOINT。成功时 `RELEASE`，Lithograph error/panic/cancel 时先 `ROLLBACK TO` 再 `RELEASE`，然后才把 error 返回 SQLite。这样一次 invocation 不会留下半写 Layer/Commit/ref/schema。SQLite function callback 本身不能依赖“外层 SQL statement 失败会自动撤销递归写入”。
+为同时满足 shared core 与 ordinary-write rollback，内部 terminal lifecycle 必须是两阶段而不是“先 commit 再序列化”：execution 在 rows 消费完成后先进入 **terminal-ready**，冻结最终 columns/counters/metrics；若本 execution 要产生 Commit，则同时按 [Content Addressing](storage.md#content-addressing) 的 finalization preparation 冻结 `committed_at`、计算 prospective Commit ID，使完整 summary candidate 在 publication 前已经确定，但普通 Lithograph-owned write/ref/maintenance/connection-state side effect 此时仍可 rollback。adapter 随后完成自己要公开的结果编码和 SQLite size/resource checks。`lithograph()` 在这一阶段组装并验证完整 `{columns,rows,summary}`；`lithograph_rows()` 只编码/验证将要公开的 `summary` event payload。只有这些可检测的 adapter failure 都通过后，execution 才执行 **finalize-success**（Commit/ref publication、release/commit、install connection-local state），随后 scalar 返回已构造 envelope，streaming cursor 才暴露 public `summary` row。terminal-ready 到 finalize-success 之间的 encoding/length/resource failure走 cancel/rollback，prospective Commit ID 不进入 history，也不产生 public summary。`CALL ... IN TRANSACTIONS` 已 durable 的 earlier batch仍是既有例外，不能被这个两阶段 terminal 反向撤销。
+
+“结果 preflight”只承诺把 Lithograph 自己能够提前完成的 JSON encoding、shape、`SQLITE_LIMIT_LENGTH` 与已知 resource check 放在 finalize-success 前；它不能保证 finalize 之后调用 SQLite 最终 `sqlite3_result_*` / vtab `xColumn` handoff 永远不再失败。若普通 scalar 的完整 envelope已经 preflight并 finalize-success，随后 host result handoff因 `SQLITE_NOMEM` 等失败，或 rows 已 finalize-success 后在最后一个 `summary` row 的 `data/event/ordinal` handoff阶段发生宿主错误，Lithograph **不能再把本 execution 自动回到 finalize-success 之前**：autocommit 下已 durable 的 Commit/ref/maintenance保持；active Lithograph explicit transaction 中已成功 staged statement保持并等待后续 tx commit/abort；caller-owned SQLite transaction 中本 statement state仍留在 outer transaction，caller仍可以显式 `ROLLBACK` 整个 outer transaction。connection-local success 同样不因 result handoff error 自动恢复旧值。调用方不得把“没有拿到成功 JSON/summary”直接解释成“没有 side effect”并盲目重放；应结合所处 transaction context，通过 Branch/history/state或 outer rollback确认结果。相反，`columns` 或普通 `row` event 的 handoff failure发生在 ordinary execution finalize-success之前，必须触发 cancel/rollback。
+
+每个会产生 SQLite side effect 的 SQL operation 继续拥有自己设计定义的原子 boundary：例如 `lithograph_init()` 保持既有 invocation SAVEPOINT，Cypher execution / maintenance 使用 execution-owned SAVEPOINT 或该 operation 明确拥有的独立 transaction boundary。**本节新增的 terminal-ready -> result preflight -> finalize-success 规则只约束 `lithograph()` / `lithograph_rows()` 的 Cypher execution surface，以及下述 explicit-transaction lifecycle 明确引用该规则的操作，不因此重开 init 等无关 API 的历史 result-delivery contract。**
+
+对普通 side-effecting Cypher execution，scalar SAVEPOINT 覆盖整个 callback；streaming scan 的 SAVEPOINT 从第一次 runtime side effect 持续到 finalize-success、error/cancel 或 `xClose`。普通 write 成功时只有在 terminal-ready payload/envelope 已编码并通过 size/resource checks 后才 `RELEASE` / finalize，随后 public summary/result 才可观察；Lithograph error/panic/cancel 时先 `ROLLBACK TO` 再 `RELEASE`，然后才把 error 返回 SQLite。这样一次 execution 不会留下半写 Layer/Commit/ref/schema。SQL callback/cursor 本身不能依赖“外层 SQL statement 失败会自动撤销递归写入”。`CALL ... IN TRANSACTIONS` 按其专用 inner-transaction contract，不套一个会吞掉已 durable batch 的 outer SAVEPOINT。
+
+因此 side-effecting `lithograph_rows()` 的 writer/savepoint lifetime 与 caller 消费速度直接相关：一旦 execution 开始真实 write，它必须保持可 rollback boundary直到 finalize-success 或 cancel/close，慢 consumer、应用停顿、长 external I/O 或巨大 result stream都会延长 SQLite single-writer hold / WAL 等待。这是“stream provisional rows但最终仍原子提交”的必要成本，不允许通过提前 commit、后台继续 execution 或把剩余 rows预物化来隐藏。调用方应持续消费到 terminal或及时 close；需要避免长 writer时应调整 query/transaction batching，而不是改变 rows事务语义。
 
 如果 host SQLite 因 authorizer、connection failure 或其它 SQLite-level failure 拒绝正常的 `ROLLBACK TO` / `RELEASE` cleanup，Lithograph 必须 fail closed：`ROLLBACK TO` 失败后不得继续 `RELEASE` 该 SAVEPOINT，因为最外层 SAVEPOINT 的 `RELEASE` 可能把本应撤销的变化提交；Engine 改为尝试整个 SQLite `ROLLBACK` 以清除未决 write 与 SAVEPOINT。该 recovery 在 caller-owned outer transaction 内也可能终止整个 outer transaction；这是无法完成 invocation-local cleanup 时优先保持 canonical storage 原子性的故障语义。只要进入 full-rollback fallback，本次 invocation 就返回 `INTERNAL_ERROR`，明确表示原 invocation-local transaction boundary 未能保持；若整个 `ROLLBACK` 也失败，仍返回 `INTERNAL_ERROR`，caller 应关闭并丢弃该 connection，不继续依赖其 transaction state。
 
-`SQLITE_NOMEM` 是这个 cleanup-failure 分支的已验证宿主特例：如果错误来自 scalar callback 内部的 FTS5 tokenizer 构造，SQLite 会在该 callback 剩余期间保持 malloc-failed 状态，使 `ROLLBACK TO`、`RELEASE` 和 full `ROLLBACK` 都继续返回 `SQLITE_NOMEM`；外层 `sqlite3_step` / `sqlite3_exec` 返回后才可能再次执行 rollback。SQL Bridge 仍保留真实 `SQLITE_NOMEM` primary code；当 tokenizer probe 在 canonical Schema 持久化之前失败时，不得发布 Commit/Branch 变化。但由于 callback 内无法恢复 invocation-local transaction boundary，该 connection 属于上段定义的 cleanup-failure quarantine，caller 必须关闭并丢弃，不能把“外层返回后手动 rollback 可以成功”当成 Lithograph invocation 已满足 cleanup 合同。Native API 不受 scalar callback 的这个宿主限制，仍按自身 fail-closed transaction contract 返回结构化错误并清理 active explicit transaction。
+`SQLITE_NOMEM` 是这个 cleanup-failure 分支的已验证宿主特例：如果错误来自 scalar callback 内部的 FTS5 tokenizer 构造，SQLite 会在该 callback 剩余期间保持 malloc-failed 状态，使 `ROLLBACK TO`、`RELEASE` 和 full `ROLLBACK` 都继续返回 `SQLITE_NOMEM`；外层 `sqlite3_step` / `sqlite3_exec` 返回后才可能再次执行 rollback。SQL execution surface 仍保留真实 `SQLITE_NOMEM` primary code；当 tokenizer probe 在 canonical Schema 持久化之前失败时，不得发布 Commit/Branch 变化。但由于 callback 内无法恢复 invocation-local transaction boundary，该 connection 属于上段定义的 cleanup-failure quarantine，caller 必须关闭并丢弃，不能把“外层返回后手动 rollback 可以成功”当成 Lithograph invocation 已满足 cleanup 合同。
 
-多个 mutating `lithograph()` invocation 出现在同一个 raw SQL statement 时，语义明确为多个独立 SAVEPOINT/graph operations：在 SQLite autocommit mode 下，前一个成功 invocation 可以在后一个 invocation 失败前已经 durable；Lithograph 不承诺把整个宿主 SQL statement 合成一个 graph transaction。caller-owned SQLite `BEGIN ... COMMIT` 只能把多个已经形成的 Lithograph Commit 合并到同一个 durability boundary，不会折叠版本历史。调用方若需要“多个独立 Cypher execution 共同形成一个 Lithograph Commit”，必须使用[Explicit Transaction](storage.md#native-explicit-transaction)的 SQL 或 Native lifecycle。推荐的普通 raw SQL write 形式仍是一个 statement 一个 `lithograph()` invocation。
+多个 mutating `lithograph()` invocation 出现在同一个 raw SQL statement 时，语义明确为多个独立 SAVEPOINT/graph operations：在 SQLite autocommit mode 下，前一个成功 invocation 可以在后一个 invocation 失败前已经 durable；Lithograph 不承诺把整个宿主 SQL statement 合成一个 graph transaction。caller-owned SQLite `BEGIN ... COMMIT` 只能把多个已经形成的 Lithograph Commit 合并到同一个 durability boundary，不会折叠版本历史。调用方若需要“多个独立 Cypher execution 共同形成一个 Lithograph Commit”，必须使用[Explicit Transaction](storage.md#native-explicit-transaction)。推荐的普通 raw SQL write 形式仍是一个 statement 一个 `lithograph()` invocation。
 
-#### SQL Explicit Transaction 封装
+#### SQL Explicit Transaction lifecycle
 
-`lithograph_tx_begin/execute/commit/abort` 是已有 explicit-transaction state machine 的 SQL scalar adapter，不是第二套 transaction 实现。它们与 `lithograph_v1_tx_*` 共享同一个 connection-local active state、writer ownership、staged state、temporal clock、finalize 与 fail-closed cleanup；同一 `sqlite3*` 仍最多只有一个 active Lithograph explicit transaction。SQL 调用方不额外执行 `BEGIN` / `COMMIT` / `ROLLBACK`：`lithograph_tx_begin` 内部执行 `BEGIN IMMEDIATE`，`lithograph_tx_commit` 内部 finalize graph Commit 并执行 SQLite `COMMIT`，`lithograph_tx_abort` 内部执行 SQLite `ROLLBACK`。
+`lithograph_tx_begin/commit/abort` 只管理 connection-local explicit transaction lifecycle，不提供第三个 Cypher execution surface。同一 `sqlite3*` 最多只有一个 active Lithograph explicit transaction；SQL 调用方不额外执行 `BEGIN` / `COMMIT` / `ROLLBACK`：`lithograph_tx_begin` 内部取得 writer ownership 并执行 `BEGIN IMMEDIATE`，`lithograph_tx_commit` finalize graph Commit 后执行 SQLite `COMMIT`，`lithograph_tx_abort` 执行 SQLite `ROLLBACK`。
 
 精确 SQL 签名与结果为：
 
 ```text
 lithograph_tx_begin(options_json)
   -> {"baseCommit":"commit/<id>"}
-
-lithograph_tx_execute(query [, params_json [, options_json]])
-  -> {"columns":[...],"rows":[...],"summary":{...}}
 
 lithograph_tx_commit()
   -> {"commit":"commit/<id>","counters":{...}}
@@ -144,100 +200,33 @@ lithograph_tx_abort()
   -> {"aborted":true}
 ```
 
-`options_json` / `params_json` 必须是非 `NULL` UTF-8 SQL TEXT；`tx_begin` 要求恰好一个 options JSON object，`tx_execute` 只接受 1–3 个参数，省略的 params/options 等价于 `'{}'`。明确 `NULL`、非 TEXT、错误 JSON shape、未知 option 与空 query 沿用 Native contract 的 `INVALID_ARGUMENT`；`tx_execute` 的参数、prepare、execution、event 或结果构造错误都是 execution failure，必须自动 abort 当前 transaction。开始前的 `tx_begin` 参数错误没有 transaction 可清理；没有 active transaction 时的 execute/commit/abort 继续返回 `INVALID_ARGUMENT` + `SQLITE_MISUSE`。
+active transaction 内，普通 `lithograph(query, params, options)` 与 `lithograph_rows(query, params, options)` 自动在同一 staged graph/Schema/Index state 上执行；不再存在 `lithograph_tx_execute()`。每次 execution 有独立 statement clock、result stream 与 counters，但 `summary.commit = null`，因为 durable Commit 只由最终 `lithograph_tx_commit()` 产生。前一个成功 execution 的 staged changes 对后一个 execution 可见。
 
-`tx_execute` 把共享 execution core 的 `COLUMNS -> ROW* -> SUMMARY` event 按普通 scalar envelope 组装，不丢弃重复列名的位置语义。整个 envelope 在 SQLite callback 成功返回前完整构造、验证且检查 `SQLITE_LIMIT_LENGTH`；构造、编码、长度或取消失败按上述规则整体 abort，不保留 staged writes。`tx_begin` 结果在返回 SQL 前发生可检测的构造/长度失败时也 abort；`tx_commit` 必须在 SQLite `COMMIT` 前构造并检查结果。一旦 SQLite `COMMIT` 已经成功，后续宿主因内存/结果传递失败不能反向撤销 durable Commit；调用方不得因此盲目重放 commit 或整个 write transaction。
+`tx_begin` 要求恰好一个非 `NULL` UTF-8 JSON object；未知 option、错误 type/JSON shape 返回 `INVALID_ARGUMENT`。没有 active transaction 时 `tx_commit/tx_abort` 返回 `INVALID_ARGUMENT` + `SQLITE_MISUSE`。外层 caller-owned SQLite transaction 已存在时 `tx_begin` 返回 `TRANSACTION_BOUNDARY_REQUIRED`，避免 Engine-owned transaction 与 caller-owned durability boundary 重叠。
 
-四个函数都是有 transaction / storage side effect 的 direct-only scalar，只使用 `SQLITE_UTF8 | SQLITE_DIRECTONLY`，不得声明 `SQLITE_DETERMINISTIC` 或 `SQLITE_INNOCUOUS`。外层 SQLite transaction 已存在时 begin 仍返回 `TRANSACTION_BOUNDARY_REQUIRED`；active 期间普通 `lithograph()` / `lithograph_rows()` 的拒绝规则不变。connection 关闭而未调用 commit/abort 时，SQLite teardown rollback 与 connection-state destructor 共同清除未提交状态。
+Lifecycle scalar 自身的 result failure 也有固定语义：`lithograph_tx_begin()` 在取得 writer ownership、pin/校验 base/expectedHead 后，必须在向 SQLite 报告 function success 前完成 `{baseCommit}` JSON 构造和可检测的 length/resource preflight；该阶段失败就 rollback 刚建立的 Engine-owned transaction并清除 active state，调用方不得观察“begin 返回失败但 transaction 其实已开始”。`lithograph_tx_abort()` 则以 rollback 为主操作：一旦 SQLite rollback + state cleanup 成功，transaction 已经 terminal aborted；之后 `{aborted:true}` 的宿主 result handoff 即使失败也不能恢复 active transaction，调用方应把该 connection 视为已无 active Lithograph tx，而不是重试 abort 假定旧 state 仍存在。
+
+active transaction 内任一 `lithograph()` execution failure、`lithograph_rows()` failure/interrupt/cancel、或 streaming cursor 在 success `summary` 前关闭，都必须 fail closed：自动 rollback 整个 explicit transaction、清除 staged state 与 connection-local active state，后续必须重新 `tx_begin`。成功 execution 本身不提交 SQLite transaction；`tx_commit` 在 SQLite `COMMIT` 前完成可检测的 result 构造/长度检查。一旦 SQLite `COMMIT` 已成功，后续宿主结果传递失败不能反向撤销 durable Commit，调用方不得因此盲目重放 commit 或整个 transaction。
+
+`lithograph_tx_begin/commit/abort` 都是有 transaction/storage side effect 的 direct-only scalar，只使用 `SQLITE_UTF8 | SQLITE_DIRECTONLY`，不得声明 `SQLITE_DETERMINISTIC` 或 `SQLITE_INNOCUOUS`。connection 未显式 commit/abort 就 teardown 时，SQLite rollback 与 connection-state destructor 共同清除未提交 state。
+
+Explicit transaction 固定 target Branch、base Commit、transaction clock、`expectedHead` 与最终 Commit metadata；active 期间 execution 不能通过 query options 切换 `branch` / `at` / `author` / `message` / `mergeSession`。Version Procedure、Branch/Tag/Commit Data mutation、checkout/GC 等拥有独立 version/ref lifecycle 的 operation 继续返回 `TRANSACTION_BOUNDARY_REQUIRED`。`CALL { ... } IN TRANSACTIONS` / `IN CONCURRENT TRANSACTIONS` 也必须拒绝，因为它们要求独立 durable inner transaction boundary，不能嵌套进“多 execution 最终只提交一次”的 explicit transaction。
+
+External I/O 本身不是拒绝理由：普通 `LOAD CSV`、Managed Semantic query 等只要不另外拥有独立 transaction/version lifecycle，就可以在 explicit transaction 的 `lithograph()` / `lithograph_rows()` execution 中运行；它们的失败按上述 fail-closed 规则 abort 整个 explicit transaction。像 Semantic/Standard Index `rebuild` 这类显式选择 committed target 并拥有 maintenance lifecycle 的 procedure 仍按各自专题拒绝 active explicit transaction。调用方应自行控制长 external I/O 带来的 writer-hold 成本，Lithograph 不为了性能偏好改变事务语义。
+
+`lithograph_validate()`、`lithograph_init()` 与 `lithograph_integrity_check()` 不属于 active explicit transaction 的 execution surface，active 时返回 `TRANSACTION_BOUNDARY_REQUIRED`，避免把 committed-only metadata/integrity 结果误解释成 staged state validation；`lithograph_version()` 只读取 extension/database version metadata，可以继续调用。需要验证某条 Cypher 是否能作用于当前 staged state 时，直接通过正常 execution surface 执行并依赖其 parse/semantic/type/schema checks。
 
 <a id="native-c-abi"></a>
 
-### Native C ABI
+### Application-facing Native execution ABI（不提供）
 
-同一个 shared library 导出稳定、带 ABI version 的 Native API，供 Rust/Python/Node/其它 bindings 直接执行 Cypher。调用 Native ABI 前，该 shared library 必须已经通过 SQLite extension loading path 在目标 `sqlite3*` connection 上完成初始化注册。
+Lithograph 不导出 application-facing Cypher execution / validation / transaction C ABI。Application、binding 与 database client 统一通过 SQLite SQL surface 使用 `lithograph()`、`lithograph_rows()`、`lithograph_validate()` 与 `lithograph_tx_begin/commit/abort`；不保留 `lithograph_v1_execute`、`lithograph_v1_validate`、`lithograph_v1_tx_*` 或 `lithograph_v1_free` compatibility layer。
 
-```text
-lithograph_v1_execute(...)
-lithograph_v1_validate(...)
-lithograph_v1_tx_begin(...)
-lithograph_v1_tx_execute(...)
-lithograph_v1_tx_commit(...)
-lithograph_v1_tx_abort(...)
-lithograph_v1_free(...)
-```
+本规则不影响 [Embedding Provider Contract](vector.md#embedding-provider) 的 `EmbeddingProviderV1`。后者是 Lithograph extension 与独立 Provider extension 之间的插件 SPI，不向 Application 提供 Cypher query execution。
 
-`lithograph_v1_tx_*` 是 additive Native ABI family；它不改变既有 `lithograph_v1_execute` / `validate` symbol 的参数与生命周期。因为一个 `sqlite3*` 同时最多存在一个 Lithograph explicit transaction，v1 直接以 connection 作为 transaction identity，不再引入第二个 opaque handle / allocator / lifetime。ABI version 由 symbol name 中的 `v1` segment 固定；未来真正不兼容 ABI 必须新增 `lithograph_v2_*` symbols，不能改变以下 v1 contract：
+`CALL { ... } IN TRANSACTIONS` / `IN CONCURRENT TRANSACTIONS` 由普通 `lithograph()` 与 `lithograph_rows()` 在 SQLite autocommit mode 下直接执行；每个 inner batch 保留 Cypher 定义的独立 commit/error 语义。caller-owned SQLite transaction 或 active Lithograph explicit transaction 已经占有外层 transaction boundary 时返回 `TRANSACTION_BOUNDARY_REQUIRED`，不能用 SAVEPOINT 把独立 commit 偷换成可被外层整体 rollback 的“子事务”。
 
-```c
-typedef enum lithograph_event_kind_v1 {
-  LITHOGRAPH_EVENT_COLUMNS_V1 = 1,
-  LITHOGRAPH_EVENT_ROW_V1 = 2,
-  LITHOGRAPH_EVENT_SUMMARY_V1 = 3
-} lithograph_event_kind_v1;
-
-typedef int (*lithograph_event_callback_v1)(
-  void *user_data,
-  lithograph_event_kind_v1 kind,
-  const unsigned char *json,
-  size_t json_len
-);
-
-int lithograph_v1_execute(
-  sqlite3 *db,
-  const char *query, size_t query_len,
-  const char *params_json, size_t params_len,
-  const char *options_json, size_t options_len,
-  lithograph_event_callback_v1 callback,
-  void *user_data,
-  char **error_json
-);
-
-int lithograph_v1_validate(
-  sqlite3 *db,
-  const char *query, size_t query_len,
-  char **error_json
-);
-
-int lithograph_v1_tx_begin(
-  sqlite3 *db,
-  const char *options_json, size_t options_len,
-  char **result_json,
-  char **error_json
-);
-
-int lithograph_v1_tx_execute(
-  sqlite3 *db,
-  const char *query, size_t query_len,
-  const char *params_json, size_t params_len,
-  const char *options_json, size_t options_len,
-  lithograph_event_callback_v1 callback,
-  void *user_data,
-  char **error_json
-);
-
-int lithograph_v1_tx_commit(
-  sqlite3 *db,
-  char **result_json,
-  char **error_json
-);
-
-int lithograph_v1_tx_abort(
-  sqlite3 *db,
-  char **error_json
-);
-
-void lithograph_v1_free(void *ptr);
-```
-
-Native v1 pointer/length 规则与现有 `execute` 一致：可选 UTF-8 JSON 输入省略时使用 `NULL, 0`；非 `NULL` 输入在调用期间可读，Engine 在返回前复制。`result_json` / `error_json` 是可选 writable out-pointer；提供时调用开始先写 `NULL`。成功的 `tx_begin` / `tx_commit` 只通过 `result_json` 返回 NUL-terminated UTF-8 JSON；失败只通过 `error_json` 返回[Result 与 Error Contract](#results-and-errors)结构化错误。两类输出均由 Lithograph 分配，调用方使用 `lithograph_v1_free` 释放且只能释放一次。
-
-`execute` 的 callback 事件顺序固定为 `COLUMNS` 一次、`ROW` 零到多次、`SUMMARY` 一次。`COLUMNS` payload 是 column-name JSON array；`ROW` 是同顺序 value array；`SUMMARY` 使用[Lithograph JSON](#lithograph-json) summary object。callback 返回非零值时 query 被取消并返回 `SQLITE_INTERRUPT`；若 query 已写入但尚未 durable commit，则整个 write rollback。
-
-`error_json` 只在失败时设置，使用[Result 与 Error Contract](#results-and-errors) tagged JSON/error contract，由 Extension 分配并必须通过 `lithograph_v1_free` 释放。callback payload 只在 callback 调用期间有效，不需要也不能由 caller 释放。
-
-Native API 接收现有 `sqlite3*`、Cypher text、parameter JSON、option JSON 和 event callback。普通 `lithograph_v1_execute` 是单 execution surface；`lithograph_v1_tx_begin/execute/commit/abort` 在同一个 connection-local explicit transaction 上执行，`tx_execute` 复用同一 parser/planner/executor，不建立第二套 Cypher engine。SQL Bridge 是面向普通 SQLite 客户端的 adapter；其普通 `lithograph()` 仍是单 execution surface，新增 `lithograph_tx_*` 则直接加入并复用同一 explicit transaction lifecycle。C ABI 签名、symbol 与 ownership 规则不变。
-
-`CALL { ... } IN TRANSACTIONS` 需要 Query Engine 拥有真实 transaction boundary。Native API 在没有 caller-owned active transaction 或 active explicit transaction 时执行该语义。SQL Bridge 本身运行在一个进行中的 SQLite statement 内，因此遇到需要独立 commit boundary 的 `IN TRANSACTIONS` / `IN CONCURRENT TRANSACTIONS` 时返回 `TRANSACTION_BOUNDARY_REQUIRED`，要求调用普通 Native execution；explicit transaction 内同样拒绝这类会再拥有独立 transaction boundary 的 query。其它 Cypher 语义不因此分叉。
+两种 result consumption shape 都不能改变上述 durability：`lithograph_rows()` 在 later batch/error/early-close 后保留 earlier durable batch；如果已 commit batch 正在 drain 时 row JSON/result handoff失败，该 batch同样保持 durable并终止 outer stream/后续 batch。`lithograph()` 即使在 earlier batch已提交后才发生最终 envelope serialization、allocation 或 `SQLITE_LIMIT_LENGTH` failure，也只能把本次 SQL invocation报错，不能反向撤销已经 durable 的 inner batch。调用方不得把这种 result-delivery failure当作“没有任何 side effect”并盲目重放整个 transaction-owning query。
 
 <a id="query-options"></a>
 
@@ -277,7 +266,7 @@ Native API 接收现有 `sqlite3*`、Cypher text、parameter JSON、option JSON 
 
 Parameters JSON 与 result JSON 共用[Lithograph JSON](#lithograph-json) tagged-value encoding。普通 JSON primitive/list/map 直接映射到对应 Cypher value；需要保留 INTEGER64 边界、Temporal、Point、Vector 或 UUID 类型时必须使用 `$type` tagged form。
 
-SQL / Native explicit transaction 的 begin options 使用独立的 transaction-level shape：
+SQL explicit transaction 的 begin options 使用独立的 transaction-level shape：
 
 ```json
 {
@@ -288,12 +277,12 @@ SQL / Native explicit transaction 的 begin options 使用独立的 transaction-
 }
 ```
 
-- `branch` 省略时使用当前 connection active Branch；开始后 target Branch 固定，后续 `tx_execute` 不能切换 Branch；
+- `branch` 省略时使用当前 connection active Branch；开始后 target Branch 固定，active transaction 内的普通 execution 不能切换 Branch；
 - `expectedHead` 可省略；提供时只接受 resolved `commit/<id>`，并在取得 writer ownership 后与 target Branch 当前 head 原子比较，不一致返回 `BRANCH_HEAD_MOVED` 且 transaction 不开始；
-- `author` / `message` 只属于最终唯一 Commit；各 `tx_execute` 不再接受自己的 Commit metadata；
-- `tx_execute` 可以使用 query-local `graphView`，但 `branch` / `at` / `author` / `message` / `mergeSession` 等会选择另一 transaction/version context 的 options 返回 `INVALID_ARGUMENT`；
+- `author` / `message` 只属于最终唯一 Commit；active transaction 内各 `lithograph()` / `lithograph_rows()` execution 不再接受自己的 Commit metadata；
+- active transaction 内 execution 可以使用 query-local `graphView`，但 `branch` / `at` / `author` / `message` / `mergeSession` 等会选择另一 transaction/version context 的 options 返回 `INVALID_ARGUMENT`；
 - Version Procedure、Branch/Tag/Commit Data mutation、checkout/GC，以及 `CALL { ... } IN TRANSACTIONS` / `IN CONCURRENT TRANSACTIONS` 不能在 explicit transaction 内嵌套执行，返回 `TRANSACTION_BOUNDARY_REQUIRED`；
-- `LOAD CSV` 和未来其它拥有 file/network external-I/O authority 的 query 同样不能在 explicit transaction 内执行，返回 `TRANSACTION_BOUNDARY_REQUIRED`。External I/O 继续由普通 execution / [Cypher Transaction Subqueries](storage.md#transaction-subqueries) batching 管理，避免从 `tx_begin` 起长期占用 SQLite single-writer ownership。普通 current-graph read/write 与 Schema/Constraint/Index command 仍可在 explicit transaction 内执行。
+- External I/O 本身不禁止 explicit transaction execution；普通 `LOAD CSV`、Managed Semantic query 等只要不另行拥有独立 transaction/version lifecycle 就可以执行。显式 rebuild/maintenance procedure 是否允许由其 own lifecycle contract 决定。调用方承担长 I/O 延长 SQLite single-writer ownership 的成本；失败时整个 explicit transaction fail closed abort。
 
 Merge Session candidate inspection 使用同一 execution options surface，而不是增加第二套 query API：
 
@@ -323,9 +312,9 @@ Merge Session candidate inspection 使用同一 execution options surface，而�
 
 I/O error、malformed CSV、type/constraint error 按 Cypher query failure 传播。普通 `LOAD CSV` 位于当前 query transaction；`CALL ... IN TRANSACTIONS` 使用[Cypher Transaction Subqueries](storage.md#transaction-subqueries) transaction semantics。
 
-SQL / Native explicit transaction 已从 `tx_begin` 起持有 single-writer ownership，因此不接受 `LOAD CSV` 或 `db.index.semantic.query*` / `db.index.semantic.rebuild`；`tx_execute` 在 external I/O 开始前返回 `TRANSACTION_BOUNDARY_REQUIRED` 并按 [Explicit Transaction](storage.md#native-explicit-transaction) fail-closed abort。需要批量导入时使用普通 `LOAD CSV` 或 Cypher `IN TRANSACTIONS`；需要 Semantic query/rebuild 时使用独立普通 execution，不把网络/文件/model 等待时间包进 multi-execution version-atomicity boundary。
+两种 SQL execution surface 都可以执行 external-I/O query；`lithograph_rows()` 不因为 filesystem/network/model I/O 而返回 adapter-level 拒绝。只读 SQLite `main` connection 也可以执行纯读 Managed Semantic query：Lithograph 只读取 graph/schema/history，OpenAI-compatible 等 Provider 若启用自己的独立 cache database，可以按其配置单独写该 cache，而不得反向写 Lithograph `main`。
 
-`db.index.semantic.query*`、`db.index.semantic.rebuild`、`db.index.semantic.cache.configure` 与 `db.index.semantic.cache.clear` 不能与 graph mutation 共用一个 Cypher execution，也不能嵌入 `CALL { ... } IN TRANSACTIONS` / `IN CONCURRENT TRANSACTIONS`；planner 必须在 Provider I/O 或 maintenance write 开始前返回 `TRANSACTION_BOUNDARY_REQUIRED`。普通 `query*` 可以在 Provider 成功后用短 SAVEPOINT 发布 query/source Embedding 到 format 4 的内部 persistent cache；该 derived-cache 写入不是 graph/schema/version mutation，不产生 Commit、不移动 Branch，因此 procedure mode 与 `summary.queryType` 仍为 `READ` / `read`。只读数据库与 cache disabled 跳过该 publish。Semantic Index create/drop 的纯本地 Schema operation 与 `cache.stats` read procedure 不属于该 external-I/O 禁止项。
+`db.index.semantic.query*` / `db.index.semantic.rebuild` 与 graph mutation、transaction-owning subquery 的组合限制由 Managed Semantic 自身的 Query Engine contract 决定，不由 `lithograph_rows()` 追加分类。Provider cache hit/miss、publish、eviction 都是 Provider 内部行为，对 Lithograph queryType、Commit、Branch 与 correctness 不可见；一个合法 cache entry 即使由最终失败/取消的 Lithograph execution 产生，也可以继续保留并被之后相同 embedding-space request 复用。
 
 <a id="results-and-errors"></a>
 
@@ -354,7 +343,7 @@ SQL Bridge 的完整 envelope：
 }
 ```
 
-`summary.queryType` 使用封闭值 `read | write | schema | version | mixed`。普通 `lithograph()` / `lithograph_v1_execute` 中，`summary.commit` 是该 query 执行所 pin 的最终可观察 Snapshot：read query 为读取 Commit，graph/schema write 为新 Commit，ref-only version operation 为操作后的 active-branch Commit。Explicit transaction 的 Native / SQL `tx_execute` statement 只作用于 staged state，因此其 `summary.commit = null`；最终 durable Commit 由 `tx_commit` 单独返回。Merge Session candidate query 同样不是 durable Commit，因此 `summary.commit = null`，并额外返回 `summary.mergeSession={"id":"merge-session/...","revision":N}`；其它 execution 省略 `mergeSession` 字段。`summary.counters` 至少固定包含：
+`summary.queryType` 使用封闭值 `read | write | schema | version | mixed`。普通非 explicit-transaction `lithograph()` / `lithograph_rows()` execution 中，`summary.commit` 是该 query 执行所 pin 的最终可观察 Snapshot：read query 为读取 Commit，graph/schema write 为新 Commit，ref-only version operation 为操作后的 active-branch Commit。active explicit transaction 内的 execution 只作用于 staged state，因此 `summary.commit = null`；最终 durable Commit 由 `lithograph_tx_commit()` 单独返回。Merge Session candidate query同样不是 durable Commit，因此 `summary.commit = null`，并额外返回 `summary.mergeSession={"id":"merge-session/...","revision":N}`；其它 execution 省略 `mergeSession` 字段。`summary.counters` 至少固定包含：
 
 ```text
 nodesCreated
@@ -373,7 +362,7 @@ indexesRemoved
 
 没有发生的 counter 返回 `0`，不因 query 类型省略 key。
 
-`summary.metrics` 在 SQL Bridge scalar result 与 Native `SUMMARY` event 使用同一 shape，固定包含 `rows`、`dbHits`、`elapsedMicros`。普通 execution 也返回该字段；`PROFILE` 在不改变 query rows/value semantics 的前提下使用同一基础计量，并额外返回 `summary.profile`：
+`summary.metrics` 在 `lithograph()` envelope 与 `lithograph_rows()` 的 `summary` event 使用同一 shape，固定包含 `rows`、`dbHits`、`elapsedMicros`。其中 `elapsedMicros` 在 shared execution 进入 terminal-ready 时冻结，覆盖本 execution 的 query/operator work 到“全部公开 rows 已产生、summary candidate 已确定”为止；不包含 adapter 对最终 envelope/summary JSON 的 serialization/result handoff，也不包含 terminal-ready 之后的 finalize-success SAVEPOINT release / SQLite COMMIT / connection-state install。这些成本按 [Performance Evidence Contract](runtime.md#performance-evidence) 另行测量，不能为了让单个 metric 看起来完整而破坏“result encoding failure 必须发生在 ordinary side effect finalize 前”的原子边界。普通 execution 也返回该字段；`PROFILE` 在不改变 query rows/value semantics 的前提下使用同一基础计量，并额外返回 `summary.profile`：
 
 ```json
 {
@@ -404,11 +393,9 @@ Parameters 接受同一 tagged encoding。识别到已知 `$type` 的 object 按
 
 这种 adapter encoding 只解决 SQLite/JSON 边界，不改变 Engine 内部 Cypher Value 类型。
 
-`lithograph_rows` 的 `row` 使用同一 value encoding，因此 scalar 与 streaming adapter 不产生两套结果语义。
+`lithograph_rows` 的 `row` event 使用同一 value encoding，因此 scalar 与 streaming surface 不产生两套结果语义。`columns` / `row` / `summary` 的 event/data shape 由 [SQL Bridge](#sql-bridge) 固定，零行结果也通过独立 `columns` event 暴露列信息。
 
-`lithograph_rows` 的 `columns` 是 column-name array，`row` 是同顺序 value array；Native `COLUMNS` / `ROW` event 使用完全相同的两个 payload shape。空结果仍通过 Native `COLUMNS` event 暴露列信息；SQL table-valued adapter 的零行结果没有可携带 metadata 的 row，调用方如必须取得空结果的 columns，应使用 `lithograph()` envelope、`EXPLAIN`/metadata surface 或 Native API。
-
-Cypher statement 只有显式结果生成 surface（例如最终 `RETURN` / procedure `YIELD`）才能产生公开 result columns / rows。以 graph/schema/version mutation clause 结束且没有最终结果投影的 statement 固定返回 `columns=[]`、`rows=[]`；executor 为执行后续 mutation 保存的内部 binding row 不属于 Result Contract，也不得经 SQL Bridge、streaming adapter 或 Native ABI 暴露。
+Cypher statement 只有显式结果生成 surface（例如最终 `RETURN` / procedure `YIELD`）才能产生公开 result columns / rows。以 graph/schema/version mutation clause 结束且没有最终结果投影的 statement 固定返回 `columns=[]`、`rows=[]`；executor 为执行后续 mutation 保存的内部 binding row 不属于 Result Contract，也不得经 `lithograph()` / `lithograph_rows()` 暴露。
 
 <a id="error-categories"></a>
 
@@ -433,28 +420,23 @@ MERGE_CONFLICT
 MERGE_SESSION_NOT_FOUND
 MERGE_SESSION_CHANGED
 TRANSACTION_BOUNDARY_REQUIRED
-READ_ONLY_ADAPTER
 READ_ONLY_SNAPSHOT
 FORMAT_TOO_NEW
 BUSY
+INTERRUPTED
 RESOURCE_ERROR
 STORAGE_ERROR
 IO_ERROR
 INTERNAL_ERROR
 ```
 
-结构化 error JSON 固定为：
+Application-facing failure 只通过 SQLite error channel 返回，不增加 `error` row/event、`last_error` function 或第二套 error object API。SQL surface 的稳定 error text 固定为：
 
-```json
-{
-  "category": "TYPE_ERROR",
-  "message": "...",
-  "sqliteCode": 1,
-  "line": 1,
-  "column": 12
-}
+```text
+LITHOGRAPH_<CATEGORY>: <message>
+LITHOGRAPH_<CATEGORY>: <message> [line=<N>,column=<N>]
 ```
 
-没有 query position 时 `line/column` 为 `null`。`sqliteCode` 使用 SQLite primary result code：parse/semantic/type/schema/version argument error 通常为 `SQLITE_ERROR`；ABI misuse 为 `SQLITE_MISUSE`；host lock contention 的 `SQLITE_BUSY/SQLITE_LOCKED` 映射 `BUSY` 并保留实际 primary code；`SQLITE_NOMEM/SQLITE_TOOBIG/SQLITE_FULL` 映射 `RESOURCE_ERROR`；`SQLITE_INTERRUPT` 保持 interrupt code；I/O/open/read-only-file 类错误映射 `IO_ERROR`。
+只有 Core 提供 query source position 时才追加第二种**尾部 suffix**；`line` / `column` 都是 1-based decimal integer，中间固定使用英文逗号且不插入额外空格。没有 position 时使用第一种形式，不伪造 `0` / `null`。调用方若需要机器识别，解析稳定 category prefix 与可选 trailing location suffix；`<message>` 本身仍是人类可读诊断，不承诺可机器解析。
 
-Native API 返回 SQLite primary result code + 结构化 `error_json`；SQL Bridge 通常使用 `LITHOGRAPH_<CATEGORY>: <message>` 作为 SQLite error text，并通过 `sqlite3_result_error_code` 保留对应 primary code。SQLite 对少数 resource result code 有宿主级 canonicalization：已验证 `SQLITE_NOMEM` 在 scalar function 设置自定义 text 后仍会由 SQLite 对外改写成 `out of memory`。这类 code 不能为了保留 Lithograph 前缀而伪装成 `SQLITE_ERROR`；SQL Bridge 以真实 primary code 为权威，Native API 继续提供完整结构化 category/message。错误必须包含可定位 query position 时的 line/column，不把内部 SQLite table/schema 细节作为公开合同泄漏。
+SQL surface 同时通过 `sqlite3_result_error_code` 保留 SQLite primary result code；parse/semantic/type/schema/version argument error 通常为 `SQLITE_ERROR`，API misuse 为 `SQLITE_MISUSE`，host lock contention 的 `SQLITE_BUSY/SQLITE_LOCKED` 映射 `BUSY`，host/user cancellation 的 `SQLITE_INTERRUPT` 映射 `INTERRUPTED` 并保留 `SQLITE_INTERRUPT`，`SQLITE_NOMEM/SQLITE_TOOBIG/SQLITE_FULL` 映射 `RESOURCE_ERROR`，I/O/open/read-only-file 类错误映射 `IO_ERROR`。Interrupt 不是 memory/disk resource exhaustion，不能为了沿用旧 adapter enum 把它写成 `RESOURCE_ERROR`。SQLite 对少数 resource result code 有宿主级 canonicalization：例如 `SQLITE_NOMEM` 可能把自定义 text 改写成 `out of memory`。真实 primary code 始终比保留 Lithograph prefix 更优先，不能为了 error text 伪装成 `SQLITE_ERROR`。错误不得泄漏内部 SQLite table/schema 或 Provider secret。

@@ -2,7 +2,7 @@
 
 [设计入口](../design.md) · [开发状态与验收](../development/README.md)
 
-本文件拥有冻结的 Cypher 25 Profile、范围与 oracle。SQL/Native execution context 见 [接口合同](interfaces.md)，具体值与查询执行语义见 [查询引擎](query-engine.md)。
+本文件拥有冻结的 Cypher 25 Profile、范围与 oracle。SQLite SQL execution context 见 [接口合同](interfaces.md)，具体值与查询执行语义见 [查询引擎](query-engine.md)。
 
 
 <a id="compatibility-profile"></a>
@@ -45,7 +45,7 @@ Neo4j DBMS 自身的多数据库管理、数据库 alias、用户/角色/权限�
 
 Lithograph 的 `graphView` execution context（[Query Options](interfaces.md#query-options)、[Graph View Execution Boundary](query-engine.md#graph-view)）是 Adapter / Engine 层对**同一个 Versioned Property Graph 的 query-local 可见子图**进行约束的通用能力，不属于 Cypher 25 grammar 或 compatibility Profile。它不得把 Cypher 25 `USE` 重新解释成子图过滤，也不得引入 Lithograph-specific Cypher clause。
 
-SQL / Native explicit transaction（[SQL Bridge / Native C ABI](interfaces.md#sql-bridge)、[Explicit Transaction](storage.md#native-explicit-transaction)）同样是 Lithograph execution/version boundary，不属于 Cypher 25 grammar 或 compatibility Profile。它只改变多个标准 Cypher execution 何时共同 finalize 为 Commit，不改变单个 execution 的 Cypher 语义，也不把 transaction lifecycle 注入 Cypher text。
+SQL explicit transaction（[SQL Bridge](interfaces.md#sql-bridge)、[Explicit Transaction](storage.md#native-explicit-transaction)）同样是 Lithograph execution/version boundary，不属于 Cypher 25 grammar 或 compatibility Profile。它只改变多个标准 Cypher execution 何时共同 finalize 为 Commit，不改变单个 execution 的 Cypher 语义，也不把 transaction lifecycle 注入 Cypher text。
 
 Full-text 的 FTS5 provider binding 由[Full-text](full-text.md)明确限定：沿用 Cypher 25 DDL、procedure、配置 key 和值类型，不新增 grammar；但 analyzer 字符串的取值、默认分词行为和评分数值依赖 backend。FTS5 tokenizer specification 不是 Neo4j analyzer 名称的可移植替代，不能仅凭相同字段名宣称两种引擎的分词、stop words 或相关性分数完全一致。这一 binding 的破坏性调整单列在 [compatibility inventory](../development/cypher25-compatibility.md)；不重写冻结 Cypher 语言 fixture 的预期结果来掩盖差异。
 

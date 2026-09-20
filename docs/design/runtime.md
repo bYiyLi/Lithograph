@@ -14,9 +14,9 @@
 
 Lithograph core 使用 **Rust 2024 Edition**。SQLite loadable-extension boundary 使用 SQLite 官方 `sqlite3ext.h` / `sqlite3_api_routines` host API table，通过 Rust `rusqlite` 的 `loadable_extension` 支持和底层 `libsqlite3-sys` loadable-extension bindings 实现。
 
-Extension artifact **不得**启用 bundled SQLite，也不得直接静态/动态链接一个私有 SQLite 副本来满足 Engine 调用。所有 SQLite API 调用必须解析到加载该 Extension 的 host SQLite API table；这样同一个 artifact 才能被 stock SQLite 以标准 `.load` 机制跨平台加载，并避免两个 SQLite runtime 同时操作同一 `sqlite3*`。
+Lithograph 与同仓库交付的 SQLite Provider extension artifact **都不得**启用 bundled SQLite，也不得直接静态/动态链接一个私有 SQLite 副本来满足 Engine/Provider 调用。所有 SQLite API 调用——包括 OpenAI-compatible Provider 打开其独立 cache database——必须解析到加载该 extension 的 host SQLite API table/runtime；这样 artifact 才能被 stock SQLite 以标准 `.load` 机制跨平台加载，并避免同一进程/extension artifact 混入第二套 SQLite runtime。
 
-Rust 负责 parser/semantic model、planner、executor、version engine、typed values、storage abstraction、vector index 和 C ABI。允许生成 parser code 或依法复用 grammar，但不允许把外部 parser library 的 AST 作为 storage/executor 公共合同。首个实现依赖基线固定 `rusqlite 0.40.1` + `libsqlite3-sys` loadable-extension path；依赖升级只能在保持本节 ABI 不变量并通过最低 SQLite、当前 SQLite 与跨平台真实 load acceptance 后进行。
+Rust 负责 parser/semantic model、planner、executor、version engine、typed values、storage abstraction、vector index、SQLite loadable-extension boundary 与 Embedding Provider SPI。允许生成 parser code 或依法复用 grammar，但不允许把外部 parser library 的 AST 作为 storage/executor 公共合同。首个实现依赖基线固定 `rusqlite 0.40.1` + `libsqlite3-sys` loadable-extension path；依赖升级只能在保持本节 SQLite/Provider ABI 不变量并通过最低 SQLite、当前 SQLite 与跨平台真实 load acceptance 后进行。
 
 <a id="sqlite-baseline"></a>
 
@@ -53,6 +53,8 @@ Lithograph 是 embedded extension，没有独立 account / role / authentication
 
 Managed Semantic Provider 可能把 source/query String 发送给网络服务或本地模型 runtime；加载和配置该 Provider 等价于 Host 主动授予相应外部处理能力。Lithograph 对 `providerConfig` 保持 provider-opaque：如果调用方直接配置 `api_key`、secret header 或其它敏感值，它们会像其它 config 一样进入 Commit/Schema/history/SHOW/backup，Lithograph 不自动脱敏或阻止；如果配置 `api_key_env`，数据库只保存环境变量名，运行时解析出的 secret value 不进入 SQLite。Provider 也可能把 caller-supplied secret 发送到任意 caller-supplied HTTP endpoint，因此 endpoint/credential trust 由调用方负责。
 
+OpenAI-compatible Provider 的可选 cache database 是宿主显式配置的独立文件，不属于 Lithograph database backup、integrity、GC 或 access-control boundary。它不保存 source/query 原文或 credential 原文，但包含 derived embedding vectors、hash 与 Provider cache metadata；文件创建/读写权限继承宿主进程，调用方需要像其它本地缓存一样单独保护、备份或删除它。删除该 cache 不能损坏 Lithograph graph correctness，只会导致后续 Provider miss 与重新计算。
+
 `graphView` 仍不是 authorization boundary，但 Managed Semantic query 的 on-demand fallback 只对本次 Graph View 中可见的候选 source text 发起 Provider 调用；它不能为了建立全图 HNSW 而在受限 query 中顺带把不可见 owner 的文本发送给外部 Provider。需要预热整个 Index 的 `db.index.semantic.rebuild` 是显式 maintenance surface，不接受 `graphView`，由拥有完整 database execution authority 的调用方执行。
 
 `graphView` 不是 authorization boundary：它只约束一次 execution 的可见 Property Subgraph。能够直接调用 Lithograph 且自行选择 options 的主体可以省略该 option 访问完整 graph；需要强制隔离的上层必须控制 execution surface 与 option construction。
@@ -74,7 +76,7 @@ Managed Semantic Provider 可能把 source/query String 发送给网络服务或
 - streaming query memory 与 executor batch / semantic barrier 相关，不与最终 row count 线性增长；
 - historical query 从 checkpoint + bounded overlay 解析，不要求从 Root 重放全部 history；
 - derived index / checkpoint 可 rebuild，不阻塞 canonical history correctness；
-- Managed Semantic 对 query/source 的重复 exact text 必须先做 embedding-space cache lookup + batch 去重；在固定 Provider/config 下，将同一文本复制到 N 个 owner 不得导致 N 次外部 Provider call。cache enabled 且 database 可写时，普通 query 对校验成功的 miss 自动执行短 persistent publish；只读或 cache disabled 时只做 bounded TEMP/memory materialization；
+- Managed Semantic 在**一次 execution** 内必须通过 bounded-memory + TEMP/disk work materialization 对 `(embedding-space, exact text)` 去重：同一文本复制到 N 个 owner、即使跨多个 source batch，也不得导致 N 次 Provider embedding；该 execution-local state terminal 后删除，不属于 Lithograph cache。跨 execution/process 的 text->Vector cache 属于具体 Provider；OpenAI-compatible Provider 在其 `providerConfig.cache` 启用时必须先查独立 cache DB、只对 miss 发远程请求，并且不能写 Lithograph `main`；
 - planner statistics 可以增量刷新，不能要求每个 query 扫描全图计算 cardinality；
 - Graph View 不能通过预先 materialize 整个子图实现；scan/seek/expand/search 必须在现有 Snapshot access path 上按需执行 visibility check，且不得因 view 导致本可 seek 的查询退化为无条件全图扫描；
 - 10M Node / 100M Relationship benchmark tier 必须作为 release hardening 的真实规模验证，覆盖 traversal、indexed lookup、write、history、diff 与 search；通过条件是正确完成、无 OOM、无意外全图扫描，并建立可持续 regression baseline。
@@ -88,7 +90,7 @@ Managed Semantic Provider 可能把 source/query String 发送给网络服务或
 
 Benchmark 报告至少保存：Git commit 与 dirty-tree digest、fixture seed/version/真实 cardinality、pinned Commit、数据/索引量与分布、CPU/RAM/OS、Rust/build profile、实际 SQLite version/compile options、journal/synchronous/cache/temp 参数、读取 adapter、并发数、batch 大小、缓存状态与重复次数。不得通过关闭 durability、安全检查或减少 fixture cardinality 获得未标注的“优化”。Fixture 构造与完整 integrity check 单独计时，不混入或静默从被测 query 中移除工作。
 
-每次查询统一从参数/options 解码或 Core prepare 入口计到全部结果被消费/释放，分别报告 prepare、Snapshot resolve、cache lookup/build/overlay、first-row、完整消费和 serialization/callback 成本。Core、Native callback 与 SQL `lithograph_rows` 分别测量，不直接比较不同 adapter 的数字；`MATCH ... RETURN 1` 必须真正消费每行，不能用 `count(*)` 或预知 cardinality 替换。旧 runner 对 streaming query 在 prepare 后开始计时，对 `execute` 则包含 prepare，新的报告必须消除这种口径差异。
+每次查询统一从参数/options 解码或 Core prepare 入口计到全部结果被消费/释放，分别报告 prepare、Snapshot resolve、cache lookup/build/overlay、first-event/first-row、完整消费和 serialization/SQL adapter 成本。Core 与 SQL `lithograph_rows` 分别测量，不直接比较不同 layer 的数字；需要完整 envelope 的小结果可以另测 `lithograph()`，但不得用 scalar full-result path 代替 streaming scale gate。`MATCH ... RETURN 1` 必须真正消费每行，不能用 `count(*)` 或预知 cardinality 替换。
 
 缓存实验固定分为四类：同 connection 的 warm read；新 connection/进程但 persistent generation 存在；generation 缺失/被删除后的 fallback 与显式 rebuild；小 delta 后的 ancestor-generation read。它们分别统计，不汇总成一个 P95。OS page cache cold 只有明确完成并记录隔离方法时才能如此命名；仅重开连接仍可能是 OS warm。统计、checkpoint、index readiness 与测试顺序都要记录，不能用 preceding EXPLAIN/查询隐藏预热成本。
 
@@ -104,9 +106,9 @@ Benchmark 报告至少保存：Git commit 与 dirty-tree digest、fixture seed/v
 
 | 工作负载/状态 | 完成目标 | 计量边界 |
 | --- | --- | --- |
-| 单起点、固定小 degree 的 typed/untyped one-hop，含0结果 | warm P95 ≤ 100 ms；新 connection P95 ≤ 500 ms | Core 和 Native 各测；结果完整消费，persistent state 已存在 |
-| 10M Label rows streaming | 中位数 ≤ 60 s，最慢一轮 ≤ 90 s | Core 与 Native 分开满足；不得以 count 替代 |
-| 单 hub 的1M outgoing rows streaming | 中位数 ≤ 30 s，最慢一轮 ≤ 45 s | Core 与 Native；包含页间推进、row/visibility工作 |
+| 单起点、固定小 degree 的 typed/untyped one-hop，含0结果 | warm P95 ≤ 100 ms；新 connection P95 ≤ 500 ms | Core 和 SQL `lithograph_rows` 各测；结果完整消费，persistent state 已存在 |
+| 10M Label rows streaming | 中位数 ≤ 60 s，最慢一轮 ≤ 90 s | Core 与 SQL `lithograph_rows` 分开满足；不得以 count 替代 |
+| 单 hub 的1M outgoing rows streaming | 中位数 ≤ 30 s，最慢一轮 ≤ 45 s | Core 与 SQL `lithograph_rows`；包含 cursor 推进、row/visibility工作 |
 | 已构建 Range Index 的 equality，命中1行或0行 | warm P95 ≤ 50 ms，新 connection P95 ≤ 500 ms | 包含 prepare/metadata，full generation build count = 0 |
 | 同一 index 返回1000行的 range read | warm P95 ≤ 250 ms，新 connection P95 ≤ 1 s | 完整范围结果；不能从 offset0重复扫描到本页 |
 | 相同 indexed domain 上1000 owner 变化后的 equality/range | P95 ≤ 1 s，full generation build count = 0 | ancestor base + delta；包括旧值移除/新值命中，不预先重建 |
@@ -114,6 +116,8 @@ Benchmark 报告至少保存：Git commit 与 dirty-tree digest、fixture seed/v
 新 connection 项不包含 shared library 编译、显式 init/migration 或 OS cache purge，但必须分别报告 open/load 成本。上述长 streaming workloads 至少独立运行3次，报告每次、中位数和最大值，不用3个样本声称 P95。短查询warm集合至少5个connection、每个20次以上；新connection集合至少100次独立重开，每次只采第一条被测query。两类各自报告 P50/P95/max 和全部失败，不能将warm样本充作reopen样本。`0 ms` 不能写成零成本，计时使用微秒或更高精度。
 
 10M/100M 核心 read workload 的总 process peak RSS 目标 ≤ 1 GiB；在固定 graph state / batch / cache budget 下，将同一 streaming query 的消费行数从1M增加到10M，额外 peak RSS ≤ 128 MiB，且无与输出行数同阶增长的 retained collection。全量 persistent index build 必须分批/可取消并单独报告内存、writer hold、磁盘体积和耗时，不能把其成本移到未计时 setup 后宣称 cold-build 已优化；它不适用 ready-index 的毫秒级延迟目标。
+
+Side-effecting `lithograph_rows()` 另报告从第一次真实 write 到 finalize-success/cancel 的 writer-hold duration，并区分 Engine active work 与 caller backpressure/暂停时间；benchmark 必须实际按设定节奏消费 rows，不能一次性 drain 后宣称 streaming write 不会长时间持锁。实现目标不是消除这一事务必需的 writer hold，而是保证没有**额外** full-result materialization、后台 completion 或 adapter delay放大它，并保证 early-close 能及时 rollback/release。
 
 1000 Node batch+Commit、History、Diff、explicit transaction、10K-conflict Merge 各阶段作为非回退集：相同条件下新中位数不得超过 before 的 `max(1.20 × before, before + 10 ms)`。重复3轮仍出现超标时按 finding 处理，不靠删掉慢样本通过。Merge 的 read preparation、writer wait、writer hold 与 total finalize 分开测量；total finalize 时间不能当成 writer hold。
 
@@ -125,6 +129,6 @@ Benchmark 报告至少保存：Git commit 与 dirty-tree digest、fixture seed/v
 
 Vector 用确定的 query sample 对 exact top-k oracle 报告 recall@k、分数/排序与 visible filtering；oracle construction 单独计时。若 exact top-k 的第 `k` 名与更多候选在实际 coordinate type / similarity 计算后具有完全相同的 cutoff score，则这些 cutoff tie candidate 在 recall@k 中等价，不能仅因 deterministic ID tie-break 选择了另一组同分结果而判为 miss；仍必须逐项验证返回 score、去重以及稳定的 score/identity 排序。ANN参数/数据相同条件下 recall@10 不得低于优化前，验收最低均值为0.95；不能降低 recall 换延迟。全文结果与相同语义 oracle 比较。报告 index build/加载/查询、cold/warm/new connection、peak RSS/磁盘以及历史 correctness；若这些新增场景暴露架构或 OOM 问题，完成最小必要设计修订后修复，不预先重写 FTS/HNSW。
 
-Mixed-workload 验证覆盖1/4/8个 reader与一个 writer、不同 Graph View、Branch/Tag移动、GC、cache eviction/rebuild；每种并发配置持续压力至少30分钟，记录吞吐、P95、BUSY/retry、失败数、writer持锁、WAL与资源回收。WAL reader pin 不得让返回值跨 Snapshot 漂移；不能为提高吞吐忽略冲突/CAS。10K-conflict Merge 仍分40轮并保持 revision/candidate/finalize语义，先测热点再优化 resolution，不改变公众冲突协议。
+Mixed-workload 验证覆盖1/4/8个 reader与一个 writer、不同 Graph View、Branch/Tag移动、GC，以及 **Lithograph-owned** Standard Index / FTS / HNSW 等 derived state 的 eviction/rebuild；每种并发配置持续压力至少30分钟，记录吞吐、P95、BUSY/retry、失败数、writer持锁、WAL与资源回收。Provider-owned embedding cache 不混进 Lithograph `main` 的 eviction/GC 统计；OpenAI-compatible Provider 的独立 cache DB 另测多 connection/process hit/miss、FIFO eviction、SQLite contention、文件增长与 failure recovery。WAL reader pin 不得让返回值跨 Snapshot 漂移；不能为提高吞吐忽略冲突/CAS。10K-conflict Merge 仍分40轮并保持 revision/candidate/finalize语义，先测热点再优化 resolution，不改变公众冲突协议。
 
 性能改动按证据优先：邻接键序 → query-scoped resolved state → persistent Standard Index base/delta → 剩余实测热点。Row slot 化、Search算法重写、更多索引或并行调度不是默认任务；没有 profiling/acceptance 驱动就不增加。具体实施与完成状态由 [性能开发计划](../development/phases/11-performance-optimization.md) 维护；验收以固定集合闭合，不以“所有可能优化都做完”作为无限任务。

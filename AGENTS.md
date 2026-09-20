@@ -90,8 +90,8 @@
 - Branch head move 与对应 graph/schema write 在同一 SQLite transaction；
 - historical query pin immutable Commit；
 - direct mutation `_lithograph_*` internal tables 不是 engine 内部捷径，所有 mutation 经 storage/version API；
-- checkpoint、statistics、range/text/full-text/vector cache 删除后可以从 canonical history 重建；
-- derived cache 不得成为 correctness source；
+- Lithograph-owned checkpoint、statistics、range/text/full-text/HNSW 等 derived state 删除后可以从 canonical history/当前 versioned definition 重建；
+- Lithograph-owned derived state 不得成为 correctness source；Embedding Provider 自己的独立 result cache 不属于 Lithograph storage/canonical-history invariant；
 - storage migration 不改变既有 Commit ID 或 history semantics；
 - 不占用宿主应用的 `PRAGMA user_version`。
 
@@ -118,7 +118,7 @@ Feature 是实现单元，Phase 是默认交付单元。
 验证范围与改动相称，但必须直接证明受影响 contract：
 
 - Rust：format、compile、clippy、unit/integration tests；
-- SQLite Extension：真实 `.load`、init、SQL Bridge / Native ABI smoke；
+- SQLite Extension：真实 `.load`、init、application-facing SQL execution surface smoke；涉及 Embedding Provider 时另验证 Provider SPI / dual-extension load；
 - Cypher：targeted fixtures + applicable compatibility suite；
 - Storage/Version：transaction rollback、hash/integrity、snapshot、branch、merge/conflict、migration fixtures；
 - Search：result semantics、historical snapshot consistency 与 rebuild/fallback；

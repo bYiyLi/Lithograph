@@ -94,7 +94,7 @@ _lithograph_index_entries
 
 范围/编码合法性、manifest 与 entries 的对应关系由 storage primitives 验证，不依赖宿主 `foreign_keys` 开关。Key encoding 沿用[Runtime Values 与 Persistent Properties](query-engine.md#runtime-values-and-properties)、[Range / Text / Point](#range-text-point)的语义；`value_blob` 保留必要的精确 recheck 值。索引前缀固定是 generation + owner kind + property ordinal，后接 equality、typed range、text 或 spatial key，并以 owner identity 处理同值重复。Relationship Lookup 使用 generation + owner kind + token + owner identity。采用固定、按非空 key family 过滤的 partial secondary indexes，避免给不适用 family 填入大量全 NULL key；相关 SQL 必须包含匹配 predicate，并经真实 plan 验证。构建一个 generation 不得 DROP 或重建其它 generation 正在使用的全部 secondary indexes。
 
-Persistent generation 只覆盖 committed canonical state，不缓存某个 Graph View，也不持久化 Native staged state 或 Merge candidate。数据库文件本身隔离 database identity；内存 handle 还必须绑定原 connection/database，不能仅凭一个 generation number 跨库复用。
+Persistent generation 只覆盖 committed canonical state，不缓存某个 Graph View，也不持久化 explicit-transaction staged state 或 Merge candidate。数据库文件本身隔离 database identity；内存 handle 还必须绑定原 connection/database，不能仅凭一个 generation number 跨库复用。
 
 <a id="base-and-delta"></a>
 
@@ -128,7 +128,7 @@ Base 与 delta 的候选合并必须 bounded/streamed，按实际 predicate key 
 | generation 不存在、未完成或 encoding 不兼容 | 正确的 canonical scan / TEMP materialization fallback；不得返回不完整结果 |
 | 明确重建或新 Index DDL | 在拥有 write authority 的 boundary 构建、原子发布 generation |
 
-普通 read、`lithograph_rows()`、只读 SQLite connection、`EXPLAIN`、validation 和 Merge candidate inspection **不得**为 cache miss 隐式写 `main`、升级 storage format 或打开辅助 write connection。可用的 TEMP 仍只是 query-local 可重建数据；宿主连 TEMP write 也禁止时使用流式 canonical fallback。`EXPLAIN`/validation 不执行 index rebuild。Cache miss 的慢路径必须被测量，而不是从延迟报告删除。
+普通 read（无论通过 `lithograph()` 还是 `lithograph_rows()` 消费）、只读 SQLite connection、`EXPLAIN`、validation 和 Merge candidate inspection **不得仅因为 Standard Index cache miss** 隐式写 `main`、升级 storage format 或打开辅助 write connection。这里约束的是 read path 的 derived-index maintenance，不把 `lithograph_rows()` 重新定义成 read-only adapter；调用方显式执行的 graph/schema/version mutation 或独立 maintenance procedure 仍按各自 execution contract处理。可用的 TEMP 仍只是 query-local 可重建数据；宿主连 TEMP write 也禁止时使用流式 canonical fallback。`EXPLAIN`/validation 不执行 index rebuild。Cache miss 的慢路径必须被测量，而不是从延迟报告删除。
 
 新 Index DDL 在既有[Schema Change](#schema-change) write boundary 内生成与最终 Schema/Commit 对应的物理 generation；explicit transaction 中未提交的 index 可使用 staged/TEMP 内容，只能在最终 commit 时发布到 committed identity，abort 不得留下可见 generation。既有普通 graph mutation 不逐次重建所有 index；后续 read 使用 delta，maintenance 可以在当前目标 Commit re-anchor。
 
@@ -141,7 +141,7 @@ YIELD name, commit, indexedEntities
 
 两个参数均为非空 STRING；`version` 使用[Version Descriptor](versioning.md#version-descriptor)已有 `commit/`、`branch/`、`tag/` descriptor，取得 writer 后解析并 pin。目标 Schema 中必须存在该 name，且属于本节支持的 Standard Index family；缺失 name、不支持的 kind/Node Lookup 或非法参数返回 `INVALID_ARGUMENT`，version 解析沿用已有稳定错误。只重建该 target 的完整 canonical index，不解释为 view-local index，不创建 Commit、不移动 ref。结果固定一行 `name: STRING, commit: STRING, indexedEntities: INTEGER`；`summary.queryType = "version"`、`summary.commit = null`、graph/schema mutation counters为0。结果中的 `commit` 是实际 anchor，`indexedEntities` 为本 generation 索引的 owner 数，不是 property-entry 数。
 
-该 procedure 只能独立调用并后接 `YIELD`/`RETURN` 等只读结果处理，不与 graph mutation 或其它维护 operation 混在一个 execution。通过 `lithograph()` 或普通 Native execution 调用；`lithograph_rows()` 返回 `READ_ONLY_ADAPTER`；SQL / Native explicit transaction、transaction-owning subquery 或 Merge candidate 中返回 `TRANSACTION_BOUNDARY_REQUIRED`。`at` 返回 `READ_ONLY_SNAPSHOT`，`branch`、`author`、`message`、`graphView` 等不适用 options 返回 `INVALID_ARGUMENT`。`SHOW PROCEDURES`/validate/EXPLAIN 必须认识该 procedure，但 validate/EXPLAIN 无写副作用。只读文件的真实执行返回既有 I/O/read-only 错误，不吞掉用户明确请求的 rebuild failure。
+该 procedure 只能独立调用并后接 `YIELD`/`RETURN` 等只读结果处理，不与 graph mutation 或其它维护 operation 混在一个 execution。`lithograph()` 与 `lithograph_rows()` 都可以调用；active Lithograph explicit transaction、transaction-owning subquery 或 Merge candidate 中返回 `TRANSACTION_BOUNDARY_REQUIRED`，因为 persistent generation publish 拥有独立 committed-version maintenance lifecycle，而不是因为 streaming adapter 只读。`at` 返回 `READ_ONLY_SNAPSHOT`，`branch`、`author`、`message`、`graphView` 等不适用 options 返回 `INVALID_ARGUMENT`。`SHOW PROCEDURES`/validate/EXPLAIN 必须认识该 procedure，但 validate/EXPLAIN 无写副作用。只读文件的真实执行返回既有 I/O/read-only 错误，不吞掉用户明确请求的 rebuild failure。
 
 Rebuild 和 DDL 使用现有 invocation SAVEPOINT/transaction discipline：从 pin 到 publish 在同一 SQLite transaction，边扫描边分批编码/写 entries，最后置 `complete=1`，成功后才让其它 reader 看到。重建已存在 generation 时旧内容的移除与替换同样原子；failure、cancel、disk-full 或 crash 只留下旧完整 generation 或无 generation，不留下可被使用的半成品。不会引入异步 worker、server、持久 build job 或 request-id 系统。此最小方案的全量重建可能长时间持有 writer，必须单独报告 build、writer-wait/hold、临时空间与峰值内存，不能把“最后设置 complete 很快”描述为整个重建的 writer 很短；使用者应在维护窗口进行全量 rebuild。
 
