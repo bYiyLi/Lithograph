@@ -4,6 +4,28 @@ Lithograph 的用户可见版本变化记录在此文件。版本遵循 Semantic
 
 ## Unreleased
 
+## 0.3.0 - 2026-09-21
+
+Phase 15 SQL-only execution、true streaming 与 Provider-owned cache release。
+
+### Changed
+
+- Application-facing query execution 收敛为 SQLite SQL-only；`lithograph()` 保留完整 JSON envelope，`lithograph_rows()` 改为 `columns -> row* -> summary` 的统一 execution event stream，并支持 mutation、`LOAD CSV`、Managed Semantic 与 `CALL { ... } IN TRANSACTIONS`。
+- SQL explicit transaction 继续使用 `lithograph_tx_begin()` / `lithograph_tx_commit()` / `lithograph_tx_abort()`，transaction 内的 query execution 直接复用普通 `lithograph()` / `lithograph_rows()` surface；独立 `lithograph_tx_execute()` 已删除。
+- Read、mutating `RETURN`、transaction subquery 与 `LOAD CSV` execution 改为 pull/backpressure streaming；必要的 semantic barrier 使用 bounded batch / TEMP spill，不再由 adapter 持有完整最终结果。
+- Managed Semantic persistent text → Vector result cache 从 Lithograph Core 移到具体 Embedding Provider；`lithograph-openai-compatible` 可通过独立 SQLite cache database 提供 persistent Provider cache。
+
+### Removed
+
+- 删除 application-facing `lithograph_v1_*` query/transaction C ABI、`include/lithograph.h` 与相关 Native query acceptance surface；`EmbeddingProviderV1` SPI 保留。
+- 删除 Lithograph-owned persistent embedding cache、format 4 cache metadata/table 与 `db.index.semantic.cache.*` procedures。
+
+### Compatibility
+
+- Embedding Provider ABI 仍为 V1，Cypher profile 仍为 `CY25-2026.08`。
+- v0.3.0 支持 storage formats 1–3，fresh/current format 为 **3**；format 1/2 可通过 `lithograph_init()` 迁移到 3。
+- **Breaking pre-1.0 change:** v0.2.0/v0.2.1 的 format 4 database 不支持直接 downgrade/migration 到 v0.3.0。需要迁移时应通过应用数据导出/重建建立新的 format 3 database。
+
 ## 0.2.1 - 2026-09-19
 
 SQL explicit transaction adapter release.
