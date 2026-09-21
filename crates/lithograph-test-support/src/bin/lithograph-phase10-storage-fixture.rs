@@ -66,11 +66,7 @@ fn create_fixture(path: &Path) -> Result<(), Box<dyn Error>> {
              id INTEGER PRIMARY KEY CHECK(id=1),\
              magic TEXT NOT NULL,\
              database_id TEXT NOT NULL,\
-             storage_format INTEGER NOT NULL,\
-             \"semantic.embedding_cache.enabled\" INTEGER NULL \
-                 CHECK(\"semantic.embedding_cache.enabled\" IN (0, 1)),\
-             \"semantic.embedding_cache.max_bytes\" INTEGER NULL \
-                 CHECK(\"semantic.embedding_cache.max_bytes\" > 0)\
+             storage_format INTEGER NOT NULL\
          );",
     )?;
     connection.execute(
@@ -93,6 +89,7 @@ fn create_fixture(path: &Path) -> Result<(), Box<dyn Error>> {
         r#"{"fixture":"phase10-cross-platform","version":1}"#,
     )?;
     create_checkpoint(&connection, head)?;
+    verify_fixture_metadata_shape(&connection)?;
     let issues = integrity_check(&connection)?;
     if !issues.is_empty() {
         return Err(format!("created interoperability fixture is corrupt: {issues:?}").into());
@@ -161,6 +158,7 @@ fn verify_extension_output(output: &str) -> Result<(), Box<dyn Error>> {
 
 fn verify_fixture_sidecars(path: &Path) -> Result<(), Box<dyn Error>> {
     let connection = Connection::open(path)?;
+    verify_fixture_metadata_shape(&connection)?;
     let commit = resolve_version_descriptor(&connection, "tag/phase10-interop")?;
     let data =
         commit_data(&connection, commit)?.ok_or("interoperability Commit Data is missing")?;
@@ -172,6 +170,20 @@ fn verify_fixture_sidecars(path: &Path) -> Result<(), Box<dyn Error>> {
     let issues = integrity_check(&connection)?;
     if !issues.is_empty() {
         return Err(format!("interoperability fixture integrity failed: {issues:?}").into());
+    }
+    Ok(())
+}
+
+fn verify_fixture_metadata_shape(connection: &Connection) -> Result<(), Box<dyn Error>> {
+    let mut statement = connection.prepare("PRAGMA main.table_info('_lithograph_meta')")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if columns != ["id", "magic", "database_id", "storage_format"] {
+        return Err(format!(
+            "interoperability fixture metadata columns differ from current storage contract: {columns:?}"
+        )
+        .into());
     }
     Ok(())
 }
