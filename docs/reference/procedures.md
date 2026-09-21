@@ -1,6 +1,6 @@
 # Procedure Reference
 
-当前 Phase 15 开发基线。完整公开签名见 [Inventory](procedure-inventory.md)。本页补充参数语义、默认值、Commit 效果及限制；名称不省略 `lithograph.` / `db.` 前缀。
+当前 v0.3.0 发布基线。完整公开签名见 [Inventory](procedure-inventory.md)。本页补充参数语义、默认值、Commit 效果及限制；名称不省略 `lithograph.` / `db.` 前缀。
 
 Procedure 通过 Cypher `CALL name(...)` 调用，返回行可接 `YIELD` / `RETURN`。本页的方括号表示可选位置参数，不是实际调用字符。可选参数通常通过省略提供默认值，不应把 null 当作任意可选参数的默认值。
 
@@ -47,7 +47,7 @@ Provider/config/source 都属于 versioned IndexDefinition。Semantic definition
 | `lithograph.branch.create(name[,from])` | from 为 Descriptor，省略从 active Branch head 创建；返回 name,commit；不切换 active Branch |
 | `lithograph.branch.list()` | 返回 name,commit,active，按名称排序 |
 | `lithograph.branch.delete(name)` | 返回 name,previousCommit；不能删除 main 或 connection active Branch |
-| `lithograph.branch.checkout(name)` | 设计上改变 connection active Branch，要求 autocommit；**v0.1.0–v0.2.1 SQL / Native adapter 均有已知执行缺陷，使用 query options.branch** |
+| `lithograph.branch.checkout(name)` | 改变 connection active Branch，要求 SQLite autocommit；v0.1.0–v0.2.1 adapter 曾有已知执行缺陷，v0.3.0 SQL surface 已修复 |
 | `lithograph.tag.create(name,target)` | target 为 Descriptor，返回 name,commit |
 | `lithograph.tag.list()` | 返回 name,commit |
 | `lithograph.tag.move(name,target)` | 显式移动已有 Tag，返回 name,previousCommit,commit |

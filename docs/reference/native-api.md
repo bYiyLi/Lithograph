@@ -1,6 +1,6 @@
 # Native / FFI Surface
 
-当前 Phase 15 开发基线 **不提供 application-facing Cypher execution、validation 或 explicit-transaction C API**。应用通过标准 SQLite API 加载 Lithograph，并使用 [SQL API](sql-api.md)。
+v0.3.0 **不提供 application-facing Cypher execution、validation 或 explicit-transaction C API**。应用通过标准 SQLite API 加载 Lithograph，并使用 [SQL API](sql-api.md)。
 
 保留的 FFI 边界只有：
 

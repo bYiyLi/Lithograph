@@ -1,6 +1,6 @@
 # Merge Session：逐步解决冲突后再提交
 
-适用 v0.1.0。目标：从 source Branch 合并到 target Branch，允许跨连接、重启和多轮人工/程序审查，不生成中间 Commit。
+适用 v0.3.0。目标：从 source Branch 合并到 target Branch，允许跨连接、重启和多轮人工/程序审查，不生成中间 Commit。
 
 ## 从 start 到 finalize
 

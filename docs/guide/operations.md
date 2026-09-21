@@ -1,10 +1,10 @@
 # 部署、备份与维护
 
-适用 v0.2.1 发布基线，并保留 v0.1.0–v0.2.0 的升级边界。Lithograph 运行在应用的 SQLite connection 中，没有独立管理 Server。以下操作涉及已有数据时，先确认文件路径、扩展版本、目标 Branch 与保留策略；不要直接修改 `_lithograph_*` 表。
+适用 v0.3.0 发布基线，并保留旧版本升级边界。Lithograph 运行在应用的 SQLite connection 中，没有独立管理 Server。以下操作涉及已有数据时，先确认文件路径、扩展版本、目标 Branch 与保留策略；不要直接修改 `_lithograph_*` 表。
 
 ## 部署前检查
 
-固定 v0.1.0 制品及 SHA-256；在实际应用进程内检查 SQLite 3.45.0+、FTS5、extension loading、CPU 架构与动态库依赖。测试环境能加载不代表生产容器、沙箱或另一个语言 binding 能加载。新部署应先在一次性数据库中运行 [快速入门](getting-started.md)。
+固定 v0.3.0 制品及 SHA-256；在实际应用进程内检查 SQLite 3.45.0+、FTS5、extension loading、CPU 架构与动态库依赖。测试环境能加载不代表生产容器、沙箱或另一个语言 binding 能加载。新部署应先在一次性数据库中运行 [快速入门](getting-started.md)。
 
 新库由 provisioning 步骤调用 `lithograph_init()`。已有库在启动时读取 `lithograph_version()` 并检查 `databaseId` / `storageFormat.current`；不要每个请求都执行 init 或 integrity scan。数据库文件、目录和备份位置的访问权限由宿主配置。
 
@@ -44,7 +44,7 @@ SQLite CLI 也提供 `.backup`；它是 CLI 命令而不是 Cypher。无论使�
 
 ## 存储格式
 
-当前 Phase 15 开发基线的 fresh/current Lithograph storage format 是 **3**。Managed Semantic 的 persistent text→Vector cache 不属于 Lithograph storage，因此不会创建 format 4、`_lithograph_embedding_cache` 或相关 metadata/migration。历史 v0.2.0/v0.2.1 release 的 format 4 行为只适用于对应 release tag。
+v0.3.0 的 fresh/current Lithograph storage format 是 **3**。Managed Semantic 的 persistent text→Vector cache 不属于 Lithograph storage，因此不会创建 format 4、`_lithograph_embedding_cache` 或相关 metadata/migration。历史 v0.2.0/v0.2.1 release 的 format 4 行为只适用于对应 release tag。
 
 打开低于当前 writable format 的旧开发 fixture 时，以当前 `lithograph_init()` / storage compatibility contract 为准；高于当前支持范围的文件必须停止使用当前 binary，不能手工修改 format marker。升级/回退前始终先做一致性备份和应用回归。
 
@@ -101,7 +101,7 @@ cache DB 与 Lithograph `main` 必须是不同文件。Provider 负责 marker/sc
 
 Branch head、Tag 和未结束的 Merge Session 都保护相应可达历史。仅在应用日志里保存一个 `commit/...` 字符串不会阻止回收。需要长期留存的状态应建立明确的保留 Tag，同时维持外部备份。
 
-`CALL lithograph.gc()` 是**显式、不可逆的历史回收**。执行前列出 Branch/Tag/open Session，确定哪些引用应删除、哪些应保留；先完成备份，再通过普通 scalar 或 Native execute 独立调用。它不是日常查询必需步骤，也不是自动按天过期的 retention 服务。
+`CALL lithograph.gc()` 是**显式、不可逆的历史回收**。执行前列出 Branch/Tag/open Session，确定哪些引用应删除、哪些应保留；先完成备份，再通过普通 SQL execution surface 独立调用，例如 `SELECT lithograph('CALL lithograph.gc()')`。它不是日常查询必需步骤，也不是自动按天过期的 retention 服务。
 
 GC 不删除仍被保留引用保护的历史；物理文件也不保证立刻缩小。SQLite VACUUM / checkpoint 的时机、锁与额外磁盘需求由宿主维护，不把它们与逻辑 GC 或创建 graph Commit 混淆。
 
@@ -111,7 +111,7 @@ GC 不删除仍被保留引用保护的历史；物理文件也不保证立刻�
 
 读取只投影需要的字段，用 Cypher 内的 WHERE / ORDER BY / LIMIT 表达语义；大量结果使用 `lithograph_rows()` 并及时关闭 cursor。排序、聚合、路径探索、全文/向量访问仍可能需要内存与 TEMP 空间，streaming API 不等于所有 query 都恒定内存。
 
-EXPLAIN 无执行副作用；PROFILE 实际执行，写查询也会写入。出现索引未被选择时先检查类型约束与查询计划，而不是强制删建索引。迁移、GC 和 rebuild 与线上写请求共享资源，避免把人工审查或网络工作放进 SQL / Native explicit transaction。
+EXPLAIN 无执行副作用；PROFILE 实际执行，写查询也会写入。出现索引未被选择时先检查类型约束与查询计划，而不是强制删建索引。迁移、GC 和 rebuild 与线上写请求共享资源，避免把人工审查或无界网络工作放进 Lithograph explicit transaction。
 
 WAL、synchronous、busy timeout、线程模式和 TEMP 位置由宿主 SQLite 决定，Lithograph 不替你静默修改。没有适合所有产品的默认吞吐/延迟承诺；最终优化验收见 [Phase 11](../development/phases/11-performance-optimization.md)，早期基线及其限制见 [Performance Evidence](../research/phase11-performance-evidence.md)。旧基线不是 v0.1.0 最终延迟数据，机器、规模和缓存状态必须一起阅读。
 

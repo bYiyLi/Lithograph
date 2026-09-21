@@ -1,6 +1,6 @@
 # Error Reference
 
-当前 Phase 15 开发基线。SQL 异常前缀为 `LITHOGRAPH_<CATEGORY>:`，parse/semantic 等定位信息以可选 `[line=N,column=N]` suffix 保留；调用方同时检查 SQLite primary result code，不要只匹配英语 message。
+当前 v0.3.0 发布基线。SQL 异常前缀为 `LITHOGRAPH_<CATEGORY>:`，parse/semantic 等定位信息以可选 `[line=N,column=N]` suffix 保留；调用方同时检查 SQLite primary result code，不要只匹配英语 message。
 
 | 稳定 category | 常见原因 | 调用方处理 |
 | --- | --- | --- |

@@ -1,6 +1,6 @@
 # Search 与数据导入
 
-适用正式 v0.2.1；Managed Semantic 从 v0.2.0 起可用。以下检索 SQL 在独立空库、已加载扩展的 connection 中依次运行。**Raw Vector** 路径仍由应用提供向量及其维度、坐标类型和模型来源；**Managed Semantic** 才通过独立 Embedding Provider extension 生成 derived Vector。
+适用正式 v0.3.0；Managed Semantic 从 v0.2.0 起可用。以下检索 SQL 在独立空库、已加载扩展的 connection 中依次运行。**Raw Vector** 路径仍由应用提供向量及其维度、坐标类型和模型来源；**Managed Semantic** 才通过独立 Embedding Provider extension 生成 derived Vector。
 
 ## 准备文档与全文索引
 
@@ -193,9 +193,9 @@ SET p.name = row.name
 RETURN count(p) AS imported
 ```
 
-结果应为 `2`。导入列是文本，数值使用 `toInteger()` / `toFloat()` 等显式转换。普通导入在一次查询中执行，失败回滚这次图写入；`lithograph_rows()` 禁止 LOAD CSV，即使它只返回读取内容。
+结果应为 `2`。导入列是文本，数值使用 `toInteger()` / `toFloat()` 等显式转换。普通导入在一次查询中执行，失败回滚这次图写入；`lithograph()` 与 `lithograph_rows()` 都可以执行 `LOAD CSV`。
 
-超大导入需要独立 batch transaction 时，使用 **普通 Native execute**，且 connection 没有外层事务：
+超大导入需要独立 batch transaction 时，在 SQLite autocommit mode 使用普通 SQL execution surface：
 
 ```cypher
 LOAD CSV WITH HEADERS FROM $source AS row
@@ -206,6 +206,6 @@ CALL (row) {
 FINISH
 ```
 
-每个成功 mutating batch 形成一个 Commit。后续 batch 失败不回滚前面已经提交的 batch，重试前必须检查业务导入进度。该形式不能从 SQL Bridge 或 SQL / Native explicit transaction 内调用。
+每个成功 mutating batch 形成一个 Commit。后续 batch 失败不回滚前面已经提交的 batch，重试前必须检查业务导入进度。该形式可以通过 `lithograph()` 或 `lithograph_rows()` 执行，但不能放在 caller-owned SQLite transaction 或 active Lithograph explicit transaction 内。
 
 LOAD CSV 使用宿主进程的文件和网络权限，不注入凭据。上层应用必须限制来源、大小、超时与网络访问；不要把不可信 Cypher 当作没有外部 I/O 能力的表达式。更多边界见 [事务](transactions.md) 与 [部署安全](operations.md)。

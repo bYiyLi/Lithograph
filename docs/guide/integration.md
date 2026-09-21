@@ -1,6 +1,6 @@
 # 应用集成
 
-当前 Phase 15 开发基线的 **application-facing execution 统一走 SQLite SQL**。应用不需要也不应解析 Lithograph shared library 的 query symbols；只需要使用自己的 SQLite driver/`sqlite3*` 加载 extension 并执行 SQL。
+v0.3.0 的 **application-facing execution 统一走 SQLite SQL**。应用不需要也不应解析 Lithograph shared library 的 query symbols；只需要使用自己的 SQLite driver/`sqlite3*` 加载 extension 并执行 SQL。
 
 | 应用需要 | 使用入口 |
 | --- | --- |

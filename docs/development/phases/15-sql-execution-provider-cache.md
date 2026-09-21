@@ -1,6 +1,6 @@
 # Phase 15：SQL Execution Surface、True Streaming 与 Provider-owned Cache
 
-**状态：`in_progress`**
+**状态：`done`**
 
 ## 1. 目标与范围
 
@@ -18,11 +18,11 @@
 
 本 Phase **不**修改 `CY25-2026.08` grammar/Profile，不删除 Raw Vector、HNSW、Full-text、Standard Index 或 `EmbeddingProviderV1` SPI，不修改 KG OS，也不引入 server/daemon/background worker。用户已明确当前产品没有旧 format 4 / Native query ABI 的历史兼容负担，因此本 Phase 不实现 format4 migration、Native compatibility shim 或旧 `lithograph_tx_execute()` alias。
 
-## 2. 当前差距与前置条件
+## 2. 开始阶段差距与前置条件
 
 Phase 00–14 已完成，是本 Phase 的实现前置；它们的历史 acceptance 继续保留，不按新目标倒改为未完成。
 
-当前实现与最新设计之间已确认的主要差距：
+Phase 开始时实现与最新设计之间已确认的主要差距：
 
 - `crates/lithograph-extension/src/rows.rs` 仍公开 `ordinal/columns/row`，并用 `READ_ONLY_ADAPTER` 拒绝 mutation、external I/O 与 transaction-owning execution；
 - 简单 direct read path 已能按 bounded batch 消费，但部分 prepared program/composed/procedure read 仍通过 `program_rows` 完整保存结果；mutating `QueryCursor` 与 transaction program 同样会先保存完整最终 result rows，再由 adapter 分批返回；
@@ -136,10 +136,10 @@ Phase 00–14 已完成，是本 Phase 的实现前置；它们的历史 accepta
 | EX15-15 | compatibility regression | frozen applicable TCK/CY25 fixtures、Graph View、Full-text、Raw Vector、version operations、Merge/GC/explicit tx全部保持既有语义，无 unexplained skip | `done` |
 | EX15-16 | true-streaming performance/resource | 固定 large-read、large-write-return、transaction-subquery workloads 达成 Runtime memory invariant并记录 first-event/full consume/TEMP/peak RSS；mutating rows分别测快/慢consumer与early-close的 writer-hold/backpressure，确认没有额外full-result materialization/后台completion；Phase 11/13旧Native scale/stream/mixed/Semantic workload有效覆盖已迁到Core/SQL runner，无删除API导致验收降级 | `done` |
 | EX15-17 | minimum/current SQLite + repository gates | SQLite 3.45.0/current real-load、targeted tests、format/clippy/coverage、`cargo make quality`、`scripts/ci.sh`、diff checks 全部通过 | `done` |
-| EX15-18 | 六目标 release artifacts | Linux/macOS/Windows x64/arm64 hosted matrix 验证 SQL-only Lithograph artifact + Provider artifact 的 build/load/symbol/runtime | `pending` |
+| EX15-18 | 六目标 release artifacts | Linux/macOS/Windows x64/arm64 hosted matrix 验证 SQL-only Lithograph artifact + Provider artifact 的 build/load/symbol/runtime | `done` |
 | EX15-19 | 文档与 review closure | Design/Development/compatibility、根 README、guide/reference/examples 与真实实现状态一致；旧 Native API reference/example 已删除或替换，rows/tx/error/Provider-cache 用法可运行，本 Phase review findings 全闭合，无旧 Native/read-only rows/format4 当前合同残留 | `done` |
 
-### 本地验收证据（2026-09-21）
+### 验收证据（2026-09-21）
 
 - 15.1 host probe：SQLite 3.45.0 与 3.51.0 均确认 same-connection SAVEPOINT / repeated inner transaction 可行；stock SQLite 会丢弃 virtual-table `xClose` 返回码，因此 cleanup failure 采用 full rollback + connection quarantine。
 - Core/SQL correctness：`phase15_streaming` 14/14；Phase05 67/67、Phase06 57/57、Phase08 27/27；SQL surface smoke 覆盖 scalar/rows、explicit tx、connection-state checkout、early-close rollback。
@@ -150,7 +150,7 @@ Phase 00–14 已完成，是本 Phase 的实现前置；它们的历史 accepta
 - Provider cache：real-load smoke 7 项覆盖 reopen/FIFO budget/oversized entry/corruption/marker-accounting fail-closed/same-main/BUSY cancellation/multi-process concurrent publish；artifact inspection 证明 Provider/Lithograph 不捆绑第二份 SQLite。
 - Repository gates：最终 `cargo make quality` exit 0（coverage line 85.27%，applicable TCK 3777/3777）；最终 `scripts/ci.sh` exit 0，覆盖 SQLite 3.45.0、3.51.0、3.53.4 real-load、Phase probes、SQL surface、Provider cache、artifact/symbol gates。
 - Developer docs：Guide verifier 96 个 SQL blocks 通过；Python quickstart、SQL explicit transaction 与 C SQLite-host 示例真实运行通过。
-- EX15-18 未在本次执行：六目标 hosted Release Matrix 需要 commit/push 后远端 CI 才能取得真实 artifact 证据；因此 Phase 15 总状态继续为 `in_progress`。
+- Hosted closure：首个 candidate revision `0feb3423d072b33226041c0d88b570662a621048` 的 repository CI `35584622281` 成功，但 Release Matrix `35584622310` 暴露 Phase10 interop fixture 仍携带历史 format4 cache-policy metadata 列；六目标都在最终 fixture reopen 处以同一 metadata-shape error 正确失败。修复 revision `b0d5a3da9c5c0266218e01c51d6d34a1be0a6b9d` 删除该历史列并增加 fixture self-check；repository CI `35586275713` 与 Release Matrix `35586275736` 随后全部成功，Linux/macOS/Windows x64/arm64 六目标 artifact build/load/symbol/runtime 均通过。EX15-18 因此为 `done`。
 
 ## 5. Review 重点
 
@@ -174,4 +174,4 @@ Phase-level review 必须至少检查：
 
 只有 EX15-01–19 全部有真实自动化/运行证据，Phase-level review 无剩余 correctness、transaction、resource、security、compatibility、release 或文档 finding，且最终 diff 无临时文件、无无关重构、无 secret/generated junk 时，Phase 15 才能从 `ready/in_progress` 标记为 `done`。
 
-Phase 15 本地实现与 review 已闭合 EX15-01–17、EX15-19；唯一未完成 acceptance 为 EX15-18 hosted 六目标 Release Matrix。由于本次未执行 commit/push，无法生成真实远端 artifact matrix 证据，因此 Phase 15 保持 `in_progress`，不标记 `done`。当前没有提交、推送或发布。
+EX15-01–19 已全部取得真实自动化/运行证据；Phase-level review findings 已闭合。实现修复 revision `b0d5a3da9c5c0266218e01c51d6d34a1be0a6b9d` 的 repository CI `35586275713` 与 hosted Release Matrix `35586275736` 均成功，六目标 artifact acceptance 完整通过。Phase 15 状态为 `done`，并进入 v0.3.0 release closure。

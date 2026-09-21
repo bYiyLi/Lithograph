@@ -1,8 +1,8 @@
 # Lithograph Developer Documentation
 
-这套文档面向把 Lithograph 嵌入自己产品的应用开发者。当前正文描述 **Phase 15 仓库开发基线（尚未发布）**；最新正式 Release 仍是 v0.2.1，其历史行为见 `docs/releases/`，不要用旧 Release Notes 反推当前未发布接口。
+这套文档面向把 Lithograph 嵌入自己产品的应用开发者。当前正文描述 **v0.3.0 正式发布基线**；旧版本历史行为见 `docs/releases/` 与对应 tag，不要用旧 Release Notes 反推当前接口。
 
-## 当前开发基线
+## v0.3.0 基线
 
 | 项目 | 当前仓库行为 |
 | --- | --- |
@@ -48,6 +48,6 @@ Lithograph 是嵌入式 SQLite extension，不是独立 Server、Agent 框架或
 
 ## 版本与历史
 
-正式 v0.2.0/v0.2.1 曾包含 format 4 / Lithograph-owned embedding cache 与 application Native query ABI；Phase 15 已在当前开发基线中替换这些合同。需要复现旧 Release 时使用对应 tag 与 Release Notes，不把当前 Guide 当作旧二进制兼容说明。
+v0.2.0/v0.2.1 曾包含 format 4 / Lithograph-owned embedding cache 与 application Native query ABI；v0.3.0 已通过 Phase 15 替换这些合同。需要复现旧 Release 时使用对应 tag 与 Release Notes，不把当前 Guide 当作旧二进制兼容说明。
 
 许可见 [LICENSE](../../LICENSE) 与 [Commercial License](../../COMMERCIAL-LICENSE.md)。

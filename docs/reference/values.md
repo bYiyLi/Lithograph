@@ -1,6 +1,6 @@
 # Value 与 Lithograph JSON v1
 
-**版本：v0.1.0。** SQL scalar、行适配器和 Native events 使用同一 JSON value encoding；params 的值也接受同一 tagged encoding。它是 SQLite/JSON 边界编码，不是新的 Cypher 类型系统。
+**版本：v0.3.0。** SQL scalar envelope 与 `lithograph_rows()` event payload 使用同一 JSON value encoding；params 的值也接受同一 tagged encoding。它是 SQLite/JSON 边界编码，不是新的 Cypher 类型系统。
 
 ## 基本值与容器
 

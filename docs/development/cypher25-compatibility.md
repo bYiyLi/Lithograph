@@ -129,19 +129,19 @@ Managed Semantic 使用 Lithograph-specific `db.index.semantic.*` procedure 与 
 
 ### Phase 15 SQL execution / Provider cache supplemental inventory
 
-Phase 15 不改变 `CY25-2026.08` language coverage 分母；它重新闭合 execution adapter、transaction boundary、resource semantics 与 Managed Semantic backend ownership。Phase 00–14 的 `done` 仍表示当时已有语言/功能证据，但下列最新产品边界在 Phase 15 真正实现并验收前保持 `planned`。
+Phase 15 不改变 `CY25-2026.08` language coverage 分母；它重新闭合 execution adapter、transaction boundary、resource semantics 与 Managed Semantic backend ownership。Phase 00–15 的 language/feature evidence 与当前 SQL-only / Provider-cache 产品边界均已闭合；下列 supplemental inventory 已由 Phase 15 acceptance 实际验证。
 
 | 验收面 | Acceptance 映射 | 状态 | Owner |
 | --- | --- | --- | --- |
-| `columns -> row* -> summary` event schema、zero-row、scalar/stream parity | EX15-01、09 | `planned` | 15.1–15.2 |
-| read/write true streaming、cancel/early-close/resource boundary | EX15-02–03、16 | `planned` | 15.1–15.2、15.6 |
-| SQL `IN TRANSACTIONS` / external I/O / read-only main | EX15-04、07–08 | `planned` | 15.3 |
-| normal execution surfaces 复用 SQL explicit transaction、删除 tx-execute | EX15-06 | `planned` | 15.3 |
-| application Native query ABI removal、Provider SPI preservation | EX15-10 | `planned` | 15.4 |
-| Lithograph format3/Core cache removal、OpenAI Provider 独立 cache DB | EX15-11–14 | `planned` | 15.5 |
-| frozen TCK/CY25 + release/runtime/documentation regression | EX15-15、17–19 | `planned` | 15.6 |
+| `columns -> row* -> summary` event schema、zero-row、scalar/stream parity | EX15-01、09 | `done` | 15.1–15.2 |
+| read/write true streaming、cancel/early-close/resource boundary | EX15-02–03、16 | `done` | 15.1–15.2、15.6 |
+| SQL `IN TRANSACTIONS` / external I/O / read-only main | EX15-04、07–08 | `done` | 15.3 |
+| normal execution surfaces 复用 SQL explicit transaction、删除 tx-execute | EX15-06 | `done` | 15.3 |
+| application Native query ABI removal、Provider SPI preservation | EX15-10 | `done` | 15.4 |
+| Lithograph format3/Core cache removal、OpenAI Provider 独立 cache DB | EX15-11–14 | `done` | 15.5 |
+| frozen TCK/CY25 + release/runtime/documentation regression | EX15-15、17–19 | `done` | 15.6 |
 
-完整证据要求见 [Phase 15 acceptance](phases/15-sql-execution-provider-cache.md#4-acceptance-matrix)。在这些项目完成前，不得用 Phase 13/14 的 Native/format4 acceptance 证明最新 SQL-only/Provider-cache 设计已经实现。
+完整证据见 [Phase 15 acceptance](phases/15-sql-execution-provider-cache.md#4-acceptance-matrix)。修复 revision `b0d5a3da9c5c0266218e01c51d6d34a1be0a6b9d` 的 repository CI `35586275713` 与六目标 Release Matrix `35586275736` 均成功；Phase 13/14 的 Native/format4 acceptance 只保留为历史版本证据，不替代当前 Phase 15 产品边界。
 
 ### Phase 03 frontend evidence
 

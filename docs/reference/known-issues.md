@@ -1,6 +1,6 @@
 # v0.1.0 已知问题与接入规避
 
-这些问题最初在**实际已发布 v0.1.0 macOS arm64 制品**上复现，不是新的设计要求。v0.2.1 release gate 重新确认其中部分历史行为。**当前 Phase 15 main 已删除 application Native query ABI，因此本页 Native 复现步骤只适用于旧 release tag，不是当前接入指南。**
+这些问题最初在**实际已发布 v0.1.0 macOS arm64 制品**上复现，不是新的设计要求。v0.2.1 release gate 重新确认其中部分历史行为。**v0.3.0 已删除 application Native query ABI，并修复旧 `branch.checkout` adapter 问题；本页 Native 复现步骤只适用于旧 release tag，不是当前接入指南。**
 
 验证制品：`lithograph-macos-arm64.tar.gz`，SHA-256 `71a50eb3d7b745dc5a616a12ad1c4bc06578b0ee17a4f7f7e1d4c0c4f7c0e278`。SQL 入口在 SQLite 3.45.0 / 3.51.0 上复现；Native 入口使用 SQLite 3.51.0。其他平台共享相关代码，但本次没有逐个平台复现，不将推断写成实测。
 
@@ -18,7 +18,7 @@ SELECT lithograph('CALL lithograph.branch.checkout(''probe'')');
 
 最后一条是**旧版本预期复现错误**，不是当前成功教程。需要复现 Native 路径时请 checkout 对应 v0.1.0/v0.2.1 tag；当前 `native_transaction.c` 已改为 SQL-only C host 示例。
 
-历史代码证据属于旧 tag；当前 main 已移除 `crates/lithograph-extension/src/native.rs`，不能用当前源码路径解释旧 binary。
+历史代码证据属于旧 tag；v0.3.0 源码已移除 `crates/lithograph-extension/src/native.rs`，不能用当前源码路径解释旧 binary。
 
 **规避：每次 query 显式传 `options:{"branch":"probe"}`。**读历史用 `at`，SQL / Native explicit transaction 在 begin 中指定 branch。无需 checkout 就能创建、读写、合并目标 Branch。不要直接改内部 connection state 或库表来绕过错误。
 

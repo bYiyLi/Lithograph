@@ -15,11 +15,11 @@ Lithograph 为 SQLite 提供版本化 Property Graph 数据库能力。
 
 ## 安装与 Quickstart
 
-当前正式版本是 **v0.2.1**。GitHub Releases 提供 Linux x64/arm64、macOS x64/arm64、Windows x64/arm64 六个平台的预编译 extension；运行时需要支持 loadable extension 与 FTS5 的 SQLite 3.45.0 或更高版本。
+当前正式版本是 **v0.3.0**。GitHub Releases 提供 Linux x64/arm64、macOS x64/arm64、Windows x64/arm64 六个平台的预编译 extension；运行时需要支持 loadable extension 与 FTS5 的 SQLite 3.45.0 或更高版本。
 
-v0.2.1 在 v0.2.0 Managed Semantic / storage format 4 基线上发布 Phase 14 SQL Explicit Transaction Adapter：普通 SQLite driver 可通过四个 `lithograph_tx_*` SQL function 把多次 Cypher execution 组合为一个 graph Commit，无需自行绑定 C API。每个平台包继续同时包含 Lithograph 主 extension 与 OpenAI-compatible Provider extension；见 [v0.2.1 Release Notes](docs/releases/v0.2.1.md)、[事务指南](docs/guide/transactions.md) 和 [SQL API Reference](docs/reference/sql-api.md)。
+v0.3.0 发布 Phase 15：application-facing execution 收敛为 SQLite SQL-only；`lithograph_rows()` 成为真正的 read/write/external-I/O/transaction-subquery event stream；explicit transaction 直接复用普通 execution surface；Managed Semantic persistent embedding cache 改由具体 Provider 自己拥有。每个平台包同时包含 Lithograph 主 extension 与 OpenAI-compatible Provider extension；见 [v0.3.0 Release Notes](docs/releases/v0.3.0.md)、[事务指南](docs/guide/transactions.md) 和 [SQL API Reference](docs/reference/sql-api.md)。
 
-基础接入从 [Developer Documentation](docs/guide/README.md) 开始。正式 v0.2.1 Release 仍保持其当时的 Native ABI 1 与 storage format 4；**当前仓库 `main` 已进入 Phase 15 未发布开发基线**，application execution 已收敛为 SQL-only，fresh/current storage format 为 3，persistent embedding cache 由 Provider 自己拥有。复现 v0.2.1 时使用对应 tag/Release Notes，不把当前 Guide 反套到旧二进制。
+基础接入从 [Developer Documentation](docs/guide/README.md) 开始。v0.3.0 的 application execution 为 SQL-only，fresh/current storage format 为 3，persistent embedding cache 由 Provider 自己拥有。v0.2.0/v0.2.1 的 Native query ABI、`lithograph_tx_execute()` 与 format 4 只属于对应历史 tag/Release Notes，不是 v0.3.0 当前接口。
 
 稳定下载地址：
 
@@ -70,20 +70,20 @@ SELECT ordinal, event, data
 FROM lithograph_rows('MATCH (p:Person) RETURN p.name');
 ```
 
-正式 Release Matrix 覆盖 Linux x64/arm64、macOS x64/arm64、Windows x64/arm64；当前 Phase 15 开发基线在发布前仍需重新跑 hosted matrix。运行时 minimum 继续是 SQLite 3.45.0，并在 release-current SQLite 上复验。其它 host application 需要在目标 SQLite connection 上启用 loadable extension，并通过 SQLite 官方 extension-loading API 加载同一个 shared library。
+v0.3.0 Release Matrix 已覆盖 Linux x64/arm64、macOS x64/arm64、Windows x64/arm64；运行时 minimum 是 SQLite 3.45.0，并在 release-current SQLite 上复验。其它 host application 需要在目标 SQLite connection 上启用 loadable extension，并通过 SQLite 官方 extension-loading API 加载同一个 shared library。
 
 同一张图可以在不同 Commit 上查询，也可以在不同 Branch 上独立演化，而不需要复制 SQLite 数据库文件。
 
 ## 开发者文档
 
-完整入口：**[Lithograph Developer Documentation](docs/guide/README.md)**。当前 Guide/Reference 描述 Phase 15 未发布开发基线；历史 Release Notes、Phase 文档与 tag 继续保留对应版本事实。
+完整入口：**[Lithograph Developer Documentation](docs/guide/README.md)**。当前 Guide/Reference 描述 v0.3.0 正式接口；历史 Release Notes、Phase 文档与 tag 继续保留对应版本事实。
 
 | 任务 | 文档 |
 | --- | --- |
 | 安装并完成第一次图查询与历史读取 | [安装](docs/guide/installation.md) · [快速入门](docs/guide/getting-started.md) |
 | 数据建模、约束、索引与检索 | [Graph/Cypher](docs/guide/graph-and-cypher.md) · [Schema/Index](docs/guide/schema-and-indexes.md) · [Search/CSV](docs/guide/search.md) |
 | 版本控制与逐步解决合并冲突 | [版本管理](docs/guide/versioning.md) · [Merge Session](docs/guide/merge.md) |
-| Python/Native 接入、事务与子图边界 | [应用集成](docs/guide/integration.md) · [事务](docs/guide/transactions.md) · [Graph View](docs/guide/graph-views.md) |
+| Python/C 接入、事务与子图边界 | [应用集成](docs/guide/integration.md) · [事务](docs/guide/transactions.md) · [Graph View](docs/guide/graph-views.md) |
 | 参数、返回值、函数、Procedure 与兼容范围 | [API Reference](docs/reference/README.md) |
 | 备份、升级、性能诊断与错误恢复 | [部署维护](docs/guide/operations.md) · [排障](docs/guide/troubleshooting.md) |
 
@@ -91,9 +91,9 @@ FROM lithograph_rows('MATCH (p:Person) RETURN p.name');
 
 ## 项目状态
 
-Lithograph 正式发布版本仍为 **v0.2.1**；当前仓库开发阶段是 **Phase 15 — SQL Execution Surface + Provider-owned Cache**。Phase 15 的本地实现、resource/quality/CI 与文档 review 已完成 SQL-only application surface、side-effect-capable `lithograph_rows()`、Native query ABI / `lithograph_tx_execute` 删除、format3 回归与 Provider-owned persistent embedding cache；唯一仍 pending 的 acceptance 是 commit/push 后才能取得真实证据的六目标 hosted Release Matrix。
+Lithograph 当前正式发布版本为 **v0.3.0**。Phase 15 — SQL Execution Surface + Provider-owned Cache 已完成：SQL-only application surface、side-effect-capable `lithograph_rows()`、Native query ABI / `lithograph_tx_execute` 删除、format3 回归、Provider-owned persistent embedding cache，以及 Linux/macOS/Windows x64/arm64 六目标 hosted Release Matrix 均已闭合。
 
-v0.2.1 仍属于 pre-1.0 版本；其 format 4 / Native ABI 行为见 [v0.2.1 Release Notes](docs/releases/v0.2.1.md)。当前 Phase 15 开发基线的 fresh/current format 为 3；升级旧正式版本前必须先看对应 Phase 15 migration/release 说明，不按旧文档自行修改 storage marker。
+v0.3.0 仍属于 pre-1.0 版本；fresh/current storage format 为 3。历史 v0.2.0/v0.2.1 的 format 4 / Native ABI 行为见对应 Release Notes；v0.3.0 不提供 format 4 → 3 downgrade/migration，切换旧数据库前必须阅读 [v0.3.0 Release Notes](docs/releases/v0.3.0.md)，不要手工修改 storage marker。
 
 - [技术设计](docs/design.md)
 - [开发计划](docs/development/README.md)
@@ -102,7 +102,7 @@ v0.2.1 仍属于 pre-1.0 版本；其 format 4 / Native ABI 行为见 [v0.2.1 Re
 - [Phase 13 Managed Semantic Vector / Embedding Provider](docs/development/phases/13-managed-semantic-vector.md)
 - [Phase 14 SQL Explicit Transaction Adapter](docs/development/phases/14-sql-explicit-transaction.md)
 - [Phase 15 SQL Execution Surface + Provider-owned Cache](docs/development/phases/15-sql-execution-provider-cache.md)
-- 当前开发阶段：Phase 00–14 已完成；Phase 15 `in_progress`。
+- 当前开发阶段：Phase 00–15 已完成；Phase 15 `done`。
 
 ## 许可
 

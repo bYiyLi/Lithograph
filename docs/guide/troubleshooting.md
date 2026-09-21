@@ -1,6 +1,6 @@
 # 排障与恢复路径
 
-适用 v0.2.1，并保留旧版本症状的明确标记。先记录实际应用进程中的 SQLite version、`lithograph_version()`、OS/进程架构、调用入口，以及完整的 category / SQLite code。不要先重复执行所有写请求，也不要直接编辑内部表。
+适用 v0.3.0，并保留旧版本症状的明确标记。先记录实际应用进程中的 SQLite version、`lithograph_version()`、OS/进程架构、调用入口，以及完整的 category / SQLite code。不要先重复执行所有写请求，也不要直接编辑内部表。
 
 ## 安装与加载
 
@@ -35,22 +35,22 @@
 
 | 症状 | 检查与处理 |
 | --- | --- |
-| `branch.checkout` 即使没有 BEGIN 也报事务边界错误 | v0.1.0–v0.2.1 已知 adapter 问题；使用每次执行的 `options.branch`，不要修改内部状态 |
-| SQL BEGIN 内仍出现多个 Commit | 这是外层落盘边界，不是多次执行单 Commit；后者使用 `lithograph_tx_*` 或 Native explicit transaction |
-| `lithograph_rows` 拒绝 CREATE / LOAD CSV | 该 adapter 只读且禁止 external I/O；选择 scalar 或普通 Native |
+| `branch.checkout` 报事务边界错误 | v0.3.0 在 SQLite autocommit mode 可直接 checkout；若仍报错，检查是否处于 caller-owned / Lithograph explicit transaction。v0.1.0–v0.2.1 另有历史 adapter 问题 |
+| SQL BEGIN 内仍出现多个 Commit | 这是外层 durability 边界，不是多次 execution 单 Commit；后者使用 `lithograph_tx_begin()` → 普通 `lithograph()` / `lithograph_rows()` → `lithograph_tx_commit()` |
+| `lithograph_rows` 拒绝 CREATE / LOAD CSV | v0.3.0 rows 支持 mutation 与 external I/O；先确认实际加载的是 v0.3.0，再按稳定 error category 检查 transaction、参数或资源边界 |
 | `at` 写入失败 | historical Snapshot 只读；从所需版本创建 Branch 后写入 |
-| Native tx_execute 失败后 tx_commit 返回 MISUSE | 之前的 execution 已自动 abort 整体；重新读取当前 head，重建一个新事务 |
-| `IN TRANSACTIONS` 在 SQL 中被拒绝 | 该 query 需要普通 Native execute，connection 不能已有外层/explicit transaction |
+| active explicit transaction 中 execution 失败后 commit 返回 MISUSE | execution failure / interrupt / summary 前 close 会 fail-closed abort 整体 transaction；重新读取当前 head，再 `tx_begin` 新事务 |
+| `IN TRANSACTIONS` 在 SQL 中被拒绝 | v0.3.0 支持普通 SQL autocommit execution；检查是否存在 caller-owned SQLite transaction 或 active Lithograph explicit transaction |
 | Merge candidate 被拒绝 | 检查 unresolved 是否为 0、revision 是否最新，以及是否混用了 branch/at/author/message |
 | `MERGE_SESSION_CHANGED` | 重新 get/conflicts 并检查新 revision；旧 cursor/resolution submission 不可直接复用 |
 | `BRANCH_HEAD_MOVED` | 当前状态已不同于你审查的基线；重新读取并重新审查，不盲目覆盖 |
 | `VERSION_NOT_FOUND`，但日志里保存了 hash | 核对 databaseId；无保护引用的 Commit 可能已被 GC，hash 字符串本身不保留历史 |
 
-发布差异的复现、源码证据与规避见 [Known Issues](../reference/known-issues.md)。文档没有把它们宣称为已修复。
+旧版本差异的复现、源码证据与规避见 [Known Issues](../reference/known-issues.md)；当前行为以 v0.3.0 Guide/Reference 为准。
 
 ## 性能、锁和文件
 
-`BUSY` / `LOCKED`：检查长寿命 SQL/Native 事务、未关闭的流式游标、另一个进程的写入。不同 Branch 仍共享 writer。设置有上限的等待/退避，确认此前调用是否已经提交，再判断是否重试。
+`BUSY` / `LOCKED`：检查长寿命 caller-owned SQLite / Lithograph explicit transaction、未关闭的流式游标、另一个进程的写入。不同 Branch 仍共享 writer。设置有上限的等待/退避，确认此前调用是否已经提交，再判断是否重试。
 
 查询突然变慢：比较实际 Snapshot、Schema、输入规模与 cache 状态，执行只读 EXPLAIN。不要用带写入的 PROFILE 做健康检查，也不要把所有慢查询归结为缺少一个索引。完全缺缓存与已有持久索引 reopen 应分别测量。
 

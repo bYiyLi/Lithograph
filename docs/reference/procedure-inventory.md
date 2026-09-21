@@ -51,7 +51,7 @@ v0.1.0 的 SHOW returnDescription.type 全部标为 STRING，argumentDescription
 
 ## 当前 Managed Semantic supplemental
 
-Phase 15 当前开发基线在历史 inventory 之外保留 5 个 `db.index.semantic.*` procedure；当前真实 `SHOW PROCEDURES` 总数为 38：
+v0.3.0 在历史 inventory 之外保留 5 个 `db.index.semantic.*` procedure；当前真实 `SHOW PROCEDURES` 总数为 38：
 
 | 签名 | Mode | 输出列 |
 | --- | --- | --- |

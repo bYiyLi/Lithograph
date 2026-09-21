@@ -1,6 +1,6 @@
 # Lithograph Reference
 
-本目录描述 **Phase 15 当前仓库开发基线（未发布）**。最新正式 Release v0.2.1 的历史接口请查对应 Release Notes/tag。
+本目录描述 **v0.3.0 正式发布接口**。旧版本历史接口请查对应 Release Notes/tag。
 
 | 需要查找 | 页面 |
 | --- | --- |

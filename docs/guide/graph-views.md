@@ -1,6 +1,6 @@
 # Graph View：选择执行可见子图
 
-适用 v0.1.0。Graph View 是一次 execution 的 Label selector，不是另一张图、另一份数据库或授权系统。以下在独立空库中运行。
+适用 v0.3.0。Graph View 是一次 execution 的 Label selector，不是另一张图、另一份数据库或授权系统。以下在独立空库中运行。
 
 ## 选择可见节点
 

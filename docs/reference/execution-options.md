@@ -1,6 +1,6 @@
 # Execution Options
 
-**版本：v0.1.0。** options 是 `lithograph()` / `lithograph_rows()` 第三个参数的 JSON object TEXT，也是普通 Native execute 的 options JSON。Key 大小写必须正确；未知 key 报 `INVALID_ARGUMENT`，没有隐含的 timeout、readOnly、database 或任意 Neo4j driver 配置。
+**版本：v0.3.0。** options 是 `lithograph()` / `lithograph_rows()` 第三个参数的 JSON object TEXT。Key 大小写必须正确；未知 key 报 `INVALID_ARGUMENT`，没有隐含的 timeout、readOnly、database 或任意 Neo4j driver 配置。
 
 ## 普通 execution
 
@@ -31,14 +31,14 @@
 
 Version mutation 不能与 at 或非空 graphView 混用。不要把同一份 options 无差别附到所有 procedures，精确参数见 [Procedures](procedures.md)。
 
-## Native tx_begin
+## `lithograph_tx_begin()` options
 
-仅允许 `branch`、`expectedHead`、`author`、`message`。Branch name 默认 active Branch；expectedHead 是 `commit/<id>`，在取得 writer 后比较，错误为 `BRANCH_HEAD_MOVED`，不创建 transaction。begin 不接受 at / graphView / mergeSession。
+仅允许 `branch`、`expectedHead`、`author`、`message`。Branch name 默认 active Branch；`expectedHead` 是 `commit/<id>`，在取得 writer 后比较，错误为 `BRANCH_HEAD_MOVED`，不创建 transaction。begin 不接受 `at` / `graphView` / `mergeSession`。
 
-## Native tx_execute
+## Active explicit transaction 中的 execution options
 
-仅允许本 statement 的 `graphView`。Branch、base、author/message 已在 begin 时确定，不接收 branch/at/expectedHead/author/message/mergeSession。每个 statement 重新在当前 staged state 上计算 view，能看到前面成功 statement 的写入。
+begin 后继续使用普通 `lithograph()` / `lithograph_rows()`。Branch、base、author/message 已在 begin 时确定，因此 active transaction 内的 execution 不接受 `branch` / `at` / `expectedHead` / `author` / `message` / `mergeSession`；`graphView` 仍可按 statement 指定，并在当前 staged state 上重新计算，能看到前面成功 statement 的写入。v0.3.0 不存在独立 `lithograph_tx_execute()`。
 
 参数与 options 不要混淆：查询里的 `$name` 从 params 取值，而不是 options。timeout、SQL busy handler、取消与线程策略属于宿主 SQLite API。
 
-依据：[option parser](../../crates/lithograph-core/src/query/options.rs)、[Native ABI](../../include/lithograph.h)、[Query Options](../design/interfaces.md#query-options)。
+依据：[option parser](../../crates/lithograph-core/src/query/options.rs)、[SQL API](sql-api.md)、[Query Options](../design/interfaces.md#query-options)。

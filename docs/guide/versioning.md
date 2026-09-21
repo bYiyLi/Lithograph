@@ -1,6 +1,6 @@
 # 版本管理
 
-适用 v0.1.0。本页先用独立演示库解释日常操作，再介绍会改写 Branch 历史的操作。完整可执行流程见 [version_workflow.py](examples/version_workflow.py)；合并冲突独立见 [Merge Session](merge.md)。
+适用 v0.3.0。本页先用独立演示库解释日常操作，再介绍会改写 Branch 历史的操作。完整可执行流程见 [version_workflow.py](examples/version_workflow.py)；合并冲突独立见 [Merge Session](merge.md)。
 
 ## Commit、Branch、Tag 与 Descriptor
 
@@ -32,7 +32,7 @@ SELECT lithograph('CALL lithograph.branch.list()');
 
 `main` 是 `light`，`feature` 是 `dark`。Query-level Branch 不改变 connection 默认的 `main`。同一数据库不同连接可以执行不同分支，但写入仍共享 SQLite 单文件 writer。
 
-**v0.1.0–v0.2.1 已知限制：**公开 inventory 包含 `lithograph.branch.checkout(name)`，但 SQL Bridge 与普通 Native execute 实际执行都会返回 `TRANSACTION_BOUNDARY_REQUIRED`。使用已验证的 `options.branch`；不要先 BEGIN、不要改内部表，也不要把这个错误解释成分支数据丢失。跟踪细节见 [已知问题](../reference/known-issues.md)。
+**v0.1.0–v0.2.1 历史限制：**`lithograph.branch.checkout(name)` 会被旧 SQL/Native adapter 的事务边界错误拒绝。v0.3.0 SQL execution surface 已修复该问题，可以在 SQLite autocommit mode 直接 checkout；active caller-owned / Lithograph explicit transaction 中仍按事务边界合同拒绝。旧版本复现与规避见 [已知问题](../reference/known-issues.md)。
 
 ## 查看历史和时间旅行
 

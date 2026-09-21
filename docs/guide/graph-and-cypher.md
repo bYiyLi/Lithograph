@@ -1,6 +1,6 @@
 # Graph 与 Cypher
 
-适用 v0.1.0。以下 SQL 示例在独立空库、已加载扩展的 connection 中依次运行。
+适用 v0.3.0。以下 SQL 示例在独立空库、已加载扩展的 connection 中依次运行。
 
 ## 数据模型
 
