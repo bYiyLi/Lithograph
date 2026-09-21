@@ -28,6 +28,49 @@ pub(super) struct SpillOutput {
 }
 
 #[derive(Debug)]
+pub(super) struct RowSpill {
+    table: String,
+    sequence: i64,
+}
+
+impl RowSpill {
+    pub(super) fn create(connection: &Connection) -> QueryResult<Self> {
+        let table = spill_table("rows");
+        create_output_table(connection, &table, false)?;
+        Ok(Self { table, sequence: 0 })
+    }
+
+    pub(super) fn push(&mut self, connection: &Connection, row: &[Value]) -> QueryResult<()> {
+        let sql = format!(
+            "INSERT INTO temp.{}(seq,row_json) VALUES(?1,?2)",
+            self.table
+        );
+        connection.execute(&sql, params![self.sequence, encode_row(row)?])?;
+        self.sequence = self.sequence.saturating_add(1);
+        Ok(())
+    }
+
+    pub(super) fn push_all(
+        &mut self,
+        connection: &Connection,
+        rows: &[Vec<Value>],
+    ) -> QueryResult<()> {
+        for row in rows {
+            self.push(connection, row)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn output(self) -> SpillOutput {
+        SpillOutput {
+            table: self.table,
+            after: -1,
+            total: usize::try_from(self.sequence).unwrap_or(usize::MAX),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub(super) struct BindingSpill {
     table: String,
     sequence: i64,
@@ -83,6 +126,10 @@ impl SpilledBindings {
 }
 
 impl BindingSpill {
+    pub(super) fn len(&self) -> usize {
+        usize::try_from(self.sequence).unwrap_or(usize::MAX)
+    }
+
     pub(super) fn create(connection: &Connection) -> QueryResult<Self> {
         let table = spill_table("bindings");
         connection.execute_batch(&format!(
@@ -897,4 +944,44 @@ fn load_run_head(
         keys: decode_row(&key_json)?,
         ordinal,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binding_spill_uses_file_backed_temp_pages() {
+        let connection = open_spill_connection().expect("spill connection");
+        let temp_store = connection
+            .query_row("PRAGMA temp_store", [], |row| row.get::<_, i64>(0))
+            .expect("temp_store");
+        assert_eq!(temp_store, 1, "spill connection must force FILE temp store");
+
+        let mut spill = BindingSpill::create(&connection).expect("binding spill");
+        let payload = "x".repeat(1024);
+        for ordinal in 0..4096_i64 {
+            let mut row = BindingRow::default();
+            row.insert(
+                "payload".to_owned(),
+                BindingValue::Scalar(Value::String(format!("{ordinal}:{payload}"))),
+            );
+            spill.push(&connection, &row).expect("spill row");
+        }
+
+        let pages = connection
+            .query_row("PRAGMA temp.page_count", [], |row| row.get::<_, i64>(0))
+            .expect("temp page count");
+        let page_size = connection
+            .query_row("PRAGMA temp.page_size", [], |row| row.get::<_, i64>(0))
+            .expect("temp page size");
+        let pages = u64::try_from(pages).expect("non-negative temp page count");
+        let page_size = u64::try_from(page_size).expect("non-negative temp page size");
+        let temp_bytes = pages.saturating_mul(page_size);
+        eprintln!("phase15 TEMP spill logical bytes: {temp_bytes}");
+        assert!(
+            temp_bytes >= 4 * 1024 * 1024,
+            "spill did not allocate the expected file-backed TEMP pages: {temp_bytes}"
+        );
+    }
 }

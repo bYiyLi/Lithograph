@@ -200,13 +200,17 @@ fn check_scalar_rows_equivalence(
     let rows = scalar["rows"]
         .as_array()
         .ok_or("scalar rows must be an array")?;
-    let lines = streamed_rows(fixture, load, query)?;
+    let (columns, lines) = streamed_rows(fixture, load, query)?;
+    require(
+        columns == scalar["columns"],
+        "rows columns event must match scalar columns",
+    )?;
     require(
         lines.len() == rows.len(),
         "rows adapter row count must match scalar",
     )?;
     for (index, line) in lines.iter().enumerate() {
-        assert_streamed_row(line, index, &scalar["columns"], &rows[index])?;
+        assert_streamed_row(line, index, &rows[index])?;
     }
     Ok(())
 }
@@ -232,36 +236,42 @@ fn streamed_rows(
     fixture: &FileDatabaseFixture,
     load: &str,
     query: &str,
-) -> Result<Vec<String>, Box<dyn Error>> {
+) -> Result<(Value, Vec<String>), Box<dyn Error>> {
     let output = fixture.execute_script(&format!(
-        "{load}\nSELECT ordinal || char(9) || columns || char(9) || row FROM lithograph_rows({}) ORDER BY ordinal;",
+        "{load}\nSELECT event || char(9) || data FROM lithograph_rows({}) ORDER BY ordinal;",
         sql_literal(query)
     ))?;
-    Ok(output.lines().map(str::to_owned).collect())
+    let mut lines = output.lines();
+    let columns = lines.next().ok_or("missing rows columns event")?;
+    let mut fields = columns.splitn(2, '\t');
+    require(
+        fields.next() == Some("columns"),
+        "rows stream must start with columns event",
+    )?;
+    let columns =
+        serde_json::from_str::<Value>(fields.next().ok_or("missing columns event payload")?)?;
+    let mut rows = Vec::new();
+    for line in lines {
+        let mut fields = line.splitn(2, '\t');
+        match fields.next() {
+            Some("row") => rows.push(fields.next().ok_or("missing row event payload")?.to_owned()),
+            Some("summary") => break,
+            _ => return Err("unexpected rows event".into()),
+        }
+    }
+    Ok((columns, rows))
 }
 
 fn assert_streamed_row(
     line: &str,
     index: usize,
-    expected_columns: &Value,
     expected_row: &Value,
 ) -> Result<(), Box<dyn Error>> {
-    let mut fields = line.splitn(3, '\t');
-    let ordinal = fields.next().ok_or("missing rows ordinal")?;
-    let columns = fields.next().ok_or("missing rows columns")?;
-    let row = fields.next().ok_or("missing rows row")?;
     require(
-        ordinal.parse::<usize>()? == index,
-        "rows ordinal must be contiguous",
-    )?;
-    require(
-        serde_json::from_str::<Value>(columns)? == *expected_columns,
-        "rows columns must equal scalar columns",
-    )?;
-    require(
-        serde_json::from_str::<Value>(row)? == *expected_row,
+        serde_json::from_str::<Value>(line)? == *expected_row,
         "rows value encoding must equal scalar row encoding",
     )?;
+    let _ = index;
     Ok(())
 }
 

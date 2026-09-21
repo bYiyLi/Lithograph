@@ -101,14 +101,17 @@ LITHOGRAPH_SQLITE3="$sqlite_bin" \
 if [ -n "$tokenizer_extension" ]; then
   LITHOGRAPH_SQLITE3="$sqlite_bin" \
     cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase12 -- "$extension" "$tokenizer_extension"
-  LITHOGRAPH_SQLITE3="$sqlite_bin" \
-    LITHOGRAPH_SQLITE_SOURCE_DIR="$source_dir" \
-    scripts/native-abi-smoke.sh "$extension" "$tokenizer_extension" "$synthetic_provider"
 fi
+LITHOGRAPH_SQLITE3="$sqlite_bin" \
+  LITHOGRAPH_SQLITE_SOURCE_DIR="$source_dir" \
+  scripts/sql-surface-smoke.sh "$extension"
 if [ -n "$openai_provider" ]; then
   LITHOGRAPH_SQLITE3="$sqlite_bin" \
     LITHOGRAPH_SQLITE_SOURCE_DIR="$source_dir" \
     scripts/openai-compatible-provider-smoke.sh "$openai_provider"
+  LITHOGRAPH_SQLITE3="$sqlite_bin" \
+    LITHOGRAPH_SQLITE_SOURCE_DIR="$source_dir" \
+    scripts/phase15-provider-cache-smoke.sh "$openai_provider"
 fi
 if [ -n "$synthetic_provider" ]; then
   LITHOGRAPH_SQLITE3="$sqlite_bin" \

@@ -109,11 +109,9 @@ if [ -n "$extension" ]; then
     cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase12 -- "$extension" "$phase12_tokenizer"
   fi
   python3 scripts/check-extension-artifact.py "$extension"
-  if [ -n "$phase12_tokenizer" ]; then
-    scripts/native-abi-smoke.sh "$extension" "$phase12_tokenizer"
-  else
-    scripts/native-abi-smoke.sh "$extension"
-  fi
+  python3 scripts/check-extension-artifact.py "$openai_provider" --provider
+  scripts/sql-surface-smoke.sh "$extension"
+  scripts/phase15-provider-cache-smoke.sh "$openai_provider"
 fi
 
 cargo run --locked --quiet -p lithograph-test-support --bin lithograph-compat -- self-check

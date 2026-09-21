@@ -9,14 +9,8 @@ from pathlib import Path
 
 REQUIRED_SYMBOLS = {
     "sqlite3_lithograph_init",
-    "lithograph_v1_execute",
-    "lithograph_v1_validate",
-    "lithograph_v1_tx_begin",
-    "lithograph_v1_tx_execute",
-    "lithograph_v1_tx_commit",
-    "lithograph_v1_tx_abort",
-    "lithograph_v1_free",
 }
+FORBIDDEN_LITHOGRAPH_SYMBOL_PREFIXES = ("lithograph_v1_",)
 PROVIDER_REQUIRED_SYMBOLS = {
     "sqlite3_extension_init",
     "sqlite3_lithographopenaicompatible_init",
@@ -87,6 +81,19 @@ def main() -> int:
     if missing:
         print(f"missing required exported symbols: {', '.join(missing)}", file=sys.stderr)
         return 1
+
+    if len(sys.argv) == 2:
+        forbidden = sorted(
+            symbol
+            for symbol in exported
+            if any(symbol.startswith(prefix) for prefix in FORBIDDEN_LITHOGRAPH_SYMBOL_PREFIXES)
+        )
+        if forbidden:
+            print(
+                f"application-facing Native query symbols must not be exported: {', '.join(forbidden)}",
+                file=sys.stderr,
+            )
+            return 1
 
     print(f"artifact inspection passed: {artifact}")
     return 0

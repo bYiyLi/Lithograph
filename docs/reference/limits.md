@@ -1,12 +1,12 @@
 # 版本边界、类型与配置限制
 
-**版本：v0.2.1。** 本页列出应用可依赖的入口约束，不把内部 cache budget、性能实测或机器容量当作通用硬上限。
+当前 Phase 15 开发基线。本页列出应用可依赖的入口约束，不把内部 cache budget、性能实测或机器容量当作通用硬上限。正式 v0.2.1 的历史 format4 行为仅适用于对应 release tag。
 
 ## 平台与存储
 
 SQLite 最低 3.45.0，必须可加载扩展并支持 FTS5。仅 connection 的 main 承载 graph repository；单文件多 Branch 仍共享 writer。预编译包提供 Linux/macOS/Windows x64/arm64，不等于保证任意 Linux libc、任意旧 OS 或所有 SQLite binding 都相容；必须在实际部署运行时 smoke-test。
 
-从 v0.2.0 起读取支持格式 1–4，新建使用 4，并通过显式 init 支持 format 3 → 4；无法把已升级 format 4 自动降级给旧 binary。内部 `_lithograph_*` namespace 保留，不插入、删除、重命名或加 trigger/index。
+当前 fresh/current Lithograph storage format 为 **3**。Phase 15 不保留 format4 migration/compatibility；高于当前支持范围的数据库必须使用对应历史 binary/tag 处理，不能手工改 storage marker。内部 `_lithograph_*` namespace 保留，不插入、删除、重命名或加 trigger/index。
 
 ## 名称、Descriptor 与 JSON
 
@@ -53,15 +53,15 @@ Vector 支持 I8/I16/I32/I64/F32/F64 坐标；输入也接受相应 `INTEGER8/16
 | output coordinate type | 固定 FLOAT32，全部 coordinate 必须 finite |
 | similarity | `cosine`、`euclidean` |
 | query options | 必需 `limit >= 0`；可选 `skip >= 0`；未知 key 拒绝 |
-| persistent cache default | enabled；`maxBytes = 1_073_741_824`（1 GiB） |
-| cache eviction | 写入时 oldest-entry/FIFO；普通 read hit 不写 main |
-| query/source miss cache | enabled + writable 时自动写 persistent cache；只读或 disabled 时仅 connection-local TEMP/LRU |
+| Lithograph Core persistent cache | 不提供；Core 只有 execution-local 去重/TEMP work state |
+| OpenAI-compatible Provider cache | omitted/disabled 不触碰文件；enabled 必须显式 `path`，使用独立 SQLite DB |
+| Provider cache budget | `max_bytes > 0`；FIFO enforcement，单 entry 超预算时结果仍可返回但不缓存 |
 | OpenAI-compatible provider batch_size | 1–2048 items；不提供 tokenizer/chunk/truncate |
 | OpenAI-compatible timeout/retry | bounded positive timeout 与有限 retry；具体范围由 Provider 本地 validation 固定 |
 | OpenAI-compatible redirect | 不跟随；任何 3xx 作为 endpoint error 返回 |
 | OpenAI-compatible proxy | 不自动读取 process environment proxy；v1 无独立 proxy config |
 
-Persistent cache key 包含完整 canonical `providerConfig`、Provider ABI semantic identity 与 dimensions；similarity 不分裂 embedding space。任何实际 semantic query/rebuild 即使 cache 已 warm 仍要求目标 Provider 当前可用。Provider config 中直接写入的 `api_key` / secret header 会进入 versioned history；`api_key_env` 只保存变量名。
+OpenAI-compatible Provider cache identity 包含会改变 embedding vector 的有效 endpoint/model/request/header/auth semantics 与 exact text；timeout/retry/batch/cache policy 等纯 operational 参数不分裂 embedding space。secret/header value 只以 digest 进入 cache identity，cache DB 不保存 raw text 或 credential。任何实际 semantic query/rebuild 即使 cache 已 warm 仍要求目标 Provider 当前可用。Provider config 中直接写入的 `api_key` / secret header 会进入 versioned history；`api_key_env` 只保存变量名。
 
 ## 不属于此产品表面的能力
 

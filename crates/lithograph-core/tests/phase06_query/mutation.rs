@@ -364,24 +364,44 @@ fn transaction_subqueries_are_classified_for_the_phase08_transaction_executor() 
 }
 
 #[test]
-fn semantic_external_io_requires_an_independent_execution_boundary() {
+fn semantic_external_io_only_rejects_transaction_owning_boundary() {
     let connection = fresh_storage();
-    for query in [
+    let mixed = prepare(
+        &connection,
         "CALL db.index.semantic.queryNodes('semantic','probe',{limit:1}) YIELD node CREATE (:Audit) RETURN node",
-        "CALL db.index.semantic.cache.clear() YIELD deletedEntries CREATE (:Audit) RETURN deletedEntries",
-        "UNWIND [1] AS value CALL (value) { CALL db.index.semantic.queryNodes('semantic','probe',{limit:1}) YIELD node RETURN node } IN TRANSACTIONS RETURN value",
-    ] {
-        let error = prepare(
-            &connection,
-            query,
-            BTreeMap::new(),
-            ExecutionOptions::default(),
-        )
-        .expect_err("Semantic external I/O must be rejected before execution");
-        assert_eq!(
-            error.kind,
-            lithograph_core::query::QueryErrorKind::TransactionBoundaryRequired,
-            "unexpected error for {query:?}: {error}",
-        );
-    }
+        BTreeMap::new(),
+        ExecutionOptions::default(),
+    );
+    assert!(
+        mixed
+            .as_ref()
+            .is_ok_and(|prepared| prepared.has_external_io()),
+        "Semantic external I/O plus ordinary graph mutation must be a valid execution shape: {mixed:?}",
+    );
+
+    let removed = prepare(
+        &connection,
+        "CALL db.index.semantic.cache.clear() YIELD deletedEntries RETURN deletedEntries",
+        BTreeMap::new(),
+        ExecutionOptions::default(),
+    )
+    .expect_err("Lithograph-owned Semantic cache procedure must no longer exist");
+    assert_eq!(
+        removed.kind,
+        lithograph_core::query::QueryErrorKind::Semantic
+    );
+
+    let query = "UNWIND [1] AS value CALL (value) { CALL db.index.semantic.queryNodes('semantic','probe',{limit:1}) YIELD node RETURN node } IN TRANSACTIONS RETURN value";
+    let error = prepare(
+        &connection,
+        query,
+        BTreeMap::new(),
+        ExecutionOptions::default(),
+    )
+    .expect_err("Semantic external I/O cannot share transaction-owning Cypher boundary");
+    assert_eq!(
+        error.kind,
+        lithograph_core::query::QueryErrorKind::TransactionBoundaryRequired,
+        "unexpected error for {query:?}: {error}",
+    );
 }

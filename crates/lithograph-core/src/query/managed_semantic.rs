@@ -1,14 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use lithograph_embedding_provider::{
     ProviderError, ProviderErrorKind, RegisteredEmbeddingProvider,
 };
-use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension as _, params};
+use rusqlite::{Connection, OptionalExtension as _, params};
 
 use crate::cypher::Value;
 use crate::storage::{
-    self, EmbeddingCacheEntry, HashId, IndexConfiguration, IndexDefinition, IndexTarget,
-    SchemaState, Snapshot, StandardIndexKind,
+    self, HashId, IndexConfiguration, IndexDefinition, IndexTarget, SchemaState, Snapshot,
+    StandardIndexKind,
 };
 
 use super::graph::ResolvedGraphView;
@@ -23,11 +24,13 @@ use super::{QueryError, QueryErrorKind, QueryResult};
 const QUERY_SOURCE_BATCH_ENTITIES: usize = 1_024;
 const QUERY_SOURCE_BATCH_TEXTS: usize = 64;
 const REBUILD_TEXT_BATCH: usize = 64;
-const REBUILD_PUBLISH_BATCH: usize = 256;
+const EXECUTION_WORK_ENCODING_VERSION: &[u8] = b"LITHOGRAPH_SEMANTIC_EXECUTION_WORK_V1";
+const EXECUTION_WORK_TABLE: &str = "_lithograph_semantic_execution_work";
+const REBUILD_STAGE_TABLE: &str = "_lithograph_semantic_rebuild_stage";
+static NEXT_EXECUTION_WORK: AtomicU64 = AtomicU64::new(1);
+static NEXT_REBUILD_STAGE: AtomicU64 = AtomicU64::new(1);
 type ManagedHnswEntries = Vec<(i64, Vec<f32>)>;
 type RebuildTextEntry = (Vec<u8>, String);
-type RebuildCacheResolution = (Vec<RebuildTextEntry>, u64);
-type CachedEmbeddingResolution = (BTreeMap<String, Vec<f32>>, Vec<String>);
 
 pub(crate) struct ManagedQueryInput<'a> {
     pub(crate) relationship_query: bool,
@@ -41,7 +44,6 @@ pub(crate) struct ManagedRebuildOutcome {
     pub(crate) commit: HashId,
     pub(crate) indexed_entities: u64,
     pub(crate) embedded_texts: u64,
-    pub(crate) cache_hits: u64,
 }
 
 struct ManagedRuntime<'connection> {
@@ -49,7 +51,142 @@ struct ManagedRuntime<'connection> {
     config_json: Vec<u8>,
     dimensions: usize,
     similarity: String,
-    space_hash: HashId,
+    execution_space: [u8; 32],
+    materialization_identity: [u8; 32],
+}
+
+struct ExecutionEmbeddingWork {
+    id: i64,
+}
+
+struct RebuildStage {
+    id: i64,
+}
+
+impl RebuildStage {
+    fn create(connection: &Connection) -> QueryResult<Self> {
+        initialize_execution_work(connection)?;
+        let id = NEXT_REBUILD_STAGE.fetch_add(1, Ordering::Relaxed);
+        let id = i64::try_from(id)
+            .map_err(|_| QueryError::internal("semantic rebuild stage id overflow"))?;
+        Ok(Self { id })
+    }
+
+    fn cleanup(&self, connection: &Connection) -> QueryResult<()> {
+        connection.execute(
+            &format!("DELETE FROM temp.{REBUILD_STAGE_TABLE} WHERE rebuild_id=?1"),
+            [self.id],
+        )?;
+        Ok(())
+    }
+}
+
+impl ExecutionEmbeddingWork {
+    fn create(connection: &Connection) -> QueryResult<Self> {
+        initialize_execution_work(connection)?;
+        let id = NEXT_EXECUTION_WORK.fetch_add(1, Ordering::Relaxed);
+        let id = i64::try_from(id)
+            .map_err(|_| QueryError::internal("semantic execution work id overflow"))?;
+        Ok(Self { id })
+    }
+
+    fn lookup(
+        &self,
+        connection: &Connection,
+        execution_space: &[u8; 32],
+        text: &str,
+        dimensions: usize,
+    ) -> QueryResult<Option<Vec<f32>>> {
+        let row = connection
+            .query_row(
+                &format!(
+                    "SELECT dimension,vector_blob FROM temp.{EXECUTION_WORK_TABLE} \
+                     WHERE execution_id=?1 AND execution_space=?2 AND text_value=?3"
+                ),
+                params![self.id, execution_space.as_slice(), text],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()?;
+        let Some((dimension, blob)) = row else {
+            return Ok(None);
+        };
+        if dimension != i64::try_from(dimensions).unwrap_or(i64::MAX)
+            || blob.len() != dimensions.saturating_mul(4)
+        {
+            return Err(QueryError::internal(
+                "semantic execution work materialization is corrupt",
+            ));
+        }
+        let mut vector = Vec::with_capacity(dimensions);
+        for chunk in blob.as_chunks::<4>().0 {
+            let value = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            if !value.is_finite() {
+                return Err(QueryError::internal(
+                    "semantic execution work contains a non-finite vector",
+                ));
+            }
+            vector.push(value);
+        }
+        Ok(Some(vector))
+    }
+
+    fn insert(
+        &self,
+        connection: &Connection,
+        execution_space: &[u8; 32],
+        text: &str,
+        vector: &[f32],
+    ) -> QueryResult<()> {
+        let dimension = i64::try_from(vector.len())
+            .map_err(|_| QueryError::internal("embedding dimension is too large"))?;
+        let blob = encode_stage_vector(vector);
+        connection.execute(
+            &format!(
+                "INSERT OR REPLACE INTO temp.{EXECUTION_WORK_TABLE}(\
+                 execution_id,execution_space,text_value,dimension,vector_blob) \
+                 VALUES(?1,?2,?3,?4,?5)"
+            ),
+            params![self.id, execution_space.as_slice(), text, dimension, blob],
+        )?;
+        Ok(())
+    }
+
+    fn drop_table(&self, connection: &Connection) -> QueryResult<()> {
+        connection.execute(
+            &format!("DELETE FROM temp.{EXECUTION_WORK_TABLE} WHERE execution_id=?1"),
+            [self.id],
+        )?;
+        Ok(())
+    }
+}
+
+pub(crate) fn initialize_execution_work(connection: &Connection) -> QueryResult<()> {
+    let existing: i64 = connection.query_row(
+        "SELECT count(*) FROM temp.sqlite_schema WHERE type='table' AND name IN (?1,?2)",
+        params![EXECUTION_WORK_TABLE, REBUILD_STAGE_TABLE],
+        |row| row.get(0),
+    )?;
+    if existing == 2 {
+        return Ok(());
+    }
+    connection.execute_batch(&format!(
+        "CREATE TEMP TABLE IF NOT EXISTS {EXECUTION_WORK_TABLE}(\
+         execution_id INTEGER NOT NULL,\
+         execution_space BLOB NOT NULL CHECK(length(execution_space)=32),\
+         text_value TEXT NOT NULL,\
+         dimension INTEGER NOT NULL CHECK(dimension BETWEEN 1 AND 4096),\
+         vector_blob BLOB NOT NULL,\
+         PRIMARY KEY(execution_id,execution_space,text_value)\
+         ) WITHOUT ROWID;\
+         CREATE TEMP TABLE IF NOT EXISTS {REBUILD_STAGE_TABLE}(\
+         rebuild_id INTEGER NOT NULL,\
+         text_hash BLOB NOT NULL CHECK(length(text_hash)=32),\
+         text_value TEXT NOT NULL,\
+         vector_blob BLOB NULL,\
+         PRIMARY KEY(rebuild_id,text_hash)\
+         ) WITHOUT ROWID"
+    ))?;
+    Ok(())
 }
 
 pub(crate) fn semantic_definition(
@@ -102,7 +239,6 @@ pub(crate) fn validate_transition(
         if previous.indexes.get(name) == Some(definition) {
             continue;
         }
-        storage::require_embedding_cache_format(connection)?;
         validate_definition(connection, definition)?;
     }
     Ok(())
@@ -116,6 +252,38 @@ pub(crate) fn query(
     input: &ManagedQueryInput<'_>,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<Vec<SemanticHit>> {
+    let work = ExecutionEmbeddingWork::create(connection)?;
+    let result = query_with_work(
+        connection,
+        snapshot,
+        graph_view,
+        index,
+        input,
+        is_interrupted,
+        &work,
+    );
+    let cleanup = work.drop_table(connection);
+    match result {
+        Ok(hits) => {
+            cleanup?;
+            Ok(hits)
+        }
+        Err(error) => {
+            let _ = cleanup;
+            Err(error)
+        }
+    }
+}
+
+fn query_with_work(
+    connection: &Connection,
+    snapshot: &Snapshot<'_>,
+    graph_view: &ResolvedGraphView,
+    index: &IndexDefinition,
+    input: &ManagedQueryInput<'_>,
+    is_interrupted: &dyn Fn() -> bool,
+    work: &ExecutionEmbeddingWork,
+) -> QueryResult<Vec<SemanticHit>> {
     validate_target(index, input.relationship_query)?;
     let runtime = resolve_runtime(connection, index)?;
     if input.limit == 0 {
@@ -125,8 +293,9 @@ pub(crate) fn query(
         .skip
         .checked_add(input.limit)
         .ok_or_else(|| QueryError::invalid_argument("semantic skip + limit is too large"))?;
-    let query_vector = resolve_query_embedding(connection, &runtime, input.query, is_interrupted)?;
-    let cache_key = managed_hnsw_cache_key(snapshot, index, runtime.space_hash)?;
+    let query_vector =
+        resolve_query_embedding(connection, &runtime, work, input.query, is_interrupted)?;
+    let cache_key = managed_hnsw_cache_key(snapshot, index, runtime.materialization_identity)?;
     let membership = semantic_membership(connection, index)?;
     let property = source_property(index)?.to_owned();
     if let Some(mut cached) = query_managed_hnsw_cache(
@@ -163,6 +332,7 @@ pub(crate) fn query(
         graph_view,
         index,
         &runtime,
+        work,
         &query_vector,
         needed,
         collect_hnsw,
@@ -189,10 +359,10 @@ pub(crate) fn query(
 fn managed_hnsw_cache_key(
     snapshot: &Snapshot<'_>,
     index: &IndexDefinition,
-    space_hash: HashId,
+    materialization_identity: [u8; 32],
 ) -> QueryResult<String> {
     let base = semantic_cache_digest(snapshot, index, b"LITHOGRAPH_MANAGED_SEMANTIC_HNSW_V1")?;
-    Ok(format!("{base}:{}", space_hash.to_hex()))
+    Ok(format!("{base}:{}", hex_bytes(&materialization_identity)))
 }
 
 fn resolve_cached_entity(
@@ -235,12 +405,19 @@ fn resolve_cached_entity(
 fn resolve_query_embedding(
     connection: &Connection,
     runtime: &ManagedRuntime<'_>,
+    work: &ExecutionEmbeddingWork,
     query: &str,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<Vec<f32>> {
-    resolve_embeddings(connection, runtime, &[query.to_owned()], is_interrupted)?
-        .remove(query)
-        .ok_or_else(|| QueryError::internal("semantic query embedding is missing"))
+    resolve_embeddings(
+        connection,
+        runtime,
+        work,
+        &[query.to_owned()],
+        is_interrupted,
+    )?
+    .remove(query)
+    .ok_or_else(|| QueryError::internal("semantic query embedding is missing"))
 }
 
 #[allow(
@@ -253,16 +430,14 @@ fn collect_query_hits(
     graph_view: &ResolvedGraphView,
     index: &IndexDefinition,
     runtime: &ManagedRuntime<'_>,
+    work: &ExecutionEmbeddingWork,
     query_vector: &[f32],
     needed: usize,
     collect_hnsw: bool,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<(Vec<SemanticHit>, ManagedHnswEntries)> {
     let property = source_property(index)?.to_owned();
-    let mut pending = Vec::<(SemanticEntity, String)>::new();
-    let mut pending_texts = BTreeSet::<String>::new();
-    let mut hits = Vec::<SemanticHit>::new();
-    let mut hnsw_entries = ManagedHnswEntries::new();
+    let mut state = QueryHitAccumulator::new(needed, collect_hnsw);
     visit_indexed_entities(
         connection,
         snapshot,
@@ -273,40 +448,18 @@ fn collect_query_hits(
             let Value::String(text) = semantic_property(snapshot, entity, &property)? else {
                 return Ok(());
             };
-            pending_texts.insert(text.clone());
-            pending.push((entity, text));
-            if pending.len() >= QUERY_SOURCE_BATCH_ENTITIES
-                || pending_texts.len() >= QUERY_SOURCE_BATCH_TEXTS
+            state.pending_texts.insert(text.clone());
+            state.pending.push((entity, text));
+            if state.pending.len() >= QUERY_SOURCE_BATCH_ENTITIES
+                || state.pending_texts.len() >= QUERY_SOURCE_BATCH_TEXTS
             {
-                flush_query_source_batch(
-                    connection,
-                    runtime,
-                    query_vector,
-                    &mut pending,
-                    &mut pending_texts,
-                    &mut hits,
-                    &mut hnsw_entries,
-                    needed,
-                    collect_hnsw,
-                    is_interrupted,
-                )?;
+                state.flush(connection, runtime, work, query_vector, is_interrupted)?;
             }
             Ok(())
         },
     )?;
-    flush_query_source_batch(
-        connection,
-        runtime,
-        query_vector,
-        &mut pending,
-        &mut pending_texts,
-        &mut hits,
-        &mut hnsw_entries,
-        needed,
-        collect_hnsw,
-        is_interrupted,
-    )?;
-    Ok((hits, hnsw_entries))
+    state.flush(connection, runtime, work, query_vector, is_interrupted)?;
+    Ok((state.hits, state.hnsw_entries))
 }
 
 pub(crate) fn rebuild(
@@ -315,12 +468,11 @@ pub(crate) fn rebuild(
     version: &str,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<ManagedRebuildOutcome> {
-    storage::require_embedding_cache_format(connection)?;
     let (commit, index) = resolve_rebuild_target(connection, index_name, version)?;
     let runtime = resolve_runtime(connection, &index)?;
     let snapshot = Snapshot::resolve(connection, commit)?;
 
-    create_rebuild_stage(connection)?;
+    let stage = RebuildStage::create(connection)?;
     let result = rebuild_staged(
         connection,
         index_name,
@@ -328,9 +480,10 @@ pub(crate) fn rebuild(
         &index,
         &snapshot,
         &runtime,
+        &stage,
         is_interrupted,
     );
-    finish_rebuild_stage(connection, result)
+    finish_rebuild_stage(connection, &stage, result)
 }
 
 fn resolve_rebuild_target(
@@ -364,17 +517,20 @@ fn rebuild_staged(
     index: &IndexDefinition,
     snapshot: &Snapshot<'_>,
     runtime: &ManagedRuntime<'_>,
+    stage: &RebuildStage,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<ManagedRebuildOutcome> {
-    let indexed_entities = stage_rebuild_sources(connection, snapshot, index, is_interrupted)?;
-    let (embedded_texts, cache_hits) = fill_rebuild_stage(connection, runtime, is_interrupted)?;
+    let indexed_entities =
+        stage_rebuild_sources(connection, snapshot, index, stage, is_interrupted)?;
+    let embedded_texts = fill_rebuild_stage(connection, runtime, stage, is_interrupted)?;
     validate_rebuild_definition(connection, commit, index_name, index)?;
-    let cache_key = managed_hnsw_cache_key(snapshot, index, runtime.space_hash)?;
+    let cache_key = managed_hnsw_cache_key(snapshot, index, runtime.materialization_identity)?;
     let hnsw_entries = collect_rebuild_hnsw_entries(
         connection,
         snapshot,
         index,
         runtime.dimensions,
+        stage,
         is_interrupted,
     )?;
     let built_hnsw = build_managed_hnsw_cache(
@@ -384,23 +540,16 @@ fn rebuild_staged(
         hnsw_entries,
         is_interrupted,
     )?;
-    let publish = publish_rebuild_stage(
-        connection,
-        runtime,
-        index,
-        commit,
-        index_name,
-        is_interrupted,
-    );
-    if publish.is_err() && built_hnsw {
-        let _ = invalidate_managed_hnsw_cache(connection, &cache_key);
+    if let Err(error) = validate_rebuild_definition(connection, commit, index_name, index) {
+        if built_hnsw {
+            let _ = invalidate_managed_hnsw_cache(connection, &cache_key);
+        }
+        return Err(error);
     }
-    publish?;
     Ok(ManagedRebuildOutcome {
         commit,
         indexed_entities,
         embedded_texts,
-        cache_hits,
     })
 }
 
@@ -409,6 +558,7 @@ fn collect_rebuild_hnsw_entries(
     snapshot: &Snapshot<'_>,
     index: &IndexDefinition,
     dimensions: usize,
+    stage: &RebuildStage,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<Vec<(i64, Vec<f32>)>> {
     let mut entries = Vec::new();
@@ -420,7 +570,7 @@ fn collect_rebuild_hnsw_entries(
         |entity, text| {
             entries.push((
                 entity_id(entity),
-                rebuild_stage_vector(connection, text, dimensions)?,
+                rebuild_stage_vector(connection, stage, text, dimensions)?,
             ));
             Ok(())
         },
@@ -430,14 +580,18 @@ fn collect_rebuild_hnsw_entries(
 
 fn rebuild_stage_vector(
     connection: &Connection,
+    stage: &RebuildStage,
     text: &str,
     dimensions: usize,
 ) -> QueryResult<Vec<f32>> {
-    let hash = storage::embedding_text_hash(text);
+    let hash = *blake3::hash(text.as_bytes()).as_bytes();
     let (stored_text, blob) = connection
         .query_row(
-            "SELECT text_value,vector_blob FROM temp._lithograph_semantic_rebuild_stage WHERE text_hash=?1",
-            [hash.as_bytes().as_slice()],
+            &format!(
+                "SELECT text_value,vector_blob FROM temp.{REBUILD_STAGE_TABLE} \
+                 WHERE rebuild_id=?1 AND text_hash=?2"
+            ),
+            params![stage.id, hash.as_slice()],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
         )
         .optional()?
@@ -455,12 +609,13 @@ fn stage_rebuild_sources(
     connection: &Connection,
     snapshot: &Snapshot<'_>,
     index: &IndexDefinition,
+    stage: &RebuildStage,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<u64> {
     let mut indexed_entities = 0_u64;
     visit_rebuild_sources(connection, snapshot, index, is_interrupted, |_, text| {
         indexed_entities = indexed_entities.saturating_add(1);
-        stage_rebuild_text(connection, text)
+        stage_rebuild_text(connection, stage, text)
     })?;
     Ok(indexed_entities)
 }
@@ -509,10 +664,10 @@ fn validate_rebuild_definition(
 
 fn finish_rebuild_stage(
     connection: &Connection,
+    stage: &RebuildStage,
     result: QueryResult<ManagedRebuildOutcome>,
 ) -> QueryResult<ManagedRebuildOutcome> {
-    let cleanup =
-        connection.execute_batch("DROP TABLE IF EXISTS temp._lithograph_semantic_rebuild_stage");
+    let cleanup = stage.cleanup(connection);
     match result {
         Ok(outcome) => {
             cleanup?;
@@ -529,7 +684,6 @@ fn resolve_runtime<'connection>(
     connection: &'connection Connection,
     index: &IndexDefinition,
 ) -> QueryResult<ManagedRuntime<'connection>> {
-    storage::require_embedding_cache_format(connection)?;
     let Some((provider_name, provider_config, dimensions, similarity)) = semantic_definition(index)
     else {
         return Err(QueryError::internal(
@@ -546,92 +700,60 @@ fn resolve_runtime<'connection>(
     provider
         .validate(&config_json, dimensions)
         .map_err(map_provider_error)?;
-    let space_hash = storage::embedding_cache_space_hash(
-        provider_name,
-        provider_config,
-        dimensions as u64,
-        provider.semantic_identity(),
-    )?;
+    let mut execution_hasher = blake3::Hasher::new();
+    execution_hasher.update(EXECUTION_WORK_ENCODING_VERSION);
+    execution_hasher.update(&(provider_name.len() as u64).to_le_bytes());
+    execution_hasher.update(provider_name.as_bytes());
+    execution_hasher.update(&(config_json.len() as u64).to_le_bytes());
+    execution_hasher.update(&config_json);
+    execution_hasher.update(&(dimensions as u64).to_le_bytes());
+    execution_hasher.update(b"FLOAT32");
+    execution_hasher.update(&(provider.semantic_identity().len() as u64).to_le_bytes());
+    execution_hasher.update(provider.semantic_identity().as_bytes());
+    let execution_space = *execution_hasher.finalize().as_bytes();
+
+    let mut materialization_hasher = blake3::Hasher::new();
+    materialization_hasher.update(b"LITHOGRAPH_MANAGED_SEMANTIC_RUNTIME_V1");
+    materialization_hasher.update(provider.semantic_identity().as_bytes());
+    let materialization_identity = *materialization_hasher.finalize().as_bytes();
     Ok(ManagedRuntime {
         provider,
         config_json,
         dimensions,
         similarity: similarity.to_owned(),
-        space_hash,
+        execution_space,
+        materialization_identity,
     })
 }
 
 fn resolve_embeddings(
     connection: &Connection,
     runtime: &ManagedRuntime<'_>,
+    work: &ExecutionEmbeddingWork,
     texts: &[String],
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<BTreeMap<String, Vec<f32>>> {
-    let (mut resolved, misses) = resolve_cached_embeddings(
-        connection,
-        runtime,
-        texts.iter().cloned().collect(),
-        is_interrupted,
-    )?;
-    if misses.is_empty() {
-        return Ok(resolved);
-    }
-    let generated = generate_embeddings(runtime, misses, is_interrupted)?;
-    publish_query_embeddings(connection, runtime, &generated)?;
-    for entry in generated {
-        storage::embedding_query_cache_put(
-            connection,
-            runtime.space_hash,
-            &entry.text,
-            &entry.vector,
-        )?;
-        resolved.insert(entry.text, entry.vector);
-    }
-    Ok(resolved)
-}
-
-fn resolve_cached_embeddings(
-    connection: &Connection,
-    runtime: &ManagedRuntime<'_>,
-    unique: BTreeSet<String>,
-    is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<CachedEmbeddingResolution> {
     let mut resolved = BTreeMap::new();
     let mut misses = Vec::new();
-    for text in unique {
+    for text in texts.iter().cloned().collect::<BTreeSet<_>>() {
         if is_interrupted() {
             return Err(QueryError::interrupted());
         }
-        if let Some(vector) = storage::embedding_cache_lookup(
+        if let Some(vector) = work.lookup(
             connection,
-            runtime.space_hash,
+            &runtime.execution_space,
             &text,
             runtime.dimensions,
         )? {
             validate_runtime_embedding(runtime, &vector)?;
             resolved.insert(text, vector);
-            continue;
+        } else {
+            misses.push(text);
         }
-        if let Some(vector) = storage::embedding_query_cache_lookup(
-            connection,
-            runtime.space_hash,
-            &text,
-            runtime.dimensions,
-        )? {
-            validate_runtime_embedding(runtime, &vector)?;
-            resolved.insert(text, vector);
-            continue;
-        }
-        misses.push(text);
     }
-    Ok((resolved, misses))
-}
-
-fn generate_embeddings(
-    runtime: &ManagedRuntime<'_>,
-    misses: Vec<String>,
-    is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<Vec<EmbeddingCacheEntry>> {
+    if misses.is_empty() {
+        return Ok(resolved);
+    }
     let refs = misses.iter().map(String::as_str).collect::<Vec<_>>();
     let values = runtime
         .provider
@@ -642,64 +764,25 @@ fn generate_embeddings(
             is_interrupted,
         )
         .map_err(map_provider_error)?;
-    let mut generated = Vec::with_capacity(misses.len());
     for (text, vector) in misses
         .into_iter()
         .zip(values.chunks_exact(runtime.dimensions))
     {
-        let vector = vector.to_vec();
-        validate_runtime_embedding(runtime, &vector)?;
-        generated.push(EmbeddingCacheEntry { text, vector });
+        validate_runtime_embedding(runtime, vector)?;
+        work.insert(connection, &runtime.execution_space, &text, vector)?;
+        resolved.insert(text, vector.to_vec());
     }
-    Ok(generated)
+    Ok(resolved)
 }
 
-fn publish_query_embeddings(
-    connection: &Connection,
-    runtime: &ManagedRuntime<'_>,
-    entries: &[EmbeddingCacheEntry],
-) -> QueryResult<()> {
-    if entries.is_empty() || connection.is_readonly("main")? {
-        return Ok(());
+fn hex_bytes(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
-    let publish = storage::embedding_cache_publish(
-        connection,
-        runtime.space_hash,
-        runtime.dimensions,
-        entries,
-    );
-    match publish {
-        Ok(()) => Ok(()),
-        Err(error) if embedding_cache_publish_needs_sibling(&error) => {
-            publish_query_embeddings_on_sibling(connection, runtime, entries, error)
-        }
-        Err(error) => Err(error.into()),
-    }
-}
-
-fn embedding_cache_publish_needs_sibling(error: &storage::StorageError) -> bool {
-    matches!(
-        error,
-        storage::StorageError::Sqlite(sqlite)
-            if sqlite.sqlite_error_code() == Some(ErrorCode::DatabaseBusy)
-    )
-}
-
-fn publish_query_embeddings_on_sibling(
-    connection: &Connection,
-    runtime: &ManagedRuntime<'_>,
-    entries: &[EmbeddingCacheEntry],
-    original_error: storage::StorageError,
-) -> QueryResult<()> {
-    let Some(path) = connection.path().filter(|path| !path.is_empty()) else {
-        return Err(original_error.into());
-    };
-    let sibling = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
-    storage::embedding_cache_publish(&sibling, runtime.space_hash, runtime.dimensions, entries)?;
-    Ok(())
+    out
 }
 
 fn validate_runtime_embedding(runtime: &ManagedRuntime<'_>, vector: &[f32]) -> QueryResult<()> {
@@ -711,46 +794,60 @@ fn validate_runtime_embedding(runtime: &ManagedRuntime<'_>, vector: &[f32]) -> Q
     Ok(())
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the bounded semantic source-batch flush keeps query state explicit"
-)]
-fn flush_query_source_batch(
-    connection: &Connection,
-    runtime: &ManagedRuntime<'_>,
-    query_vector: &[f32],
-    pending: &mut Vec<(SemanticEntity, String)>,
-    pending_texts: &mut BTreeSet<String>,
-    hits: &mut Vec<SemanticHit>,
-    hnsw_entries: &mut ManagedHnswEntries,
+struct QueryHitAccumulator {
+    pending: Vec<(SemanticEntity, String)>,
+    pending_texts: BTreeSet<String>,
+    hits: Vec<SemanticHit>,
+    hnsw_entries: ManagedHnswEntries,
     needed: usize,
     collect_hnsw: bool,
-    is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<()> {
-    if pending.is_empty() {
-        return Ok(());
-    }
-    let texts = pending_texts.iter().cloned().collect::<Vec<_>>();
-    let vectors = resolve_embeddings(connection, runtime, &texts, is_interrupted)?;
-    for (entity, text) in pending.drain(..) {
-        let vector = vectors.get(&text).ok_or_else(|| {
-            QueryError::internal("semantic source embedding is missing after batch resolution")
-        })?;
-        hits.push(SemanticHit {
-            entity,
-            score: vector_similarity_numbers(vector, query_vector, &runtime.similarity)?,
-        });
-        if collect_hnsw {
-            hnsw_entries.push((entity_id(entity), vector.clone()));
+}
+
+impl QueryHitAccumulator {
+    fn new(needed: usize, collect_hnsw: bool) -> Self {
+        Self {
+            pending: Vec::new(),
+            pending_texts: BTreeSet::new(),
+            hits: Vec::new(),
+            hnsw_entries: ManagedHnswEntries::new(),
+            needed,
+            collect_hnsw,
         }
     }
-    pending_texts.clear();
-    let trim_threshold = needed.saturating_mul(2).max(4_096);
-    if hits.len() > trim_threshold {
-        sort_semantic_hits(hits);
-        hits.truncate(needed);
+
+    fn flush(
+        &mut self,
+        connection: &Connection,
+        runtime: &ManagedRuntime<'_>,
+        work: &ExecutionEmbeddingWork,
+        query_vector: &[f32],
+        is_interrupted: &dyn Fn() -> bool,
+    ) -> QueryResult<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let texts = self.pending_texts.iter().cloned().collect::<Vec<_>>();
+        let vectors = resolve_embeddings(connection, runtime, work, &texts, is_interrupted)?;
+        for (entity, text) in self.pending.drain(..) {
+            let vector = vectors.get(&text).ok_or_else(|| {
+                QueryError::internal("semantic source embedding is missing after batch resolution")
+            })?;
+            self.hits.push(SemanticHit {
+                entity,
+                score: vector_similarity_numbers(vector, query_vector, &runtime.similarity)?,
+            });
+            if self.collect_hnsw {
+                self.hnsw_entries.push((entity_id(entity), vector.clone()));
+            }
+        }
+        self.pending_texts.clear();
+        let trim_threshold = self.needed.saturating_mul(2).max(4_096);
+        if self.hits.len() > trim_threshold {
+            sort_semantic_hits(&mut self.hits);
+            self.hits.truncate(self.needed);
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 fn validate_target(index: &IndexDefinition, relationship_query: bool) -> QueryResult<()> {
@@ -779,19 +876,19 @@ fn source_property(index: &IndexDefinition) -> QueryResult<&str> {
         .ok_or_else(|| QueryError::internal("Semantic Index is missing its source Property"))
 }
 
-fn create_rebuild_stage(connection: &Connection) -> QueryResult<()> {
-    connection.execute_batch(
-        "DROP TABLE IF EXISTS temp._lithograph_semantic_rebuild_stage;         CREATE TEMP TABLE _lithograph_semantic_rebuild_stage(             text_hash BLOB NOT NULL CHECK(length(text_hash)=32),             text_value TEXT NOT NULL,             vector_blob BLOB NULL,             PRIMARY KEY(text_hash)         ) WITHOUT ROWID;",
-    )?;
-    Ok(())
-}
-
-fn stage_rebuild_text(connection: &Connection, text: &str) -> QueryResult<()> {
-    let hash = storage::embedding_text_hash(text);
+fn stage_rebuild_text(
+    connection: &Connection,
+    stage: &RebuildStage,
+    text: &str,
+) -> QueryResult<()> {
+    let hash = *blake3::hash(text.as_bytes()).as_bytes();
     let existing = connection
         .query_row(
-            "SELECT text_value FROM temp._lithograph_semantic_rebuild_stage WHERE text_hash=?1",
-            [hash.as_bytes().as_slice()],
+            &format!(
+                "SELECT text_value FROM temp.{REBUILD_STAGE_TABLE} \
+                 WHERE rebuild_id=?1 AND text_hash=?2"
+            ),
+            params![stage.id, hash.as_slice()],
             |row| row.get::<_, String>(0),
         )
         .optional()?;
@@ -805,8 +902,11 @@ fn stage_rebuild_text(connection: &Connection, text: &str) -> QueryResult<()> {
         return Ok(());
     }
     connection.execute(
-        "INSERT INTO temp._lithograph_semantic_rebuild_stage(text_hash,text_value,vector_blob)          VALUES(?1,?2,NULL)",
-        params![hash.as_bytes().as_slice(), text],
+        &format!(
+            "INSERT INTO temp.{REBUILD_STAGE_TABLE}(rebuild_id,text_hash,text_value,vector_blob) \
+             VALUES(?1,?2,?3,NULL)"
+        ),
+        params![stage.id, hash.as_slice(), text],
     )?;
     Ok(())
 }
@@ -814,63 +914,32 @@ fn stage_rebuild_text(connection: &Connection, text: &str) -> QueryResult<()> {
 fn fill_rebuild_stage(
     connection: &Connection,
     runtime: &ManagedRuntime<'_>,
+    stage: &RebuildStage,
     is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<(u64, u64)> {
+) -> QueryResult<u64> {
     let mut cursor: Option<Vec<u8>> = None;
     let mut embedded_texts = 0_u64;
-    let mut cache_hits = 0_u64;
     loop {
-        let batch = read_rebuild_text_batch(connection, cursor.as_deref())?;
+        let batch = read_rebuild_text_batch(connection, stage, cursor.as_deref())?;
         if batch.is_empty() {
             break;
         }
         cursor = batch.last().map(|(hash, _)| hash.clone());
-        let (misses, batch_hits) =
-            resolve_rebuild_cache_hits(connection, runtime, &batch, is_interrupted)?;
-        cache_hits = cache_hits.saturating_add(batch_hits);
         embedded_texts = embedded_texts.saturating_add(embed_rebuild_misses(
             connection,
             runtime,
-            misses,
+            stage,
+            batch,
             is_interrupted,
         )?);
     }
-    Ok((embedded_texts, cache_hits))
-}
-
-fn resolve_rebuild_cache_hits(
-    connection: &Connection,
-    runtime: &ManagedRuntime<'_>,
-    batch: &[RebuildTextEntry],
-    is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<RebuildCacheResolution> {
-    let mut misses = Vec::new();
-    let mut cache_hits = 0_u64;
-    for (hash, text) in batch {
-        if is_interrupted() {
-            return Err(QueryError::interrupted());
-        }
-        let Some(vector) = storage::embedding_cache_lookup(
-            connection,
-            runtime.space_hash,
-            text,
-            runtime.dimensions,
-        )?
-        else {
-            misses.push((hash.clone(), text.clone()));
-            continue;
-        };
-        validate_runtime_embedding(runtime, &vector)?;
-        stage_rebuild_vector(connection, hash, &vector)?;
-        storage::embedding_query_cache_put(connection, runtime.space_hash, text, &vector)?;
-        cache_hits = cache_hits.saturating_add(1);
-    }
-    Ok((misses, cache_hits))
+    Ok(embedded_texts)
 }
 
 fn embed_rebuild_misses(
     connection: &Connection,
     runtime: &ManagedRuntime<'_>,
+    stage: &RebuildStage,
     misses: Vec<RebuildTextEntry>,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<u64> {
@@ -891,13 +960,12 @@ fn embed_rebuild_misses(
         )
         .map_err(map_provider_error)?;
     let mut embedded = 0_u64;
-    for ((hash, text), vector) in misses
+    for ((hash, _text), vector) in misses
         .into_iter()
         .zip(values.chunks_exact(runtime.dimensions))
     {
         validate_runtime_embedding(runtime, vector)?;
-        stage_rebuild_vector(connection, &hash, vector)?;
-        storage::embedding_query_cache_put(connection, runtime.space_hash, &text, vector)?;
+        stage_rebuild_vector(connection, stage, &hash, vector)?;
         embedded = embedded.saturating_add(1);
     }
     Ok(embedded)
@@ -905,121 +973,49 @@ fn embed_rebuild_misses(
 
 fn read_rebuild_text_batch(
     connection: &Connection,
+    stage: &RebuildStage,
     after: Option<&[u8]>,
 ) -> QueryResult<Vec<(Vec<u8>, String)>> {
-    let mut statement = connection.prepare(
-        "SELECT text_hash,text_value FROM temp._lithograph_semantic_rebuild_stage          WHERE vector_blob IS NULL AND (?1 IS NULL OR text_hash > ?1)          ORDER BY text_hash LIMIT ?2",
-    )?;
+    let mut statement = connection.prepare(&format!(
+        "SELECT text_hash,text_value FROM temp.{REBUILD_STAGE_TABLE} \
+             WHERE rebuild_id=?1 AND vector_blob IS NULL AND (?2 IS NULL OR text_hash > ?2) \
+             ORDER BY text_hash LIMIT ?3"
+    ))?;
     let rows = statement.query_map(
-        params![after, i64::try_from(REBUILD_TEXT_BATCH).unwrap_or(i64::MAX)],
+        params![
+            stage.id,
+            after,
+            i64::try_from(REBUILD_TEXT_BATCH).unwrap_or(i64::MAX)
+        ],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(QueryError::from)
 }
 
-fn stage_rebuild_vector(connection: &Connection, hash: &[u8], vector: &[f32]) -> QueryResult<()> {
+fn stage_rebuild_vector(
+    connection: &Connection,
+    stage: &RebuildStage,
+    hash: &[u8],
+    vector: &[f32],
+) -> QueryResult<()> {
     let blob = encode_stage_vector(vector);
     connection.execute(
-        "UPDATE temp._lithograph_semantic_rebuild_stage SET vector_blob=?2 WHERE text_hash=?1",
-        params![hash, blob],
+        &format!(
+            "UPDATE temp.{REBUILD_STAGE_TABLE} SET vector_blob=?3 \
+             WHERE rebuild_id=?1 AND text_hash=?2"
+        ),
+        params![stage.id, hash, blob],
     )?;
     Ok(())
 }
 
-fn publish_rebuild_stage(
-    connection: &Connection,
-    runtime: &ManagedRuntime<'_>,
-    expected_index: &IndexDefinition,
-    commit: HashId,
-    index_name: &str,
-    is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<()> {
-    if connection.is_readonly("main")? {
-        // A read-only database cannot publish the optional persistent cache,
-        // but rebuild still has a complete TEMP embedding/HNSW result for this
-        // connection. Revalidate the pinned definition before reporting
-        // success just as the writable publish path does.
-        return validate_rebuild_definition(connection, commit, index_name, expected_index);
-    }
-    connection.execute_batch("SAVEPOINT lithograph_semantic_rebuild_publish")?;
-    let result = (|| {
-        let current = SchemaState::load(connection, commit)?;
-        if current.indexes.get(index_name) != Some(expected_index) {
-            return Err(QueryError::new(
-                QueryErrorKind::Storage,
-                "Semantic Index definition changed before cache publish",
-            ));
-        }
-        let mut cursor: Option<Vec<u8>> = None;
-        loop {
-            if is_interrupted() {
-                return Err(QueryError::interrupted());
-            }
-            let batch =
-                read_rebuild_publish_batch(connection, cursor.as_deref(), runtime.dimensions)?;
-            if batch.is_empty() {
-                break;
-            }
-            cursor = batch.last().map(|(hash, _)| hash.clone());
-            let entries = batch
-                .into_iter()
-                .map(|(_, entry)| entry)
-                .collect::<Vec<_>>();
-            storage::embedding_cache_publish(
-                connection,
-                runtime.space_hash,
-                runtime.dimensions,
-                &entries,
-            )?;
-        }
-        Ok(())
-    })();
-    match result {
-        Ok(()) => {
-            connection.execute_batch("RELEASE lithograph_semantic_rebuild_publish")?;
-            Ok(())
-        }
-        Err(error) => {
-            let _ = connection.execute_batch(
-                "ROLLBACK TO lithograph_semantic_rebuild_publish;                  RELEASE lithograph_semantic_rebuild_publish",
-            );
-            Err(error)
-        }
-    }
-}
-
-fn read_rebuild_publish_batch(
-    connection: &Connection,
-    after: Option<&[u8]>,
-    dimensions: usize,
-) -> QueryResult<Vec<(Vec<u8>, EmbeddingCacheEntry)>> {
-    let mut statement = connection.prepare(
-        "SELECT text_hash,text_value,vector_blob FROM temp._lithograph_semantic_rebuild_stage          WHERE vector_blob IS NOT NULL AND (?1 IS NULL OR text_hash > ?1)          ORDER BY text_hash LIMIT ?2",
-    )?;
-    let rows = statement.query_map(
-        params![
-            after,
-            i64::try_from(REBUILD_PUBLISH_BATCH).unwrap_or(i64::MAX)
-        ],
-        |row| {
-            Ok((
-                row.get::<_, Vec<u8>>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Vec<u8>>(2)?,
-            ))
-        },
-    )?;
-    rows.map(|row| {
-        let (hash, text, blob) = row?;
-        let vector = decode_stage_vector(&blob, dimensions)?;
-        Ok((hash, EmbeddingCacheEntry { text, vector }))
-    })
-    .collect()
-}
-
 fn encode_stage_vector(vector: &[f32]) -> Vec<u8> {
-    storage::encode_embedding_vector(vector)
+    let mut blob = Vec::with_capacity(vector.len().saturating_mul(4));
+    for value in vector {
+        blob.extend_from_slice(&value.to_le_bytes());
+    }
+    blob
 }
 
 fn decode_stage_vector(blob: &[u8], dimensions: usize) -> QueryResult<Vec<f32>> {

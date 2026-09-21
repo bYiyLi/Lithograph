@@ -78,12 +78,13 @@ pub(super) fn commit_count(fixture: &FileDatabaseFixture) -> Result<u64, Box<dyn
     Ok(prefixed_value(&output, "commits=")?.parse()?)
 }
 
-pub(super) fn require_persistent_cache_empty(
+pub(super) fn require_core_cache_absent(
     fixture: &FileDatabaseFixture,
 ) -> Result<(), Box<dyn Error>> {
-    let output = fixture
-        .execute_script("SELECT 'cache=' || count(*) FROM main._lithograph_embedding_cache;")?;
-    require_line(&output, "cache=0")
+    let output = fixture.execute_script(
+        "SELECT 'core-cache-table=' || count(*) FROM main.sqlite_schema WHERE type='table' AND name='_lithograph_embedding_cache';",
+    )?;
+    require_line(&output, "core-cache-table=0")
 }
 
 pub(super) fn execute_script_allowing_failure(

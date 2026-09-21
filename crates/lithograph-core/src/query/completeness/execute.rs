@@ -315,28 +315,7 @@ pub(crate) fn execute_version_program(
     Ok((rows, summary_commit.unwrap_or(commit)))
 }
 
-pub(super) fn execute_read_snapshot(
-    connection: &Connection,
-    program: &PreparedProgram,
-    snapshot: Snapshot<'_>,
-    graph_view: &ResolvedGraphView,
-    params: &BTreeMap<String, Value>,
-    metrics: &mut QueryMetrics,
-    is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<Vec<Vec<Value>>> {
-    execute_read_snapshot_with_version_summary(
-        connection,
-        program,
-        snapshot,
-        graph_view,
-        params,
-        metrics,
-        is_interrupted,
-    )
-    .map(|(rows, _)| rows)
-}
-
-fn execute_read_snapshot_with_version_summary(
+pub(super) fn execute_read_snapshot_with_version_summary(
     connection: &Connection,
     program: &PreparedProgram,
     snapshot: Snapshot<'_>,

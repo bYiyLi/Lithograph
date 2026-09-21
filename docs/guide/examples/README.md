@@ -1,13 +1,13 @@
-# v0.1.0 可执行示例与验证记录
+# 当前可执行示例与历史验证记录
 
-这些代码面向第三方应用开发者，不是 SDK，也不要求阅读引擎实现。使用可信、校验过的 v0.1.0 发布扩展，以及支持 extension loading 的 SQLite 3.45.0+ 运行时。
+这些代码面向第三方应用开发者，不是 SDK，也不要求阅读引擎实现。当前 quickstart / transaction 示例按 Phase 15 SQL-only 开发基线维护；下方“历史验证”部分单独保留 v0.1.0 发布制品事实。
 
 | 文件 | 用途与安全范围 |
 | --- | --- |
 | [python_quickstart.py](python_quickstart.py) | 标准库 Python、内存库；SQL 参数绑定、图写入、stream、Tag、history、integrity |
 | [version_workflow.py](version_workflow.py) | 独立临时目录；持久 Session/重连/冲突/CAS、Diff/Patch、Data、历史改写、GC、备份恢复 |
-| [sql_transaction.py](sql_transaction.py) | 标准库 Python；通过四个 SQL scalar 完成多次写入单 Commit 与 abort，不绑定 C API |
-| [native_transaction.c](native_transaction.c) | POSIX C，内存库；两次写入一个 Commit、events/ownership、取消与 fail-closed abort |
+| [sql_transaction.py](sql_transaction.py) | 标准库 Python；`tx_begin -> lithograph()* -> tx_commit/abort`，不绑定 C API |
+| [native_transaction.c](native_transaction.c) | C 语言 SQLite host；通过标准 SQLite API 加载 extension 并执行同一 SQL-only surface |
 | [verify.py](verify.py) | 提取指南 SQL，在独立空库执行；额外检查失败路径、类型保真和 CSV |
 | [generate_reference.py](generate_reference.py) | 从已验证发布制品的 SHOW 导出重建 function/procedure reference tables |
 
@@ -23,7 +23,7 @@ python3 -B docs/guide/examples/version_workflow.py /absolute/path/lithograph.dyl
 python3 -B docs/guide/examples/sql_transaction.py /absolute/path/lithograph.dylib
 ```
 
-程序全部断言成功后输出 PASS，失败返回非零。C 编译与运行见 [Integration](../integration.md)。默认 Native 示例会故意取消一次 query，输出 `RESOURCE_ERROR` / `SQLITE_INTERRUPT` 是该负向验证的预期诊断；最终仍须有 PASS 和退出码 0。
+程序全部断言成功后输出 PASS，失败返回非零。C 编译与运行见 [Integration](../integration.md)；当前 C 示例不调用 Lithograph application query ABI。
 
 ## 文档 SQL 回归
 
@@ -34,7 +34,7 @@ python3 -B docs/guide/examples/verify.py /absolute/path/lithograph.dylib \
 
 `--sqlite3` 可省略，省略时只使用 Python 绑定的 SQLite。指定时必须使用实际可执行 CLI 路径；脚本在临时工作目录运行 CLI，因此不依赖当前目录的文件。每篇指南的 SQL 块按出现顺序执行，但不同指南的库彼此隔离。
 
-该检查不自动执行 shell 安装指令、含示意变量的语法参考、以及明确用于复现错误的 Known Issues 块。安装制品校验、Native C 和 Known Issues probes 是独立验证项，不能把“有一个脚本 PASS”写成整套手册全部已验证。
+该检查不自动执行 shell 安装指令、含示意变量的语法参考、以及明确用于复现旧版本错误的 Known Issues 块。安装制品校验、C host 和历史 Known Issues probes 是独立验证项，不能把“有一个脚本 PASS”写成整套手册全部已验证。
 
 ## Reference inventory 再生成
 
@@ -46,7 +46,7 @@ python3 -B docs/guide/examples/generate_reference.py target/developer-docs-v010
 
 导出先检查 `extension == 0.1.0`，再执行 `SHOW FUNCTIONS YIELD *` 与 `SHOW PROCEDURES YIELD *`。JSON 临时输出留在 target，不提交；生成的两个 Markdown 表是用户 Reference。不要拿未来版本的导出覆盖标为 v0.1.0 的表。
 
-## 本次使用的真实制品
+## v0.1.0 历史验证记录
 
 2026-09-16 UTC，从 [v0.1.0 Release](https://github.com/bYiyLi/Lithograph/releases/tag/v0.1.0) 下载 `lithograph-macos-arm64.tar.gz`，核对 SHA-256：
 
@@ -64,7 +64,7 @@ python3 -B docs/guide/examples/generate_reference.py target/developer-docs-v010
 | Python quickstart | Python 3.14.0 + SQLite 3.51.0，PASS |
 | 完整 version workflow 与备份恢复 | 同上，PASS；包括预期冲突、过期 revision 拒绝和重连 |
 | 指南 SQL | 9 篇指南、31 个 SQL 块、93 条语句；Python SQLite 3.51.0，以及 CLI 3.45.0 / 3.53.4 均通过 |
-| Native C | 使用 SQLite 3.51.0 header/library，`-Wall -Wextra -Werror` 编译，默认事务/取消/完整性流程 PASS |
+| 当时的 Native C | 使用 SQLite 3.51.0 header/library，`-Wall -Wextra -Werror` 编译；仅描述 v0.1.0 tag 的历史验证 |
 | 发布接口 inventory | 172 条 function signature、33 个 procedure，均由发布扩展 SHOW 导出 |
 | 已知问题 probes | SQL / Native checkout、Native NULL JSON，以及 Procedure 类型 metadata 不一致；已记录并采用显式规避 |
 

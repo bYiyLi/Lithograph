@@ -65,7 +65,7 @@ SELECT lithograph_init();
 SELECT lithograph_version();
 ```
 
-未初始化时 `databaseId` 和 `storageFormat.current` 为 `null`。初始化后，`extension` 为 `"0.2.1"`，`abi` 为 `1`，`cypherProfile` 为 `"CY25-2026.08"`，`storageFormat.current` 为 `4`。`databaseId` 每个新库不同。
+未初始化时 `databaseId` 和 `storageFormat.current` 为 `null`。初始化后，`extension` 为 `"0.2.1"`，`cypherProfile` 为 `"CY25-2026.08"`，`storageFormat.min/max/current` 分别为 `1/3/3`。当前开发基线不再暴露 application query ABI 字段；`databaseId` 每个新库不同。
 
 `lithograph_init()` 的 `root` 是裸 64 位十六进制 hash；需要 Version Descriptor 时使用 `commit/` 前缀，或读取 `lithograph.commit.get('branch/main')` 的 `commit` 列。
 

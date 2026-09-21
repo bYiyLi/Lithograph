@@ -9,31 +9,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
-#include <dlfcn.h>
 #include <unistd.h>
-#endif
-
-#include "lithograph.h"
-
-typedef int (*tx_begin_fn)(sqlite3 *, const char *, size_t, char **, char **);
-typedef int (*tx_execute_fn)(
-    sqlite3 *, const char *, size_t, const char *, size_t, const char *, size_t,
-    lithograph_event_callback_v1, void *, char **
-);
-typedef int (*tx_commit_fn)(sqlite3 *, char **, char **);
-typedef int (*tx_abort_fn)(sqlite3 *, char **);
-typedef void (*free_fn)(void *);
-
-#ifdef _WIN32
-typedef HMODULE library_handle;
-static library_handle open_library(const char *path) { return LoadLibraryA(path); }
-static FARPROC load_symbol(library_handle library, const char *name) { return GetProcAddress(library, name); }
-static void close_library(library_handle library) { FreeLibrary(library); }
-#else
-typedef void *library_handle;
-static library_handle open_library(const char *path) { return dlopen(path, RTLD_NOW | RTLD_LOCAL); }
-static void *load_symbol(library_handle library, const char *name) { return dlsym(library, name); }
-static void close_library(library_handle library) { dlclose(library); }
 #endif
 
 typedef struct latency_samples {
@@ -72,15 +48,6 @@ typedef struct writer_context {
     latency_samples writer_wait;
     latency_samples writer_hold;
 } writer_context;
-
-typedef struct native_writer_api {
-    library_handle library;
-    tx_begin_fn tx_begin;
-    tx_execute_fn tx_execute;
-    tx_commit_fn tx_commit;
-    tx_abort_fn tx_abort;
-    free_fn lithograph_free;
-} native_writer_api;
 
 static uint64_t wal_size(const char *database);
 
@@ -187,19 +154,19 @@ static int step_reader_query(sqlite3 *db, const char *sql, uint64_t expected_row
 
 static const char *reader_query(unsigned selector, uint64_t target_id, char *buffer, size_t size) {
     if (selector == 0) {
-        return "SELECT row FROM lithograph_rows('MATCH (:ScaleLowDegree)-[:SCALE_LINK]->(m) RETURN 1')";
+        return "SELECT data FROM lithograph_rows('MATCH (:ScaleLowDegree)-[:SCALE_LINK]->(m) RETURN 1') WHERE event='row'";
     }
     if (selector == 1) {
         int written = snprintf(
             buffer,
             size,
-            "SELECT row FROM lithograph_rows('MATCH (n:ScaleNode) WHERE n.scaleId = %llu RETURN n.scaleId')",
+            "SELECT data FROM lithograph_rows('MATCH (n:ScaleNode) WHERE n.scaleId = %llu RETURN n.scaleId') WHERE event='row'",
             (unsigned long long)target_id
         );
         require(written > 0 && (size_t)written < size, "indexed reader SQL overflow");
         return buffer;
     }
-    return "SELECT row FROM lithograph_rows('MATCH (:ScaleLowDegree)-[:SCALE_LINK]->(m) RETURN 1','{}','{\"graphView\":{\"requireAllLabels\":[\"ScaleNode\"]}}')";
+    return "SELECT data FROM lithograph_rows('MATCH (:ScaleLowDegree)-[:SCALE_LINK]->(m) RETURN 1','{}','{\"graphView\":{\"requireAllLabels\":[\"ScaleNode\"]}}') WHERE event='row'";
 }
 
 static void classify_result(int rc, uint64_t *busy, uint64_t *failures) {
@@ -241,59 +208,46 @@ static int exec_sql(sqlite3 *db, const char *sql) {
     return rc;
 }
 
-static int native_noop_callback(
-    void *data,
-    lithograph_event_kind_v1 kind,
-    const unsigned char *json,
-    size_t json_len
-) {
-    (void)data;
-    (void)kind;
-    (void)json;
-    (void)json_len;
-    return 0;
+static int execute_scalar(sqlite3 *db, const char *sql) {
+    sqlite3_stmt *statement = NULL;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &statement, NULL);
+    if (rc != SQLITE_OK) {
+        return rc;
+    }
+    rc = sqlite3_step(statement);
+    if (rc == SQLITE_ROW) {
+        rc = sqlite3_step(statement);
+    }
+    int finalize_rc = sqlite3_finalize(statement);
+    if (rc != SQLITE_DONE) {
+        return rc;
+    }
+    return finalize_rc;
 }
 
-static native_writer_api load_native_writer_api(const char *extension) {
-    native_writer_api api = {0};
-    api.library = open_library(extension);
-    require(api.library != NULL, "failed to open Extension for Native writer symbols");
-#ifdef _WIN32
-    FARPROC begin_symbol = load_symbol(api.library, "lithograph_v1_tx_begin");
-    FARPROC execute_symbol = load_symbol(api.library, "lithograph_v1_tx_execute");
-    FARPROC commit_symbol = load_symbol(api.library, "lithograph_v1_tx_commit");
-    FARPROC abort_symbol = load_symbol(api.library, "lithograph_v1_tx_abort");
-    FARPROC free_symbol = load_symbol(api.library, "lithograph_v1_free");
-    memcpy(&api.tx_begin, &begin_symbol, sizeof(api.tx_begin));
-    memcpy(&api.tx_execute, &execute_symbol, sizeof(api.tx_execute));
-    memcpy(&api.tx_commit, &commit_symbol, sizeof(api.tx_commit));
-    memcpy(&api.tx_abort, &abort_symbol, sizeof(api.tx_abort));
-    memcpy(&api.lithograph_free, &free_symbol, sizeof(api.lithograph_free));
-#else
-    api.tx_begin = (tx_begin_fn)load_symbol(api.library, "lithograph_v1_tx_begin");
-    api.tx_execute = (tx_execute_fn)load_symbol(api.library, "lithograph_v1_tx_execute");
-    api.tx_commit = (tx_commit_fn)load_symbol(api.library, "lithograph_v1_tx_commit");
-    api.tx_abort = (tx_abort_fn)load_symbol(api.library, "lithograph_v1_tx_abort");
-    api.lithograph_free = (free_fn)load_symbol(api.library, "lithograph_v1_free");
-#endif
-    require(
-        api.tx_begin != NULL && api.tx_execute != NULL && api.tx_commit != NULL
-            && api.tx_abort != NULL && api.lithograph_free != NULL,
-        "missing Native writer symbol"
-    );
-    return api;
-}
-
-static void abort_writer_tx(sqlite3 *db, const native_writer_api *api) {
-    char *error = NULL;
-    (void)api->tx_abort(db, &error);
-    api->lithograph_free(error);
+static int execute_lithograph(sqlite3 *db, const char *query) {
+    sqlite3_stmt *statement = NULL;
+    int rc = sqlite3_prepare_v2(db, "SELECT lithograph(?1)", -1, &statement, NULL);
+    if (rc != SQLITE_OK) {
+        return rc;
+    }
+    rc = sqlite3_bind_text(statement, 1, query, -1, SQLITE_TRANSIENT);
+    if (rc == SQLITE_OK) {
+        rc = sqlite3_step(statement);
+    }
+    if (rc == SQLITE_ROW) {
+        rc = sqlite3_step(statement);
+    }
+    int finalize_rc = sqlite3_finalize(statement);
+    if (rc != SQLITE_DONE) {
+        return rc;
+    }
+    return finalize_rc;
 }
 
 static int writer_create(
     writer_context *context,
     sqlite3 *db,
-    const native_writer_api *api,
     uint64_t ordinal
 ) {
     char query[256];
@@ -305,44 +259,23 @@ static int writer_create(
     );
     require(written > 0 && (size_t)written < sizeof(query), "writer create query overflow");
 
-    char *result = NULL;
-    char *error = NULL;
     uint64_t wait_started = monotonic_ns();
-    int rc = api->tx_begin(db, "{}", 2, &result, &error);
+    int rc = execute_scalar(db, "SELECT lithograph_tx_begin('{}')");
     latency_push(&context->writer_wait, (monotonic_ns() - wait_started) / 1000);
-    api->lithograph_free(result);
-    api->lithograph_free(error);
     if (rc != SQLITE_OK) {
         return rc;
     }
 
     uint64_t hold_started = monotonic_ns();
-    error = NULL;
-    rc = api->tx_execute(
-        db,
-        query,
-        strlen(query),
-        "{}",
-        2,
-        "{}",
-        2,
-        native_noop_callback,
-        NULL,
-        &error
-    );
-    api->lithograph_free(error);
+    rc = execute_lithograph(db, query);
     if (rc != SQLITE_OK) {
-        abort_writer_tx(db, api);
+        (void)execute_scalar(db, "SELECT lithograph_tx_abort()");
         latency_push(&context->writer_hold, (monotonic_ns() - hold_started) / 1000);
         return rc;
     }
-    result = NULL;
-    error = NULL;
-    rc = api->tx_commit(db, &result, &error);
-    api->lithograph_free(result);
-    api->lithograph_free(error);
+    rc = execute_scalar(db, "SELECT lithograph_tx_commit()");
     if (rc != SQLITE_OK) {
-        abort_writer_tx(db, api);
+        (void)execute_scalar(db, "SELECT lithograph_tx_abort()");
     }
     latency_push(&context->writer_hold, (monotonic_ns() - hold_started) / 1000);
     return rc;
@@ -412,12 +345,11 @@ static void *writer_main(void *data) {
     writer_context *context = (writer_context *)data;
     sqlite3 *db = NULL;
     open_loaded(context->database, context->extension, &db);
-    native_writer_api api = load_native_writer_api(context->extension);
     classify_result(writer_tag(db, context->readers, 1), &context->busy, &context->failures);
     int rebuilt = 0;
     while (monotonic_ns() < context->deadline_ns) {
         uint64_t started = monotonic_ns();
-        int rc = writer_create(context, db, &api, context->writes + 1);
+        int rc = writer_create(context, db, context->writes + 1);
         latency_push(&context->latency, (monotonic_ns() - started) / 1000);
         classify_result(rc, &context->busy, &context->failures);
         if (rc == SQLITE_OK) {
@@ -430,7 +362,6 @@ static void *writer_main(void *data) {
         }
         sleep_millis(100);
     }
-    close_library(api.library);
     sqlite3_close(db);
     return NULL;
 }

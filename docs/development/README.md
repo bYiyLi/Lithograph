@@ -38,7 +38,7 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 
 ## 3. 当前基线
 
-**状态分界：Phase 00–14 全部 `done`；Phase 15 `ready`。** Phase 11 是在已完成的基础功能/规模验收之上增加的性能专项，不回开Phase 10，也不把Phase 10单次scale通过解释成全场景低延迟保证。Phase 11 已完成format3、persistent Standard Index、邻接keyset、query-owned resolved state/read guard、增量index overlay、实测热点优化以及固定性能机/并发/repository gate。Phase 12–14 的 Native/format4/SQL tx adapter 记录保留当时真实完成证据，不作为最新目标合同；最新 Design 已由 Phase 15 接管 application SQL-only、true streaming、explicit transaction execution surface 与 Provider-owned embedding cache 的实现收敛。
+**状态分界：Phase 00–14 全部 `done`；Phase 15 `in_progress`。** Phase 11 是在已完成的基础功能/规模验收之上增加的性能专项，不回开Phase 10，也不把Phase 10单次scale通过解释成全场景低延迟保证。Phase 11 已完成format3、persistent Standard Index、邻接keyset、query-owned resolved state/read guard、增量index overlay、实测热点优化以及固定性能机/并发/repository gate。Phase 12–14 的 Native/format4/SQL tx adapter 记录保留当时真实完成证据，不作为最新目标合同；最新 Design 已由 Phase 15 接管 application SQL-only、true streaming、explicit transaction execution surface 与 Provider-owned embedding cache 的实现收敛。
 
 **Phase 12 已完成并进入 v0.1.1 发布基线。** [Full-text / FTS5 Tokenizer 扩展](phases/12-fulltext-tokenizer.md) 根据 [Full-text](../design/full-text.md) 接入宿主 connection 已注册 tokenizer 的原生 specification，移除两个旧 analyzer 名称的特殊映射，并闭合配置、历史/cache、query-time analyzer、失败原子性、version publication 与 Native/SQL integration。
 
@@ -46,7 +46,7 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 
 **Phase 14 已完成开发验收并进入 v0.2.1 发布基线。** [SQL Explicit Transaction Adapter](phases/14-sql-explicit-transaction.md) 在不改变 C ABI 和既有 transaction 语义的前提下，为普通 SQLite driver 增加 `lithograph_tx_begin/execute/commit/abort` SQL 入口；SQLite 3.45.0/3.51.0/3.53.4 real-load、Native ABI、repository quality/coverage 与六目标 Release Matrix 均已通过。实现 revision `2f617f13e007ce713bd48078396c40bf0a963c7c` 的 repository CI `35448157779` 与 Release Matrix `35448157766` 均成功。
 
-**Phase 15 已具备完整 Design input 与 acceptance，状态为 `ready`，尚未开始代码实现。** [SQL Execution Surface、True Streaming 与 Provider-owned Cache](phases/15-sql-execution-provider-cache.md) 将删除 application-facing Native query ABI 与 `lithograph_tx_execute()`，让 `lithograph()` / `lithograph_rows()` 成为唯一两种 execution consumption surface；`lithograph_rows()` 要求 Core 真正增量执行 read/write/transaction program；Managed Semantic text -> Vector cache 从 Lithograph Core/format4 移入具体 Provider，OpenAI-compatible Provider 使用独立 SQLite cache DB。用户已明确本轮不承担旧 Native/format4 历史兼容，因此 implementation 以最新 Design 为准。
+**Phase 15 已具备完整 Design input 与 acceptance，状态为 `in_progress`。** 15.1 已完成首轮 host feasibility probe：SQLite 3.45.0 / 3.51.0 支持 same-connection SAVEPOINT 与 repeated inner transaction，但 stock SQLite 会丢弃 virtual-table `xClose` 返回码；Interfaces 已先收敛对应 cleanup-failure quarantine 语义，随后继续代码实现。[SQL Execution Surface、True Streaming 与 Provider-owned Cache](phases/15-sql-execution-provider-cache.md) 将删除 application-facing Native query ABI 与 `lithograph_tx_execute()`，让 `lithograph()` / `lithograph_rows()` 成为唯一两种 execution consumption surface；`lithograph_rows()` 要求 Core 真正增量执行 read/write/transaction program；Managed Semantic text -> Vector cache 从 Lithograph Core/format4 移入具体 Provider，OpenAI-compatible Provider 使用独立 SQLite cache DB。用户已明确本轮不承担旧 Native/format4 历史兼容，因此 implementation 以最新 Design 为准。
 
 当前仓库实现已经完成 Phase 00–14；现有 current-graph engine 已闭合 query composition、aggregation、advanced path、expression/function/value、mutation、versioned Graph Type/Constraint、lookup/range/text/point/full-text/vector index、Raw Vector `SEARCH`、Managed Semantic、`LOAD CSV`、Cypher transaction batching 与 Phase 14 的 SQL/Native explicit transaction adapter。**但实现尚未满足最新 Design**：rows 仍有 read-only/external-I/O gate，write/transaction-program result 仍存在完整 materialization，Native query ABI 与 `tx_execute` 仍存在，Core 仍拥有 format4 embedding result cache。以上差距全部由 Phase 15 接管；在其 acceptance 闭合前不能把最新 SQL-only/true-streaming/Provider-cache 设计描述成已实现或已发布。
 
@@ -67,7 +67,7 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 - Phase 12：`done`；
 - Phase 13：`done`；
 - Phase 14：`done`；
-- Phase 15：`ready`；
+- Phase 15：`in_progress`；
 - `docs/development/cypher25-compatibility.md` 保留 Phase 00–14 已执行证据；Full-text family、Phase 12 provider supplemental inventory 与 Phase 13 Managed Semantic supplemental inventory 均已闭合为 `done`。Phase 14 是 adapter 扩展，不改变冻结 Cypher 语言 coverage 分母。
 
 ## 4. 路线总览
@@ -89,7 +89,9 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 | [12 Full-text / FTS5 Tokenizer 扩展](phases/12-fulltext-tokenizer.md) | `done` | 原生 tokenizer specification、Schema/历史/cache、query analyzer、失败原子性与真实 SQLite/Native 扩展验收 | 08、09、11 |
 | [13 Managed Semantic Vector / Embedding Provider](phases/13-managed-semantic-vector.md) | `done` | 保留 Raw Vector；新增 SQLite Embedding Provider、Semantic Index、format4 Embedding cache、文本 query/rebuild/cache maintenance | 01、07–12 |
 | [14 SQL Explicit Transaction Adapter](phases/14-sql-explicit-transaction.md) | `done` | 新增四个 SQL `tx_*` scalar，复用既有 Native explicit transaction core；真实 SQLite、Native ABI、quality/coverage 与六目标 hosted Release Matrix 全部闭合 | 01、05、09 |
-| [15 SQL Execution Surface、True Streaming 与 Provider-owned Cache](phases/15-sql-execution-provider-cache.md) | `ready` | SQL-only application surface、真正 rows execution stream、normal surfaces 复用 explicit tx、删除 Native query ABI、Provider-owned embedding cache | 01、04–14 |
+| [15 SQL Execution Surface、True Streaming 与 Provider-owned Cache](phases/15-sql-execution-provider-cache.md) | `in_progress` | SQL-only application surface、真正 rows execution stream、normal surfaces 复用 explicit tx、删除 Native query ABI、Provider-owned embedding cache | 01、04–14 |
+
+Phase 15 当前本地 acceptance 已闭合 EX15-01–17 与 EX15-19；EX15-18 hosted 六目标 Release Matrix 尚未执行，因此 Phase 仍保持 `in_progress`。本地证据、10M streaming/resource 数值与剩余条件见 Phase 15 计划。
 
 关键依赖原则：**Version-aware graph storage 在 Phase 02 建立，不能拖到后期再 retrofit。** Phase 09 的历史实现建立 explicit transaction / Merge Session/version operations；Phase 14 增加 SQL tx adapter；Phase 15 不重做 version model，而是让正常 SQL execution surface 直接使用同一 staged transaction state，并删除重复 Native/tx-execute adapter。Phase 13 的 Managed Semantic Schema/Provider/HNSW foundation继续保留，但其 Lithograph-owned embedding result cache/format4 被 Phase 15 最新设计替代；Raw Vector 继续作为标准 Cypher 25 contract。
 

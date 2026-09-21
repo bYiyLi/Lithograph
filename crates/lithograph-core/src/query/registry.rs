@@ -192,46 +192,13 @@ const PROCEDURES: &[ProcedureDefinition] = &[
         outputs: &["relationship", "score"],
     },
     ProcedureDefinition {
-        name: "db.index.semantic.cache.configure",
-        description: "Configures the database-local persistent embedding cache policy.",
-        mode: "WRITE",
-        works_on_system: false,
-        signature: "db.index.semantic.cache.configure(options :: MAP) :: (enabled :: BOOLEAN, maxBytes :: INTEGER)",
-        admin: false,
-        outputs: &["enabled", "maxBytes"],
-    },
-    ProcedureDefinition {
-        name: "db.index.semantic.cache.stats",
-        description: "Returns persistent embedding cache policy and usage.",
+        name: "db.index.semantic.rebuild",
+        description: "Rebuilds connection-local Semantic/HNSW materialization for one explicit committed version.",
         mode: "READ",
         works_on_system: false,
-        signature: "db.index.semantic.cache.stats() :: (enabled :: BOOLEAN, maxBytes :: INTEGER, usedBytes :: INTEGER, entries :: INTEGER, spaces :: INTEGER)",
+        signature: "db.index.semantic.rebuild(name :: STRING, version :: STRING) :: (name :: STRING, commit :: STRING, indexedEntities :: INTEGER, embeddedTexts :: INTEGER)",
         admin: false,
-        outputs: &["enabled", "maxBytes", "usedBytes", "entries", "spaces"],
-    },
-    ProcedureDefinition {
-        name: "db.index.semantic.cache.clear",
-        description: "Clears only the database-local persistent embedding cache.",
-        mode: "WRITE",
-        works_on_system: false,
-        signature: "db.index.semantic.cache.clear() :: (deletedEntries :: INTEGER, releasedPayloadBytes :: INTEGER)",
-        admin: false,
-        outputs: &["deletedEntries", "releasedPayloadBytes"],
-    },
-    ProcedureDefinition {
-        name: "db.index.semantic.rebuild",
-        description: "Precomputes persistent embeddings for one Semantic Index at an explicit version.",
-        mode: "WRITE",
-        works_on_system: false,
-        signature: "db.index.semantic.rebuild(name :: STRING, version :: STRING) :: (name :: STRING, commit :: STRING, indexedEntities :: INTEGER, embeddedTexts :: INTEGER, cacheHits :: INTEGER)",
-        admin: false,
-        outputs: &[
-            "name",
-            "commit",
-            "indexedEntities",
-            "embeddedTexts",
-            "cacheHits",
-        ],
+        outputs: &["name", "commit", "indexedEntities", "embeddedTexts"],
     },
     ProcedureDefinition {
         name: "lithograph.branch.create",
@@ -593,12 +560,7 @@ pub(crate) fn is_semantic_query(name: &str) -> bool {
 }
 
 pub(crate) fn is_semantic_maintenance(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "db.index.semantic.cache.configure"
-            | "db.index.semantic.cache.clear"
-            | "db.index.semantic.rebuild"
-    )
+    name.eq_ignore_ascii_case("db.index.semantic.rebuild")
 }
 
 pub(crate) fn is_semantic_direct_only(name: &str) -> bool {

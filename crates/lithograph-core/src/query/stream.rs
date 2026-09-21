@@ -11,13 +11,17 @@ use super::expression::{self, BindingRow, BindingValue};
 use super::graph::ResolvedGraphView;
 use super::plan::{Direction, MatchStep, PatternPart, PreparedQuery, RelationshipSpec};
 use super::spill::{
-    DistinctSpill, SortSpill, SpillOutput, drop_temp_table, open_spill_connection, read_output_row,
+    BindingSpill, DistinctSpill, RowSpill, SortSpill, SpillOutput, drop_temp_table,
+    open_spill_connection, read_output_row,
 };
 use super::{QueryError, QueryResult, check_interrupted};
 
 mod node_match;
 mod profile;
+pub(crate) mod program;
+mod program_cursor;
 mod project;
+mod transaction;
 mod write;
 use node_match::{node_matches, node_matches_scanned};
 pub use profile::{OperatorRuntimeMetrics, QueryMetrics};
@@ -116,8 +120,13 @@ pub struct QueryCursor {
     barrier: BarrierState,
     spill_connection: Option<Connection>,
     write_state: WriteState,
-    program_rows: Option<Vec<Vec<Value>>>,
-    program_offset: usize,
+    program_stream: Option<program::ProgramStream>,
+    program_stream_checked: bool,
+    read_summary_commit: Option<HashId>,
+    transaction_stream: Option<super::transaction::TransactionProgramStream>,
+    transaction_stream_checked: bool,
+    transaction_rows: Option<super::mutation::WriteRows>,
+    transaction_offset: usize,
     transaction_summary: Option<QuerySummary>,
     finished: bool,
 }
@@ -128,7 +137,7 @@ enum WriteState {
     Pending,
     Active {
         savepoint: String,
-        rows: Vec<Vec<Value>>,
+        rows: Option<Box<super::mutation::WriteRows>>,
         offset: usize,
         summary: QuerySummary,
     },
@@ -297,7 +306,11 @@ fn set_optional_null(row: &mut BindingRow, variable: Option<&str>) {
     }
 }
 
-pub(crate) fn materialize_match_step(
+#[allow(
+    clippy::too_many_arguments,
+    reason = "match streaming keeps snapshot, view, params, metrics, cancellation, and spill state explicit"
+)]
+pub(crate) fn spill_match_step(
     snapshot: &Snapshot<'_>,
     graph_view: &ResolvedGraphView,
     params: &std::collections::BTreeMap<String, Value>,
@@ -305,8 +318,9 @@ pub(crate) fn materialize_match_step(
     step: &MatchStep,
     metrics: &mut QueryMetrics,
     is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<Vec<BindingRow>> {
-    let mut output = Vec::new();
+    spill_connection: &Connection,
+    output: &mut BindingSpill,
+) -> QueryResult<()> {
     for row in input {
         let mut cursor = StepCursor::new(step.clone(), row);
         loop {
@@ -314,10 +328,10 @@ pub(crate) fn materialize_match_step(
             let Some(row) = cursor.next_row(snapshot, graph_view, params, metrics)? else {
                 break;
             };
-            output.push(row);
+            output.push(spill_connection, &row)?;
         }
     }
-    Ok(output)
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -531,9 +545,6 @@ impl PartCursor {
         end: i64,
         metrics: &mut QueryMetrics,
     ) -> QueryResult<Option<BindingRow>> {
-        let Some(spec) = &self.part.relationship else {
-            return Ok(None);
-        };
         let Some(end_spec) = &self.part.end else {
             return Ok(None);
         };
@@ -545,6 +556,21 @@ impl PartCursor {
         {
             return Ok(None);
         }
+        self.bind_relationship_row(start, end, relationship)
+    }
+
+    fn bind_relationship_row(
+        &self,
+        start: i64,
+        end: i64,
+        relationship: RelationshipRecord,
+    ) -> QueryResult<Option<BindingRow>> {
+        let Some(spec) = &self.part.relationship else {
+            return Ok(None);
+        };
+        let Some(end_spec) = &self.part.end else {
+            return Ok(None);
+        };
         if self.base.used_relationships.contains(&relationship.id)
             && !relationship_already_bound(&self.base, spec, relationship.id)
         {
@@ -734,36 +760,7 @@ impl PartCursor {
         if !node_matches(snapshot, graph_view, end_spec, end_id, metrics)? {
             return Ok(None);
         }
-        if self.base.used_relationships.contains(&relationship.id)
-            && !relationship_already_bound(&self.base, spec, relationship.id)
-        {
-            return Ok(None);
-        }
-        let Some(row) = bind_node(
-            self.base.clone(),
-            self.part.start.variable.as_deref(),
-            start,
-        )?
-        else {
-            return Ok(None);
-        };
-        let Some(row) = bind_relationship(row, spec, relationship)? else {
-            return Ok(None);
-        };
-        let Some(row) = bind_node(row, end_spec.variable.as_deref(), end_id)? else {
-            return Ok(None);
-        };
-        let Some(mut row) = bind_path(
-            row,
-            self.part.path_variable.as_deref(),
-            vec![start, end_id],
-            vec![relationship],
-        )?
-        else {
-            return Ok(None);
-        };
-        row.used_relationships.insert(relationship.id);
-        Ok(Some(row))
+        self.bind_relationship_row(start, end_id, relationship)
     }
 }
 
@@ -918,8 +915,13 @@ impl QueryCursor {
             barrier,
             spill_connection: None,
             write_state,
-            program_rows: None,
-            program_offset: 0,
+            program_stream: None,
+            program_stream_checked: false,
+            read_summary_commit: None,
+            transaction_stream: None,
+            transaction_stream_checked: false,
+            transaction_rows: None,
+            transaction_offset: 0,
             transaction_summary: None,
             finished: false,
         }
@@ -953,6 +955,13 @@ impl QueryCursor {
             .program
             .as_ref()
             .is_some_and(|program| program.version_operation)
+    }
+
+    pub fn has_connection_state_operation(&self) -> bool {
+        self.prepared
+            .program
+            .as_ref()
+            .is_some_and(|program| program.checkout_operation)
     }
 
     pub fn set_transaction_time_micros(&mut self, micros: i64) -> QueryResult<()> {
@@ -1028,102 +1037,6 @@ impl QueryCursor {
         self.explain_emitted = true;
         self.metrics.rows = 1;
         self.finish(vec![vec![Value::String(self.prepared.physical.explain())]])
-    }
-
-    fn next_program_read(
-        &mut self,
-        connection: &Connection,
-        max_rows: usize,
-        is_interrupted: &dyn Fn() -> bool,
-    ) -> QueryResult<QueryBatch> {
-        if self.program_rows.is_none() {
-            let snapshot = prepared_snapshot(connection, &self.prepared)?;
-            let program = prepared_program(&self.prepared, "Phase 06 program is missing")?;
-            let rows = super::completeness::execute_prepared_read(
-                connection,
-                program,
-                snapshot,
-                &self.prepared.graph_view,
-                &self.prepared.params,
-                self.prepared.mode,
-                &mut self.metrics,
-                is_interrupted,
-            )?;
-            self.metrics.rows = rows.len().try_into().unwrap_or(u64::MAX);
-            self.program_rows = Some(rows);
-        }
-        let (batch_rows, done) =
-            self.take_program_rows(max_rows, "Phase 06 program rows are missing")?;
-        if done {
-            return self.finish(batch_rows);
-        }
-        Ok(QueryBatch {
-            rows: batch_rows,
-            done: false,
-            summary: None,
-        })
-    }
-
-    fn next_transaction_program(
-        &mut self,
-        connection: &Connection,
-        max_rows: usize,
-        is_interrupted: &dyn Fn() -> bool,
-    ) -> QueryResult<QueryBatch> {
-        if self.program_rows.is_none() {
-            let program = prepared_program(&self.prepared, "transaction program is missing")?;
-            let outcome = super::transaction::execute_transaction_program(
-                connection,
-                program,
-                self.prepared.commit,
-                &self.prepared.params,
-                &mut self.metrics,
-                is_interrupted,
-            )?;
-            self.metrics.rows = outcome.rows.len().try_into().unwrap_or(u64::MAX);
-            self.transaction_summary = Some(committed_summary(
-                if program.writes {
-                    QueryType::Write
-                } else {
-                    QueryType::Read
-                },
-                outcome.commit,
-                outcome.counters,
-                &self.metrics,
-                self.suppress_summary_commit,
-            ));
-            self.program_rows = Some(outcome.rows);
-        }
-        let (batch_rows, done) =
-            self.take_program_rows(max_rows, "transaction program rows are missing")?;
-        if done {
-            self.metrics.elapsed_micros =
-                self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
-            self.metrics.finish_profile();
-            if let Some(summary) = &mut self.transaction_summary {
-                summary.metrics = self.metrics.clone();
-            }
-        }
-        Ok(QueryBatch {
-            rows: batch_rows,
-            done,
-            summary: done.then(|| self.transaction_summary.clone()).flatten(),
-        })
-    }
-
-    fn take_program_rows(
-        &mut self,
-        max_rows: usize,
-        missing_message: &str,
-    ) -> QueryResult<(Vec<Vec<Value>>, bool)> {
-        let rows = self
-            .program_rows
-            .as_ref()
-            .ok_or_else(|| QueryError::internal(missing_message))?;
-        let end = self.program_offset.saturating_add(max_rows).min(rows.len());
-        let batch_rows = rows[self.program_offset..end].to_vec();
-        self.program_offset = end;
-        Ok((batch_rows, self.program_offset >= rows.len()))
     }
 
     fn next_direct(
@@ -1356,24 +1269,28 @@ impl QueryCursor {
     }
 
     fn read_summary(&self) -> QuerySummary {
-        let semantic_maintenance = self.prepared.has_semantic_maintenance();
         QuerySummary {
             query_type: if self
                 .prepared
                 .program
                 .as_ref()
                 .is_some_and(|program| program.version_operation)
-                || semantic_maintenance
             {
                 QueryType::Version
             } else {
                 QueryType::Read
             },
-            commit: if self.prepared.candidate.is_some() || semantic_maintenance {
+            commit: if self.prepared.candidate.is_some() {
                 None
             } else {
-                (!self.suppress_summary_commit)
-                    .then(|| format!("commit/{}", self.prepared.commit.to_hex()))
+                (!self.suppress_summary_commit).then(|| {
+                    format!(
+                        "commit/{}",
+                        self.read_summary_commit
+                            .unwrap_or(self.prepared.commit)
+                            .to_hex()
+                    )
+                })
             },
             merge_session: self
                 .prepared

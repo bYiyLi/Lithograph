@@ -1,6 +1,6 @@
 # v0.1.0 已知问题与接入规避
 
-这些问题最初在**实际已发布 v0.1.0 macOS arm64 制品**上复现，不是新的设计要求。v0.2.1 release gate 重新确认 `branch.checkout` 仍返回 transaction-boundary error，Procedure introspection 仍为空 argument metadata / STRING return type；Native input decoder 仍把 `NULL,0` 解码为空字符串而不是默认 `{}`。因此 v0.2.1 继续保留以下规避路径。
+这些问题最初在**实际已发布 v0.1.0 macOS arm64 制品**上复现，不是新的设计要求。v0.2.1 release gate 重新确认其中部分历史行为。**当前 Phase 15 main 已删除 application Native query ABI，因此本页 Native 复现步骤只适用于旧 release tag，不是当前接入指南。**
 
 验证制品：`lithograph-macos-arm64.tar.gz`，SHA-256 `71a50eb3d7b745dc5a616a12ad1c4bc06578b0ee17a4f7f7e1d4c0c4f7c0e278`。SQL 入口在 SQLite 3.45.0 / 3.51.0 上复现；Native 入口使用 SQLite 3.51.0。其他平台共享相关代码，但本次没有逐个平台复现，不将推断写成实测。
 
@@ -16,9 +16,9 @@ SELECT lithograph('CALL lithograph.branch.create(''probe'')');
 SELECT lithograph('CALL lithograph.branch.checkout(''probe'')');
 ```
 
-最后一条是**预期复现错误**，不是成功教程。Native 复现可编译 [C 示例](../guide/examples/native_transaction.c) 后运行 `native_transaction <extension> --probe-checkout`。
+最后一条是**旧版本预期复现错误**，不是当前成功教程。需要复现 Native 路径时请 checkout 对应 v0.1.0/v0.2.1 tag；当前 `native_transaction.c` 已改为 SQL-only C host 示例。
 
-代码证据：adapter 对 write 使用 [内部 savepoint](../../crates/lithograph-extension/src/execution.rs)，普通 Native [同样包装](../../crates/lithograph-extension/src/native.rs)，执行器又要求 [checkout 时 autocommit](../../crates/lithograph-core/src/query/stream/write.rs)。这个组合造成入口行为与设计不一致。
+历史代码证据属于旧 tag；当前 main 已移除 `crates/lithograph-extension/src/native.rs`，不能用当前源码路径解释旧 binary。
 
 **规避：每次 query 显式传 `options:{"branch":"probe"}`。**读历史用 `at`，SQL / Native explicit transaction 在 begin 中指定 branch。无需 checkout 就能创建、读写、合并目标 Branch。不要直接改内部 connection state 或库表来绕过错误。
 
@@ -28,7 +28,7 @@ SELECT lithograph('CALL lithograph.branch.checkout(''probe'')');
 
 **规避：传入 `"{}",2`**，长度是两个 UTF-8 bytes。tx_begin 不需要自定义 options 时也显式传 `{}`，不要依赖空指针默认行为。非空对象同样使用准确 bytes length。
 
-普通 execute 最小复现由 C 示例的 `--probe-null-json` 输出，分别检查 params 和 options；源码入口为 [decode_native_execute_inputs](../../crates/lithograph-extension/src/native.rs)。SQL Bridge 省略第二/第三参数的 `{}` 默认值不受此问题影响。
+普通 Native execute 的最小复现仅保留在旧 tag；当前 SQL surface 省略第二/第三参数时使用 `{}` 默认值，不存在该 Native NULL decoder。
 
 ## DOC-V010-03：Procedure introspection 参数/结果 metadata 不完整
 

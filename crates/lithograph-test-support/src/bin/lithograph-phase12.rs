@@ -144,7 +144,7 @@ fn check_lithograph_load_order(
          SELECT {create_custom};\n\
          SELECT 'custom-args=' || phase12_tokenizer_name() || ':' || phase12_tokenizer_args();\n\
          SELECT 'custom-hit=' || json_extract({custom_query}, '$.rows[0][0]');\n\
-         SELECT 'rows-hit=' || json_extract((SELECT row FROM lithograph_rows({rows_query}) WHERE ordinal=0), '$[0]');\n\
+         SELECT 'rows-hit=' || json_extract((SELECT data FROM lithograph_rows({rows_query}) WHERE event='row' ORDER BY ordinal LIMIT 1), '$[0]');\n\
          SELECT {create_override};\n\
          SELECT {create_query_synonym};\n\
          SELECT phase12_tokenizer_reset();\n\

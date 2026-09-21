@@ -13,6 +13,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 base64.workspace = true
+blake3.workspace = true
 httpdate.workspace = true
 lithograph-embedding-provider.workspace = true
 log = { version = "0.4.34", features = ["max_level_off", "release_max_level_off"] }

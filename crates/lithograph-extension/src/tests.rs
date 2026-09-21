@@ -9,8 +9,7 @@ fn uuid_validation_accepts_rfc9562_v4_shape() {
 
 #[test]
 fn error_json_has_stable_shape() {
-    let value: Value = serde_json::from_str(&LithographError::not_initialized().to_json())
-        .expect("error JSON must be valid");
+    let value = LithographError::not_initialized().to_json_value();
     assert_eq!(value["category"], "NOT_INITIALIZED");
     assert_eq!(value["sqliteCode"], ffi::SQLITE_ERROR);
     assert!(value["line"].is_null());
@@ -111,29 +110,32 @@ fn query_error_mapping_preserves_busy_and_io_categories() {
 }
 
 #[test]
-fn native_input_utf8_copies_and_validates_input() {
-    let bytes = b"RETURN 1";
-    // SAFETY: `bytes` is a live local buffer for the full call.
-    let value = unsafe {
-        input_utf8(bytes.as_ptr().cast::<c_char>(), bytes.len(), "query")
-            .expect("valid UTF-8 must be accepted")
-    };
-    assert_eq!(value, "RETURN 1");
+fn query_error_mapping_preserves_interrupted_category_and_sqlite_code() {
+    let mapped = execution::map_query_error(query::QueryError {
+        kind: query::QueryErrorKind::Interrupted,
+        message: "probe".to_owned(),
+        line: None,
+        column: None,
+        sqlite_code: Some(ffi::SQLITE_INTERRUPT),
+    });
+    assert_eq!(mapped.category, ErrorCategory::Interrupted);
+    assert_eq!(mapped.sqlite_code, ffi::SQLITE_INTERRUPT);
+    assert_eq!(mapped.public_message(), "LITHOGRAPH_INTERRUPTED: probe");
+}
 
-    let invalid = [0xff_u8];
-    // SAFETY: `invalid` is a live one-byte local buffer for the full call.
-    let error = unsafe {
-        input_utf8(invalid.as_ptr().cast::<c_char>(), invalid.len(), "query")
-            .expect_err("invalid UTF-8 must be rejected")
-    };
-    assert_eq!(error.category, ErrorCategory::InvalidArgument);
-
-    // SAFETY: NULL is intentionally supplied with non-zero length to
-    // exercise misuse validation without dereferencing it.
-    let error = unsafe {
-        input_utf8(ptr::null(), 1, "query").expect_err("NULL plus length must be misuse")
-    };
-    assert_eq!(error.sqlite_code, ffi::SQLITE_MISUSE);
+#[test]
+fn public_sql_error_preserves_source_location_suffix() {
+    let mapped = execution::map_query_error(query::QueryError {
+        kind: query::QueryErrorKind::Parse,
+        message: "probe".to_owned(),
+        line: Some(2),
+        column: Some(7),
+        sqlite_code: None,
+    });
+    assert_eq!(
+        mapped.public_message(),
+        "LITHOGRAPH_PARSE_ERROR: probe [line=2,column=7]"
+    );
 }
 
 #[test]

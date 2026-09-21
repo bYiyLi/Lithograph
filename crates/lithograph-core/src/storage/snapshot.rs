@@ -113,6 +113,18 @@ impl<'connection> Snapshot<'connection> {
         }
     }
 
+    pub(crate) fn resolved_state(&self) -> ResolvedSnapshotState {
+        ResolvedSnapshotState {
+            commit: self.commit,
+            cache_identity: self.cache_identity,
+            checkpoint: self.checkpoint,
+            overlay: self.overlay.clone(),
+            property_cache: self.property_cache.clone(),
+            query_local_layer: self.query_local_layer.clone(),
+            schema_override: self.schema_override.clone(),
+        }
+    }
+
     /// Resolves a Commit-pinned snapshot and overlays one query-local staged Layer.
     ///
     /// The staged Layer is never persisted by this helper. Mutation execution uses

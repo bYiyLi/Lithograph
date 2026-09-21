@@ -54,10 +54,10 @@ Phase 13 Managed Semantic Vector / Embedding Provider (done)
 Phase 14 SQL Explicit Transaction Adapter (done)
         |
         v
-Phase 15 SQL Execution / True Streaming / Provider Cache (ready)
+Phase 15 SQL Execution / True Streaming / Provider Cache (in_progress)
 ```
 
-Phase 00–14均已完成当时的开发验收；Phase 15 已有完整设计输入和 acceptance，状态为 `ready`。Phase 13/14 的 Provider/format4/Native/SQL tx adapter 记录继续作为历史实现证据，但最新 Design 已改变 execution/cache ownership，因此当前实现必须通过 Phase 15 收敛后才满足最新产品合同。具体 Phase 15 顺序与验收见 [Phase 15 计划](phases/15-sql-execution-provider-cache.md)。
+Phase 00–14均已完成当时的开发验收；Phase 15 状态为 `in_progress`。当前本地实现、resource/quality/CI 与文档 review 已闭合 EX15-01–17、EX15-19；唯一 pending 是 EX15-18 六目标 hosted Release Matrix，它需要 commit/push 后由远端 CI 产生真实 artifact 证据。15.1 host feasibility probe 已确认 same-connection SAVEPOINT / repeated inner transaction 可行，并确认 stock SQLite 丢弃 virtual-table `xClose` 返回码；对应 cleanup failure contract 已回写 Interfaces。Phase 13/14 的 Provider/format4/Native/SQL tx adapter 记录继续作为历史实现证据，当前产品合同以 Phase 15 收敛后的 SQL-only / format3 / Provider-owned cache 设计为准。具体证据见 [Phase 15 计划](phases/15-sql-execution-provider-cache.md)。
 
 Phase 12 的目标由 [Full-text](../design/full-text.md) 定义，当前实现与 FT12-01–20 开发验收已经闭合；依赖 Phase 08/09/11，不重开已完成 Phase。具体实现顺序与证据见 [Phase 12计划](phases/12-fulltext-tokenizer.md)。该成果已经进入 v0.1.1 发布基线，对应 repository CI 与六目标 hosted Release Matrix 均已通过。
 

@@ -94,8 +94,6 @@ fn semantic_argument_count(name: &str) -> Option<usize> {
     Some(match name.to_ascii_lowercase().as_str() {
         "db.index.semantic.createnodeindex" | "db.index.semantic.createrelationshipindex" => 4,
         "db.index.semantic.querynodes" | "db.index.semantic.queryrelationships" => 3,
-        "db.index.semantic.cache.configure" => 1,
-        "db.index.semantic.cache.stats" | "db.index.semantic.cache.clear" => 0,
         "db.index.semantic.rebuild" => 2,
         _ => return None,
     })
@@ -283,38 +281,6 @@ fn parse_semantic_options(value: Value) -> QueryResult<SemanticQueryOptions> {
         )));
     }
     Ok(SemanticQueryOptions { skip, limit })
-}
-
-fn parse_cache_configure_options(value: Value) -> QueryResult<(Option<bool>, Option<u64>)> {
-    let Value::Map(mut options) = value else {
-        return Err(QueryError::invalid_argument(
-            "semantic cache configure options must be a MAP",
-        ));
-    };
-    let enabled = match options.remove("enabled") {
-        None => None,
-        Some(Value::Boolean(value)) => Some(value),
-        Some(_) => {
-            return Err(QueryError::invalid_argument(
-                "semantic cache enabled must be BOOLEAN",
-            ));
-        }
-    };
-    let max_bytes = match options.remove("maxBytes") {
-        None => None,
-        Some(Value::Integer(value)) if value > 0 => Some(value as u64),
-        Some(_) => {
-            return Err(QueryError::invalid_argument(
-                "semantic cache maxBytes must be a positive INTEGER",
-            ));
-        }
-    };
-    if let Some(key) = options.keys().next() {
-        return Err(QueryError::invalid_argument(format!(
-            "unsupported semantic cache option {key:?}"
-        )));
-    }
-    Ok((enabled, max_bytes))
 }
 
 #[derive(Clone, Copy)]
@@ -589,42 +555,11 @@ impl ReadExecutor<'_, '_> {
     }
 
     fn semantic_maintenance_row(
-        &self,
+        &mut self,
         name: &str,
         args: Vec<Value>,
     ) -> QueryResult<BTreeMap<String, Value>> {
         match name.to_ascii_lowercase().as_str() {
-            "db.index.semantic.cache.stats" => self.semantic_cache_stats_row(),
-            "db.index.semantic.cache.configure" => {
-                let value = args.into_iter().next().ok_or_else(|| {
-                    QueryError::invalid_argument("semantic cache configure requires options")
-                })?;
-                let (enabled, max_bytes) = parse_cache_configure_options(value)?;
-                let policy =
-                    storage::embedding_cache_configure(self.connection, enabled, max_bytes)?;
-                Ok(BTreeMap::from([
-                    ("enabled".to_owned(), Value::Boolean(policy.enabled)),
-                    (
-                        "maxBytes".to_owned(),
-                        Value::Integer(i64::try_from(policy.max_bytes).unwrap_or(i64::MAX)),
-                    ),
-                ]))
-            }
-            "db.index.semantic.cache.clear" => {
-                let outcome = storage::embedding_cache_clear(self.connection)?;
-                Ok(BTreeMap::from([
-                    (
-                        "deletedEntries".to_owned(),
-                        Value::Integer(i64::try_from(outcome.deleted_entries).unwrap_or(i64::MAX)),
-                    ),
-                    (
-                        "releasedPayloadBytes".to_owned(),
-                        Value::Integer(
-                            i64::try_from(outcome.released_payload_bytes).unwrap_or(i64::MAX),
-                        ),
-                    ),
-                ]))
-            }
             "db.index.semantic.rebuild" => {
                 let index_name =
                     require_semantic_string(args.first().cloned().unwrap_or(Value::Null), "name")?;
@@ -638,6 +573,7 @@ impl ReadExecutor<'_, '_> {
                     &version,
                     self.is_interrupted,
                 )?;
+                self.version_summary_commit = Some(outcome.commit);
                 Ok(BTreeMap::from([
                     ("name".to_owned(), Value::String(index_name)),
                     (
@@ -652,39 +588,12 @@ impl ReadExecutor<'_, '_> {
                         "embeddedTexts".to_owned(),
                         Value::Integer(i64::try_from(outcome.embedded_texts).unwrap_or(i64::MAX)),
                     ),
-                    (
-                        "cacheHits".to_owned(),
-                        Value::Integer(i64::try_from(outcome.cache_hits).unwrap_or(i64::MAX)),
-                    ),
                 ]))
             }
             _ => Err(QueryError::internal(format!(
                 "registered Semantic procedure {name} has no executor"
             ))),
         }
-    }
-
-    fn semantic_cache_stats_row(&self) -> QueryResult<BTreeMap<String, Value>> {
-        let stats = storage::embedding_cache_stats(self.connection)?;
-        Ok(BTreeMap::from([
-            ("enabled".to_owned(), Value::Boolean(stats.policy.enabled)),
-            (
-                "maxBytes".to_owned(),
-                Value::Integer(i64::try_from(stats.policy.max_bytes).unwrap_or(i64::MAX)),
-            ),
-            (
-                "usedBytes".to_owned(),
-                Value::Integer(i64::try_from(stats.used_bytes).unwrap_or(i64::MAX)),
-            ),
-            (
-                "entries".to_owned(),
-                Value::Integer(i64::try_from(stats.entries).unwrap_or(i64::MAX)),
-            ),
-            (
-                "spaces".to_owned(),
-                Value::Integer(i64::try_from(stats.spaces).unwrap_or(i64::MAX)),
-            ),
-        ]))
     }
 
     fn execute_fulltext_procedure(

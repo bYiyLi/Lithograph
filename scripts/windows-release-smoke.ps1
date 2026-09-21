@@ -288,14 +288,14 @@ if ($InteropFixture) {
     }
 }
 
-$nativeSource = Join-Path $repoRoot "tests\native_abi_smoke.c"
-$nativeObj = Join-Path $root "native-abi-smoke.obj"
-$nativeExe = Join-Path $root "native-abi-smoke.exe"
-Invoke-VcCommand -Name "native-compile" -Command "cd /d `"$root`" && cl /nologo /c /std:c11 /W4 /WX /I`"$lithographInclude`" /I`"$($minimum.Include)`" `"$nativeSource`" /Fo`"$nativeObj`""
-Invoke-VcCommand -Name "native-link" -Command "cd /d `"$root`" && link /nologo `"$nativeObj`" `"$($minimum.Obj)`" /OUT:`"$nativeExe`""
-& $nativeExe $extension "" $syntheticProvider
+$sqlSmokeSource = Join-Path $repoRoot "tests\sql_surface_smoke.c"
+$sqlSmokeObj = Join-Path $root "sql-surface-smoke.obj"
+$sqlSmokeExe = Join-Path $root "sql-surface-smoke.exe"
+Invoke-VcCommand -Name "sql-surface-compile" -Command "cd /d `"$root`" && cl /nologo /c /std:c11 /W4 /WX /I`"$($minimum.Include)`" `"$sqlSmokeSource`" /Fo`"$sqlSmokeObj`""
+Invoke-VcCommand -Name "sql-surface-link" -Command "cd /d `"$root`" && link /nologo `"$sqlSmokeObj`" `"$($minimum.Obj)`" /OUT:`"$sqlSmokeExe`""
+& $sqlSmokeExe $extension
 if ($LASTEXITCODE -ne 0) {
-    throw "Windows Native C ABI smoke failed"
+    throw "Windows SQL surface C smoke failed"
 }
 
 $exportsFile = Join-Path $root "exports.txt"
@@ -304,19 +304,11 @@ $dependenciesFile = Join-Path $root "dependencies.txt"
 Invoke-VcCommand -Name "artifact-inspect" -Command "dumpbin /nologo /exports `"$extension`" > `"$exportsFile`" && dumpbin /nologo /imports `"$extension`" > `"$importsFile`" && dumpbin /nologo /dependents `"$extension`" > `"$dependenciesFile`""
 
 $exports = Get-Content -Raw $exportsFile
-foreach ($symbol in @(
-    "sqlite3_lithograph_init",
-    "lithograph_v1_execute",
-    "lithograph_v1_validate",
-    "lithograph_v1_tx_begin",
-    "lithograph_v1_tx_execute",
-    "lithograph_v1_tx_commit",
-    "lithograph_v1_tx_abort",
-    "lithograph_v1_free"
-)) {
-    if ($exports -notmatch [regex]::Escape($symbol)) {
-        throw "Windows artifact is missing required export: $symbol"
-    }
+if ($exports -notmatch [regex]::Escape("sqlite3_lithograph_init")) {
+    throw "Windows artifact is missing required export: sqlite3_lithograph_init"
+}
+if ($exports -match "lithograph_v1_") {
+    throw "Windows artifact still exports application-facing Native query symbols"
 }
 
 $imports = Get-Content -Raw $importsFile

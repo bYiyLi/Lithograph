@@ -68,10 +68,8 @@ fn run() -> Result<ProbeResult, Box<dyn Error>> {
     checks.push("format2-read-write-and-migration");
     check_format2_migration_failure_rolls_back(&load)?;
     checks.push("format2-migration-failure-rollback");
-    check_format3_read_write_and_migration(&load)?;
-    checks.push("format3-read-write-and-migration");
-    check_format3_migration_failure_rolls_back(&load)?;
-    checks.push("format3-migration-failure-rollback");
+    check_format3_current_read_write(&load)?;
+    checks.push("format3-current-read-write");
     check_failed_migration_rolls_back(&load)?;
     checks.push("migration-failure-rollback");
     check_metadata_update_fault_rolls_back(&load)?;
@@ -182,7 +180,6 @@ fn verify_migrated_state(
         "_lithograph_merge_resolutions",
         "_lithograph_index_generations",
         "_lithograph_index_entries",
-        "_lithograph_embedding_cache",
     ] {
         let count: i64 =
             after.query_row(&format!("SELECT count(*) FROM main.{table}"), [], |row| {
@@ -630,18 +627,14 @@ fn check_adapter_boundaries(
     fixture: &FileDatabaseFixture,
     load: &str,
 ) -> Result<(), Box<dyn Error>> {
-    let rows_script = format!(
-        "{load}\nSELECT row FROM lithograph_rows({});",
+    let rows = fixture.execute_script(&format!(
+        "{load}\nSELECT group_concat(event, ',') FROM lithograph_rows({});",
         sql_literal("CALL lithograph.branch.checkout('feature') YIELD name RETURN name")
-    );
-    match fixture.execute_script(&rows_script) {
-        Err(FixtureError::Sqlite { stderr, .. }) => require(
-            stderr.contains("READ_ONLY_ADAPTER"),
-            "lithograph_rows must reject checkout/version connection-state mutation",
-        )?,
-        Err(error) => return Err(error.into()),
-        Ok(_) => return Err("lithograph_rows unexpectedly executed Branch checkout".into()),
-    }
+    ))?;
+    require(
+        rows.trim() == "columns,row,summary",
+        "lithograph_rows must execute checkout/version connection-state mutation through the normal event lifecycle",
+    )?;
 
     let graph_view_script = format!(
         "{load}\nSELECT lithograph({}, '{{}}', {});",
@@ -686,7 +679,7 @@ fn abort_session_and_check_restart(
     }
 }
 
-fn check_format3_read_write_and_migration(load: &str) -> Result<(), Box<dyn Error>> {
+fn check_format3_current_read_write(load: &str) -> Result<(), Box<dyn Error>> {
     let fixture = FileDatabaseFixture::new(0x0913)?;
     let expected = seed_format3_database(fixture.path())?;
 
@@ -695,133 +688,37 @@ fn check_format3_read_write_and_migration(load: &str) -> Result<(), Box<dyn Erro
     ))?;
     require(
         read.trim() == "3",
-        "format-3 database must remain readable before migration",
+        "current format-3 database must remain readable",
     )?;
-
-    match fixture.execute_script(&format!(
-        "{load}\nSELECT lithograph('CREATE (:LegacyFormat3Write) FINISH');"
-    )) {
-        Err(FixtureError::Sqlite { stderr, .. }) => require(
-            stderr.contains("LITHOGRAPH_STORAGE_ERROR") && stderr.contains("read-only"),
-            &format!("format-3 write refusal must be explicit and stable: {stderr}"),
-        )?,
-        Err(error) => return Err(error.into()),
-        Ok(_) => return Err("format-3 write unexpectedly succeeded before migration".into()),
-    }
 
     let output = fixture.execute_script(&format!("{load}\nSELECT lithograph_init();"))?;
     let init: Value = serde_json::from_str(&output)?;
     require(
         init["storageFormat"] == STORAGE_FORMAT,
-        "format-3 migration must advance to current storage format",
+        "format-3 init must preserve current storage format",
     )?;
     require(
         init["databaseId"] == expected.database_id,
-        "format-3 migration must preserve databaseId",
+        "format-3 init must preserve databaseId",
     )?;
     require(
         init["root"] == expected.root.to_hex(),
-        "format-3 migration must preserve Root Commit identity",
+        "format-3 init must preserve Root Commit identity",
     )?;
-    verify_format3_fixture_after_migration(fixture.path(), &expected)
-}
+    verify_format3_fixture_current(fixture.path(), &expected)?;
 
-fn check_format3_migration_failure_rolls_back(load: &str) -> Result<(), Box<dyn Error>> {
-    let fixture = FileDatabaseFixture::new(0x0914)?;
-    let expected = seed_format3_database(fixture.path())?;
-    let connection = Connection::open(fixture.path())?;
-    connection.execute_batch(concat!(
-        "CREATE TRIGGER phase13_fail_format4_update ",
-        "BEFORE UPDATE OF storage_format ON main._lithograph_meta ",
-        "WHEN NEW.storage_format = 4 ",
-        "BEGIN ",
-        "SELECT RAISE(ABORT, 'phase13 format4 metadata fault'); ",
-        "END;"
+    fixture.execute_script(&format!(
+        "{load}\nSELECT lithograph('CREATE (:CurrentFormat3Write) FINISH');"
     ))?;
-    drop(connection);
-
-    let script = format!("{load}\nSELECT lithograph_init();");
-    match fixture.execute_script(&script) {
-        Err(FixtureError::Sqlite { stderr, .. }) => require(
-            stderr.contains("LITHOGRAPH_")
-                && (stderr.contains("phase13 format4 metadata fault")
-                    || stderr.contains("failed to advance Lithograph storage format")),
-            &format!("3->4 metadata fault must surface as migration failure: {stderr}"),
-        )?,
-        Err(error) => return Err(error.into()),
-        Ok(_) => return Err("format-3 migration unexpectedly survived format-4 fault".into()),
-    }
-    verify_format3_failure_rollback(fixture.path(), &expected)?;
-
-    let recovery = Connection::open(fixture.path())?;
-    recovery.execute_batch("DROP TRIGGER main.phase13_fail_format4_update")?;
-    require(
-        integrity_check(&recovery)?.is_empty(),
-        "rolled-back format-3 database must remain valid after removing the injected fault",
-    )?;
-    drop(recovery);
-    let output = fixture.execute_script(&script)?;
-    let init: Value = serde_json::from_str(&output)?;
-    require(
-        init["storageFormat"] == STORAGE_FORMAT,
-        "format-3 migration must succeed after format-4 fault removal",
-    )?;
-    verify_format3_fixture_after_migration(fixture.path(), &expected)
-}
-
-fn verify_format3_failure_rollback(
-    path: &std::path::Path,
-    expected: &Format3FixtureState,
-) -> Result<(), Box<dyn Error>> {
-    let connection = Connection::open(path)?;
-    let format: i64 = connection.query_row(
-        "SELECT storage_format FROM main._lithograph_meta WHERE id=1",
-        [],
-        |row| row.get(0),
-    )?;
-    require(format == 3, "failed 3->4 migration must leave format at 3")?;
-    require(
-        branch_head(&connection, "main")? == expected.root,
-        "failed 3->4 migration must preserve main Branch head",
+    let written = scalar_query(
+        &fixture,
+        load,
+        "MATCH (n:CurrentFormat3Write) RETURN count(n)",
+        "{}",
     )?;
     require(
-        list_tags(&connection)?
-            .iter()
-            .any(|tag| tag.name == "legacy-v3" && tag.commit == expected.root),
-        "failed 3->4 migration must preserve Tags",
-    )?;
-    require(
-        commit_data(&connection, expected.root)?.as_deref()
-            == Some(r#"{"fixture":"format3","preserved":true}"#),
-        "failed 3->4 migration must preserve Commit Data",
-    )?;
-    require(
-        load_merge_session(&connection, &expected.session_id)?.is_some(),
-        "failed 3->4 migration must preserve Merge Sessions",
-    )?;
-    let format4_objects: i64 = connection.query_row(
-        concat!(
-            "SELECT count(*) FROM main.sqlite_schema ",
-            "WHERE type='table' AND name='_lithograph_embedding_cache'"
-        ),
-        [],
-        |row| row.get(0),
-    )?;
-    require(
-        format4_objects == 0,
-        "failed 3->4 migration must rollback the embedding cache table",
-    )?;
-    let format4_columns: i64 = connection.query_row(
-        concat!(
-            "SELECT count(*) FROM pragma_table_info('_lithograph_meta') ",
-            "WHERE name IN ('semantic.embedding_cache.enabled', 'semantic.embedding_cache.max_bytes')"
-        ),
-        [],
-        |row| row.get(0),
-    )?;
-    require(
-        format4_columns == 0,
-        "failed 3->4 migration must rollback operational metadata columns",
+        written["rows"] == serde_json::json!([[1]]),
+        "current format-3 database must accept graph writes",
     )
 }
 
@@ -845,7 +742,6 @@ fn seed_format3_database(path: &std::path::Path) -> Result<Format3FixtureState, 
         "UPDATE main._lithograph_meta SET storage_format=3 WHERE id=1",
         [],
     )?;
-    connection.execute_batch("DROP TABLE main._lithograph_embedding_cache;")?;
     create_tag(&connection, "legacy-v3", root)?;
     set_commit_data(
         &connection,
@@ -864,52 +760,52 @@ fn seed_format3_database(path: &std::path::Path) -> Result<Format3FixtureState, 
     })
 }
 
-fn verify_format3_fixture_after_migration(
+fn verify_format3_fixture_current(
     path: &std::path::Path,
     expected: &Format3FixtureState,
 ) -> Result<(), Box<dyn Error>> {
     let connection = Connection::open(path)?;
     require(
         branch_head(&connection, "main")? == expected.root,
-        "3->4 migration must preserve main Branch head",
+        "current format-3 init must preserve main Branch head",
     )?;
     require(
         list_tags(&connection)?
             .iter()
             .any(|tag| tag.name == "legacy-v3" && tag.commit == expected.root),
-        "3->4 migration must preserve Tags",
+        "current format-3 init must preserve Tags",
     )?;
     require(
         commit_data(&connection, expected.root)?.as_deref()
             == Some(r#"{"fixture":"format3","preserved":true}"#),
-        "3->4 migration must preserve Commit Data",
+        "current format-3 init must preserve Commit Data",
     )?;
     require(
         load_merge_session(&connection, &expected.session_id)?.is_some(),
-        "3->4 migration must preserve Merge Sessions",
+        "current format-3 init must preserve Merge Sessions",
     )?;
-    let cache_entries: i64 = connection.query_row(
-        "SELECT count(*) FROM main._lithograph_embedding_cache",
+    let cache_objects: i64 = connection.query_row(
+        "SELECT count(*) FROM main.sqlite_schema WHERE name='_lithograph_embedding_cache'",
         [],
         |row| row.get(0),
     )?;
     require(
-        cache_entries == 0,
-        "3->4 migration must create an empty persistent embedding cache",
+        cache_objects == 0,
+        "current format-3 inventory must not contain the removed embedding cache table",
     )?;
-    let format4_columns: i64 = connection.query_row(
+    let cache_columns: i64 = connection.query_row(
         "SELECT count(*) FROM pragma_table_info('_lithograph_meta') \
          WHERE name IN ('semantic.embedding_cache.enabled', 'semantic.embedding_cache.max_bytes')",
         [],
         |row| row.get(0),
     )?;
     require(
-        format4_columns == 2,
-        "3->4 migration must add both operational embedding-cache metadata columns",
+        cache_columns == 0,
+        "current format-3 metadata must not contain embedding-cache policy columns",
     )?;
     require(
         integrity_check(&connection)?.is_empty(),
-        "migrated format-4 database must pass integrity",
+        "current format-3 database must pass integrity",
     )
 }
 
@@ -935,8 +831,7 @@ fn seed_format2_database(path: &std::path::Path) -> Result<Format2FixtureState, 
     )?;
     connection.execute_batch(
         "DROP TABLE main._lithograph_index_entries;\
-         DROP TABLE main._lithograph_index_generations;\
-         DROP TABLE main._lithograph_embedding_cache;",
+         DROP TABLE main._lithograph_index_generations;",
     )?;
     create_tag(&connection, "legacy-v2", root)?;
     set_commit_data(
@@ -1032,7 +927,6 @@ fn seed_format1_database(
         [old_root.as_bytes().as_slice()],
     )?;
     for table in [
-        "_lithograph_embedding_cache",
         "_lithograph_index_entries",
         "_lithograph_index_generations",
         "_lithograph_merge_resolutions",

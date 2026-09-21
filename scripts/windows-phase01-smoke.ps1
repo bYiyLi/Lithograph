@@ -21,7 +21,7 @@ $root = Join-Path $targetRoot "phase01\windows-sqlite-3.45.0"
 $archive = Join-Path $root "sqlite-autoconf-3450000.tar.gz"
 $sourceDir = Join-Path $root "sqlite-autoconf-3450000"
 $sqliteExe = Join-Path $root "sqlite3.exe"
-$nativeExe = Join-Path $root "native-abi-smoke.exe"
+$sqlSmokeExe = Join-Path $root "sql-surface-smoke.exe"
 $expectedSha256 = "72887d57a1d8f89f52be38ef84a6353ce8c3ed55ada7864eb944abd9a495e436"
 
 New-Item -ItemType Directory -Force -Path $root | Out-Null
@@ -70,8 +70,7 @@ function Invoke-VcCommand {
 $sqliteC = Join-Path $sourceDir "sqlite3.c"
 $shellC = Join-Path $sourceDir "shell.c"
 $sqliteHeaderDir = $sourceDir
-$nativeSource = Join-Path $repoRoot "tests\native_abi_smoke.c"
-$lithographInclude = Join-Path $repoRoot "include"
+$sqlSmokeSource = Join-Path $repoRoot "tests\sql_surface_smoke.c"
 $sqliteObj = Join-Path $root "sqlite3-native.obj"
 $sqliteLib = Join-Path $root "sqlite3.lib"
 
@@ -120,12 +119,12 @@ if ($LASTEXITCODE -ne 0) {
     throw "Windows Phase 06 Cypher completeness probe failed"
 }
 
-$nativeObj = Join-Path $root "native-abi-smoke.obj"
-Invoke-VcCommand "cd /d `"$root`" && cl /nologo /c /std:c11 /W4 /WX /I`"$lithographInclude`" /I`"$sqliteHeaderDir`" `"$nativeSource`" /Fo`"$nativeObj`""
-Invoke-VcCommand "cd /d `"$root`" && link /nologo `"$nativeObj`" `"$sqliteObj`" /OUT:`"$nativeExe`""
-& $nativeExe $extension
+$sqlSmokeObj = Join-Path $root "sql-surface-smoke.obj"
+Invoke-VcCommand "cd /d `"$root`" && cl /nologo /c /std:c11 /W4 /WX /I`"$sqliteHeaderDir`" `"$sqlSmokeSource`" /Fo`"$sqlSmokeObj`""
+Invoke-VcCommand "cd /d `"$root`" && link /nologo `"$sqlSmokeObj`" `"$sqliteObj`" /OUT:`"$sqlSmokeExe`""
+& $sqlSmokeExe $extension
 if ($LASTEXITCODE -ne 0) {
-    throw "Windows Native C ABI smoke failed"
+    throw "Windows SQL surface C smoke failed"
 }
 
 $exportsFile = Join-Path $root "exports.txt"
@@ -134,19 +133,11 @@ $dependenciesFile = Join-Path $root "dependencies.txt"
 Invoke-VcCommand "dumpbin /nologo /exports `"$extension`" > `"$exportsFile`" && dumpbin /nologo /imports `"$extension`" > `"$importsFile`" && dumpbin /nologo /dependents `"$extension`" > `"$dependenciesFile`""
 
 $exports = Get-Content -Raw $exportsFile
-foreach ($symbol in @(
-    "sqlite3_lithograph_init",
-    "lithograph_v1_execute",
-    "lithograph_v1_validate",
-    "lithograph_v1_tx_begin",
-    "lithograph_v1_tx_execute",
-    "lithograph_v1_tx_commit",
-    "lithograph_v1_tx_abort",
-    "lithograph_v1_free"
-)) {
-    if ($exports -notmatch [regex]::Escape($symbol)) {
-        throw "Windows artifact is missing required export: $symbol"
-    }
+if ($exports -notmatch [regex]::Escape("sqlite3_lithograph_init")) {
+    throw "Windows artifact is missing required export: sqlite3_lithograph_init"
+}
+if ($exports -match "lithograph_v1_") {
+    throw "Windows artifact still exports application-facing Native query symbols"
 }
 
 $imports = Get-Content -Raw $importsFile
@@ -158,4 +149,4 @@ if ($dependencies -match "(?i)sqlite.*\.dll") {
     throw "Windows extension artifact links a private SQLite runtime"
 }
 
-Write-Host "Windows Phase 01 load/ABI/artifact smoke passed: $extension"
+Write-Host "Windows Phase 01 load/SQL/artifact smoke passed: $extension"

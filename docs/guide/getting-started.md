@@ -1,6 +1,6 @@
 # 快速入门：创建图并查看历史
 
-适用 v0.1.0。目标：创建两个节点和一条关系，参数化查询、修改数据，并查看修改前的状态。使用安装章节确认可加载的扩展，打开新的演示数据库后执行 `.load`。不要在已有业务库直接运行本教程。
+适用当前 Phase 15 开发基线。目标：创建两个节点和一条关系，参数化查询、修改数据，并查看修改前的状态。使用安装章节确认可加载的扩展，打开新的演示数据库后执行 `.load`。不要在已有业务库直接运行本教程。
 
 ## 初始化
 
@@ -30,14 +30,14 @@ SQL 字符串中的单引号需要写成两个单引号；JSON 参数可以减�
 ## 查询关系
 
 ```sql
-SELECT ordinal, columns, row
+SELECT ordinal, event, data
 FROM lithograph_rows(
   'MATCH (p:Person)-[r:WORKS_AT]->(c:Company)
    RETURN p.name AS person, c.name AS company, r.since AS since'
 );
 ```
 
-得到一行，`ordinal = 0`，`row = ["Alice","Acme",2026]`。`columns` / `row` 都是 JSON 文本。读取不会创建 Commit。
+得到三个 event：`ordinal=0,event='columns'` 的 `data` 是列名数组；随后 `event='row'` 的 `data` 为 `["Alice","Acme",2026]`；最后是 `event='summary'`。读取不会创建 Commit。
 
 ## 为当前状态命名，再修改
 

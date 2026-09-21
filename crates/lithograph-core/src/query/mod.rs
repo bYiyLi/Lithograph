@@ -32,6 +32,12 @@ pub use stream::{
     OperatorRuntimeMetrics, QueryBatch, QueryCounters, QueryCursor, QueryMetrics, QuerySummary,
     QueryType,
 };
+
+#[doc(hidden)]
+pub fn initialize_connection_state(connection: &rusqlite::Connection) -> QueryResult<()> {
+    managed_semantic::initialize_execution_work(connection)
+}
+
 #[doc(hidden)]
 pub use version::validate_candidate_state;
 

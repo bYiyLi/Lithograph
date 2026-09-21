@@ -119,7 +119,12 @@ SELECT lithograph(
          encoding_format:''float'',
          timeout_ms:30000,
          max_retries:2,
-         batch_size:32
+         batch_size:32,
+         cache:{
+           enabled:true,
+           path:''./openai-embedding-cache.db'',
+           max_bytes:1073741824
+         }
        },
        dimensions:1536,
        similarity:''cosine''
@@ -147,24 +152,21 @@ SELECT lithograph(
 
 source 必须是实际 String；missing、`null` 与其它类型不参与索引。String 按精确 UTF-8 bytes 发送给 Provider，不 trim、lowercase、拼接或截断。Graph View 在 provider input 与 top-k 前生效，历史查询使用目标 Commit 的历史 Semantic definition。
 
-普通 `queryNodes/queryRelationships` 对 query text 和可见 source text 使用相同的 persistent cache key。Cache enabled 且 database 可写时，miss 会调用 Provider、完整校验结果并自动写入 persistent cache；后续同 connection、新 connection 或 process restart 可直接复用。Cache 不保存原文副本。只读数据库或 cache disabled 时仍可查询，但 miss 只进入 connection-local TEMP/LRU。
+Lithograph Core 不拥有 persistent text→Vector cache。它只在**同一次 execution**内对相同 embedding-space / exact text 做去重，并可把大 work set spill 到 TEMP/disk。跨 execution / connection / process 的缓存由具体 Provider 自己决定。上例中 OpenAI-compatible Provider 的 `providerConfig.cache` 使用独立 filesystem SQLite database；`enabled=false` 或省略 cache 时不触碰该文件。
+
+Provider cache 与 Lithograph `main` database、Commit/Schema/history、integrity/GC 相互隔离。cache key 包含有效 endpoint/model/request/header/auth 语义与 exact text；timeout/retry/batch/cache policy 等纯 operational 参数不改变 embedding identity。secret/header value 只以 digest 参与 identity，cache DB 不保存 raw input text 或 credential。
 
 `rebuild` 是可选维护入口，不是正常搜索的前置步骤：
 
 ```sql
 SELECT lithograph(
   'CALL db.index.semantic.rebuild(''doc_semantic'', ''branch/main'')
-   YIELD name, commit, indexedEntities, embeddedTexts, cacheHits
-   RETURN name, commit, indexedEntities, embeddedTexts, cacheHits'
-);
-SELECT lithograph(
-  'CALL db.index.semantic.cache.stats()
-   YIELD enabled, maxBytes, usedBytes, entries, spaces
-   RETURN enabled, maxBytes, usedBytes, entries, spaces'
+   YIELD name, commit, indexedEntities, embeddedTexts
+   RETURN name, commit, indexedEntities, embeddedTexts'
 );
 ```
 
-`rebuild`、`cache.configure`、`cache.clear` 是 operational maintenance：不创建 graph Commit、不移动 ref，不能从 `lithograph_rows()` 或 SQL / Native explicit transaction 中执行。普通 semantic query 的 cache publish同样只修改derived cache，summary仍是`read`，不创建 graph Commit、不移动ref。实际 semantic query/rebuild 每次都要求目标 Provider 当前可用并通过 validation，即使 persistent cache 已经 warm。详细签名见 [Procedure Reference](../reference/procedures.md)。
+`rebuild` 只负责目标 committed Snapshot 的当前-connection TEMP Semantic/HNSW materialization：不创建 graph Commit、不移动 ref，返回中的 `commit` 是实际 pin 的 target Commit。它不报告或维护 Provider cache。普通 Semantic query 可通过 `lithograph()` 与 `lithograph_rows()` 执行，并在 active explicit transaction 中读取当前 staged source/membership/definition。实际 query/rebuild 每次都要求目标 Provider 当前可用并通过 validation。
 
 ## 历史检索和子图检索
 

@@ -1,8 +1,6 @@
 #![forbid(unsafe_code)]
 
-use lithograph_core::storage::branch_head;
 use lithograph_test_support::sqlite::{FileDatabaseFixture, FixtureError, extension_load_command};
-use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::Value;
 use std::env;
@@ -47,10 +45,10 @@ fn run() -> Result<ProbeResult, Box<dyn Error>> {
 
     check_search_and_fulltext(&fixture, &load)?;
     checks.push("search-fulltext");
-    check_sql_bridge_transaction_boundary(&fixture, &load)?;
-    checks.push("sql-bridge-transaction-boundary");
-    check_rows_rejects_transaction_and_external_io(&fixture, &load)?;
-    checks.push("rows-no-transaction-or-external-io");
+    check_sql_bridge_transaction_execution(&fixture, &load)?;
+    checks.push("sql-bridge-transaction-execution");
+    check_rows_transaction_and_external_io(&fixture, &load)?;
+    checks.push("rows-transaction-external-io");
     check_scalar_load_csv(&fixture, &load)?;
     checks.push("scalar-load-csv");
 
@@ -100,48 +98,50 @@ fn check_search_and_fulltext(
     )
 }
 
-fn check_sql_bridge_transaction_boundary(
+fn check_sql_bridge_transaction_execution(
     fixture: &FileDatabaseFixture,
     load: &str,
 ) -> Result<(), Box<dyn Error>> {
-    let before = branch_head(&Connection::open(fixture.path())?, "main")?;
-    let query = "UNWIND [1] AS value CALL (value) { CREATE (:SqlBridgeMustNotBatch) } IN TRANSACTIONS FINISH";
-    let script = format!("{load}\nSELECT lithograph({});", sql_literal(query));
-    match fixture.execute_script(&script) {
-        Err(FixtureError::Sqlite { stderr, .. }) => require(
-            stderr.contains("TRANSACTION_BOUNDARY_REQUIRED"),
-            "SQL Bridge transaction-owning query must return TRANSACTION_BOUNDARY_REQUIRED",
-        )?,
-        Err(error) => return Err(error.into()),
-        Ok(_) => return Err("SQL Bridge unexpectedly executed transaction-owning Cypher".into()),
-    }
+    let query = "UNWIND [1,2] AS value CALL (value) { CREATE (:SqlBridgeBatch {value:value}) } IN TRANSACTIONS OF 1 ROWS FINISH";
+    let result = scalar_query(fixture, load, query)?;
     require(
-        branch_head(&Connection::open(fixture.path())?, "main")? == before,
-        "rejected SQL Bridge transaction query must not move Branch head",
+        result["summary"]["queryType"] == "write",
+        "SQL Bridge transaction-owning query must complete as a write",
+    )?;
+    let count = scalar_query(fixture, load, "MATCH (n:SqlBridgeBatch) RETURN count(n)")?;
+    require(
+        count["rows"] == serde_json::json!([[2]]),
+        "SQL Bridge transaction batches did not persist committed rows",
     )
 }
 
-fn check_rows_rejects_transaction_and_external_io(
+fn check_rows_transaction_and_external_io(
     fixture: &FileDatabaseFixture,
     load: &str,
 ) -> Result<(), Box<dyn Error>> {
-    for query in [
-        "UNWIND [1] AS value CALL (value) { RETURN value AS innerValue } IN TRANSACTIONS RETURN innerValue",
-        "LOAD CSV FROM 'file:///definitely/not/a/lithograph/phase08/file.csv' AS row RETURN row",
-    ] {
-        let script = format!(
-            "{load}\nSELECT row FROM lithograph_rows({});",
-            sql_literal(query)
-        );
-        match fixture.execute_script(&script) {
-            Err(FixtureError::Sqlite { stderr, .. }) => require(
-                stderr.contains("READ_ONLY_ADAPTER"),
-                "lithograph_rows must reject transaction-owning and external-I/O Cypher before side effects",
-            )?,
-            Err(error) => return Err(error.into()),
-            Ok(_) => return Err("lithograph_rows unexpectedly executed a forbidden query".into()),
-        }
-    }
+    let transaction = "UNWIND [1,2] AS value CALL (value) { RETURN value AS innerValue } IN TRANSACTIONS OF 1 ROWS RETURN innerValue ORDER BY innerValue";
+    let events = fixture.execute_script(&format!(
+        "{load}\nSELECT group_concat(event, ',') FROM lithograph_rows({});",
+        sql_literal(transaction)
+    ))?;
+    require(
+        events.trim() == "columns,row,row,summary",
+        "lithograph_rows transaction-owning query returned an unexpected event lifecycle",
+    )?;
+
+    let csv = fixture.directory().join("phase08-rows.csv");
+    fs::write(&csv, "name\nRowsAlice\nRowsBob\n")?;
+    let uri = local_file_uri(&csv);
+    let load_csv =
+        format!("LOAD CSV WITH HEADERS FROM '{uri}' AS row RETURN row.name ORDER BY row.name");
+    let events = fixture.execute_script(&format!(
+        "{load}\nSELECT group_concat(event, ',') FROM lithograph_rows({});",
+        sql_literal(&load_csv)
+    ))?;
+    require(
+        events.trim() == "columns,row,row,summary",
+        "lithograph_rows external-I/O query returned an unexpected event lifecycle",
+    )?;
     Ok(())
 }
 

@@ -18,7 +18,6 @@ mod path;
 mod validation;
 mod version;
 
-use execute::execute_read_snapshot;
 pub(crate) use execute::execute_version_program;
 use validation::{
     has_graph_expression, query_body_has_public_result, validate_static_property_accesses,
@@ -239,7 +238,6 @@ fn has_aggregating_function(root: &AstNode) -> bool {
 
 fn validate_semantic_external_io_program(
     root: &AstNode,
-    writes: bool,
     transaction_owning: bool,
 ) -> QueryResult<()> {
     let has_semantic_external_io = root
@@ -247,9 +245,9 @@ fn validate_semantic_external_io_program(
         .filter(|node| node.kind == AstKind::FunctionName)
         .filter_map(|node| node.text.as_deref())
         .any(super::registry::is_semantic_direct_only);
-    if has_semantic_external_io && (writes || transaction_owning) {
+    if has_semantic_external_io && transaction_owning {
         return Err(QueryError::transaction_boundary_required(
-            "Semantic query and maintenance cannot execute with graph mutation or transaction-owning Cypher",
+            "Semantic external I/O cannot execute inside transaction-owning Cypher",
         ));
     }
     Ok(())
@@ -273,7 +271,7 @@ pub(crate) fn prepare_program(
     let public_result = query_body_has_public_result(&ast.root);
     let columns = output_columns(&ast.root, source, public_result)?;
     let writes = contains_mutation(&ast.root);
-    validate_semantic_external_io_program(&ast.root, writes, transaction_owning)?;
+    validate_semantic_external_io_program(&ast.root, transaction_owning)?;
     let version =
         version::validate_version_program(&ast.root, options, writes, transaction_owning)?;
     let write_options = writes
@@ -1332,7 +1330,7 @@ fn physical_operator(operator: &LogicalOperator) -> PhysicalOperator {
     clippy::too_many_arguments,
     reason = "the program boundary keeps all immutable query execution inputs explicit"
 )]
-pub(crate) fn execute_prepared_read(
+pub(crate) fn execute_prepared_read_with_summary_commit(
     connection: &Connection,
     program: &PreparedProgram,
     snapshot: crate::storage::Snapshot<'_>,
@@ -1341,16 +1339,16 @@ pub(crate) fn execute_prepared_read(
     mode: ExecutionMode,
     metrics: &mut QueryMetrics,
     is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<Vec<Vec<Value>>> {
+) -> QueryResult<(Vec<Vec<Value>>, Option<crate::storage::HashId>)> {
     if program.writes {
         return Err(QueryError::internal(
             "mutating Phase 06 program reached the read executor",
         ));
     }
     if mode == ExecutionMode::Explain {
-        return Ok(vec![vec![Value::String(program.physical.explain())]]);
+        return Ok((vec![vec![Value::String(program.physical.explain())]], None));
     }
-    execute_read_snapshot(
+    execute::execute_read_snapshot_with_version_summary(
         connection,
         program,
         snapshot,

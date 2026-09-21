@@ -19,7 +19,6 @@ pub enum QueryErrorKind {
     MergeSessionNotFound,
     MergeSessionChanged,
     MergeConflict,
-    ReadOnlyAdapter,
     ReadOnlySnapshot,
     TransactionBoundaryRequired,
     Busy,
@@ -64,10 +63,6 @@ impl QueryError {
 
     pub fn graph_view_violation(message: impl Into<String>) -> Self {
         Self::new(QueryErrorKind::GraphViewViolation, message)
-    }
-
-    pub fn read_only_adapter(message: impl Into<String>) -> Self {
-        Self::new(QueryErrorKind::ReadOnlyAdapter, message)
     }
 
     pub fn read_only_snapshot(message: impl Into<String>) -> Self {

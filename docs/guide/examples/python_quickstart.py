@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the v0.1.0 SQL Bridge tutorial in an isolated in-memory database."""
+"""Run the current SQL-only Lithograph quickstart in an isolated database."""
 
 import argparse
 import json
@@ -24,8 +24,8 @@ def open_graph(extension: Path, database: str = ":memory:",
         finally:
             db.enable_load_extension(False)
         version = json.loads(db.execute("SELECT lithograph_version()").fetchone()[0])
-        if version["extension"] != "0.1.0":
-            raise RuntimeError("This example targets Lithograph 0.1.0")
+        if version.get("cypherProfile") != "CY25-2026.08":
+            raise RuntimeError("Unexpected Lithograph compatibility profile")
         if initialize:
             db.execute("SELECT lithograph_init()").fetchone()
         return db
@@ -57,7 +57,7 @@ def require(condition: bool, message: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("extension", type=Path, help="Trusted v0.1.0 shared library")
+    parser.add_argument("extension", type=Path, help="Trusted Lithograph shared library")
     args = parser.parse_args()
     db = open_graph(args.extension)
     try:
@@ -80,12 +80,12 @@ def main() -> None:
         require(historical["rows"] == [["Alice"]], "Historical state changed")
         require(changed["summary"]["commit"] != baseline, "Missing new Commit")
         cursor = db.execute(
-            "SELECT ordinal, columns, row FROM lithograph_rows(?, ?, ?)",
+            "SELECT ordinal, event, data FROM lithograph_rows(?, ?, ?)",
             ("MATCH (p:Person) RETURN p.name AS name", "{}", "{}"))
         try:
-            for ordinal, columns, row in cursor:
-                print(json.dumps({"ordinal": ordinal, "columns": json.loads(columns),
-                                  "row": json.loads(row)}))
+            for ordinal, event, data in cursor:
+                print(json.dumps({"ordinal": ordinal, "event": event,
+                                  "data": json.loads(data)}))
         finally:
             cursor.close()
         check = json.loads(db.execute("SELECT lithograph_integrity_check()").fetchone()[0])

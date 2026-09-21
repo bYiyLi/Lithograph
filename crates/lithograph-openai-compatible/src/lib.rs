@@ -13,6 +13,7 @@
     deny(clippy::expect_used, clippy::panic, clippy::unwrap_used)
 )]
 
+mod cache;
 mod config;
 mod http;
 
@@ -34,7 +35,7 @@ const SQLITE_MIN_VERSION_NUMBER: c_int = 3_045_000;
 const SQLITE_API_GET_CLIENTDATA_SLOT: usize = 268;
 const SQLITE_API_SET_CLIENTDATA_SLOT: usize = 269;
 const PROVIDER_KEY: &CStr = c"lithograph.embedding.v1/openai-compatible";
-const PROVIDER_SEMANTIC_IDENTITY: &[u8] = b"lithograph-openai-compatible/v1";
+pub(crate) const PROVIDER_SEMANTIC_IDENTITY: &[u8] = b"lithograph-openai-compatible/v1";
 const MAX_DIMENSIONS: usize = 4_096;
 
 type SqliteGetClientdata = unsafe extern "C" fn(*mut ffi::sqlite3, *const c_char) -> *mut c_void;
@@ -50,6 +51,7 @@ static SQLITE_SET_CLIENTDATA: OnceLock<SqliteSetClientdata> = OnceLock::new();
 
 struct ProviderRuntime {
     client: Client,
+    main_database: Option<std::path::PathBuf>,
 }
 
 /// Generic SQLite extension entry point.
@@ -102,10 +104,11 @@ unsafe fn extension_entry(
 
 fn extension_init(connection: Connection) -> SqliteResult<bool> {
     ensure_dependency_logging_disabled().map_err(sqlite_init_error)?;
+    let main_database = cache::main_database_path(&connection);
     // SAFETY: connection remains live for registration and SQLite owns client
     // data after successful set_clientdata.
     let db = unsafe { connection.handle() };
-    register_provider(db).map_err(sqlite_init_error)?;
+    register_provider(db, main_database).map_err(sqlite_init_error)?;
     Ok(false)
 }
 
@@ -120,13 +123,17 @@ fn sqlite_init_error(message: String) -> rusqlite::Error {
     rusqlite::Error::SqliteFailure(ffi::Error::new(ffi::SQLITE_ERROR), Some(message))
 }
 
-fn register_provider(db: *mut ffi::sqlite3) -> Result<(), String> {
+fn register_provider(
+    db: *mut ffi::sqlite3,
+    main_database: Option<std::path::PathBuf>,
+) -> Result<(), String> {
     if !host_get_clientdata(db, PROVIDER_KEY).is_null() {
         return Err("openai-compatible embedding provider is already registered".to_owned());
     }
 
     let mut runtime = Box::new(ProviderRuntime {
         client: Client::new(),
+        main_database,
     });
     let context = (&mut *runtime as *mut ProviderRuntime).cast::<c_void>();
     let provider = Box::new(EmbeddingProviderV1 {
@@ -234,10 +241,24 @@ unsafe extern "C" fn embed_batch_callback(
         let texts = unsafe { owned_texts(texts, text_count) }?;
         // SAFETY: validate_request confirmed this provider-owned context.
         let runtime = unsafe { &*context.cast::<ProviderRuntime>() };
-        let values = runtime.client.embed(&config, &texts, dimensions, || {
-            // SAFETY: callback/user data are caller-owned for embedBatch.
-            unsafe { cancelled(is_cancelled, cancel_user_data) }
-        })?;
+        let values = if config.cache.enabled {
+            cache::embed(
+                &runtime.client,
+                &config,
+                runtime.main_database.as_deref(),
+                &texts,
+                dimensions,
+                || {
+                    // SAFETY: callback/user data are caller-owned for embedBatch.
+                    unsafe { cancelled(is_cancelled, cancel_user_data) }
+                },
+            )?
+        } else {
+            runtime.client.embed(&config, &texts, dimensions, || {
+                // SAFETY: callback/user data are caller-owned for embedBatch.
+                unsafe { cancelled(is_cancelled, cancel_user_data) }
+            })?
+        };
         let mut values = values.into_boxed_slice();
         let value_count = values.len();
         let values_ptr = values.as_mut_ptr();

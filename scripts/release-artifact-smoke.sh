@@ -27,10 +27,11 @@ for phase in 01 02 03 04 05 06 07 08 09; do
 done
 
 python3 scripts/check-extension-artifact.py "$extension"
-scripts/native-abi-smoke.sh "$extension"
+scripts/sql-surface-smoke.sh "$extension"
 if [ -n "$openai_provider" ]; then
   python3 scripts/check-extension-artifact.py "$openai_provider" --provider
   scripts/openai-compatible-provider-smoke.sh "$openai_provider"
+  scripts/phase15-provider-cache-smoke.sh "$openai_provider"
 fi
 
 # Same artifact, two independently built host runtimes: the frozen minimum and

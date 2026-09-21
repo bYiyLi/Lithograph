@@ -179,10 +179,14 @@ static void check_registration(sqlite3 *db) {
     sqlite3_int64 count = scalar_int(
         db,
         "SELECT count(*) FROM pragma_function_list "
-        "WHERE name IN ('lithograph_tx_begin','lithograph_tx_execute','lithograph_tx_commit','lithograph_tx_abort') "
+        "WHERE name IN ('lithograph_tx_begin','lithograph_tx_commit','lithograph_tx_abort') "
         "AND (flags & 2048)=0 AND (flags & 524288)!=0"
     );
-    require(count == 4, "transaction SQL functions have incorrect registration flags");
+    require(count == 3, "transaction SQL functions have incorrect registration flags");
+    require(
+        scalar_int(db, "SELECT count(*) FROM pragma_function_list WHERE name='lithograph_tx_execute'") == 0,
+        "lithograph_tx_execute must not be registered"
+    );
 }
 
 static void check_commit_and_staged_read(sqlite3 *writer, sqlite3 *reader) {
@@ -196,20 +200,20 @@ static void check_commit_and_staged_read(sqlite3 *writer, sqlite3 *reader) {
     );
     require(strstr(result, "baseCommit") != NULL, "tx_begin result shape differs");
     require(sqlite3_get_autocommit(writer) == 0, "tx_begin did not start a SQLite transaction");
-    scalar_text(writer, "SELECT lithograph_tx_execute('CREATE (:SqlTx {name: ''one''}) FINISH')", result, sizeof(result));
+    scalar_text(writer, "SELECT lithograph('CREATE (:SqlTx {name: ''one''}) FINISH')", result, sizeof(result));
     scalar_text(
         writer,
-        "SELECT lithograph_tx_execute('CREATE (:SqlTx {name: $name}) FINISH','{\"name\":\"two\"}')",
+        "SELECT lithograph('CREATE (:SqlTx {name: $name}) FINISH','{\"name\":\"two\"}')",
         result,
         sizeof(result)
     );
     scalar_text(
         writer,
-        "SELECT json_extract(lithograph_tx_execute('MATCH (n:SqlTx) RETURN count(n)'), '$.rows[0][0]')",
+        "SELECT json_extract(lithograph('MATCH (n:SqlTx) RETURN count(n)'), '$.rows[0][0]')",
         result,
         sizeof(result)
     );
-    require(strcmp(result, "2") == 0, "tx_execute did not read prior staged writes");
+    require(strcmp(result, "2") == 0, "normal execution did not read prior staged writes");
     require(label_count(reader, "SqlTx") == 0, "another connection observed staged writes");
     scalar_text(writer, "SELECT lithograph_tx_commit()", result, sizeof(result));
     require(strstr(result, "\"commit\"") != NULL, "tx_commit result shape differs");
@@ -229,13 +233,13 @@ static void check_read_only_and_empty_delta(sqlite3 *db) {
     char result[4096];
     sqlite3_int64 before = commit_count(db);
     scalar_text(db, "SELECT lithograph_tx_begin('{}')", result, sizeof(result));
-    scalar_text(db, "SELECT lithograph_tx_execute('RETURN 1 AS value')", result, sizeof(result));
+    scalar_text(db, "SELECT lithograph('RETURN 1 AS value')", result, sizeof(result));
     scalar_text(db, "SELECT lithograph_tx_commit()", result, sizeof(result));
     require(commit_count(db) == before, "read-only SQL transaction created a Commit");
 
     scalar_text(db, "SELECT lithograph_tx_begin('{}')", result, sizeof(result));
-    scalar_text(db, "SELECT lithograph_tx_execute('CREATE (:SqlEmpty {id: 1}) FINISH')", result, sizeof(result));
-    scalar_text(db, "SELECT lithograph_tx_execute('MATCH (n:SqlEmpty {id: 1}) DELETE n FINISH')", result, sizeof(result));
+    scalar_text(db, "SELECT lithograph('CREATE (:SqlEmpty {id: 1}) FINISH')", result, sizeof(result));
+    scalar_text(db, "SELECT lithograph('MATCH (n:SqlEmpty {id: 1}) DELETE n FINISH')", result, sizeof(result));
     scalar_text(db, "SELECT lithograph_tx_commit()", result, sizeof(result));
     require(commit_count(db) == before + 1, "empty-delta SQL transaction did not create one Commit");
     require(label_count(db, "SqlEmpty") == 0, "empty-delta SQL transaction changed graph state");
@@ -245,10 +249,10 @@ static void check_abort_and_fail_closed(sqlite3 *db) {
     char result[4096];
     canonical_history_snapshot before = snapshot_canonical_history(db);
     scalar_text(db, "SELECT lithograph_tx_begin('{}')", result, sizeof(result));
-    scalar_text(db, "SELECT lithograph_tx_execute('CREATE (:SqlAbort) FINISH')", result, sizeof(result));
+    scalar_text(db, "SELECT lithograph('CREATE (:SqlAbort) FINISH')", result, sizeof(result));
     scalar_text(
         db,
-        "SELECT lithograph_tx_execute('CREATE RANGE INDEX sql_abort_idx FOR (n:SqlAbort) ON (n.value)')",
+        "SELECT lithograph('CREATE RANGE INDEX sql_abort_idx FOR (n:SqlAbort) ON (n.value)')",
         result,
         sizeof(result)
     );
@@ -259,25 +263,25 @@ static void check_abort_and_fail_closed(sqlite3 *db) {
     require_canonical_history_unchanged(db, &before, "tx_abort left canonical history state");
 
     scalar_text(db, "SELECT lithograph_tx_begin('{}')", result, sizeof(result));
-    scalar_text(db, "SELECT lithograph_tx_execute('CREATE (:SqlFailure) FINISH')", result, sizeof(result));
-    execute_error(db, "SELECT lithograph_tx_execute('not valid Cypher')", "LITHOGRAPH_PARSE_ERROR");
-    require(sqlite3_get_autocommit(db) != 0, "failed tx_execute did not abort the SQLite transaction");
-    require(label_count(db, "SqlFailure") == 0, "failed tx_execute left durable graph state");
-    require_canonical_history_unchanged(db, &before, "failed tx_execute left canonical history state");
+    scalar_text(db, "SELECT lithograph('CREATE (:SqlFailure) FINISH')", result, sizeof(result));
+    execute_error(db, "SELECT lithograph('not valid Cypher')", "LITHOGRAPH_PARSE_ERROR");
+    require(sqlite3_get_autocommit(db) != 0, "failed transaction execution did not abort the SQLite transaction");
+    require(label_count(db, "SqlFailure") == 0, "failed transaction execution left durable graph state");
+    require_canonical_history_unchanged(db, &before, "failed transaction execution left canonical history state");
 
     scalar_text(db, "SELECT lithograph_tx_begin('{}')", result, sizeof(result));
-    scalar_text(db, "SELECT lithograph_tx_execute('CREATE (:SqlBoundary) FINISH')", result, sizeof(result));
+    scalar_text(db, "SELECT lithograph('CREATE (:SqlBoundary) FINISH')", result, sizeof(result));
     execute_error(
         db,
-        "SELECT lithograph_tx_execute('CALL lithograph.branch.list() YIELD name RETURN name')",
+        "SELECT lithograph('CALL lithograph.branch.list() YIELD name RETURN name')",
         "LITHOGRAPH_TRANSACTION_BOUNDARY_REQUIRED"
     );
-    require(sqlite3_get_autocommit(db) != 0, "restricted tx_execute did not abort the SQLite transaction");
+    require(sqlite3_get_autocommit(db) != 0, "restricted transaction execution did not abort the SQLite transaction");
     require(
         label_count(db, "SqlBoundary") == 0,
-        "restricted tx_execute left durable graph state"
+        "restricted transaction execution left durable graph state"
     );
-    require_canonical_history_unchanged(db, &before, "restricted tx_execute left canonical history state");
+    require_canonical_history_unchanged(db, &before, "restricted transaction execution left canonical history state");
 }
 
 static void check_boundaries_and_arguments(sqlite3 *db) {
@@ -292,7 +296,7 @@ static void check_boundaries_and_arguments(sqlite3 *db) {
     require(sqlite3_get_autocommit(db) == 0, "duplicate begin unexpectedly aborted the active transaction");
     scalar_text(db, "SELECT lithograph_tx_abort()", result, sizeof(result));
 
-    execute_error(db, "SELECT lithograph_tx_execute('RETURN 1')", "LITHOGRAPH_INVALID_ARGUMENT");
+    execute_error(db, "SELECT lithograph_tx_execute('RETURN 1')", "no such function");
     execute_error(db, "SELECT lithograph_tx_commit()", "LITHOGRAPH_INVALID_ARGUMENT");
     execute_error(db, "SELECT lithograph_tx_abort()", "LITHOGRAPH_INVALID_ARGUMENT");
 
@@ -308,16 +312,27 @@ static void check_boundaries_and_arguments(sqlite3 *db) {
     require(sqlite3_get_autocommit(db) != 0, "expectedHead mismatch left an active transaction");
 
     scalar_text(db, "SELECT lithograph_tx_begin('{}')", result, sizeof(result));
-    execute_error(db, "SELECT lithograph_tx_execute('RETURN 1',NULL)", "LITHOGRAPH_INVALID_ARGUMENT");
-    require(sqlite3_get_autocommit(db) != 0, "NULL tx_execute argument did not fail-closed abort");
+    execute_error(db, "SELECT lithograph('RETURN 1',NULL)", "LITHOGRAPH_INVALID_ARGUMENT");
+    require(sqlite3_get_autocommit(db) != 0, "NULL execution argument did not fail-closed abort");
 
     scalar_text(db, "SELECT lithograph_tx_begin('{}')", result, sizeof(result));
     execute_error(
         db,
-        "SELECT lithograph_tx_execute('RETURN 1','{}','{\"branch\":\"main\"}')",
+        "SELECT event FROM lithograph_rows('RETURN 1',NULL)",
         "LITHOGRAPH_INVALID_ARGUMENT"
     );
-    require(sqlite3_get_autocommit(db) != 0, "invalid tx_execute options did not fail-closed abort");
+    require(
+        sqlite3_get_autocommit(db) != 0,
+        "NULL rows execution argument did not fail-closed abort"
+    );
+
+    scalar_text(db, "SELECT lithograph_tx_begin('{}')", result, sizeof(result));
+    execute_error(
+        db,
+        "SELECT lithograph('RETURN 1','{}','{\"branch\":\"main\"}')",
+        "LITHOGRAPH_INVALID_ARGUMENT"
+    );
+    require(sqlite3_get_autocommit(db) != 0, "invalid transaction execution options did not fail-closed abort");
 
     execute_error(db, "SELECT lithograph_tx_begin()", "wrong number of arguments");
     execute_error(db, "SELECT lithograph_tx_commit(1)", "wrong number of arguments");
@@ -333,12 +348,12 @@ static void check_result_limit_cleanup(sqlite3 *db) {
 
     scalar_text(db, "SELECT lithograph_tx_begin('{}')", result, sizeof(result));
     old_limit = sqlite3_limit(db, SQLITE_LIMIT_LENGTH, 100);
-    execute_error(db, "SELECT lithograph_tx_execute('RETURN 1')", "LITHOGRAPH_RESOURCE_ERROR");
+    execute_error(db, "SELECT lithograph('RETURN 1')", "LITHOGRAPH_RESOURCE_ERROR");
     sqlite3_limit(db, SQLITE_LIMIT_LENGTH, old_limit);
-    require(sqlite3_get_autocommit(db) != 0, "tx_execute result failure did not abort");
+    require(sqlite3_get_autocommit(db) != 0, "transaction execution result failure did not abort");
 
     scalar_text(db, "SELECT lithograph_tx_begin('{}')", result, sizeof(result));
-    scalar_text(db, "SELECT lithograph_tx_execute('CREATE (:SqlLimit) FINISH')", result, sizeof(result));
+    scalar_text(db, "SELECT lithograph('CREATE (:SqlLimit) FINISH')", result, sizeof(result));
     old_limit = sqlite3_limit(db, SQLITE_LIMIT_LENGTH, 100);
     execute_error(db, "SELECT lithograph_tx_commit()", "LITHOGRAPH_RESOURCE_ERROR");
     sqlite3_limit(db, SQLITE_LIMIT_LENGTH, old_limit);
@@ -362,7 +377,7 @@ static void check_close_cleanup(const char *database, const char *extension, sql
     char result[4096];
     canonical_history_snapshot before = snapshot_canonical_history(db);
     scalar_text(db, "SELECT lithograph_tx_begin('{}')", result, sizeof(result));
-    scalar_text(db, "SELECT lithograph_tx_execute('CREATE (:SqlClose) FINISH')", result, sizeof(result));
+    scalar_text(db, "SELECT lithograph('CREATE (:SqlClose) FINISH')", result, sizeof(result));
     require(sqlite3_get_autocommit(db) == 0, "close-cleanup fixture has no active transaction");
     require(sqlite3_close(db) == SQLITE_OK, "failed to close connection with active SQL transaction");
 

@@ -1,4 +1,3 @@
-use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use rusqlite::Connection;
@@ -20,7 +19,7 @@ use super::plan::{
     Direction, LogicalOperator, LogicalPlan, MatchStep, OrderItem, Projection, ProjectionPlan,
     append_pattern_operators, lower_match, lower_projection,
 };
-use super::stream::{QueryMetrics, materialize_match_step};
+use super::stream::QueryMetrics;
 use super::{QueryError, QueryErrorKind, QueryResult, check_interrupted, now_micros};
 use crate::cypher::unescape_identifier;
 
@@ -29,8 +28,9 @@ const SCAN_BATCH: usize = 256;
 mod execute;
 pub(crate) use execute::{
     TransactionBatchOutcome, TransactionMutationContext, execute_program,
-    execute_program_suffix_transaction, execute_transaction_batch, execute_write,
-    property_from_value,
+    execute_program_suffix_transaction, execute_spilled_outer_write_transaction,
+    execute_transaction_batch, execute_write, materialize_binding_rows_to_spill,
+    property_from_value, spill_value_rows,
 };
 
 #[derive(Debug, Clone)]
@@ -154,9 +154,39 @@ pub(crate) struct MutationCounters {
     pub labels_removed: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
+pub(crate) struct WriteRows {
+    kind: WriteRowsKind,
+}
+
+#[derive(Debug)]
+enum WriteRowsKind {
+    Materialized(MaterializedWriteRows),
+    Projected(ProjectedWriteRows),
+}
+
+#[derive(Debug)]
+struct MaterializedWriteRows {
+    connection: Connection,
+    output: super::spill::SpillOutput,
+}
+
+#[derive(Debug)]
+struct ProjectedWriteRows {
+    connection: Connection,
+    bindings: super::spill::BindingSpill,
+    after: i64,
+    total: usize,
+    snapshot_state: Box<storage::ResolvedSnapshotState>,
+    params: BTreeMap<String, Value>,
+    projection: WriteProjection,
+    seen: usize,
+    emitted: usize,
+}
+
+#[derive(Debug)]
 pub(crate) struct WriteOutcome {
-    pub rows: Vec<Vec<Value>>,
+    pub rows: Option<WriteRows>,
     pub commit: HashId,
     pub counters: MutationCounters,
 }

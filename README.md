@@ -19,7 +19,7 @@ Lithograph 为 SQLite 提供版本化 Property Graph 数据库能力。
 
 v0.2.1 在 v0.2.0 Managed Semantic / storage format 4 基线上发布 Phase 14 SQL Explicit Transaction Adapter：普通 SQLite driver 可通过四个 `lithograph_tx_*` SQL function 把多次 Cypher execution 组合为一个 graph Commit，无需自行绑定 C API。每个平台包继续同时包含 Lithograph 主 extension 与 OpenAI-compatible Provider extension；见 [v0.2.1 Release Notes](docs/releases/v0.2.1.md)、[事务指南](docs/guide/transactions.md) 和 [SQL API Reference](docs/reference/sql-api.md)。
 
-基础接入从 [Developer Documentation](docs/guide/README.md) 开始。v0.2.1 保持 Native ABI 1、`CY25-2026.08` 与 storage format 4。版本变化见 [CHANGELOG](CHANGELOG.md)、[v0.2.1 Release Notes](docs/releases/v0.2.1.md) 与 [事务指南](docs/guide/transactions.md)；下面的 `latest` 地址会随未来 release 更新。
+基础接入从 [Developer Documentation](docs/guide/README.md) 开始。正式 v0.2.1 Release 仍保持其当时的 Native ABI 1 与 storage format 4；**当前仓库 `main` 已进入 Phase 15 未发布开发基线**，application execution 已收敛为 SQL-only，fresh/current storage format 为 3，persistent embedding cache 由 Provider 自己拥有。复现 v0.2.1 时使用对应 tag/Release Notes，不把当前 Guide 反套到旧二进制。
 
 稳定下载地址：
 
@@ -63,20 +63,20 @@ SELECT lithograph_init();
 SELECT lithograph('CREATE (:Person {name: ''Alice''}) FINISH');
 ```
 
-只读结果较大时，使用流式的 `lithograph_rows()`：
+大结果或需要增量消费时，使用流式的 `lithograph_rows()`；它与 scalar 共享同一 execution 能力，也可以执行 mutation、LOAD CSV、Managed Semantic 与 transaction subquery：
 
 ```sql
-SELECT row
+SELECT ordinal, event, data
 FROM lithograph_rows('MATCH (p:Person) RETURN p.name');
 ```
 
-上述流程已由 release gate 在 Linux x64/arm64、macOS x64/arm64、Windows x64/arm64 六个平台验证；运行时 gate 覆盖 SQLite 3.45.0 minimum 与 3.53.4 release-current runtime。其它 host application 需要在目标 SQLite connection 上启用 loadable extension，并通过 SQLite 官方 extension-loading API 加载同一个 shared library。
+正式 Release Matrix 覆盖 Linux x64/arm64、macOS x64/arm64、Windows x64/arm64；当前 Phase 15 开发基线在发布前仍需重新跑 hosted matrix。运行时 minimum 继续是 SQLite 3.45.0，并在 release-current SQLite 上复验。其它 host application 需要在目标 SQLite connection 上启用 loadable extension，并通过 SQLite 官方 extension-loading API 加载同一个 shared library。
 
 同一张图可以在不同 Commit 上查询，也可以在不同 Branch 上独立演化，而不需要复制 SQLite 数据库文件。
 
 ## 开发者文档
 
-完整入口：**[Lithograph Developer Documentation](docs/guide/README.md)**。文档明确区分 v0.1.0 基础验证、v0.1.1 Full-text tokenizer、v0.2.0 Managed Semantic 与 v0.2.1 SQL explicit transaction 增量；不会把固定旧版本的示例、已知问题或历史证据静默改写成新版本事实。
+完整入口：**[Lithograph Developer Documentation](docs/guide/README.md)**。当前 Guide/Reference 描述 Phase 15 未发布开发基线；历史 Release Notes、Phase 文档与 tag 继续保留对应版本事实。
 
 | 任务 | 文档 |
 | --- | --- |
@@ -91,9 +91,9 @@ FROM lithograph_rows('MATCH (p:Person) RETURN p.name');
 
 ## 项目状态
 
-Lithograph 当前已经完成 Phase 00–14 的开发验收，正式发布版本为 **v0.2.1**。Phase 14 在不改变 Native ABI、Cypher profile 或 storage format 的前提下新增 SQL explicit transaction adapter；真实 SQLite 3.45.0 / 3.51.0 / 3.53.4、repository CI 与 Linux/macOS/Windows x64/arm64 六目标 hosted Release Matrix 均已通过。
+Lithograph 正式发布版本仍为 **v0.2.1**；当前仓库开发阶段是 **Phase 15 — SQL Execution Surface + Provider-owned Cache**。Phase 15 的本地实现、resource/quality/CI 与文档 review 已完成 SQL-only application surface、side-effect-capable `lithograph_rows()`、Native query ABI / `lithograph_tx_execute` 删除、format3 回归与 Provider-owned persistent embedding cache；唯一仍 pending 的 acceptance 是 commit/push 后才能取得真实证据的六目标 hosted Release Matrix。
 
-v0.2.1 仍属于 pre-1.0 版本。从 v0.2.0 升级不需要 storage migration；从 v0.1.1 或更早版本升级前应保留完整备份，`lithograph_init()` 支持 format 3 → 4 原子迁移，但 format 4 没有自动 downgrade。详见 [CHANGELOG](CHANGELOG.md) 与 [v0.2.1 Release Notes](docs/releases/v0.2.1.md)。
+v0.2.1 仍属于 pre-1.0 版本；其 format 4 / Native ABI 行为见 [v0.2.1 Release Notes](docs/releases/v0.2.1.md)。当前 Phase 15 开发基线的 fresh/current format 为 3；升级旧正式版本前必须先看对应 Phase 15 migration/release 说明，不按旧文档自行修改 storage marker。
 
 - [技术设计](docs/design.md)
 - [开发计划](docs/development/README.md)
@@ -101,7 +101,8 @@ v0.2.1 仍属于 pre-1.0 版本。从 v0.2.0 升级不需要 storage migration�
 - [Phase 12 全文 Tokenizer 扩展计划](docs/development/phases/12-fulltext-tokenizer.md)
 - [Phase 13 Managed Semantic Vector / Embedding Provider](docs/development/phases/13-managed-semantic-vector.md)
 - [Phase 14 SQL Explicit Transaction Adapter](docs/development/phases/14-sql-explicit-transaction.md)
-- 当前开发阶段：Phase 00–14 全部 `done`；Phase 14 从 v0.2.1 起进入正式发布基线。
+- [Phase 15 SQL Execution Surface + Provider-owned Cache](docs/development/phases/15-sql-execution-provider-cache.md)
+- 当前开发阶段：Phase 00–14 已完成；Phase 15 `in_progress`。
 
 ## 许可
 

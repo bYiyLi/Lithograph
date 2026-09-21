@@ -11,6 +11,8 @@ mod mutation;
 mod path_scale;
 #[path = "phase06_query/spatial.rs"]
 mod spatial;
+#[path = "phase06_query/streaming.rs"]
+mod streaming;
 #[path = "phase06_query/temporal.rs"]
 mod temporal;
 
@@ -1046,7 +1048,7 @@ fn composable_show_preserves_input_rows_and_scope() {
 fn show_procedures_uses_the_complete_registry_column_contract() {
     let connection = fresh_storage();
     let default_columns = rows(&connection, "SHOW PROCEDURES");
-    assert_eq!(default_columns.len(), 41);
+    assert_eq!(default_columns.len(), 38);
     for row in default_columns {
         assert_eq!(row.len(), 4);
         assert!(matches!(&row[2], Value::String(mode) if mode == "READ" || mode == "WRITE"));
@@ -1064,13 +1066,13 @@ fn show_procedures_uses_the_complete_registry_column_contract() {
             Value::Boolean(false),
         )]))
     );
-    assert_eq!(rows(&connection, "SHOW PROCEDURE").len(), 41);
+    assert_eq!(rows(&connection, "SHOW PROCEDURE").len(), 38);
     assert_eq!(
         rows(
             &connection,
             "SHOW PROCEDURES YIELD name WHERE name STARTS WITH 'db.index.semantic.' RETURN count(*)"
         ),
-        vec![vec![Value::Integer(8)]]
+        vec![vec![Value::Integer(5)]]
     );
     assert!(!query_error(&connection, "SHOW PROCEDURES YIELD category").is_empty());
 }

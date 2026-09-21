@@ -92,7 +92,10 @@ args = [
     "-C", "20",
     "-L", "150",
     "-a", "10",
-    "tests/native_abi_smoke.c",
+    "tests/sql_surface_smoke.c",
+    "tests/sql_scale_smoke.c",
+    "tests/provider_cache_probe.c",
+    "tests/phase15_streaming_resource.c",
     "tests/openai_compatible_provider_smoke.c",
     "tests/phase13_semantic_concurrency.c",
     "tests/phase13_semantic_performance.c",
@@ -206,9 +209,11 @@ LITHOGRAPH_PHASE11_SEARCH_HIGH_DIMENSION=16 \
 LITHOGRAPH_PHASE11_SEARCH_PROGRESS=256 \
   cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase11-search
 cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase10-tck
-scripts/native-abi-smoke.sh "$extension"
+scripts/sql-surface-smoke.sh "$extension"
 scripts/synthetic-embedding-provider-smoke.sh "$synthetic_provider"
+python3 scripts/check-extension-artifact.py "$openai_provider" --provider
 scripts/openai-compatible-provider-smoke.sh "$openai_provider"
+scripts/phase15-provider-cache-smoke.sh "$openai_provider"
 cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase13 -- \
   "$extension" "$synthetic_provider" "$openai_provider"
 

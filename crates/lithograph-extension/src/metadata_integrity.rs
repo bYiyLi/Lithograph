@@ -289,21 +289,7 @@ fn check_metadata_columns(
         ("database_id", "TEXT", 1, None, 0, 0),
         ("storage_format", "INTEGER", 1, None, 0, 0),
     ];
-    let storage_format = connection
-        .query_row(
-            "SELECT storage_format FROM main._lithograph_meta WHERE id = 1",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()
-        .map_err(|error| map_sqlite_error(error, "failed to inspect Lithograph metadata format"))?;
-    let mut expected = base.to_vec();
-    if storage_format.is_some_and(|format| format >= 4) {
-        expected.extend([
-            (SEMANTIC_CACHE_ENABLED_COLUMN, "INTEGER", 0, None, 0, 0),
-            (SEMANTIC_CACHE_MAX_BYTES_COLUMN, "INTEGER", 0, None, 0, 0),
-        ]);
-    }
+    let expected = base.to_vec();
     if columns.len() != expected.len()
         || columns.iter().zip(expected).any(|(actual, expected)| {
             actual.name != expected.0
@@ -430,8 +416,4 @@ fn metadata_schema_sql_matches(sql: &str) -> bool {
         == "createtable_lithograph_meta(idintegerprimarykeycheck(id=1),magictextnotnull,database_idtextnotnull,storage_formatintegernotnull)"
         || normalized
             == "createtablemain._lithograph_meta(idintegerprimarykeycheck(id=1),magictextnotnull,database_idtextnotnull,storage_formatintegernotnull)"
-        || normalized
-            == "createtable_lithograph_meta(idintegerprimarykeycheck(id=1),magictextnotnull,database_idtextnotnull,storage_formatintegernotnull,\"semantic.embedding_cache.enabled\"integernullcheck(\"semantic.embedding_cache.enabled\"in(0,1)),\"semantic.embedding_cache.max_bytes\"integernullcheck(\"semantic.embedding_cache.max_bytes\">0))"
-        || normalized
-            == "createtablemain._lithograph_meta(idintegerprimarykeycheck(id=1),magictextnotnull,database_idtextnotnull,storage_formatintegernotnull,\"semantic.embedding_cache.enabled\"integernullcheck(\"semantic.embedding_cache.enabled\"in(0,1)),\"semantic.embedding_cache.max_bytes\"integernullcheck(\"semantic.embedding_cache.max_bytes\">0))"
 }

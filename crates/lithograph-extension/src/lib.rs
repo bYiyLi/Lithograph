@@ -16,8 +16,8 @@
 )]
 
 use std::borrow::Cow;
-use std::collections::HashMap;
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::collections::{HashMap, HashSet};
+use std::ffi::{CStr, c_char, c_int, c_void};
 use std::fmt::Write as _;
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -34,21 +34,20 @@ use rusqlite::vtab::{
 use rusqlite::{Connection, Error as SqliteError, Result as SqliteResult, ffi};
 use serde_json::{Value, json};
 
-const ABI_VERSION: u32 = 1;
 const STORAGE_FORMAT_MIN: i64 = 1;
-const STORAGE_FORMAT_MAX: i64 = 4;
-const STORAGE_FORMAT_CURRENT: i64 = 4;
+const STORAGE_FORMAT_MAX: i64 = 3;
+const STORAGE_FORMAT_CURRENT: i64 = 3;
 const SQLITE_MIN_VERSION_NUMBER: c_int = 3_045_000;
 const META_TABLE: &str = "_lithograph_meta";
 const INTERNAL_PREFIX: &str = "_lithograph_";
 const MAGIC: &str = "lithograph-format-v1";
-const SEMANTIC_CACHE_ENABLED_COLUMN: &str = "semantic.embedding_cache.enabled";
-const SEMANTIC_CACHE_MAX_BYTES_COLUMN: &str = "semantic.embedding_cache.max_bytes";
 const ROWS_MODULE_NAME: &CStr = c"lithograph_rows";
 
 static NEXT_SAVEPOINT: AtomicU64 = AtomicU64::new(1);
 static REGISTERED_CONNECTIONS: OnceLock<Mutex<HashMap<usize, usize>>> = OnceLock::new();
 static ACTIVE_READERS: OnceLock<Mutex<HashMap<usize, usize>>> = OnceLock::new();
+static ACTIVE_SIDE_EFFECTS: OnceLock<Mutex<HashSet<usize>>> = OnceLock::new();
+static QUARANTINED_CONNECTIONS: OnceLock<Mutex<HashSet<usize>>> = OnceLock::new();
 const EXPLICIT_TRANSACTION_CLIENTDATA_KEY: &CStr = c"lithograph.explicit-transaction.v1";
 
 type SqliteIsInterrupted = unsafe extern "C" fn(*mut ffi::sqlite3) -> c_int;
@@ -77,6 +76,10 @@ struct ConnectionRegistration {
 
 struct MainReadGuard {
     statement: *mut ffi::sqlite3_stmt,
+    handle: usize,
+}
+
+struct SideEffectGuard {
     handle: usize,
 }
 
@@ -113,6 +116,14 @@ impl Drop for ConnectionRegistration {
         if let Some(count) = registrations.get_mut(&self.handle) {
             if *count <= 1 {
                 registrations.remove(&self.handle);
+                active_side_effects()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(&self.handle);
+                quarantined_connections()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(&self.handle);
             } else {
                 *count -= 1;
             }
@@ -126,6 +137,38 @@ fn registered_connections() -> &'static Mutex<HashMap<usize, usize>> {
 
 fn active_readers() -> &'static Mutex<HashMap<usize, usize>> {
     ACTIVE_READERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn active_side_effects() -> &'static Mutex<HashSet<usize>> {
+    ACTIVE_SIDE_EFFECTS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn quarantined_connections() -> &'static Mutex<HashSet<usize>> {
+    QUARANTINED_CONNECTIONS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn quarantine_connection(connection: &Connection) {
+    // SAFETY: reading the handle does not extend the connection lifetime.
+    let handle = unsafe { connection.handle() } as usize;
+    quarantined_connections()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(handle);
+}
+
+fn require_connection_healthy(connection: &Connection) -> LithographResult<()> {
+    // SAFETY: reading the handle does not extend the connection lifetime.
+    let handle = unsafe { connection.handle() } as usize;
+    if quarantined_connections()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains(&handle)
+    {
+        return Err(LithographError::internal(
+            "connection is quarantined after a failed Lithograph transaction cleanup; close and discard it",
+        ));
+    }
+    Ok(())
 }
 
 impl MainReadGuard {
@@ -192,6 +235,33 @@ impl Drop for MainReadGuard {
     }
 }
 
+impl SideEffectGuard {
+    fn acquire(connection: &Connection) -> LithographResult<Self> {
+        // SAFETY: reading the handle does not extend the connection lifetime.
+        let handle = unsafe { connection.handle() } as usize;
+        let mut active = active_side_effects()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !active.insert(handle) {
+            return Err(LithographError::new(
+                ErrorCategory::TransactionBoundaryRequired,
+                "connection has an active Lithograph side-effecting execution",
+                ffi::SQLITE_ERROR,
+            ));
+        }
+        Ok(Self { handle })
+    }
+}
+
+impl Drop for SideEffectGuard {
+    fn drop(&mut self) {
+        active_side_effects()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.handle);
+    }
+}
+
 fn active_reader_count(connection: &Connection) -> usize {
     // SAFETY: reading the handle does not extend the connection lifetime.
     let handle = unsafe { connection.handle() } as usize;
@@ -208,6 +278,23 @@ fn require_no_active_readers(connection: &Connection) -> LithographResult<()> {
         return Err(LithographError::new(
             ErrorCategory::TransactionBoundaryRequired,
             "connection has an active Lithograph read cursor",
+            ffi::SQLITE_ERROR,
+        ));
+    }
+    Ok(())
+}
+
+fn require_no_active_side_effect(connection: &Connection) -> LithographResult<()> {
+    // SAFETY: reading the handle does not extend the connection lifetime.
+    let handle = unsafe { connection.handle() } as usize;
+    if active_side_effects()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains(&handle)
+    {
+        return Err(LithographError::new(
+            ErrorCategory::TransactionBoundaryRequired,
+            "connection has an active Lithograph side-effecting execution",
             ffi::SQLITE_ERROR,
         ));
     }
@@ -324,7 +411,6 @@ enum ErrorCategory {
     MergeSessionNotFound,
     MergeSessionChanged,
     MergeConflict,
-    ReadOnlyAdapter,
     ReadOnlySnapshot,
     TransactionBoundaryRequired,
     FormatTooNew,
@@ -332,6 +418,7 @@ enum ErrorCategory {
     Resource,
     Storage,
     Io,
+    Interrupted,
     Internal,
 }
 
@@ -353,7 +440,6 @@ impl ErrorCategory {
             Self::MergeSessionNotFound => "MERGE_SESSION_NOT_FOUND",
             Self::MergeSessionChanged => "MERGE_SESSION_CHANGED",
             Self::MergeConflict => "MERGE_CONFLICT",
-            Self::ReadOnlyAdapter => "READ_ONLY_ADAPTER",
             Self::ReadOnlySnapshot => "READ_ONLY_SNAPSHOT",
             Self::TransactionBoundaryRequired => "TRANSACTION_BOUNDARY_REQUIRED",
             Self::FormatTooNew => "FORMAT_TOO_NEW",
@@ -361,6 +447,7 @@ impl ErrorCategory {
             Self::Resource => "RESOURCE_ERROR",
             Self::Storage => "STORAGE_ERROR",
             Self::Io => "IO_ERROR",
+            Self::Interrupted => "INTERRUPTED",
             Self::Internal => "INTERNAL_ERROR",
         }
     }
@@ -408,14 +495,18 @@ impl LithographError {
         Self::new(ErrorCategory::Internal, message, ffi::SQLITE_ERROR)
     }
 
+    fn public_message(&self) -> String {
+        let mut message = format!("LITHOGRAPH_{}: {}", self.category.as_str(), self.message);
+        if let (Some(line), Some(column)) = (self.line, self.column) {
+            let _ = write!(message, " [line={line},column={column}]");
+        }
+        message
+    }
+
     fn to_sqlite_error(&self) -> SqliteError {
         SqliteError::SqliteFailure(
             ffi::Error::new(self.sqlite_code),
-            Some(format!(
-                "LITHOGRAPH_{}: {}",
-                self.category.as_str(),
-                self.message
-            )),
+            Some(self.public_message()),
         )
     }
 
@@ -427,10 +518,6 @@ impl LithographError {
             "line": self.line,
             "column": self.column,
         })
-    }
-
-    fn to_json(&self) -> String {
-        self.to_json_value().to_string()
     }
 }
 
@@ -586,6 +673,8 @@ fn host_set_clientdata(
 fn extension_init(db: Connection) -> SqliteResult<bool> {
     storage::initialize_connection_state(&db)
         .map_err(|error| rusqlite::Error::ModuleError(error.to_string()))?;
+    query::initialize_connection_state(&db)
+        .map_err(|error| rusqlite::Error::ModuleError(error.to_string()))?;
     register_scalar_functions(&db)?;
 
     const ROWS_MODULE: Module<'static, RowsTab> = Module::eponymous_only_module();
@@ -633,7 +722,6 @@ fn migrate_phase01_bootstrap(connection: &Connection, source_format: i64) -> Lit
     storage::create_storage_schema(connection).map_err(|error| {
         map_storage_error(error, "failed to migrate Phase 01 storage bootstrap")
     })?;
-    add_format4_metadata_columns(connection)?;
     storage::initialize_root(connection).map_err(|error| {
         map_storage_error(error, "failed to initialize Root Commit during migration")
     })?;
@@ -658,15 +746,6 @@ fn migrate_versioned_storage(connection: &Connection, source_format: i64) -> Lit
         advance_storage_format(connection, 2, 3)?;
         ensure_current_metadata_integrity(connection)?;
         current = 3;
-    }
-    if current == 3 {
-        storage::create_format4_schema(connection).map_err(|error| {
-            map_storage_error(error, "failed to create storage-format-4 schema")
-        })?;
-        add_format4_metadata_columns(connection)?;
-        advance_storage_format(connection, 3, 4)?;
-        ensure_current_metadata_integrity(connection)?;
-        current = 4;
     }
     if current == STORAGE_FORMAT_CURRENT {
         Ok(())
@@ -737,7 +816,6 @@ fn version_json(connection: &Connection) -> LithographResult<Value> {
         }
         return Ok(json!({
             "extension": env!("CARGO_PKG_VERSION"),
-            "abi": ABI_VERSION,
             "cypherProfile": CYPHER_PROFILE,
             "storageFormat": {
                 "min": STORAGE_FORMAT_MIN,
@@ -759,7 +837,6 @@ fn version_json(connection: &Connection) -> LithographResult<Value> {
 
     Ok(json!({
         "extension": env!("CARGO_PKG_VERSION"),
-        "abi": ABI_VERSION,
         "cypherProfile": CYPHER_PROFILE,
         "storageFormat": {
             "min": STORAGE_FORMAT_MIN,
@@ -777,27 +854,10 @@ fn create_metadata_table(connection: &Connection) -> LithographResult<()> {
                 id INTEGER PRIMARY KEY CHECK(id = 1),\
                 magic TEXT NOT NULL,\
                 database_id TEXT NOT NULL,\
-                storage_format INTEGER NOT NULL,\
-                \"semantic.embedding_cache.enabled\" INTEGER NULL CHECK(\"semantic.embedding_cache.enabled\" IN (0, 1)),\
-                \"semantic.embedding_cache.max_bytes\" INTEGER NULL CHECK(\"semantic.embedding_cache.max_bytes\" > 0)\
+                storage_format INTEGER NOT NULL\
             );",
         )
         .map_err(|error| map_sqlite_error(error, "failed to create Lithograph metadata"))
-}
-
-fn add_format4_metadata_columns(connection: &Connection) -> LithographResult<()> {
-    connection
-        .execute_batch(
-            "ALTER TABLE main._lithograph_meta \
-                 ADD COLUMN \"semantic.embedding_cache.enabled\" INTEGER NULL \
-                 CHECK(\"semantic.embedding_cache.enabled\" IN (0, 1));\
-             ALTER TABLE main._lithograph_meta \
-                 ADD COLUMN \"semantic.embedding_cache.max_bytes\" INTEGER NULL \
-                 CHECK(\"semantic.embedding_cache.max_bytes\" > 0);",
-        )
-        .map_err(|error| {
-            map_sqlite_error(error, "failed to add storage-format-4 operational metadata")
-        })
 }
 
 fn read_metadata(connection: &Connection) -> LithographResult<Option<Metadata>> {
@@ -990,11 +1050,13 @@ fn rollback_savepoint(connection: &Connection, savepoint: &str) -> LithographRes
     // caller must be told that invocation-local transaction semantics could
     // not be preserved (and an outer transaction may have been aborted).
     if connection.execute_batch("ROLLBACK").is_ok() {
+        quarantine_connection(connection);
         return Err(LithographError::internal(format!(
             "internal savepoint cleanup failed ({detail}); full SQLite rollback executed"
         )));
     }
 
+    quarantine_connection(connection);
     Err(LithographError::internal(format!(
         "internal savepoint cleanup failed ({detail}); full SQLite rollback also failed"
     )))
@@ -1055,9 +1117,9 @@ fn catch_sqlite_boundary<T>(operation: impl FnOnce() -> SqliteResult<T>) -> Sqli
 
 mod execution;
 mod metadata_integrity;
-mod native;
 mod rows;
 mod scalar;
+mod transaction;
 
 use metadata_integrity::{
     ensure_current_metadata_integrity, ensure_runtime_metadata_integrity, has_any_internal_object,
@@ -1065,13 +1127,6 @@ use metadata_integrity::{
     query_metadata_marker,
 };
 
-#[cfg(test)]
-use native::input_utf8;
-pub use native::{
-    LithographEventCallbackV1, LithographEventKindV1, lithograph_v1_execute, lithograph_v1_free,
-    lithograph_v1_tx_abort, lithograph_v1_tx_begin, lithograph_v1_tx_commit,
-    lithograph_v1_tx_execute, lithograph_v1_validate,
-};
 use rows::RowsTab;
 use scalar::register_scalar_functions;
 

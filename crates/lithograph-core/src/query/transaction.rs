@@ -10,8 +10,8 @@ use crate::cypher::{
 use crate::storage::{self, HashId, Snapshot};
 
 use super::completeness::execute::{
-    ConditionalBranchQuery, RowSet, conditional_branch_query, execute_read_clause,
-    materialize_rows, rows_for_next, select_conditional_branch,
+    ConditionalBranchQuery, RowSet, conditional_branch_query, execute_read_clause, rows_for_next,
+    select_conditional_branch,
 };
 use super::completeness::{
     PreparedProgram, TransactionProgramOptions, composed_query_parts, executable_query,
@@ -24,7 +24,8 @@ use super::ingestion::{
 };
 use super::mutation::{
     MutationCounters, TransactionBatchOutcome, TransactionMutationContext,
-    execute_program_suffix_transaction, execute_transaction_batch,
+    execute_program_suffix_transaction, execute_spilled_outer_write_transaction,
+    execute_transaction_batch,
 };
 use super::spill::{BindingSpill, open_spill_connection};
 use super::{
@@ -32,10 +33,13 @@ use super::{
 };
 
 pub(crate) struct TransactionProgramOutcome {
-    pub(crate) rows: Vec<Vec<Value>>,
+    pub(crate) rows: Option<super::mutation::WriteRows>,
     pub(crate) commit: HashId,
     pub(crate) counters: QueryCounters,
 }
+
+mod stream;
+pub(crate) use stream::{TransactionProgramStream, TransactionStreamBatch};
 
 struct TransactionRuntime<'a> {
     connection: &'a Connection,
@@ -66,6 +70,7 @@ impl TransactionRuntime<'_> {
     }
 }
 
+#[derive(Debug)]
 struct TransactionSpec {
     batch_size: Option<expression::Expr>,
     concurrency: Option<expression::Expr>,
@@ -135,9 +140,14 @@ pub(crate) fn execute_transaction_program(
     let snapshot = Snapshot::resolve(connection, runtime.commit)?;
     let rows = if program.public_result {
         super::completeness::execute::validate_executed_columns(&program.columns, &result.columns)?;
-        materialize_rows(&snapshot, result)?
+        super::mutation::materialize_binding_rows_to_spill(
+            &snapshot,
+            &result.columns,
+            result.rows,
+            is_interrupted,
+        )?
     } else {
-        Vec::new()
+        None
     };
     Ok(TransactionProgramOutcome {
         rows,

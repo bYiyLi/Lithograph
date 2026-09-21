@@ -133,7 +133,7 @@ fn measure_rows_query(
         |limit| format!("MATCH (n) RETURN 1 AS one LIMIT {limit}"),
     );
     let script = format!(
-        "{load}\nSELECT count(*) FROM lithograph_rows('{}');\n",
+        "{load}\nSELECT count(*) FROM lithograph_rows('{}') WHERE event='row';\n",
         query.replace('\'', "''")
     );
     let sqlite = env::var_os("LITHOGRAPH_SQLITE3").unwrap_or_else(|| OsString::from("sqlite3"));

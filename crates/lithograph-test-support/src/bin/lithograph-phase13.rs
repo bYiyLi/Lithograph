@@ -85,12 +85,10 @@ fn run_primary_checks(
     checks.push("semantic-schema-negative-validation");
     check_source_edge_semantics(lithograph, synthetic)?;
     checks.push("semantic-source-exact-type-and-limit");
-    check_query_rebuild_cache(lithograph, synthetic)?;
-    checks.push("query-rebuild-cache");
-    check_cache_disabled_query(lithograph, synthetic)?;
-    checks.push("cache-disabled-query-bypass");
-    check_cache_identity(lithograph, synthetic)?;
-    checks.push("embedding-space-identity");
+    check_query_rebuild_without_core_cache(lithograph, synthetic)?;
+    checks.push("query-rebuild-without-core-cache");
+    check_execution_local_embedding_dedup(lithograph, synthetic)?;
+    checks.push("execution-local-exact-text-dedup");
     check_graph_view_nodes(lithograph, synthetic)?;
     checks.push("node-graph-view-before-provider");
     Ok(())
@@ -115,14 +113,14 @@ fn run_boundary_checks(
     checks.push("provider-missing-inspection-drop");
     check_failure_atomicity(lithograph, synthetic)?;
     checks.push("provider-failure-atomicity");
-    check_cache_publish_failure(lithograph, synthetic)?;
-    checks.push("query-cache-publish-failure-atomicity");
     check_graph_mutation_provider_boundary(lithograph, synthetic)?;
     checks.push("graph-mutation-provider-boundary");
     check_rows_adapter_authority(lithograph, synthetic)?;
     checks.push("rows-adapter-authority");
     check_read_only_rebuild(lithograph, synthetic)?;
     checks.push("read-only-query-and-rebuild");
+    check_explicit_transaction_staged_semantic(lithograph, synthetic)?;
+    checks.push("explicit-transaction-staged-semantic");
     Ok(())
 }
 
@@ -258,7 +256,7 @@ fn check_schema_validation_negatives(
 fn check_source_edge_semantics(lithograph: &str, provider: &str) -> Result<(), Box<dyn Error>> {
     let fixture = FileDatabaseFixture::new(0x1315)?;
     let create = semantic_node_create("edge_sem", "Doc", "text", "synthetic-a", "{}", 4, "cosine");
-    let rebuild = "CALL db.index.semantic.rebuild('edge_sem','branch/main') YIELD indexedEntities, embeddedTexts, cacheHits RETURN indexedEntities, embeddedTexts, cacheHits";
+    let rebuild = "CALL db.index.semantic.rebuild('edge_sem','branch/main') YIELD indexedEntities, embeddedTexts RETURN indexedEntities, embeddedTexts";
     let zero_limit =
         "CALL db.index.semantic.queryNodes('edge_sem','probe',{limit:0}) YIELD node RETURN node";
     let output = fixture.execute_script(&format!(
@@ -269,7 +267,7 @@ fn check_source_edge_semantics(lithograph: &str, provider: &str) -> Result<(), B
     ))?;
     let rebuild = prefixed_json(&output, "rebuild=")?;
     require(
-        rebuild["rows"] == json!([[3, 3, 0]]),
+        rebuild["rows"] == json!([[3, 3]]),
         "Semantic rebuild did not include exactly the STRING source values",
     )?;
     let inputs = prefixed_value(&output, "inputs=")?;
@@ -306,82 +304,56 @@ fn check_source_edge_semantics(lithograph: &str, provider: &str) -> Result<(), B
     Ok(())
 }
 
-fn check_query_rebuild_cache(lithograph: &str, provider: &str) -> Result<(), Box<dyn Error>> {
+fn check_query_rebuild_without_core_cache(
+    lithograph: &str,
+    provider: &str,
+) -> Result<(), Box<dyn Error>> {
     let fixture = FileDatabaseFixture::new(0x1303)?;
     let create = semantic_node_create("doc_sem", "Doc", "text", "synthetic-a", "{}", 4, "cosine");
     let query = "CALL db.index.semantic.queryNodes('doc_sem','hello',{skip:0,limit:3}) YIELD node, score RETURN node.name, score";
-    let query_only = "CALL db.index.semantic.queryNodes('doc_sem','search-only',{skip:0,limit:3}) YIELD node RETURN node.name";
-    let rebuild = "CALL db.index.semantic.rebuild('doc_sem','branch/main') YIELD name, commit, indexedEntities, embeddedTexts, cacheHits RETURN name, commit, indexedEntities, embeddedTexts, cacheHits";
+    let rebuild = "CALL db.index.semantic.rebuild('doc_sem','branch/main') YIELD name, commit, indexedEntities, embeddedTexts RETURN name, commit, indexedEntities, embeddedTexts";
     fixture.execute_script(&format!(
-        "{lithograph}\n{provider}\n         SELECT lithograph_init();\n         SELECT lithograph('CREATE (:Doc {{name:''alpha'', text:''hello''}}), (:Doc {{name:''beta'', text:''world''}}), (:Doc {{name:''dup'', text:''hello''}}) FINISH');\n         SELECT lithograph({create});",
+        "{lithograph}\n{provider}\n\
+         SELECT lithograph_init();\n\
+         SELECT lithograph('CREATE (:Doc {{name:''alpha'', text:''hello''}}), (:Doc {{name:''beta'', text:''world''}}), (:Doc {{name:''dup'', text:''hello''}}) FINISH');\n\
+         SELECT lithograph({create});",
         create = sql_literal(&create),
     ))?;
     let head_before = branch_head_text(&fixture, lithograph)?;
     let commits_before = commit_count(&fixture)?;
+
     let output = fixture.execute_script(&format!(
-        "{lithograph}\n{provider}\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT 'cache-before=' || count(*) FROM main._lithograph_embedding_cache;\n         SELECT 'query=' || lithograph({query});\n         SELECT 'hnsw-after-query=' || count(*) || ':' || COALESCE(sum(entry_count),0) FROM temp._lithograph_vector_cache_meta;\n         SELECT 'query-validate=' || synthetic_embedding_validate_calls('synthetic-a');\n         SELECT 'query-embed=' || synthetic_embedding_embed_calls('synthetic-a');\n         SELECT 'cache-after-query=' || count(*) FROM main._lithograph_embedding_cache;\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT 'warm=' || lithograph({query});\n         SELECT 'hnsw-after-warm=' || count(*) || ':' || COALESCE(sum(entry_count),0) FROM temp._lithograph_vector_cache_meta;\n         SELECT 'warm-validate=' || synthetic_embedding_validate_calls('synthetic-a');\n         SELECT 'warm-embed=' || synthetic_embedding_embed_calls('synthetic-a');\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT 'query-only=' || lithograph({query_only});\n         SELECT 'query-only-embed=' || synthetic_embedding_embed_calls('synthetic-a');\n         SELECT 'cache-after-query-only=' || count(*) FROM main._lithograph_embedding_cache;\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT 'query-only-reuse=' || lithograph({query_only});\n         SELECT 'query-only-reuse-embed=' || synthetic_embedding_embed_calls('synthetic-a');\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT 'rebuild=' || lithograph({rebuild});\n         SELECT 'hnsw-after-rebuild=' || count(*) || ':' || COALESCE(sum(entry_count),0) FROM temp._lithograph_vector_cache_meta;\n         SELECT 'rebuild-validate=' || synthetic_embedding_validate_calls('synthetic-a');\n         SELECT 'rebuild-embed=' || synthetic_embedding_embed_calls('synthetic-a');\n         SELECT 'cache-after-rebuild=' || count(*) FROM main._lithograph_embedding_cache;",
+        "{lithograph}\n{provider}\n\
+         SELECT synthetic_embedding_reset('synthetic-a');\n\
+         SELECT 'query=' || lithograph({query});\n\
+         SELECT 'query-validate=' || synthetic_embedding_validate_calls('synthetic-a');\n\
+         SELECT 'query-embed=' || synthetic_embedding_embed_calls('synthetic-a');\n\
+         SELECT synthetic_embedding_reset('synthetic-a');\n\
+         SELECT 'repeat=' || lithograph({query});\n\
+         SELECT 'repeat-embed=' || synthetic_embedding_embed_calls('synthetic-a');\n\
+         SELECT synthetic_embedding_reset('synthetic-a');\n\
+         SELECT 'rebuild=' || lithograph({rebuild});\n\
+         SELECT 'rebuild-validate=' || synthetic_embedding_validate_calls('synthetic-a');\n\
+         SELECT 'rebuild-embed=' || synthetic_embedding_embed_calls('synthetic-a');",
         query = sql_literal(query),
-        query_only = sql_literal(query_only),
         rebuild = sql_literal(rebuild),
     ))?;
 
-    verify_query_cache_counters(&output)?;
-    verify_semantic_query_result(&output)?;
-    verify_rebuild_result(&output)?;
+    assert_semantic_query_output(&output)?;
+    assert_semantic_rebuild_output(&output)?;
+    assert_core_cache_surface_removed(&fixture, lithograph)?;
 
-    let reopened = fixture.execute_script(&format!(
-        "{lithograph}\n{provider}\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT 'reopen=' || lithograph({query_only});\n         SELECT 'hnsw-reopen=' || count(*) || ':' || COALESCE(sum(entry_count),0) FROM temp._lithograph_vector_cache_meta;\n         SELECT 'reopen-validate=' || synthetic_embedding_validate_calls('synthetic-a');\n         SELECT 'reopen-embed=' || synthetic_embedding_embed_calls('synthetic-a');\n         SELECT 'stats=' || lithograph('CALL db.index.semantic.cache.stats()');",
-        query_only = sql_literal(query_only)
-    ))?;
-    verify_reopened_cache(&reopened)?;
-
-    let changed_query = "CALL db.index.semantic.queryNodes('doc_sem','changed-query',{limit:1}) YIELD node RETURN node.name";
-    let changed = fixture.execute_script(&format!(
-        "{lithograph}\n{provider}\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT lithograph({changed_query});\n         SELECT 'changed-embed=' || synthetic_embedding_embed_calls('synthetic-a');\n         SELECT 'changed-inputs=' || synthetic_embedding_embed_inputs('synthetic-a');\n         SELECT 'cache-after-changed=' || count(*) FROM main._lithograph_embedding_cache;",
-        changed_query = sql_literal(changed_query),
-    ))?;
-    require_line(&changed, "changed-embed=1")?;
-    require_line(&changed, "changed-inputs=1")?;
-    require_line(&changed, "cache-after-changed=4")?;
-
-    let policy = fixture.execute_script(&format!(
-        "{lithograph}\n         SELECT 'disabled=' || lithograph('CALL db.index.semantic.cache.configure({{enabled:false,maxBytes:16}})');\n         SELECT 'disabled-stats=' || lithograph('CALL db.index.semantic.cache.stats()');\n         SELECT 'enabled=' || lithograph('CALL db.index.semantic.cache.configure({{enabled:true}})');\n         SELECT 'enabled-stats=' || lithograph('CALL db.index.semantic.cache.stats()');"
-    ))?;
-    verify_disabled_cache_retention(&policy)?;
     require(
         branch_head_text(&fixture, lithograph)? == head_before,
-        "Semantic query/rebuild cache publication moved the Branch head",
+        "Semantic query/rebuild moved the Branch head",
     )?;
     require(
         commit_count(&fixture)? == commits_before,
-        "Semantic query/rebuild cache publication created a Commit",
+        "Semantic query/rebuild created a Commit",
     )
 }
 
-fn verify_query_cache_counters(output: &str) -> Result<(), Box<dyn Error>> {
-    for expected in [
-        "cache-before=0",
-        "hnsw-after-query=1:3",
-        "query-validate=1",
-        "query-embed=2",
-        "cache-after-query=2",
-        "hnsw-after-warm=1:3",
-        "warm-validate=1",
-        "warm-embed=0",
-        "query-only-embed=1",
-        "cache-after-query-only=3",
-        "query-only-reuse-embed=0",
-        "hnsw-after-rebuild=1:3",
-        "rebuild-validate=1",
-        "rebuild-embed=0",
-        "cache-after-rebuild=3",
-    ] {
-        require_line(output, expected)?;
-    }
-    Ok(())
-}
-
-fn verify_semantic_query_result(output: &str) -> Result<(), Box<dyn Error>> {
+fn assert_semantic_query_output(output: &str) -> Result<(), Box<dyn Error>> {
     let query_json = prefixed_json(output, "query=")?;
     let rows = query_json["rows"]
         .as_array()
@@ -397,169 +369,81 @@ fn verify_semantic_query_result(output: &str) -> Result<(), Box<dyn Error>> {
     )?;
     require(rows[2][0] == "beta", "Semantic query third result differs")?;
     require(
-        query_json["summary"]["queryType"] == "read",
-        "query summary type differs",
+        query_json["summary"]["queryType"] == "read" && query_json["summary"]["commit"].is_string(),
+        "Semantic query summary differs",
     )?;
-    require(
-        query_json["summary"]["commit"].is_string(),
-        "query summary lost pinned commit",
-    )
+    require_line(output, "query-validate=1")?;
+    require_positive_value(output, "query-embed=")?;
+    require_positive_value(output, "repeat-embed=")?;
+    require_line(output, "rebuild-validate=1")?;
+    require_positive_value(output, "rebuild-embed=")
 }
 
-fn verify_rebuild_result(output: &str) -> Result<(), Box<dyn Error>> {
+fn assert_semantic_rebuild_output(output: &str) -> Result<(), Box<dyn Error>> {
     let rebuild_json = prefixed_json(output, "rebuild=")?;
     require(
+        rebuild_json["columns"] == json!(["name", "commit", "indexedEntities", "embeddedTexts"]),
+        "Semantic rebuild exposed the removed cacheHits column",
+    )?;
+    require(
         rebuild_json["rows"][0][2] == 3,
-        "rebuild indexedEntities differs",
+        "Semantic rebuild indexedEntities differs",
     )?;
     require(
-        rebuild_json["rows"][0][3] == 0 && rebuild_json["rows"][0][4] == 2,
-        "rebuild did not reuse source Embeddings populated by ordinary query",
-    )?;
-    require(
-        rebuild_json["summary"]["queryType"] == "version",
-        "rebuild summary type differs",
-    )?;
-    require(
-        rebuild_json["summary"]["commit"].is_null(),
-        "rebuild summary exposed a commit",
-    )?;
-    Ok(())
-}
-
-fn verify_reopened_cache(reopened: &str) -> Result<(), Box<dyn Error>> {
-    require_line(reopened, "hnsw-reopen=1:3")?;
-    require_line(reopened, "reopen-validate=1")?;
-    require_line(reopened, "reopen-embed=0")?;
-    let stats = prefixed_json(reopened, "stats=")?;
-    require(
-        stats["rows"][0][3] == 3,
-        "persistent cache entry count differs",
-    )?;
-    require(
-        stats["rows"][0][4] == 1,
-        "persistent cache space count differs",
+        rebuild_json["summary"]["queryType"] == "read"
+            && rebuild_json["summary"]["commit"].is_string(),
+        "Semantic rebuild summary no longer matches the pinned target Commit contract",
     )
 }
 
-fn verify_disabled_cache_retention(output: &str) -> Result<(), Box<dyn Error>> {
-    let disabled = prefixed_json(output, "disabled-stats=")?;
-    require(
-        disabled["rows"][0][0] == false
-            && disabled["rows"][0][1] == 16
-            && disabled["rows"][0][2] == 64
-            && disabled["rows"][0][3] == 4,
-        "disabling cache unexpectedly evicted persistent rows",
-    )?;
-    let enabled = prefixed_json(output, "enabled-stats=")?;
-    require(
-        enabled["rows"][0][0] == true
-            && enabled["rows"][0][1] == 16
-            && enabled["rows"][0][2] == 16
-            && enabled["rows"][0][3] == 1,
-        "re-enabling cache did not enforce the persisted capacity budget",
-    )
-}
-
-fn check_cache_disabled_query(lithograph: &str, provider: &str) -> Result<(), Box<dyn Error>> {
-    let fixture = FileDatabaseFixture::new(0x1314)?;
-    let create = semantic_node_create(
-        "disabled_sem",
-        "Doc",
-        "text",
-        "synthetic-a",
-        "{}",
-        4,
-        "cosine",
-    );
-    fixture.execute_script(&format!(
-        "{lithograph}\n{provider}\n         SELECT lithograph_init();\n         SELECT lithograph('CREATE (:Doc {{name:''a'', text:''alpha''}}) FINISH');\n         SELECT lithograph({create});\n         SELECT lithograph('CALL db.index.semantic.cache.configure({{enabled:false}})');",
-        create = sql_literal(&create),
-    ))?;
-    let head_before = branch_head_text(&fixture, lithograph)?;
-    let query = "CALL db.index.semantic.queryNodes('disabled_sem','probe',{limit:1}) YIELD node RETURN node.name";
-    for label in ["first", "reopened"] {
-        let output = fixture.execute_script(&format!(
-            "{lithograph}\n{provider}\n             SELECT synthetic_embedding_reset('synthetic-a');\n             SELECT '{label}=' || lithograph({query});\n             SELECT '{label}-embed=' || synthetic_embedding_embed_calls('synthetic-a');\n             SELECT '{label}-cache=' || count(*) FROM main._lithograph_embedding_cache;",
-            query = sql_literal(query),
-        ))?;
-        require_line(&output, &format!("{label}-embed=2"))?;
-        require_line(&output, &format!("{label}-cache=0"))?;
-    }
-    require(
-        branch_head_text(&fixture, lithograph)? == head_before,
-        "cache-disabled Semantic query moved the Branch head",
-    )
-}
-
-fn check_cache_identity(lithograph: &str, provider: &str) -> Result<(), Box<dyn Error>> {
-    let fixture = FileDatabaseFixture::new(0x1304)?;
-    let cosine = semantic_node_create(
-        "cosine_sem",
-        "Doc",
-        "text",
-        "synthetic-a",
-        "{variant:'one',alpha:1,beta:2}",
-        4,
-        "cosine",
-    );
-    let euclidean = semantic_node_create(
-        "euclidean_sem",
-        "Doc",
-        "text",
-        "synthetic-a",
-        "{beta:2,variant:'one',alpha:1}",
-        4,
-        "euclidean",
-    );
-    let changed = semantic_node_create(
-        "changed_sem",
-        "Doc",
-        "text",
-        "synthetic-a",
-        "{variant:'two',alpha:1,beta:2}",
-        4,
-        "cosine",
-    );
-    let other_provider = semantic_node_create(
-        "provider_b_sem",
-        "Doc",
-        "text",
-        "synthetic-b",
-        "{alpha:1,beta:2,variant:'one'}",
-        4,
-        "cosine",
-    );
-    let output = fixture.execute_script(&format!(
-        "{lithograph}\n{provider}\n         SELECT lithograph_init();\n         SELECT lithograph('CREATE (:Doc {{text:''alpha''}}), (:Doc {{text:''beta''}}) FINISH');\n         SELECT lithograph({cosine});\n         SELECT lithograph({euclidean});\n         SELECT lithograph({changed});\n         SELECT lithograph({other_provider});\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT 'first=' || lithograph('CALL db.index.semantic.rebuild(''cosine_sem'',''branch/main'')');\n         SELECT 'first-calls=' || synthetic_embedding_embed_calls('synthetic-a') || ':' || synthetic_embedding_embed_inputs('synthetic-a');\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT 'second=' || lithograph('CALL db.index.semantic.rebuild(''euclidean_sem'',''branch/main'')');\n         SELECT 'second-calls=' || synthetic_embedding_embed_calls('synthetic-a') || ':' || synthetic_embedding_embed_inputs('synthetic-a');\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT 'third=' || lithograph('CALL db.index.semantic.rebuild(''changed_sem'',''branch/main'')');\n         SELECT 'third-calls=' || synthetic_embedding_embed_calls('synthetic-a') || ':' || synthetic_embedding_embed_inputs('synthetic-a');\n         SELECT synthetic_embedding_reset('synthetic-b');\n         SELECT 'fourth=' || lithograph('CALL db.index.semantic.rebuild(''provider_b_sem'',''branch/main'')');\n         SELECT 'fourth-calls=' || synthetic_embedding_embed_calls('synthetic-b') || ':' || synthetic_embedding_embed_inputs('synthetic-b');\n         SELECT 'stats=' || lithograph('CALL db.index.semantic.cache.stats()');",
-        cosine = sql_literal(&cosine),
-        euclidean = sql_literal(&euclidean),
-        changed = sql_literal(&changed),
-        other_provider = sql_literal(&other_provider),
-    ))?;
-    let second = prefixed_json(&output, "second=")?;
-    require(
-        second["rows"][0][4] == 2,
-        "similarity changed embedding-space identity",
-    )?;
-    for expected in [
-        "first-calls=1:2",
-        "second-calls=0:0",
-        "third-calls=1:2",
-        "fourth-calls=1:2",
+fn assert_core_cache_surface_removed(
+    fixture: &FileDatabaseFixture,
+    lithograph: &str,
+) -> Result<(), Box<dyn Error>> {
+    require_core_cache_absent(fixture)?;
+    for procedure in [
+        "CALL db.index.semantic.cache.configure({enabled:false})",
+        "CALL db.index.semantic.cache.stats()",
+        "CALL db.index.semantic.cache.clear()",
     ] {
-        require_line(&output, expected)?;
+        let (success, _, stderr) = execute_script_allowing_failure(
+            fixture.path(),
+            &format!(
+                "{lithograph}\nSELECT lithograph({});",
+                sql_literal(procedure)
+            ),
+        )?;
+        require(!success, "removed Core cache procedure unexpectedly exists")?;
+        require(
+            stderr.contains("SEMANTIC_ERROR"),
+            &format!("removed Core cache procedure lost semantic error: {stderr}"),
+        )?;
     }
-    let stats = prefixed_json(&output, "stats=")?;
-    require(
-        stats["rows"][0][3] == 6,
-        "config-separated cache entries differ",
-    )?;
-    require(
-        stats["rows"][0][4] == 3,
-        "provider/config identity did not isolate embedding spaces",
-    )?;
     Ok(())
+}
+
+fn check_execution_local_embedding_dedup(
+    lithograph: &str,
+    provider: &str,
+) -> Result<(), Box<dyn Error>> {
+    let fixture = FileDatabaseFixture::new(0x13f2)?;
+    let create = semantic_node_create("dedup_sem", "Doc", "text", "synthetic-a", "{}", 4, "cosine");
+    let query =
+        "CALL db.index.semantic.queryNodes('dedup_sem','probe',{limit:1}) YIELD node RETURN node";
+    let output = fixture.execute_script(&format!(
+        "{lithograph}\n{provider}\n         SELECT lithograph_init();\n         SELECT lithograph('UNWIND range(1,600) AS i CREATE (:Doc {{text:''dup-source''}}) FINISH');\n         SELECT lithograph({create});\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT lithograph({query});\n         SELECT 'dedup-inputs=' || synthetic_embedding_embed_inputs('synthetic-a');",
+        create = sql_literal(&create),
+        query = sql_literal(query),
+    ))?;
+    require_line(&output, "dedup-inputs=2")
+}
+
+fn require_positive_value(output: &str, prefix: &str) -> Result<(), Box<dyn Error>> {
+    let value = prefixed_value(output, prefix)?.parse::<i64>()?;
+    require(
+        value > 0,
+        &format!("expected a positive Provider counter for {prefix}, got {value}"),
+    )
 }
 
 fn check_graph_view_nodes(lithograph: &str, provider: &str) -> Result<(), Box<dyn Error>> {
@@ -606,7 +490,7 @@ fn check_graph_view_nodes(lithograph: &str, provider: &str) -> Result<(), Box<dy
         "Node Graph View result differs when reusing full-graph HNSW",
     )?;
     require_line(&output, "hnsw-view-reuse=1:2")?;
-    require_line(&output, "view-reuse-calls=0")?;
+    require_line(&output, "view-reuse-calls=1")?;
     Ok(())
 }
 
@@ -649,7 +533,7 @@ fn check_graph_view_relationships(lithograph: &str, provider: &str) -> Result<()
         "Relationship Graph View result differs when reusing full-graph HNSW",
     )?;
     require_line(&output, "hnsw-rel-reuse=1:2")?;
-    require_line(&output, "view-reuse-calls=0")
+    require_line(&output, "view-reuse-calls=1")
 }
 
 fn check_history_provider_selection(
@@ -757,18 +641,21 @@ fn check_provider_missing_inspection_and_drop(
         4,
         "cosine",
     );
-    let warmed = fixture.execute_script(&format!(
-        "{lithograph}\n{provider}\n         SELECT lithograph_init();\n         SELECT lithograph('CREATE (:Doc {{name:''a'', text:''alpha''}}) FINISH');\n         SELECT lithograph({create});\n         SELECT lithograph('CALL lithograph.tag.create(''missing-provider'',''branch/main'') YIELD name RETURN name');\n         SELECT lithograph('CALL db.index.semantic.rebuild(''missing_sem'',''branch/main'') YIELD embeddedTexts RETURN embeddedTexts');\n         SELECT 'cache=' || count(*) FROM main._lithograph_embedding_cache;",
+    fixture.execute_script(&format!(
+        "{lithograph}\n{provider}\n\
+         SELECT lithograph_init();\n\
+         SELECT lithograph('CREATE (:Doc {{name:''a'', text:''alpha''}}) FINISH');\n\
+         SELECT lithograph({create});\n\
+         SELECT lithograph('CALL lithograph.tag.create(''missing-provider'',''branch/main'') YIELD name RETURN name');\n\
+         SELECT lithograph('CALL db.index.semantic.rebuild(''missing_sem'',''branch/main'') YIELD embeddedTexts RETURN embeddedTexts');",
         create = sql_literal(&create)
     ))?;
-    let cache_entries = prefixed_value(&warmed, "cache=")?.parse::<i64>()?;
-    require(
-        cache_entries > 0,
-        "Semantic warm-cache fixture did not persist embeddings",
-    )?;
+    require_core_cache_absent(&fixture)?;
+
     let historical_options = sql_literal(r#"{"at":"tag/missing-provider"}"#);
     let inspection = fixture.execute_script(&format!(
-        "{lithograph}\n         SELECT 'show=' || lithograph('SHOW ALL INDEXES YIELD name, type WHERE name = ''missing_sem'' RETURN name, type', '{{}}', {historical_options});",
+        "{lithograph}\n\
+         SELECT 'show=' || lithograph('SHOW ALL INDEXES YIELD name, type WHERE name = ''missing_sem'' RETURN name, type', '{{}}', {historical_options});",
         historical_options = historical_options,
     ))?;
     let show = prefixed_json(&inspection, "show=")?;
@@ -801,11 +688,11 @@ fn check_provider_missing_inspection_and_drop(
     )?;
     require(
         !success,
-        "Semantic rebuild unexpectedly used warm cache without Provider",
+        "Semantic rebuild unexpectedly worked without Provider",
     )?;
     require(
         stderr.contains("INVALID_ARGUMENT") && stderr.contains("synthetic-a"),
-        "warm-cache rebuild missing Provider failure lost stable category/name",
+        "rebuild missing-Provider failure lost stable category/name",
     )?;
 
     let dropped = fixture.execute_script(&format!(
@@ -917,7 +804,7 @@ fn check_provider_payload_failures(
         stderr.contains("INTERNAL_ERROR"),
         "invalid Provider payload did not fail closed as internal ABI violation",
     )?;
-    require_persistent_cache_empty(fixture)?;
+    require_core_cache_absent(fixture)?;
 
     let zero_query =
         "CALL db.index.semantic.queryNodes('bad_zero','probe',{limit:2}) YIELD node RETURN node";
@@ -936,7 +823,7 @@ fn check_provider_payload_failures(
         stderr.contains("SEMANTIC_ERROR") && stderr.contains("non-zero embeddings"),
         "zero cosine Provider payload did not fail with stable similarity semantics",
     )?;
-    require_persistent_cache_empty(fixture)?;
+    require_core_cache_absent(fixture)?;
 
     check_provider_error_failures(fixture, lithograph, provider)
 }
@@ -960,7 +847,7 @@ fn check_provider_error_failures(
         "Provider I/O failure unexpectedly completed query",
     )?;
     require(stderr.contains("IO_ERROR"), "Provider I/O category differs")?;
-    require_persistent_cache_empty(fixture)?;
+    require_core_cache_absent(fixture)?;
 
     let cancelled_query =
         "CALL db.index.semantic.queryNodes('bad_cancel','probe',{limit:2}) YIELD node RETURN node";
@@ -976,87 +863,79 @@ fn check_provider_error_failures(
         "cancelled Provider call unexpectedly completed query",
     )?;
     require(
-        stderr.contains("RESOURCE_ERROR") && stderr.contains("synthetic configured cancellation"),
+        stderr.contains("INTERRUPTED") && stderr.contains("synthetic configured cancellation"),
         &format!("Provider cancellation category differs: {stderr}"),
     )?;
-    require_persistent_cache_empty(fixture)
-}
-
-fn check_cache_publish_failure(lithograph: &str, provider: &str) -> Result<(), Box<dyn Error>> {
-    let fixture = FileDatabaseFixture::new(0x1315)?;
-    let create = semantic_node_create(
-        "publish_fail_sem",
-        "Doc",
-        "text",
-        "synthetic-a",
-        "{publish_fail:'query_only'}",
-        4,
-        "cosine",
-    );
-    fixture.execute_script(&format!(
-        "{lithograph}\n{provider}\n         SELECT lithograph_init();\n         SELECT lithograph('CREATE (:Doc {{name:''a'', text:''alpha''}}) FINISH');\n         SELECT lithograph({create});",
-        create = sql_literal(&create),
-    ))?;
-    let head_before = branch_head_text(&fixture, lithograph)?;
-    let query = "CALL db.index.semantic.queryNodes('publish_fail_sem','probe',{limit:1}) YIELD node RETURN node.name";
-    let (success, stdout, stderr) = execute_script_allowing_failure(
-        fixture.path(),
-        &format!(
-            "{lithograph}\n{provider}\n.bail off\n             SELECT synthetic_embedding_reset('synthetic-a');\n             SELECT lithograph({query});\n             PRAGMA query_only=OFF;\n             SELECT 'publish-fail-embed=' || synthetic_embedding_embed_calls('synthetic-a');",
-            query = sql_literal(query),
-        ),
-    )?;
-    require(
-        !success,
-        "fault-injected query unexpectedly published cache",
-    )?;
-    require(
-        stderr.contains("readonly database"),
-        &format!("cache publish failure lost stable storage category: {stderr}"),
-    )?;
-    require_line(&stdout, "publish-fail-embed=1")?;
-    require_persistent_cache_empty(&fixture)?;
-    require(
-        branch_head_text(&fixture, lithograph)? == head_before,
-        "failed cache publish moved the Branch head",
-    )
+    require_core_cache_absent(fixture)
 }
 
 fn check_rows_adapter_authority(lithograph: &str, provider: &str) -> Result<(), Box<dyn Error>> {
     let fixture = FileDatabaseFixture::new(0x1310)?;
     let create = semantic_node_create("rows_sem", "Doc", "text", "synthetic-a", "{}", 4, "cosine");
     fixture.execute_script(&format!(
-        "{lithograph}\n{provider}\nSELECT lithograph_init();\n         SELECT lithograph('CREATE (:Doc {{name:''a'', text:''alpha''}}) FINISH');\n         SELECT lithograph({create});",
+        "{lithograph}\n{provider}\nSELECT lithograph_init();\n\
+         SELECT lithograph('CREATE (:Doc {{name:''a'', text:''alpha''}}) FINISH');\n\
+         SELECT lithograph({create});",
         create = sql_literal(&create)
     ))?;
+
     let semantic_query = "CALL db.index.semantic.queryNodes('rows_sem','probe',{limit:1}) YIELD node RETURN node.name";
-    let rebuild = "CALL db.index.semantic.rebuild('rows_sem','branch/main')";
-    for query in [
-        semantic_query,
-        rebuild,
+    let output = fixture.execute_script(&format!(
+        "{lithograph}\n{provider}\n\
+         SELECT ordinal || ':' || event || ':' || data FROM lithograph_rows({query});",
+        query = sql_literal(semantic_query),
+    ))?;
+    require(
+        output.lines().any(|line| line.starts_with("0:columns:")),
+        "lithograph_rows Semantic query lost columns event",
+    )?;
+    require(
+        output
+            .lines()
+            .any(|line| line.contains(":row:") && line.contains("\"a\"")),
+        "lithograph_rows Semantic query lost row event",
+    )?;
+    require(
+        output.lines().any(|line| line.contains(":summary:")),
+        "lithograph_rows Semantic query lost summary event",
+    )?;
+
+    let rebuild = "CALL db.index.semantic.rebuild('rows_sem','branch/main') YIELD name, indexedEntities RETURN name, indexedEntities";
+    let rebuild_output = fixture.execute_script(&format!(
+        "{lithograph}\n{provider}\n\
+         SELECT ordinal || ':' || event || ':' || data FROM lithograph_rows({rebuild});",
+        rebuild = sql_literal(rebuild),
+    ))?;
+    require(
+        rebuild_output.lines().any(|line| line.contains(":row:")),
+        "lithograph_rows Semantic rebuild did not execute through SQL surface",
+    )?;
+    require(
+        rebuild_output
+            .lines()
+            .any(|line| line.contains(":summary:")),
+        "lithograph_rows Semantic rebuild lost summary event",
+    )?;
+
+    for procedure in [
         "CALL db.index.semantic.cache.configure({enabled:false})",
+        "CALL db.index.semantic.cache.stats()",
         "CALL db.index.semantic.cache.clear()",
     ] {
         let (success, _, stderr) = execute_script_allowing_failure(
             fixture.path(),
             &format!(
-                "{lithograph}\nSELECT row FROM lithograph_rows({});",
-                sql_literal(query)
+                "{lithograph}\nSELECT event, data FROM lithograph_rows({});",
+                sql_literal(procedure)
             ),
         )?;
+        require(!success, "removed Core cache procedure unexpectedly exists")?;
         require(
-            !success,
-            "lithograph_rows unexpectedly accepted Semantic external/write surface",
-        )?;
-        require(
-            stderr.contains("READ_ONLY_ADAPTER"),
-            "lithograph_rows did not reject before Provider execution",
+            stderr.contains("SEMANTIC_ERROR"),
+            &format!("removed Core cache procedure lost semantic error: {stderr}"),
         )?;
     }
-    let stats = fixture.execute_script(&format!(
-        "{lithograph}\n         SELECT 'stats=' || json_extract(row, '$[0]') FROM lithograph_rows('CALL db.index.semantic.cache.stats() YIELD entries RETURN entries') WHERE ordinal=0;"
-    ))?;
-    require_line(&stats, "stats=0")
+    require_core_cache_absent(&fixture)
 }
 
 fn check_graph_mutation_provider_boundary(
@@ -1078,31 +957,34 @@ fn check_graph_mutation_provider_boundary(
         create = sql_literal(&create),
     ))?;
     let before = branch_head_text(&fixture, lithograph)?;
+    let commits_before = commit_count(&fixture)?;
     let query = "CALL db.index.semantic.queryNodes('mutation_sem','probe',{limit:1}) YIELD node CREATE (:Audit {name:node.name}) RETURN node.name";
-    let (success, stdout, stderr) = execute_script_allowing_failure(
-        fixture.path(),
-        &format!(
-            "{lithograph}\n{provider}\n.bail off\n             SELECT synthetic_embedding_reset('synthetic-a');\n             SELECT lithograph({});\n             SELECT 'embed=' || synthetic_embedding_embed_calls('synthetic-a');",
-            sql_literal(query),
-        ),
+    let output = fixture.execute_script(&format!(
+        "{lithograph}\n{provider}\n             SELECT synthetic_embedding_reset('synthetic-a');\n             SELECT 'mutation=' || lithograph({});\n             SELECT 'embed=' || synthetic_embedding_embed_calls('synthetic-a');",
+        sql_literal(query),
+    ))?;
+    require_positive_value(&output, "embed=")?;
+    let mutation = prefixed_json(&output, "mutation=")?;
+    require(
+        mutation["rows"] == json!([["a"]]),
+        "Semantic Provider graph mutation result differs",
     )?;
     require(
-        !success,
-        "graph mutation unexpectedly accepted Semantic Provider I/O",
+        mutation["summary"]["queryType"] == "write" && mutation["summary"]["commit"].is_string(),
+        "Semantic Provider graph mutation lost write summary",
     )?;
     require(
-        stderr.contains("TRANSACTION_BOUNDARY_REQUIRED"),
-        "graph mutation Semantic boundary lost its stable error category",
+        branch_head_text(&fixture, lithograph)? != before,
+        "successful Semantic Provider graph mutation did not move Branch head",
     )?;
-    require_line(&stdout, "embed=0")?;
     require(
-        branch_head_text(&fixture, lithograph)? == before,
-        "rejected graph mutation moved Branch head",
+        commit_count(&fixture)? == commits_before + 1,
+        "Semantic Provider graph mutation did not create exactly one Commit",
     )?;
     let audit = fixture.execute_script(&format!(
         "{lithograph}\nSELECT 'audit=' || json_extract(lithograph('MATCH (node:Audit) RETURN count(node)'), '$.rows[0][0]');"
     ))?;
-    require_line(&audit, "audit=0")
+    require_line(&audit, "audit=1")
 }
 
 fn check_read_only_rebuild(lithograph: &str, provider: &str) -> Result<(), Box<dyn Error>> {
@@ -1133,7 +1015,7 @@ fn check_read_only_rebuild(lithograph: &str, provider: &str) -> Result<(), Box<d
         &format!("read-only Semantic query must remain executable: {stdout:?} {stderr:?}"),
     )?;
     require_line(&stdout, "query-embed=2")?;
-    require_persistent_cache_empty(&fixture)?;
+    require_core_cache_absent(&fixture)?;
 
     let rebuild = "CALL db.index.semantic.rebuild('readonly_sem','branch/main')";
     let (success, stdout, stderr) = execute_readonly_script_allowing_failure(
@@ -1150,7 +1032,76 @@ fn check_read_only_rebuild(lithograph: &str, provider: &str) -> Result<(), Box<d
         ),
     )?;
     require_line(&stdout, "embed=1")?;
-    require_persistent_cache_empty(&fixture)
+    require_core_cache_absent(&fixture)
+}
+
+fn check_explicit_transaction_staged_semantic(
+    lithograph: &str,
+    provider: &str,
+) -> Result<(), Box<dyn Error>> {
+    let fixture = FileDatabaseFixture::new(0x13f1)?;
+    let create = semantic_node_create(
+        "staged_sem",
+        "Doc",
+        "text",
+        "synthetic-a",
+        "{}",
+        4,
+        "cosine",
+    );
+    let query = "CALL db.index.semantic.queryNodes('staged_sem','probe',{limit:10}) YIELD node RETURN node.name ORDER BY node.name";
+
+    let output = fixture.execute_script(&format!(
+        "{lithograph}\n{provider}\n         SELECT lithograph_init();\n         SELECT lithograph('CREATE (:Doc {{name:''base'', text:''base''}}) FINISH');\n         SELECT lithograph_tx_begin('{{}}');\n         SELECT lithograph({create});\n         SELECT 'staged-create=' || lithograph({query});\n         SELECT lithograph_tx_abort();\n         SELECT 'post-create-abort=' || json_extract(lithograph(
+           'SHOW ALL INDEXES YIELD name WHERE name = ''staged_sem'' RETURN count(*)'
+         ), '$.rows[0][0]');",
+        create = sql_literal(&create),
+        query = sql_literal(query),
+    ))?;
+    let staged_create = prefixed_json(&output, "staged-create=")?;
+    require(
+        staged_create["rows"] == json!([["base"]]),
+        "explicit transaction Semantic query did not observe staged definition",
+    )?;
+    require_line(&output, "post-create-abort=0")?;
+
+    let output = fixture.execute_script(&format!(
+        "{lithograph}\n{provider}\n         SELECT lithograph({create});\n         SELECT lithograph_tx_begin('{{}}');\n         SELECT lithograph('CREATE (:Doc {{name:''staged'', text:''staged''}}) FINISH');\n         SELECT 'staged-source=' || lithograph({query});\n         SELECT lithograph_tx_abort();\n         SELECT 'post-source-abort=' || lithograph({query});",
+        create = sql_literal(&create),
+        query = sql_literal(query),
+    ))?;
+    let staged_source = prefixed_json(&output, "staged-source=")?;
+    require(
+        staged_source["rows"] == json!([["base"], ["staged"]]),
+        "explicit transaction Semantic query did not observe staged source membership",
+    )?;
+    let post_source_abort = prefixed_json(&output, "post-source-abort=")?;
+    require(
+        post_source_abort["rows"] == json!([["base"]]),
+        "aborted staged Semantic source remained visible",
+    )?;
+
+    let (ok, _stdout, stderr) = execute_script_allowing_failure(
+        fixture.path(),
+        &format!(
+            "{lithograph}\n{provider}\n             SELECT lithograph_tx_begin('{{}}');\n             SELECT lithograph('DROP INDEX staged_sem');\n             SELECT lithograph({query});",
+            query = sql_literal(query),
+        ),
+    )?;
+    require(
+        !ok && stderr.contains("staged_sem"),
+        &format!("staged Semantic drop was not observed by query: {stderr}"),
+    )?;
+
+    let output = fixture.execute_script(&format!(
+        "{lithograph}\n{provider}\n         SELECT 'post-drop-failure=' || lithograph({query});",
+        query = sql_literal(query),
+    ))?;
+    let post_drop_failure = prefixed_json(&output, "post-drop-failure=")?;
+    require(
+        post_drop_failure["rows"] == json!([["base"]]),
+        "failed staged Semantic drop damaged committed definition",
+    )
 }
 
 fn check_openai_schema_roundtrip(

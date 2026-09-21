@@ -1,6 +1,6 @@
-# Cypher 25 Compatibility — v0.1.0
+# Cypher 25 Compatibility — current development baseline
 
-Lithograph v0.1.0 的语言基线是冻结的 **`CY25-2026.08`**：Cypher 25 current-graph surface，以及截至 2026.08 公开 additions；证据于 2026-09-09 冻结。它不是“任意未来 Cypher 25 文档页面上的所有内容”，也不是 Neo4j Server 的全部产品能力。
+Lithograph 当前语言基线仍是冻结的 **`CY25-2026.08`**：Cypher 25 current-graph surface，以及截至 2026.08 公开 additions；证据于 2026-09-09 冻结。它不是“任意未来 Cypher 25 文档页面上的所有内容”，也不是 Neo4j Server 的全部产品能力。
 
 ## 支持范围
 
@@ -18,7 +18,7 @@ Lithograph v0.1.0 的语言基线是冻结的 **`CY25-2026.08`**：Cypher 25 cur
 
 完整 clause/feature 验收清单由 [Compatibility Matrix](../development/cypher25-compatibility.md) 管理。本页是用户侧范围摘要，不另设第二套验收状态。每个输入仍需满足准确 syntax、类型、作用域、adapter 与事务限制。
 
-[Function Reference](functions.md) 从 v0.1.0 真实 SHOW 输出生成，包含全部 172 条签名（含重载）；[Procedure Inventory](procedure-inventory.md) 保留 33 个 v0.1.0 历史签名，并补充 v0.2.0 的 8 个 Managed Semantic procedure。客户端可以通过 SHOW 自检，但不能因为名称登记存在就忽略 [Known Issues](known-issues.md)。
+[Function Reference](functions.md) 保留冻结 profile 的 function inventory；[Procedure Inventory](procedure-inventory.md) 区分 33 个 v0.1.0 历史签名与当前 5 个 Managed Semantic procedure，当前 `SHOW PROCEDURES` 总数为 38。客户端可以通过 SHOW 自检，但不能因为名称登记存在就忽略 transaction/context 限制。
 
 ## 不属于此 compatibility profile
 
@@ -30,11 +30,11 @@ Lithograph 不提供 Bolt/HTTP 数据库服务器或 Neo4j driver 协议。APOC 
 
 ## 相同语言、不同宿主入口
 
-图查询文本仍是 Cypher；SQLite 通过 `lithograph()`、`lithograph_rows()` 或 Native API 承载执行。版本管理通过 `CALL lithograph.*` procedures 扩展数据库能力，不创造新的 Cypher grammar。
+图查询文本仍是 Cypher；application execution 统一由 SQLite SQL 的 `lithograph()` 与 `lithograph_rows()` 承载。版本管理通过 `CALL lithograph.*` procedures 扩展数据库能力，不创造新的 Cypher grammar。Embedding Provider SPI 是独立扩展边界，不是第三种 application query API。
 
-`CALL ... IN TRANSACTIONS` 虽然是 profile 的 query 能力，但需要能拥有 batch transaction boundary 的普通 Native 入口，不能放进 SQL scalar 或 SQL / Native explicit transaction。`IN CONCURRENT TRANSACTIONS` 不意味着一个 SQLite 文件支持多个物理 writer 同时提交。
+`CALL ... IN TRANSACTIONS` / `IN CONCURRENT TRANSACTIONS` 直接通过普通 SQL execution surface 运行，但必须处于 SQLite autocommit 且没有 active Lithograph explicit transaction；它们自己拥有 inner transaction boundary。`IN CONCURRENT TRANSACTIONS` 不意味着一个 SQLite 文件支持多个物理 writer 同时提交。
 
-`lithograph_rows` 只读且无外部 I/O；历史 at 只读；Graph View 约束执行可见子图。Graph Type / Constraint / Index 与图状态一起 versioned，历史查询解析历史 Schema，而不是最新 schema catalog。
+`lithograph_rows` 是完整 execution event stream，不是只读 adapter；mutation、LOAD CSV、Managed Semantic 与 transaction subquery 都可以通过它推进。historical `at` 仍是只读 Snapshot；Graph View 约束执行可见子图。Graph Type / Constraint / Index 与图状态一起 versioned，历史查询解析历史 Schema，而不是最新 schema catalog。
 
 ## 验收证据与本次文档验证的区别
 

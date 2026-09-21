@@ -19,11 +19,7 @@ report="$report_dir/provider-cache.json"
 mkdir -p "$report_dir"
 
 case "$(uname -s)" in
-  Darwin)
-    dynamic_loader_lib=""
-    ;;
-  Linux)
-    dynamic_loader_lib="-ldl"
+  Darwin|Linux)
     ;;
   *)
     echo "Phase 13 semantic performance evidence is supported on macOS and Linux" >&2
@@ -37,7 +33,7 @@ if [ -n "$sqlite_source_dir" ]; then
   "$cc_bin" \
     -std=c11 -Wall -Wextra -Werror -D_DARWIN_C_SOURCE \
     -DSQLITE_THREADSAFE=1 -DSQLITE_ENABLE_FTS5 \
-    -I"$sqlite_source_dir" -Iinclude \
+    -I"$sqlite_source_dir" \
     tests/phase13_semantic_performance.c \
     -c -o "$smoke_object"
   "$cc_bin" \
@@ -47,15 +43,15 @@ if [ -n "$sqlite_source_dir" ]; then
     "$sqlite_source_dir/sqlite3.c" \
     -c -o "$sqlite_object"
   "$cc_bin" "$smoke_object" "$sqlite_object" \
-    $dynamic_loader_lib -pthread -lm -o "$output"
+    -pthread -lm -o "$output"
 else
   sqlite_prefix=$(CDPATH= cd -- "$(dirname -- "$sqlite_bin")/.." && pwd)
   "$cc_bin" \
     -std=c11 -Wall -Wextra -Werror -D_DARWIN_C_SOURCE \
-    -I"$sqlite_prefix/include" -Iinclude \
+    -I"$sqlite_prefix/include" \
     -L"$sqlite_prefix/lib" \
     tests/phase13_semantic_performance.c \
-    -lsqlite3 $dynamic_loader_lib -pthread -lm \
+    -lsqlite3 -pthread -lm \
     -o "$output"
 fi
 

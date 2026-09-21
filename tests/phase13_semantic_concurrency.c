@@ -295,9 +295,10 @@ static void verify_concurrency_result(
     require(
         scalar_int64(
             writer_db,
-            "SELECT count(*) FROM main._lithograph_embedding_cache"
-        ) == 3,
-        "semantic query did not atomically publish its query and two source cache entries"
+            "SELECT count(*) FROM main.sqlite_schema "
+            "WHERE type='table' AND name='_lithograph_embedding_cache'"
+        ) == 0,
+        "semantic query unexpectedly recreated the removed Lithograph embedding cache"
     );
     require(
         scalar_int64(
@@ -312,7 +313,7 @@ static void verify_concurrency_result(
         "{\"schemaVersion\":1,\"providerSleepMs\":1000,"
         "\"writerWaitMs\":%lld,\"writerHoldMs\":%lld,\"writerTotalMs\":%lld,"
         "\"walCheckpoint\":{\"busy\":%d,\"logFrames\":%d,\"checkpointedFrames\":%d},"
-        "\"nonAutocommitProviderCalls\":0,\"persistentCacheEntries\":3}\n",
+        "\"nonAutocommitProviderCalls\":0,\"coreEmbeddingCacheTable\":false}\n",
         (long long)writer.wait_ms,
         (long long)writer.hold_ms,
         (long long)writer.total_ms,

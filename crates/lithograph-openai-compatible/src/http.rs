@@ -38,7 +38,7 @@ impl Failure {
         }
     }
 
-    fn io(message: impl Into<String>) -> Self {
+    pub(crate) fn io(message: impl Into<String>) -> Self {
         Self {
             kind: FailureKind::Io,
             message: message.into(),
@@ -108,6 +108,28 @@ impl Client {
         config: &ProviderConfig,
         texts: &[String],
         dimensions: usize,
+        is_cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<f32>, Failure> {
+        self.embed_impl(config, texts, dimensions, None, is_cancelled)
+    }
+
+    pub(crate) fn embed_with_headers(
+        &self,
+        config: &ProviderConfig,
+        texts: &[String],
+        dimensions: usize,
+        headers: &[(String, String)],
+        is_cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<f32>, Failure> {
+        self.embed_impl(config, texts, dimensions, Some(headers), is_cancelled)
+    }
+
+    fn embed_impl(
+        &self,
+        config: &ProviderConfig,
+        texts: &[String],
+        dimensions: usize,
+        headers: Option<&[(String, String)]>,
         mut is_cancelled: impl FnMut() -> bool,
     ) -> Result<Vec<f32>, Failure> {
         validate_shape(texts.len(), dimensions)?;
@@ -128,8 +150,14 @@ impl Client {
         let mut all_values = Vec::with_capacity(value_count);
         for batch in texts.chunks(config.batch_size) {
             ensure_not_cancelled(&mut is_cancelled)?;
-            let values =
-                self.embed_one_batch(&agent, config, batch, dimensions, &mut is_cancelled)?;
+            let values = self.embed_one_batch(
+                &agent,
+                config,
+                batch,
+                dimensions,
+                headers,
+                &mut is_cancelled,
+            )?;
             all_values.extend(values);
         }
         Ok(all_values)
@@ -141,6 +169,7 @@ impl Client {
         config: &ProviderConfig,
         texts: &[String],
         dimensions: usize,
+        headers: Option<&[(String, String)]>,
         is_cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<f32>, Failure> {
         let request = EmbeddingRequest {
@@ -157,7 +186,7 @@ impl Client {
         let mut attempt = 0_u32;
         loop {
             ensure_not_cancelled(is_cancelled)?;
-            match send(agent, config, &body) {
+            match send(agent, config, headers, &body) {
                 Ok(mut response) if response.status().is_success() => {
                     ensure_not_cancelled(is_cancelled)?;
                     return decode_response(
@@ -206,11 +235,19 @@ fn validate_shape(text_count: usize, dimensions: usize) -> Result<(), Failure> {
 fn send(
     agent: &ureq::Agent,
     config: &ProviderConfig,
+    resolved_headers: Option<&[(String, String)]>,
     body: &[u8],
 ) -> Result<ureq::http::Response<ureq::Body>, Failure> {
-    let headers = config
-        .final_headers(environment_value)
-        .map_err(Failure::invalid)?;
+    let owned_headers;
+    let headers = match resolved_headers {
+        Some(headers) => headers,
+        None => {
+            owned_headers = config
+                .final_headers(environment_value)
+                .map_err(Failure::invalid)?;
+            &owned_headers
+        }
+    };
     let mut request = agent.post(&config.embeddings_url());
     for (name, value) in headers {
         request = request.header(name, value);
@@ -220,7 +257,7 @@ fn send(
     })
 }
 
-fn environment_value(name: &str) -> Result<Option<String>, String> {
+pub(crate) fn environment_value(name: &str) -> Result<Option<String>, String> {
     match std::env::var(name) {
         Ok(value) => Ok(Some(value)),
         Err(VarError::NotPresent) => Ok(None),
@@ -734,7 +771,7 @@ mod tests {
         )]);
         let config = provider_config(base_url);
         let agent = config.agent();
-        let mut response = send(&agent, &config, b"{}").expect("stub response");
+        let mut response = send(&agent, &config, None, b"{}").expect("stub response");
         let error = read_response_body(&mut response, 16).expect_err("response limit");
         handle.join().expect("stub join");
         assert_eq!(error.kind, FailureKind::Resource);

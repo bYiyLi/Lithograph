@@ -633,11 +633,11 @@ fn check_execution_boundary(load: &str) -> Result<(), Box<dyn Error>> {
         "frontend validation must expose the frozen Cypher profile",
     )?;
     let rows = fixture.execute_script(&format!(
-        "{load}\nSELECT ordinal, columns, row FROM lithograph_rows('RETURN 1');"
+        "{load}\nSELECT ordinal, event, data FROM lithograph_rows('RETURN 1');"
     ))?;
     require(
-        rows.contains("0|[\"1\"]|[1]"),
-        "rows execution must stream the same column and value contract",
+        rows.contains("0|columns|[\"1\"]") && rows.contains("1|row|[1]"),
+        "rows execution must expose columns and row events for the same result",
     )?;
     assert_sqlite_error(
         fixture.execute_script(&format!(

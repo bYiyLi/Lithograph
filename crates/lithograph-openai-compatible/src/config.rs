@@ -10,6 +10,7 @@ const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_MAX_RETRIES: u32 = 2;
 const DEFAULT_BATCH_SIZE: usize = 32;
+const DEFAULT_CACHE_MAX_BYTES: u64 = 1_073_741_824;
 const MAX_TIMEOUT_MS: u64 = 600_000;
 const MAX_RETRIES: u32 = 8;
 pub(crate) const MAX_BATCH_SIZE: usize = 2_048;
@@ -29,6 +30,27 @@ impl EncodingFormat {
         match self {
             Self::Float => "float",
             Self::Base64 => "base64",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CacheConfig {
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    #[serde(default)]
+    pub(crate) path: Option<String>,
+    #[serde(default = "default_cache_max_bytes")]
+    pub(crate) max_bytes: u64,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: None,
+            max_bytes: DEFAULT_CACHE_MAX_BYTES,
         }
     }
 }
@@ -63,6 +85,8 @@ pub(crate) struct ProviderConfig {
     pub(crate) batch_size: usize,
     #[serde(default)]
     pub(crate) semantic_identity: Option<String>,
+    #[serde(default)]
+    pub(crate) cache: CacheConfig,
 }
 
 impl ProviderConfig {
@@ -78,6 +102,7 @@ impl ProviderConfig {
         self.validate_strings()?;
         self.validate_execution_limits()?;
         self.validate_semantic_identity()?;
+        self.validate_cache()?;
         validate_headers(&self.headers)?;
         let _ = normalize_base_url(&self.base_url)?;
         Ok(())
@@ -117,6 +142,31 @@ impl ProviderConfig {
                     "semantic_identity must be at most {MAX_SEMANTIC_IDENTITY_BYTES} bytes"
                 ));
             }
+        }
+        Ok(())
+    }
+
+    fn validate_cache(&self) -> Result<(), String> {
+        if self.cache.max_bytes == 0 || self.cache.max_bytes > i64::MAX as u64 {
+            return Err("cache.max_bytes must be between 1 and 9223372036854775807".to_owned());
+        }
+        if let Some(path) = self.cache.path.as_deref() {
+            validate_string("cache.path", path)?;
+        }
+        if !self.cache.enabled {
+            return Ok(());
+        }
+        let path = self
+            .cache
+            .path
+            .as_deref()
+            .ok_or_else(|| "cache.path is required when cache.enabled=true".to_owned())?;
+        require_nonempty("cache.path", path)?;
+        if path == ":memory:" || path.starts_with("file:") {
+            return Err(
+                "cache.path must be a filesystem path, not an in-memory database or SQLite URI"
+                    .to_owned(),
+            );
         }
         Ok(())
     }
@@ -299,6 +349,10 @@ const fn default_batch_size() -> usize {
     DEFAULT_BATCH_SIZE
 }
 
+const fn default_cache_max_bytes() -> u64 {
+    DEFAULT_CACHE_MAX_BYTES
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,6 +374,7 @@ mod tests {
         assert_eq!(defaults.timeout_ms, DEFAULT_TIMEOUT_MS);
         assert_eq!(defaults.max_retries, DEFAULT_MAX_RETRIES);
         assert_eq!(defaults.batch_size, DEFAULT_BATCH_SIZE);
+        assert_eq!(defaults.cache, CacheConfig::default());
         let agent = defaults.agent();
         assert!(agent.config().proxy().is_none());
         assert_eq!(agent.config().max_redirects(), 0);
@@ -338,12 +393,16 @@ mod tests {
             "timeout_ms":1234,
             "max_retries":4,
             "batch_size":16,
-            "semantic_identity":"deployment-2"
+            "semantic_identity":"deployment-2",
+            "cache":{"enabled":true,"path":"cache.db","max_bytes":12345}
         }))
         .expect("complete config");
         assert_eq!(complete.base_url, "http://localhost:8080/v1");
         assert_eq!(complete.encoding_format, EncodingFormat::Base64);
         assert_eq!(complete.semantic_identity.as_deref(), Some("deployment-2"));
+        assert!(complete.cache.enabled);
+        assert_eq!(complete.cache.path.as_deref(), Some("cache.db"));
+        assert_eq!(complete.cache.max_bytes, 12345);
     }
 
     #[test]
@@ -353,6 +412,16 @@ mod tests {
         assert!(parse(serde_json::json!({"model":"x","timeout_ms":0})).is_err());
         assert!(parse(serde_json::json!({"model":"x","max_retries":9})).is_err());
         assert!(parse(serde_json::json!({"model":"x","batch_size":2049})).is_err());
+        assert!(parse(serde_json::json!({"model":"x","cache":{"unknown":1}})).is_err());
+        assert!(parse(serde_json::json!({"model":"x","cache":{"enabled":true}})).is_err());
+        assert!(
+            parse(serde_json::json!({"model":"x","cache":{"enabled":true,"path":""}})).is_err()
+        );
+        assert!(
+            parse(serde_json::json!({"model":"x","cache":{"enabled":true,"path":":memory:"}}))
+                .is_err()
+        );
+        assert!(parse(serde_json::json!({"model":"x","cache":{"max_bytes":0}})).is_err());
         assert!(
             parse(serde_json::json!({
                 "model":"x",

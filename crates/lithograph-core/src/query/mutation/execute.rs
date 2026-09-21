@@ -8,15 +8,17 @@ mod value;
 
 pub(crate) use program::{
     TransactionBatchOutcome, TransactionMutationContext, execute_program,
-    execute_program_suffix_transaction, execute_transaction_batch,
+    execute_program_suffix_transaction, execute_spilled_outer_write_transaction,
+    execute_transaction_batch,
 };
-pub(crate) use value::property_from_value;
+pub(crate) use value::{materialize_binding_rows_to_spill, property_from_value, spill_value_rows};
 
+use super::super::spill::{BINDING_SPILL_BATCH_ROWS, BindingSpill, open_spill_connection};
 use delete::apply_delete;
 use delta::{property_states_equal, staged_snapshot};
 use matcher::match_pattern;
 use value::{
-    binding_node, binding_owner, evaluate_map, project_rows, require_visible_owner,
+    binding_node, binding_owner, evaluate_map, project_spilled_rows, require_visible_owner,
     set_property_map, validate_clause_view,
 };
 
@@ -142,19 +144,28 @@ pub(crate) fn execute_write(
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<WriteOutcome> {
     let mut context = MutationContext::new(connection, base_commit, params, &prepared.graph_view)?;
-    let mut rows = vec![BindingRow::default()];
+    let spill_connection = open_spill_connection()?;
+    let mut rows = BindingSpill::from_rows(&spill_connection, &[BindingRow::default()])?;
     for clause in &prepared.clauses {
         check_interrupted(is_interrupted)?;
-        rows = execute_clause(&mut context, clause, rows, metrics, is_interrupted)?;
+        rows = execute_clause_spilled(
+            &mut context,
+            clause,
+            &spill_connection,
+            rows,
+            metrics,
+            is_interrupted,
+        )?;
         check_interrupted(is_interrupted)?;
     }
-    finish_write(context, prepared, rows, is_interrupted)
+    finish_spilled_write(context, prepared, spill_connection, rows, is_interrupted)
 }
 
-fn finish_write(
+fn finish_spilled_write(
     context: MutationContext<'_, '_>,
     prepared: &PreparedWrite,
-    rows: Vec<BindingRow>,
+    spill_connection: Connection,
+    rows: BindingSpill,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<WriteOutcome> {
     check_interrupted(is_interrupted)?;
@@ -168,10 +179,10 @@ fn finish_write(
         &final_snapshot,
         &final_layer,
     )?;
-    let output = match &prepared.projection {
-        Some(projection) => project_rows(&final_snapshot, context.params, rows, projection)?,
-        None => Vec::new(),
-    };
+    let result_state = prepared
+        .projection
+        .as_ref()
+        .map(|_| final_snapshot.resolved_state());
     check_interrupted(is_interrupted)?;
     let metadata = CommitMetadata {
         author: prepared.author.clone(),
@@ -186,6 +197,23 @@ fn finish_write(
         &final_layer,
         &metadata,
     )?;
+    let output = match &prepared.projection {
+        Some(projection) => project_spilled_rows(
+            context.connection,
+            result_state
+                .ok_or_else(|| QueryError::internal("write result snapshot state is missing"))?,
+            context.params,
+            spill_connection,
+            rows,
+            projection,
+            is_interrupted,
+        )?,
+        None => {
+            rows.abort(&spill_connection)?;
+            None
+        }
+    };
+    check_interrupted(is_interrupted)?;
     Ok(WriteOutcome {
         rows: output,
         commit,
@@ -193,50 +221,179 @@ fn finish_write(
     })
 }
 
-fn execute_clause(
+fn execute_clause_spilled(
     context: &mut MutationContext<'_, '_>,
     clause: &WriteClause,
-    rows: Vec<BindingRow>,
+    spill_connection: &Connection,
+    input: BindingSpill,
     metrics: &mut QueryMetrics,
     is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<Vec<BindingRow>> {
+) -> QueryResult<BindingSpill> {
     match clause {
-        WriteClause::Match { clause, optional } => {
-            execute_match_clause(context, clause, *optional, rows, metrics, is_interrupted)
-        }
+        WriteClause::Match { clause, optional } => execute_match_clause_spilled(
+            context,
+            clause,
+            *optional,
+            spill_connection,
+            input,
+            metrics,
+            is_interrupted,
+        ),
         WriteClause::Create(pattern) => {
-            execute_create_clause(context, pattern, rows, is_interrupted)
+            execute_create_clause_spilled(context, pattern, spill_connection, input, is_interrupted)
         }
-        WriteClause::Set(items) => execute_set_clause(context, items, rows, is_interrupted),
-        WriteClause::Remove(items) => execute_remove_clause(context, items, rows, is_interrupted),
+        WriteClause::Set(items) => execute_row_mutation_spilled(
+            context,
+            RowMutation::Set(items),
+            spill_connection,
+            input,
+            is_interrupted,
+        ),
+        WriteClause::Remove(items) => execute_row_mutation_spilled(
+            context,
+            RowMutation::Remove(items),
+            spill_connection,
+            input,
+            is_interrupted,
+        ),
         WriteClause::Delete {
             expressions,
             detach,
-        } => execute_delete_clause(context, expressions, *detach, rows, is_interrupted),
-        WriteClause::Merge(merge) => execute_merge_clause(context, merge, rows, is_interrupted),
+        } => execute_delete_clause_spilled(
+            context,
+            expressions,
+            *detach,
+            spill_connection,
+            input,
+            is_interrupted,
+        ),
+        WriteClause::Merge(merge) => {
+            execute_merge_clause_spilled(context, merge, spill_connection, input, is_interrupted)
+        }
     }
 }
 
-fn execute_match_clause(
+fn execute_match_clause_spilled(
     context: &MutationContext<'_, '_>,
     clause: &AstNode,
     optional: bool,
-    rows: Vec<BindingRow>,
+    spill_connection: &Connection,
+    input: BindingSpill,
     metrics: &mut QueryMetrics,
     is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<Vec<BindingRow>> {
+) -> QueryResult<BindingSpill> {
     let snapshot = context.staged_snapshot()?;
     let graph_view = context.graph_view()?;
     let step = lower_match(context.connection, clause, optional)?;
-    materialize_match_step(
-        &snapshot,
-        &graph_view,
-        context.params,
-        rows,
-        &step,
-        metrics,
+    let mut output = BindingSpill::create(spill_connection)?;
+    input.for_each_batch(spill_connection, BINDING_SPILL_BATCH_ROWS, |rows| {
+        crate::query::stream::spill_match_step(
+            &snapshot,
+            &graph_view,
+            context.params,
+            rows,
+            &step,
+            metrics,
+            is_interrupted,
+            spill_connection,
+            &mut output,
+        )
+    })?;
+    input.abort(spill_connection)?;
+    Ok(output)
+}
+
+fn execute_create_clause_spilled(
+    context: &mut MutationContext<'_, '_>,
+    pattern: &[WritePatternPart],
+    spill_connection: &Connection,
+    input: BindingSpill,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<BindingSpill> {
+    execute_spilled_mutation_batches(
+        context,
+        spill_connection,
+        input,
         is_interrupted,
+        |context, rows, state, is_interrupted| {
+            execute_create_clause_batch(context, pattern, rows, state, is_interrupted)
+        },
     )
+}
+
+fn execute_delete_clause_spilled(
+    context: &mut MutationContext<'_, '_>,
+    expressions: &[Expr],
+    detach: bool,
+    spill_connection: &Connection,
+    input: BindingSpill,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<BindingSpill> {
+    // DELETE owns a clause-wide target barrier: evaluate every target before
+    // applying removals so repeated/connected target semantics stay identical.
+    let rows = input.collect(spill_connection)?;
+    input.abort(spill_connection)?;
+    let rows = execute_delete_clause(context, expressions, detach, rows, is_interrupted)?;
+    BindingSpill::from_rows(spill_connection, &rows)
+}
+
+fn execute_merge_clause_spilled(
+    context: &mut MutationContext<'_, '_>,
+    merge: &MergePlan,
+    spill_connection: &Connection,
+    input: BindingSpill,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<BindingSpill> {
+    execute_spilled_mutation_batches(
+        context,
+        spill_connection,
+        input,
+        is_interrupted,
+        |context, rows, state, is_interrupted| {
+            execute_merge_clause_batch(context, merge, rows, state, is_interrupted)
+        },
+    )
+}
+
+fn execute_row_mutation_spilled(
+    context: &mut MutationContext<'_, '_>,
+    mutation: RowMutation<'_>,
+    spill_connection: &Connection,
+    input: BindingSpill,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<BindingSpill> {
+    execute_spilled_mutation_batches(
+        context,
+        spill_connection,
+        input,
+        is_interrupted,
+        |context, rows, state, is_interrupted| {
+            execute_row_mutation_batch(context, mutation, rows, state, is_interrupted)
+        },
+    )
+}
+
+fn execute_spilled_mutation_batches<'connection, 'query>(
+    context: &mut MutationContext<'connection, 'query>,
+    spill_connection: &Connection,
+    input: BindingSpill,
+    is_interrupted: &dyn Fn() -> bool,
+    mut transform: impl FnMut(
+        &mut MutationContext<'connection, 'query>,
+        Vec<BindingRow>,
+        &mut MutationClauseState<'connection>,
+        &dyn Fn() -> bool,
+    ) -> QueryResult<Vec<BindingRow>>,
+) -> QueryResult<BindingSpill> {
+    let mut state = begin_mutation_clause(context)?;
+    let mut output = BindingSpill::create(spill_connection)?;
+    input.for_each_batch(spill_connection, BINDING_SPILL_BATCH_ROWS, |rows| {
+        let rows = transform(context, rows, &mut state, is_interrupted)?;
+        output.push_all(spill_connection, &rows)
+    })?;
+    finish_mutation_clause(context, &state)?;
+    input.abort(spill_connection)?;
+    Ok(output)
 }
 
 fn execute_create_clause(
@@ -263,7 +420,10 @@ fn begin_mutation_clause<'connection>(
     Ok(MutationClauseState {
         clause_input: context.staged_snapshot()?,
         graph_view: context.graph_view()?,
-        touched: TouchedElements::default(),
+        touched: TouchedElements {
+            track: !context.graph_view_selector.is_full_graph(),
+            ..TouchedElements::default()
+        },
     })
 }
 
@@ -320,6 +480,7 @@ fn execute_remove_clause(
     Ok(rows)
 }
 
+#[derive(Clone, Copy)]
 enum RowMutation<'a> {
     Set(&'a [SetItem]),
     Remove(&'a [RemoveItem]),
@@ -475,10 +636,21 @@ fn execute_merge_clause_batch(
     Ok(output)
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct TouchedElements {
+    track: bool,
     nodes: BTreeSet<i64>,
     relationships: BTreeSet<i64>,
+}
+
+impl Default for TouchedElements {
+    fn default() -> Self {
+        Self {
+            track: true,
+            nodes: BTreeSet::new(),
+            relationships: BTreeSet::new(),
+        }
+    }
 }
 
 fn create_pattern(

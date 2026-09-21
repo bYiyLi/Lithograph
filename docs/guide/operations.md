@@ -42,13 +42,11 @@ SQLite CLI 也提供 `.backup`；它是 CLI 命令而不是 Cypher。无论使�
 
 恢复保留相同 databaseId；它是原 repository 的副本，不是新的独立 identity space。两个副本分别继续写入后，不存在远程 fetch/push 或跨文件 branch merge API；应用不得把这种复制误当成支持多主同步。
 
-## 存储格式升级
+## 存储格式
 
-v0.1.0/v0.1.1 新建 format 3，支持读取 formats 1–3。v0.2.0 新建 format **4**、读取 formats 1–4，并通过显式 `lithograph_init()` 支持 format 3 → 4；format 4 新增的 persistent Embedding Result Cache 是 derived data，不改变既有 Commit/Layer/Schema hash 或历史语义。加载扩展与普通读取不会自动升级文件。未来格式高于当前 binary 支持范围时停止使用旧扩展，不修改内部 version marker 来强行打开。
+当前 Phase 15 开发基线的 fresh/current Lithograph storage format 是 **3**。Managed Semantic 的 persistent text→Vector cache 不属于 Lithograph storage，因此不会创建 format 4、`_lithograph_embedding_cache` 或相关 metadata/migration。历史 v0.2.0/v0.2.1 release 的 format 4 行为只适用于对应 release tag。
 
-升级步骤：建立并验证一致性备份；在备份副本上验证新扩展与迁移；安排停止写入的维护窗口；运行 init 并检查结果；执行完整性和应用回归；再恢复业务流量。迁移可能扫描较大历史并占用显著时间、空间和 writer，不将幂等初始化描述为常数时间。
-
-format 3/4 都没有自动降级接口。回退方案是相容的旧应用/扩展加升级前备份，不是在已升级文件上运行更旧 binary。尤其 format 4 文件不能交给只支持 format 3 的 v0.1.1 binary 继续写。pre-1.0 升级前还需审查 API / profile 变化，不能只比较 ABI 大版本数字。
+打开低于当前 writable format 的旧开发 fixture 时，以当前 `lithograph_init()` / storage compatibility contract 为准；高于当前支持范围的文件必须停止使用当前 binary，不能手工修改 format marker。升级/回退前始终先做一致性备份和应用回归。
 
 ## 完整性检查与损坏处理
 
@@ -74,24 +72,30 @@ SELECT lithograph(
 
 重建在同一写事务中原子发布，失败不会暴露半成品。全量扫描/构建可能长时间占用 writer，安排维护窗口并测量真实空间和耗时。普通只读查询遇到标准索引缓存缺失时可以使用正确但更慢的 fallback；不要通过手工删除内部表来触发重建。
 
-## Managed Semantic cache 维护
+## Managed Semantic / Provider cache
 
-Phase 13 的 persistent Embedding Result Cache 是 database-local derived data。它不属于某个 Branch/Commit，也不进入 Schema hash；默认容量策略为 enabled、1 GiB。公开维护入口：
+Lithograph Core 没有 persistent Embedding Result Cache，也没有 cache stats/configure/clear procedure。OpenAI-compatible Provider 可在 Semantic Index 的 versioned `providerConfig` 中启用自己的独立 SQLite cache：
 
 ```cypher
-CALL db.index.semantic.cache.stats()
-CALL db.index.semantic.cache.configure({enabled:true, maxBytes:1073741824})
-CALL db.index.semantic.cache.clear()
-CALL db.index.semantic.rebuild('document_semantic', 'branch/main')
+{
+  provider:'openai-compatible',
+  providerConfig:{
+    model:'text-embedding-3-small',
+    api_key_env:'OPENAI_API_KEY',
+    cache:{
+      enabled:true,
+      path:'./openai-embedding-cache.db',
+      max_bytes:1073741824
+    }
+  },
+  dimensions:1536,
+  similarity:'cosine'
+}
 ```
 
-`stats` 只读；`configure`、`clear`、`rebuild` 是独立 maintenance write，只能从普通 `lithograph()` 或 autocommit Native execution 调用，不能放入 `lithograph_rows()`、SQL / Native explicit transaction、transaction-owning subquery 或 Merge candidate。它们成功时不创建 Commit、不移动 Branch/Tag。
+cache DB 与 Lithograph `main` 必须是不同文件。Provider 负责 marker/schema、atomic publish、FIFO budget、并发/锁等待和损坏处理；Lithograph integrity/GC 不扫描或修复它。直接删除/替换 Provider cache 只影响后续命中率，不改变 graph correctness。
 
-普通 semantic query 会先查 persistent cache；query/source exact text miss 才调用 Provider。Provider 返回的整批结果通过数量、维度、finite value 与 similarity 校验后，在短 transaction 中自动写入同一 database-local cache，因此正常搜索不需要先执行 `rebuild` 或预热，并可跨 connection/process restart 复用。Cache 只保存 embedding-space/text hash、text byte length、向量和结构 metadata，不复制 query/source 原文。只读数据库或 cache disabled 时跳过 persistent publish，仍用 Provider + TEMP/LRU 完成查询。
-
-`rebuild` 保留为显式维护能力：它会 pin 指定 immutable Snapshot，在 SQLite single-writer ownership 之外调用 Provider 计算缺失 source embedding；全部成功后才进入短 publish transaction。普通 query 与 rebuild 的 Provider I/O / cancel / payload validation / cache publish 失败都不会留下可复用半 entry，也不会创建 Commit 或移动 Branch。
-
-需要使用 Managed Semantic 的每个真实 connection 都必须加载目标 Provider；persistent cache 已 warm 也不能绕过 Provider registration/validation。Provider 未加载时，普通 graph/history/SHOW 仍可用，但实际 semantic query/rebuild 明确失败。完整用法与 secret 边界见 [Search](search.md#managed-semantic-text-search)。
+`db.index.semantic.rebuild(name,version)` 仍是显式维护入口，但只重建当前 connection 的 TEMP Semantic/HNSW materialization，返回 `name,commit,indexedEntities,embeddedTexts`；它不维护 Provider cache。
 
 ## 历史保留与 GC
 
@@ -105,7 +109,7 @@ GC 不删除仍被保留引用保护的历史；物理文件也不保证立刻�
 
 先用代表性的查询、数据规模和并发方式测量，再调整模型、索引和宿主参数。至少区分首次建索引、已有持久 generation 的 reopen、少量增量变化以及完全缺缓存的查询。它们不是同一个“冷启动”状态。
 
-读取只投影需要的字段，用 Cypher 内的 WHERE / ORDER BY / LIMIT 表达语义；大量结果选择行适配器或 Native stream，同时及时关闭 cursor。排序、聚合、路径探索、全文/向量访问仍可能需要内存与 TEMP 空间，streaming API 不等于所有 query 都恒定内存。
+读取只投影需要的字段，用 Cypher 内的 WHERE / ORDER BY / LIMIT 表达语义；大量结果使用 `lithograph_rows()` 并及时关闭 cursor。排序、聚合、路径探索、全文/向量访问仍可能需要内存与 TEMP 空间，streaming API 不等于所有 query 都恒定内存。
 
 EXPLAIN 无执行副作用；PROFILE 实际执行，写查询也会写入。出现索引未被选择时先检查类型约束与查询计划，而不是强制删建索引。迁移、GC 和 rebuild 与线上写请求共享资源，避免把人工审查或网络工作放进 SQL / Native explicit transaction。
 

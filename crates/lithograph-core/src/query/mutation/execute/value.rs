@@ -1,6 +1,8 @@
 use super::*;
-use crate::query::spill::distinct_row_key;
-use std::cell::RefCell;
+use crate::query::spill::{
+    BINDING_SPILL_BATCH_ROWS, BindingSpill, DistinctSpill, RowSpill, SortSpill, SpillOutput,
+    drop_temp_table, open_spill_connection, read_output_row,
+};
 
 pub(super) fn evaluate_map(
     expression: &Expr,
@@ -269,6 +271,9 @@ pub(super) fn require_visible_owner(
 
 impl TouchedElements {
     pub(super) fn insert(&mut self, owner_kind: OwnerKind, id: i64) {
+        if !self.track {
+            return;
+        }
         match owner_kind {
             OwnerKind::Node => {
                 self.nodes.insert(id);
@@ -316,24 +321,497 @@ pub(super) fn project_rows(
     params: &BTreeMap<String, Value>,
     rows: Vec<BindingRow>,
     projection: &WriteProjection,
-) -> QueryResult<Vec<Vec<Value>>> {
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<Option<WriteRows>> {
     if is_aggregate_projection(projection) {
-        return project_aggregate_rows(snapshot, params, &rows, projection);
+        return project_aggregate_write_rows(snapshot, params, &rows, projection, is_interrupted);
     }
     reject_mixed_aggregate_projection(projection)?;
-    let mut projected = project_regular_rows(snapshot, params, rows, projection)?;
-    if projection.distinct {
-        projected = distinct_rows(projected)?;
+    if projection.order.is_empty() && !projection.distinct {
+        return project_direct_rows(snapshot, params, rows, projection, is_interrupted);
     }
-    if !projection.order.is_empty() {
-        sort_projected_rows(&mut projected, &projection.order)?;
+    project_barrier_rows(snapshot, params, rows, projection, is_interrupted)
+}
+
+fn project_aggregate_write_rows(
+    snapshot: &Snapshot<'_>,
+    params: &BTreeMap<String, Value>,
+    rows: &[BindingRow],
+    projection: &WriteProjection,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<Option<WriteRows>> {
+    let rows = project_aggregate_rows(snapshot, params, rows, projection, is_interrupted)?;
+    spill_value_rows(rows)
+}
+
+fn project_barrier_rows(
+    snapshot: &Snapshot<'_>,
+    params: &BTreeMap<String, Value>,
+    rows: Vec<BindingRow>,
+    projection: &WriteProjection,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<Option<WriteRows>> {
+    let connection = open_spill_connection()?;
+    let output = if projection.order.is_empty() {
+        distinct_output_from_rows(
+            &connection,
+            snapshot,
+            params,
+            rows,
+            projection,
+            is_interrupted,
+        )?
+    } else {
+        sorted_output_from_rows(
+            &connection,
+            snapshot,
+            params,
+            rows,
+            projection,
+            is_interrupted,
+        )?
+    };
+    select_spill_output(connection, output, projection.skip, projection.limit)
+}
+
+fn distinct_output_from_rows(
+    connection: &Connection,
+    snapshot: &Snapshot<'_>,
+    params: &BTreeMap<String, Value>,
+    rows: Vec<BindingRow>,
+    projection: &WriteProjection,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<SpillOutput> {
+    let mut spill = DistinctSpill::create(connection)?;
+    for binding in rows {
+        project_and_push(
+            snapshot,
+            params,
+            &binding,
+            projection,
+            is_interrupted,
+            |row, _| spill.push(connection, &row),
+        )?;
     }
-    Ok(projected
-        .into_iter()
-        .skip(projection.skip)
-        .take(projection.limit.unwrap_or(usize::MAX))
-        .map(|(row, _)| row)
-        .collect())
+    Ok(spill.output())
+}
+
+fn sorted_output_from_rows(
+    connection: &Connection,
+    snapshot: &Snapshot<'_>,
+    params: &BTreeMap<String, Value>,
+    rows: Vec<BindingRow>,
+    projection: &WriteProjection,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<SpillOutput> {
+    let directions = projection
+        .order
+        .iter()
+        .map(|item| item.descending)
+        .collect::<Vec<_>>();
+    let mut spill = SortSpill::create(connection, projection.distinct, directions)?;
+    for binding in rows {
+        project_and_push(
+            snapshot,
+            params,
+            &binding,
+            projection,
+            is_interrupted,
+            |row, keys| spill.push(connection, row, keys),
+        )?;
+    }
+    finish_sort_output(connection, spill, is_interrupted)
+}
+
+fn finish_sort_output(
+    connection: &Connection,
+    mut spill: SortSpill,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<SpillOutput> {
+    let total = match spill.finish(connection, is_interrupted).and_then(|total| {
+        spill.cleanup_aux(connection)?;
+        Ok(total)
+    }) {
+        Ok(total) => total,
+        Err(error) => {
+            let _ = spill.abort(connection);
+            return Err(error);
+        }
+    };
+    Ok(spill.into_output(total))
+}
+
+pub(super) fn project_spilled_rows(
+    main_connection: &Connection,
+    snapshot_state: crate::storage::ResolvedSnapshotState,
+    params: &BTreeMap<String, Value>,
+    spill_connection: Connection,
+    rows: BindingSpill,
+    projection: &WriteProjection,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<Option<WriteRows>> {
+    if projection.order.is_empty() && !projection.distinct && !is_aggregate_projection(projection) {
+        reject_mixed_aggregate_projection(projection)?;
+        return project_lazy_spilled_rows(
+            snapshot_state,
+            params,
+            spill_connection,
+            rows,
+            projection,
+        );
+    }
+
+    let snapshot = Snapshot::from_resolved_state(main_connection, &snapshot_state);
+    if is_aggregate_projection(projection) {
+        let collected = rows.collect(&spill_connection)?;
+        rows.abort(&spill_connection)?;
+        return project_rows(&snapshot, params, collected, projection, is_interrupted);
+    }
+    reject_mixed_aggregate_projection(projection)?;
+    project_spilled_barrier_rows(
+        &snapshot,
+        params,
+        spill_connection,
+        rows,
+        projection,
+        is_interrupted,
+    )
+}
+
+fn project_lazy_spilled_rows(
+    snapshot_state: crate::storage::ResolvedSnapshotState,
+    params: &BTreeMap<String, Value>,
+    spill_connection: Connection,
+    rows: BindingSpill,
+    projection: &WriteProjection,
+) -> QueryResult<Option<WriteRows>> {
+    let available = rows.len().saturating_sub(projection.skip);
+    let total = projection
+        .limit
+        .map_or(available, |limit| available.min(limit));
+    if total == 0 {
+        rows.abort(&spill_connection)?;
+        return Ok(None);
+    }
+    Ok(Some(WriteRows {
+        kind: WriteRowsKind::Projected(ProjectedWriteRows {
+            connection: spill_connection,
+            bindings: rows,
+            after: -1,
+            total,
+            snapshot_state: Box::new(snapshot_state),
+            params: params.clone(),
+            projection: projection.clone(),
+            seen: 0,
+            emitted: 0,
+        }),
+    }))
+}
+
+fn project_spilled_barrier_rows(
+    snapshot: &Snapshot<'_>,
+    params: &BTreeMap<String, Value>,
+    spill_connection: Connection,
+    rows: BindingSpill,
+    projection: &WriteProjection,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<Option<WriteRows>> {
+    let output_connection = open_spill_connection()?;
+    let output = if projection.order.is_empty() {
+        distinct_output_from_spill(
+            &output_connection,
+            snapshot,
+            params,
+            &spill_connection,
+            &rows,
+            projection,
+            is_interrupted,
+        )?
+    } else {
+        sorted_output_from_spill(
+            &output_connection,
+            snapshot,
+            params,
+            &spill_connection,
+            &rows,
+            projection,
+            is_interrupted,
+        )?
+    };
+    rows.abort(&spill_connection)?;
+    select_spill_output(output_connection, output, projection.skip, projection.limit)
+}
+
+fn distinct_output_from_spill(
+    output_connection: &Connection,
+    snapshot: &Snapshot<'_>,
+    params: &BTreeMap<String, Value>,
+    spill_connection: &Connection,
+    rows: &BindingSpill,
+    projection: &WriteProjection,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<SpillOutput> {
+    // #lizard forgives(parameter_count)
+    let mut output = DistinctSpill::create(output_connection)?;
+    rows.for_each_batch(spill_connection, BINDING_SPILL_BATCH_ROWS, |bindings| {
+        for binding in bindings {
+            project_and_push(
+                snapshot,
+                params,
+                &binding,
+                projection,
+                is_interrupted,
+                |row, _| output.push(output_connection, &row),
+            )?;
+        }
+        Ok(())
+    })?;
+    Ok(output.output())
+}
+
+fn sorted_output_from_spill(
+    output_connection: &Connection,
+    snapshot: &Snapshot<'_>,
+    params: &BTreeMap<String, Value>,
+    spill_connection: &Connection,
+    rows: &BindingSpill,
+    projection: &WriteProjection,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<SpillOutput> {
+    // #lizard forgives(parameter_count)
+    let directions = projection
+        .order
+        .iter()
+        .map(|item| item.descending)
+        .collect::<Vec<_>>();
+    let mut output = SortSpill::create(output_connection, projection.distinct, directions)?;
+    rows.for_each_batch(spill_connection, BINDING_SPILL_BATCH_ROWS, |bindings| {
+        for binding in bindings {
+            project_and_push(
+                snapshot,
+                params,
+                &binding,
+                projection,
+                is_interrupted,
+                |row, keys| output.push(output_connection, row, keys),
+            )?;
+        }
+        Ok(())
+    })?;
+    finish_sort_output(output_connection, output, is_interrupted)
+}
+
+fn project_and_push(
+    snapshot: &Snapshot<'_>,
+    params: &BTreeMap<String, Value>,
+    binding: &BindingRow,
+    projection: &WriteProjection,
+    is_interrupted: &dyn Fn() -> bool,
+    push: impl FnOnce(Vec<Value>, Vec<Value>) -> QueryResult<()>,
+) -> QueryResult<()> {
+    check_interrupted(is_interrupted)?;
+    let (row, keys) = project_binding(snapshot, params, binding, projection)?;
+    push(row, keys)
+}
+
+fn project_direct_rows(
+    snapshot: &Snapshot<'_>,
+    params: &BTreeMap<String, Value>,
+    rows: Vec<BindingRow>,
+    projection: &WriteProjection,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<Option<WriteRows>> {
+    let connection = open_spill_connection()?;
+    let mut spill = RowSpill::create(&connection)?;
+    let mut seen = 0usize;
+    let mut emitted = 0usize;
+    let limit = projection.limit.unwrap_or(usize::MAX);
+    for binding in rows {
+        check_interrupted(is_interrupted)?;
+        if emitted >= limit {
+            break;
+        }
+        let (row, _) = project_binding(snapshot, params, &binding, projection)?;
+        if seen < projection.skip {
+            seen = seen.saturating_add(1);
+            continue;
+        }
+        seen = seen.saturating_add(1);
+        spill.push(&connection, &row)?;
+        emitted = emitted.saturating_add(1);
+    }
+    write_rows_from_output(connection, spill.output())
+}
+
+pub(crate) fn spill_value_rows(rows: Vec<Vec<Value>>) -> QueryResult<Option<WriteRows>> {
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let connection = open_spill_connection()?;
+    let mut spill = RowSpill::create(&connection)?;
+    spill.push_all(&connection, &rows)?;
+    write_rows_from_output(connection, spill.output())
+}
+
+fn select_spill_output(
+    connection: Connection,
+    mut source: SpillOutput,
+    skip: usize,
+    limit: Option<usize>,
+) -> QueryResult<Option<WriteRows>> {
+    let mut selected = RowSpill::create(&connection)?;
+    let mut seen = 0usize;
+    let mut emitted = 0usize;
+    let limit = limit.unwrap_or(usize::MAX);
+    while emitted < limit {
+        let Some((sequence, row)) = read_output_row(&connection, &source.table, source.after)?
+        else {
+            break;
+        };
+        source.after = sequence;
+        if seen < skip {
+            seen = seen.saturating_add(1);
+            continue;
+        }
+        seen = seen.saturating_add(1);
+        selected.push(&connection, &row)?;
+        emitted = emitted.saturating_add(1);
+    }
+    drop_temp_table(&connection, &source.table)?;
+    write_rows_from_output(connection, selected.output())
+}
+
+fn write_rows_from_output(
+    connection: Connection,
+    output: SpillOutput,
+) -> QueryResult<Option<WriteRows>> {
+    if output.total == 0 {
+        drop_temp_table(&connection, &output.table)?;
+        return Ok(None);
+    }
+    Ok(Some(WriteRows {
+        kind: WriteRowsKind::Materialized(MaterializedWriteRows { connection, output }),
+    }))
+}
+
+impl WriteRows {
+    pub(crate) fn total(&self) -> usize {
+        match &self.kind {
+            WriteRowsKind::Materialized(rows) => rows.output.total,
+            WriteRowsKind::Projected(rows) => rows.total,
+        }
+    }
+
+    pub(crate) fn next_batch(
+        &mut self,
+        main_connection: &Connection,
+        max_rows: usize,
+        is_interrupted: &dyn Fn() -> bool,
+    ) -> QueryResult<Vec<Vec<Value>>> {
+        match &mut self.kind {
+            WriteRowsKind::Materialized(rows) => rows.next_batch(max_rows, is_interrupted),
+            WriteRowsKind::Projected(rows) => {
+                rows.next_batch(main_connection, max_rows, is_interrupted)
+            }
+        }
+    }
+}
+
+impl MaterializedWriteRows {
+    fn next_batch(
+        &mut self,
+        max_rows: usize,
+        is_interrupted: &dyn Fn() -> bool,
+    ) -> QueryResult<Vec<Vec<Value>>> {
+        let mut rows = Vec::with_capacity(max_rows);
+        while rows.len() < max_rows && self.output.after < self.output.total as i64 - 1 {
+            check_interrupted(is_interrupted)?;
+            let Some((sequence, row)) =
+                read_output_row(&self.connection, &self.output.table, self.output.after)?
+            else {
+                return Err(QueryError::internal(
+                    "write result spill ended before its declared row count",
+                ));
+            };
+            self.output.after = sequence;
+            rows.push(row);
+        }
+        Ok(rows)
+    }
+}
+
+impl ProjectedWriteRows {
+    fn next_batch(
+        &mut self,
+        main_connection: &Connection,
+        max_rows: usize,
+        is_interrupted: &dyn Fn() -> bool,
+    ) -> QueryResult<Vec<Vec<Value>>> {
+        let snapshot = Snapshot::from_resolved_state(main_connection, self.snapshot_state.as_ref());
+        let mut output = Vec::with_capacity(max_rows);
+        while output.len() < max_rows && self.emitted < self.total {
+            check_interrupted(is_interrupted)?;
+            let batch =
+                self.bindings
+                    .read_batch(&self.connection, self.after, BINDING_SPILL_BATCH_ROWS)?;
+            if batch.is_empty() {
+                return Err(QueryError::internal(
+                    "write binding spill ended before its declared row count",
+                ));
+            }
+            self.append_batch(&snapshot, batch, max_rows, &mut output)?;
+        }
+        Ok(output)
+    }
+
+    fn append_batch(
+        &mut self,
+        snapshot: &Snapshot<'_>,
+        batch: Vec<(i64, BindingRow)>,
+        max_rows: usize,
+        output: &mut Vec<Vec<Value>>,
+    ) -> QueryResult<()> {
+        for (sequence, binding) in batch {
+            if self.emitted >= self.total || output.len() >= max_rows {
+                break;
+            }
+            if self.seen < self.projection.skip {
+                self.after = sequence;
+                self.seen = self.seen.saturating_add(1);
+                continue;
+            }
+            let (row, _) = project_binding(snapshot, &self.params, &binding, &self.projection)?;
+            self.after = sequence;
+            self.seen = self.seen.saturating_add(1);
+            self.emitted = self.emitted.saturating_add(1);
+            output.push(row);
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn materialize_binding_rows_to_spill(
+    snapshot: &Snapshot<'_>,
+    columns: &[String],
+    rows: Vec<BindingRow>,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<Option<WriteRows>> {
+    let connection = open_spill_connection()?;
+    let mut spill = RowSpill::create(&connection)?;
+    for row in rows {
+        check_interrupted(is_interrupted)?;
+        let values = columns
+            .iter()
+            .map(|column| {
+                expression::binding_value(
+                    snapshot,
+                    row.values.get(column).unwrap_or(&BindingValue::Null),
+                )
+            })
+            .collect::<QueryResult<Vec<_>>>()?;
+        spill.push(&connection, &values)?;
+    }
+    write_rows_from_output(connection, spill.output())
 }
 
 fn is_aggregate_projection(projection: &WriteProjection) -> bool {
@@ -363,9 +841,11 @@ fn project_aggregate_rows(
     params: &BTreeMap<String, Value>,
     rows: &[BindingRow],
     projection: &WriteProjection,
+    is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<Vec<Vec<Value>>> {
     let mut counts = vec![0_i64; projection.projections.len()];
     for row in rows {
+        check_interrupted(is_interrupted)?;
         for (index, item) in projection.projections.iter().enumerate() {
             if expression::count_contributes(&item.expression, snapshot, row, params)? {
                 counts[index] = counts[index].saturating_add(1);
@@ -418,7 +898,31 @@ fn validate_aggregate_order(
     Ok(())
 }
 
+fn opaque_write_projection_expression(expression: &Expr) -> bool {
+    matches!(
+        expression,
+        Expr::Case { .. }
+            | Expr::ListComprehension { .. }
+            | Expr::ListPredicate { .. }
+            | Expr::Reduce { .. }
+            | Expr::AllReduce { .. }
+            | Expr::MapProjection { .. }
+            | Expr::Subscript { .. }
+            | Expr::IsNull { .. }
+            | Expr::NormalizedPredicate { .. }
+            | Expr::TypePredicate { .. }
+            | Expr::LabelPredicate { .. }
+            | Expr::Interpolated(_)
+            | Expr::Subquery { .. }
+            | Expr::PatternPredicate(_)
+            | Expr::PatternComprehension(_)
+    )
+}
+
 fn contains_count(expression: &Expr) -> bool {
+    if opaque_write_projection_expression(expression) {
+        return false;
+    }
     match expression {
         Expr::Function {
             name,
@@ -427,28 +931,17 @@ fn contains_count(expression: &Expr) -> bool {
         } => name.eq_ignore_ascii_case("count") || arguments.iter().any(contains_count),
         Expr::List(items) => items.iter().any(contains_count),
         Expr::Map(entries) => entries.values().any(contains_count),
-        Expr::Case { .. }
-        | Expr::ListComprehension { .. }
-        | Expr::ListPredicate { .. }
-        | Expr::Reduce { .. }
-        | Expr::AllReduce { .. }
-        | Expr::MapProjection { .. }
-        | Expr::Subscript { .. }
-        | Expr::IsNull { .. }
-        | Expr::NormalizedPredicate { .. }
-        | Expr::TypePredicate { .. }
-        | Expr::LabelPredicate { .. }
-        | Expr::Interpolated(_)
-        | Expr::Subquery { .. }
-        | Expr::PatternPredicate(_)
-        | Expr::PatternComprehension(_) => false,
         Expr::Property(base, _) | Expr::Unary(_, base) => contains_count(base),
         Expr::Binary(_, left, right) => contains_count(left) || contains_count(right),
         Expr::Literal(_) | Expr::Variable(_) | Expr::Parameter(_) => false,
+        _ => false,
     }
 }
 
 fn uses_only_aliases(expression: &Expr, aliases: &BTreeMap<String, Value>) -> bool {
+    if opaque_write_projection_expression(expression) {
+        return false;
+    }
     match expression {
         Expr::Variable(name) => aliases.contains_key(name),
         Expr::List(items) => items.iter().all(|item| uses_only_aliases(item, aliases)),
@@ -464,34 +957,9 @@ fn uses_only_aliases(expression: &Expr, aliases: &BTreeMap<String, Value>) -> bo
         Expr::Binary(_, left, right) => {
             uses_only_aliases(left, aliases) && uses_only_aliases(right, aliases)
         }
-        Expr::Case { .. }
-        | Expr::ListComprehension { .. }
-        | Expr::ListPredicate { .. }
-        | Expr::Reduce { .. }
-        | Expr::AllReduce { .. }
-        | Expr::MapProjection { .. }
-        | Expr::Subscript { .. }
-        | Expr::IsNull { .. }
-        | Expr::NormalizedPredicate { .. }
-        | Expr::TypePredicate { .. }
-        | Expr::LabelPredicate { .. }
-        | Expr::Interpolated(_)
-        | Expr::Subquery { .. }
-        | Expr::PatternPredicate(_)
-        | Expr::PatternComprehension(_) => false,
         Expr::Literal(_) | Expr::Parameter(_) => true,
+        _ => false,
     }
-}
-
-fn project_regular_rows(
-    snapshot: &Snapshot<'_>,
-    params: &BTreeMap<String, Value>,
-    rows: Vec<BindingRow>,
-    projection: &WriteProjection,
-) -> QueryResult<Vec<(Vec<Value>, Vec<Value>)>> {
-    rows.into_iter()
-        .map(|binding| project_binding(snapshot, params, &binding, projection))
-        .collect()
 }
 
 fn project_binding(
@@ -519,63 +987,4 @@ fn project_binding(
         })
         .collect::<QueryResult<Vec<_>>>()?;
     Ok((row, keys))
-}
-
-fn distinct_rows(
-    projected: Vec<(Vec<Value>, Vec<Value>)>,
-) -> QueryResult<Vec<(Vec<Value>, Vec<Value>)>> {
-    let mut seen = BTreeSet::new();
-    let mut unique = Vec::with_capacity(projected.len());
-    for candidate in projected {
-        if seen.insert(distinct_row_key(&candidate.0)?) {
-            unique.push(candidate);
-        }
-    }
-    Ok(unique)
-}
-
-fn sort_projected_rows(
-    projected: &mut [(Vec<Value>, Vec<Value>)],
-    order: &[OrderItem],
-) -> QueryResult<()> {
-    for (_, keys) in projected.iter() {
-        for key in keys {
-            let _ = crate::cypher::cypher_order_compare(key, key)?;
-        }
-    }
-    let failure = RefCell::new(None);
-    projected.sort_by(
-        |left, right| match compare_order_keys(&left.1, &right.1, order) {
-            Ok(ordering) => ordering,
-            Err(error) => {
-                let mut first = failure.borrow_mut();
-                if first.is_none() {
-                    *first = Some(error);
-                }
-                Ordering::Equal
-            }
-        },
-    );
-    match failure.into_inner() {
-        Some(error) => Err(error),
-        None => Ok(()),
-    }
-}
-
-fn compare_order_keys(
-    left: &[Value],
-    right: &[Value],
-    order: &[OrderItem],
-) -> QueryResult<Ordering> {
-    for ((left, right), item) in left.iter().zip(right).zip(order) {
-        let ordering = crate::cypher::cypher_order_compare(left, right)?;
-        if ordering != Ordering::Equal {
-            return Ok(if item.descending {
-                ordering.reverse()
-            } else {
-                ordering
-            });
-        }
-    }
-    Ok(Ordering::Equal)
 }

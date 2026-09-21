@@ -57,8 +57,8 @@ fn run() -> Result<ProbeResult, Box<dyn Error>> {
     checks.push("outer-transaction-composition");
     check_caller_savepoint_composition(&load)?;
     checks.push("caller-savepoint-composition");
-    check_rows_rejects_write(&load)?;
-    checks.push("rows-read-only");
+    check_rows_executes_write(&load)?;
+    checks.push("rows-write-summary");
     check_graph_view_violation_rolls_back(&load)?;
     checks.push("graph-view-write-rollback");
     check_reopen_history(&load)?;
@@ -315,20 +315,16 @@ fn check_caller_savepoint_composition(load: &str) -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
-fn check_rows_rejects_write(load: &str) -> Result<(), Box<dyn Error>> {
+fn check_rows_executes_write(load: &str) -> Result<(), Box<dyn Error>> {
     let fixture = initialized_fixture(0x0505, load)?;
-    let script = format!(
-        "{load}\nSELECT row FROM lithograph_rows({});",
+    let events = fixture.execute_script(&format!(
+        "{load}\nSELECT group_concat(event, ',') FROM lithograph_rows({});",
         sql_literal("CREATE (:RowsMustNotWrite) FINISH")
-    );
-    match fixture.execute_script(&script) {
-        Err(FixtureError::Sqlite { stderr, .. }) => require(
-            stderr.contains("READ_ONLY_ADAPTER"),
-            "lithograph_rows mutation must return READ_ONLY_ADAPTER",
-        )?,
-        Err(error) => return Err(error.into()),
-        Ok(_) => return Err("lithograph_rows unexpectedly executed a mutation".into()),
-    }
+    ))?;
+    require(
+        events.trim() == "columns,summary",
+        "lithograph_rows mutation must expose columns -> summary",
+    )?;
     let read = scalar_query(
         &fixture,
         load,
@@ -336,8 +332,8 @@ fn check_rows_rejects_write(load: &str) -> Result<(), Box<dyn Error>> {
         "{}",
     )?;
     require(
-        read["rows"] == serde_json::json!([[0]]),
-        "rows adapter must not write",
+        read["rows"] == serde_json::json!([[1]]),
+        "rows execution must persist a fully consumed mutation",
     )?;
     Ok(())
 }

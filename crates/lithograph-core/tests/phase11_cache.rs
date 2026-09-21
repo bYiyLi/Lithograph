@@ -18,11 +18,7 @@ fn initialize_database(path: &std::path::Path) -> Connection {
         .execute_batch(
             "CREATE TABLE main._lithograph_meta(\
                  id INTEGER PRIMARY KEY CHECK(id=1), magic TEXT NOT NULL, \
-                 database_id TEXT NOT NULL, storage_format INTEGER NOT NULL,\
-                 \"semantic.embedding_cache.enabled\" INTEGER NULL \
-                     CHECK(\"semantic.embedding_cache.enabled\" IN (0, 1)),\
-                 \"semantic.embedding_cache.max_bytes\" INTEGER NULL \
-                     CHECK(\"semantic.embedding_cache.max_bytes\" > 0));",
+                 database_id TEXT NOT NULL, storage_format INTEGER NOT NULL);",
         )
         .expect("metadata");
     connection
@@ -81,76 +77,6 @@ fn current_schema_is_structurally_exact() {
         structural_integrity_issues(&connection)
             .expect("structural integrity")
             .is_empty()
-    );
-}
-
-#[test]
-fn integrity_detects_embedding_cache_payload_damage() {
-    let file = NamedTempFile::new().expect("temporary database");
-    let connection = initialize_database(file.path());
-    let vector = [1.0_f32, 2.0_f32]
-        .into_iter()
-        .flat_map(f32::to_le_bytes)
-        .collect::<Vec<_>>();
-    connection
-        .execute(
-            "INSERT INTO main._lithograph_embedding_cache(\
-                 space_hash, text_hash, text_bytes, dimension, coordinate_type, vector_blob, payload_bytes\
-             ) VALUES(?1, ?2, 5, 2, 5, ?3, 8)",
-            params![[0x11_u8; 32].as_slice(), [0x22_u8; 32].as_slice(), vector],
-        )
-        .expect("valid embedding cache entry");
-    assert!(
-        integrity_check(&connection)
-            .expect("valid cache integrity")
-            .is_empty()
-    );
-
-    connection
-        .execute(
-            "UPDATE main._lithograph_embedding_cache SET payload_bytes = 4",
-            [],
-        )
-        .expect("damage cache accounting");
-    let issues = integrity_check(&connection).expect("damaged cache integrity");
-    assert!(
-        issues
-            .iter()
-            .any(|issue| issue.code == "embedding_cache.payload_bytes"),
-        "integrity must detect damaged embedding cache accounting: {issues:?}"
-    );
-
-    connection
-        .execute(
-            "UPDATE main._lithograph_embedding_cache \
-             SET payload_bytes = 8, vector_blob = zeroblob(4)",
-            [],
-        )
-        .expect("damage cache vector length");
-    let issues = integrity_check(&connection).expect("damaged vector integrity");
-    assert!(
-        issues
-            .iter()
-            .any(|issue| issue.code == "embedding_cache.vector_blob"),
-        "integrity must detect damaged embedding cache vector payload: {issues:?}"
-    );
-
-    let non_finite = [f32::NAN, 2.0_f32]
-        .into_iter()
-        .flat_map(f32::to_le_bytes)
-        .collect::<Vec<_>>();
-    connection
-        .execute(
-            "UPDATE main._lithograph_embedding_cache SET vector_blob = ?1",
-            [non_finite],
-        )
-        .expect("damage cache coordinate");
-    let issues = integrity_check(&connection).expect("non-finite cache integrity");
-    assert!(
-        issues
-            .iter()
-            .any(|issue| issue.code == "embedding_cache.coordinate"),
-        "integrity must detect non-finite embedding cache coordinates: {issues:?}"
     );
 }
 

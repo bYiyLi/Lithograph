@@ -10,8 +10,10 @@ use crate::query::completeness::{
     PreparedProgram, composed_query_parts, executable_query, explicit_imports, project_bindings,
     required_query_body,
 };
-use crate::query::expression::{self, BindingRow, BindingValue, binding_value, compile_expression};
+use crate::query::expression::{self, BindingRow, BindingValue, compile_expression};
+use crate::query::spill::BindingSpill;
 
+use super::value::materialize_binding_rows_to_spill;
 use super::*;
 
 mod load_csv;
@@ -88,6 +90,20 @@ pub(crate) fn execute_program_suffix_transaction(
     )
 }
 
+pub(crate) fn execute_spilled_outer_write_transaction(
+    context: &mut TransactionMutationContext<'_>,
+    clauses: &[AstNode],
+    spill_connection: Connection,
+    input: BindingSpill,
+) -> QueryResult<TransactionBatchOutcome> {
+    execute_owned_sqlite_transaction(
+        context,
+        "outer mutation after IN TRANSACTIONS requires SQLite autocommit execution",
+        "outer suffix",
+        move |context| execute_spilled_outer_write_inner(context, clauses, spill_connection, input),
+    )
+}
+
 fn execute_owned_sqlite_transaction(
     context: &mut TransactionMutationContext<'_>,
     boundary_message: &str,
@@ -142,6 +158,61 @@ fn execute_program_suffix_inner(
         transaction.is_interrupted,
     )?;
     finish_transaction_mutation(transaction, context, rows, true)
+}
+
+fn execute_spilled_outer_write_inner(
+    transaction: &mut TransactionMutationContext<'_>,
+    clauses: &[AstNode],
+    spill_connection: Connection,
+    mut rows: BindingSpill,
+) -> QueryResult<TransactionBatchOutcome> {
+    check_interrupted(transaction.is_interrupted)?;
+    let mut context = MutationContext::new(
+        transaction.connection,
+        transaction.base_commit,
+        transaction.params,
+        transaction.graph_view,
+    )?;
+    for clause in clauses {
+        let AstKind::Clause(kind) = clause.kind else {
+            continue;
+        };
+        check_interrupted(transaction.is_interrupted)?;
+        let write_clause = match kind {
+            ClauseKind::Create | ClauseKind::Insert => {
+                Some(WriteClause::Create(lower_write_pattern(clause)?))
+            }
+            ClauseKind::Set => Some(WriteClause::Set(lower_set_items(clause)?)),
+            ClauseKind::Remove => Some(WriteClause::Remove(lower_remove_items(clause)?)),
+            ClauseKind::Merge => Some(WriteClause::Merge(lower_merge(clause)?)),
+            ClauseKind::Finish => None,
+            _ => {
+                return Err(QueryError::internal(
+                    "unsupported clause reached spilled outer-write executor",
+                ));
+            }
+        };
+        if let Some(write_clause) = write_clause {
+            rows = execute_clause_spilled(
+                &mut context,
+                &write_clause,
+                &spill_connection,
+                rows,
+                transaction.metrics,
+                transaction.is_interrupted,
+            )?;
+        }
+    }
+    rows.abort(&spill_connection)?;
+    finish_transaction_mutation(
+        transaction,
+        context,
+        RowSet {
+            columns: Vec::new(),
+            rows: Vec::new(),
+        },
+        true,
+    )
 }
 
 fn execute_transaction_batch_inner(
@@ -974,24 +1045,14 @@ fn finish_program(
     )?;
     let rows = if program.public_result {
         validate_executed_columns(&program.columns, &result.columns)?;
-        result
-            .rows
-            .into_iter()
-            .map(|row| {
-                result
-                    .columns
-                    .iter()
-                    .map(|column| {
-                        binding_value(
-                            &final_snapshot,
-                            row.values.get(column).unwrap_or(&BindingValue::Null),
-                        )
-                    })
-                    .collect::<QueryResult<Vec<_>>>()
-            })
-            .collect::<QueryResult<Vec<_>>>()?
+        materialize_binding_rows_to_spill(
+            &final_snapshot,
+            &result.columns,
+            result.rows,
+            is_interrupted,
+        )?
     } else {
-        Vec::new()
+        None
     };
     check_interrupted(is_interrupted)?;
     let options = program

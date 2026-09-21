@@ -83,7 +83,7 @@ fn check_rows_program_adapter(
 ) -> Result<(), Box<dyn Error>> {
     let query = "FOR x IN [3, 1, 2] RETURN x ORDER BY x";
     let output = fixture.execute_script(&format!(
-        "{load}\nSELECT json_extract(row, '$[0]') FROM lithograph_rows({}) ORDER BY ordinal;",
+        "{load}\nSELECT json_extract(data, '$[0]') FROM lithograph_rows({}) WHERE event='row' ORDER BY ordinal;",
         sql_literal(query)
     ))?;
     require(
