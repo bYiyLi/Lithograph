@@ -94,4 +94,12 @@ Tag 的 [CI 38774756406](https://github.com/bYiyLi/Lithograph/actions/runs/38774
 
 同一发布主库 + 发布 OpenAI-compatible Provider 通过普通 `.load` basename 检查、OpenAI-compatible smoke、7 项 Provider cache gate；发布主库 + synthetic Provider + 发布真实 Provider 的 Phase 13 probe 20/20 通过，包含安全选项零 embedding 调用、加载顺序、历史/Graph View、失败原子性、scalar/rows、只读 main 与 explicit staged Semantic。对真实远程服务的配置模板不计入已通过示例；Provider 回归使用 synthetic Provider 和本地测试服务。
 
-DOC17-01–09 与前置 Phase 16 全部闭合。提交、推送、tag 和正式 Release 已实际完成；本次发布后的记录提交只同步 Development 验收与状态，不改变冻结源码、用户手册、二进制、tag 或发布资产。发布源码与该记录提交之间只能有 Development 文档差异；固定 v0.3.1 用户手册始终由 immutable tag 提供。
+DOC17-01–09 与前置 Phase 16 全部闭合。提交、推送、tag 和正式 Release 已实际完成；初次记录提交 `a4df5eb` 只同步 Development 验收与状态。后续下述 fixture 修复与已知问题补充不改变产品 runtime、已发布 tag 或资产；固定 v0.3.1 手册仍由 immutable tag 提供，发布后新发现的限制另由 Release 补充说明链接到 Known Issues。
+
+### 发布后记录提交的测试时序与已知问题
+
+记录提交 `a4df5eb` 的 Release Matrix `38776987432` 在 macOS arm64 的 seeded concurrent Provider publish case 只报告 `status=2`。同一次 callback 的 message 已被旧 probe 丢弃，不能仅凭该日志唯一还原失败原因。定向复现确认 fixture 的 250 ms HTTP timeout 与等待两个独立进程的 HTTP barrier 存在时间竞争：第二 worker 晚 350 ms 时，第一方超时，Provider 按配置返回 IO_ERROR；同条件改为 2000 ms 后双方成功。
+
+测试修复仅给 concurrent-publish case 使用 5000 ms timeout，并固定第二 worker 晚 350 ms；其它 BUSY/cancellation case 的 250 ms 配置不变。复用已有同次 callback error probe，精确断言两个 `result=OK`，保留双 HTTP barrier 与 cache 3 entries / 24 bytes。发布 Provider 完整 7 项 cache gate、10/10 次定向重复、format 和对应 all-features Clippy 均通过；不通过重放失败请求取诊断，也不放宽产品锁等待。
+
+复核另发现独立的可选 cache 首次并发初始化竞争：在空库上两方都先观察空 Schema，后一方取得 writer 后未重查，可能创建同名表失败。该问题用发布制品定向复现 5/5；它不能解释已完成 seed 的上述 CI case。v0.3.0 到 v0.3.1 的 `cache.rs` 源码未变。本次不把独立产品修复扩展为另一发布版本，已如实加入 [Known Issues](../../reference/known-issues.md#provider-cache-first-use)、Provider 使用/配置参考和 Release 补充说明；提供单进程预热或关闭可选 cache 的规避。产品 race 仍未修复，不计为修复完成，也不据此改写已发布 tag/二进制。

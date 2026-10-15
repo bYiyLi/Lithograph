@@ -125,6 +125,8 @@ query 会为需要参与的 source/query text 调用 Provider；Graph View 在 P
 
 先创建父目录并确保宿主可以写入。path 不能指向 Lithograph main、内存数据库或 SQLite URI；相对路径基于宿主工作目录，部署中优先使用自己管理的明确路径。配置完整规则与 key identity 见 [Provider cache 参考](../reference/openai-compatible-provider.md#persistent-cache)。
 
+v0.3.1 首次并发初始化同一空 cache 存在已知竞争。启动多个 worker 前，先由单个进程用同一配置完成一次有效请求并等待成功，再开放并发；不能只创建一个空文件。范围与失败处理见 [已知问题](../reference/known-issues.md#provider-cache-first-use)。
+
 重复执行相同有效请求可以减少远程重算。cache 不保存 source/query 原文或 credential 原文，但保存 derived vectors 与 hashes；独立管理其文件权限和生命周期。容量是 vector payload budget，FIFO eviction 不保证文件立即缩小。删除 cache 不改变 graph/history；缺失后将重新请求 endpoint。
 
 只读 Lithograph main 仍可执行 Semantic read，并按配置写独立 cache。graph rollback 不能撤回网络请求或已成功发布的合法 cache entry。需要禁止这些操作的宿主应强制设置 `readOnlyNoExternalIO:true`，见 [安全执行](safe-execution.md)。

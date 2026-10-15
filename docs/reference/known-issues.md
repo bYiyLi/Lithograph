@@ -16,6 +16,18 @@
 
 v0.3.1 的 FULLTEXT/VECTOR `createStatement` 只输出基础创建形式，不能独立作为多 Label/Type、additional property 和 OPTIONS 的完整导出。复制 definition 时应同时保存 `labelsOrTypes`、`properties`、`options` 等实际字段，按 [索引参考](../cypher/indexes.md) 重新构造；需要保留完整版本化定义时使用公开 Diff/Patch 对象。不能只复制这个字符串后假定索引配置完全相同。
 
+<a id="provider-cache-first-use"></a>
+
+## v0.3.1：Provider cache 首次并发初始化
+
+**仍影响 v0.3.1 随附的 OpenAI-compatible Provider，修复版本尚未发布。** 仅当 `cache.enabled=true`，多个进程首次同时打开同一个尚未初始化的 cache path 时，一个请求可能返回 Provider `IO_ERROR`（code 2），message 为 `cache database operation failed`。两方都可能先观察到空库；取得初始化 writer 后没有重新检查另一方刚创建的 Schema，后一方创建同名表失败。cache 已初始化后的正常并发读写不涉及这个首次创建窗口。
+
+该问题在下载的 macOS arm64 v0.3.1 Provider / SQLite 3.51.0 上用两个进程、临时空 cache 和 150 ms 初始化锁定向复现 5/5：一个请求成功，另一个失败，最终只有成功请求的 entry；未观察到 cache 内容损坏。其它平台共享相关源码，此处不将源码推断写成逐平台复现。v0.3.0 与 v0.3.1 的 cache 实现源码未变，但本条制品证据只针对 v0.3.1。
+
+**规避：先串行预热，再启用并发。** 启动 worker/连接池并发工作前，由单个进程使用目标 Provider 配置和同一 cache path 完成一次有效 embedding/Semantic 请求，等待成功后再启动其余进程。仅创建目录或空文件不等于完成 Provider 初始化。已经遇到此错误时，先让初始化请求结束并核对路径/权限，再按业务幂等与重试策略处理失败请求；不要盲目重放整个 mutating Cypher。也可以保持默认的 `cache.enabled=false`。
+
+不要手工创建或修改 cache marker/内部表，也不要将 graph main 作为 cache。配置与 I/O 失败语义见 [Provider Reference](openai-compatible-provider.md#persistent-cache)，使用步骤见 [Provider 指南](../guide/embedding-providers.md#enable-cache)。
+
 ## 历史制品证据
 
 下列历史问题最初在**实际已发布 v0.1.0 macOS arm64 制品**复现。v0.2.1 release gate 重新确认过部分旧行为。历史 Native 操作只适用于对应旧 tag。

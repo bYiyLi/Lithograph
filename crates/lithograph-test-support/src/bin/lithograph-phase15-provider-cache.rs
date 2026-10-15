@@ -264,24 +264,28 @@ fn check_concurrent_publish(provider_load: &str, probe_load: &str) -> Result<(),
     require_server_requests(seed_server, 1)?;
 
     let (base_url, server) = embedding_barrier_server(2)?;
-    let config = provider_config(&base_url, &cache, 24);
+    // The first HTTP request waits for the second worker at the server barrier.
+    // Give process startup/scheduling its own margin instead of testing whether
+    // another SQLite process can load the Provider within the usual 250 ms.
+    let config = provider_config_with_timeout(&base_url, &cache, 24, 5_000);
     let first_fixture = FileDatabaseFixture::new(0x1505_0009)?;
     let second_fixture = FileDatabaseFixture::new(0x1505_000a)?;
     let first_path = first_fixture.path().to_path_buf();
     let second_path = second_fixture.path().to_path_buf();
     let first_script = format!(
         "{provider_load}\n{probe_load}\n\
-         SELECT 'status=' || provider_cache_probe_status({config}, 'concurrent-a', 2);",
+         SELECT 'result=' || provider_cache_probe_error({config}, 'concurrent-a', 2);",
         config = sql_literal(&config),
     );
     let second_script = format!(
         "{provider_load}\n{probe_load}\n\
-         SELECT 'status=' || provider_cache_probe_status({config}, 'concurrent-b', 2);",
+         SELECT 'result=' || provider_cache_probe_error({config}, 'concurrent-b', 2);",
         config = sql_literal(&config),
     );
     let first = thread::spawn(move || {
         execute_script(&first_path, &first_script).map_err(|error| error.to_string())
     });
+    thread::sleep(Duration::from_millis(350));
     let second = thread::spawn(move || {
         execute_script(&second_path, &second_script).map_err(|error| error.to_string())
     });
@@ -296,7 +300,7 @@ fn check_concurrent_publish(provider_load: &str, probe_load: &str) -> Result<(),
     require_server_requests(server, 2)?;
     for output in [&first_output, &second_output] {
         require(
-            output.lines().any(|line| line.trim() == "status=0"),
+            output.lines().any(|line| line.trim() == "result=OK"),
             &format!("concurrent Provider publish failed: {output:?}"),
         )?;
     }
@@ -353,11 +357,20 @@ fn require_cache_state(path: &Path, entries: i64, used: i64) -> Result<(), Box<d
 }
 
 fn provider_config(base_url: &str, cache: &Path, max_bytes: u64) -> String {
+    provider_config_with_timeout(base_url, cache, max_bytes, 250)
+}
+
+fn provider_config_with_timeout(
+    base_url: &str,
+    cache: &Path,
+    max_bytes: u64,
+    timeout_ms: u64,
+) -> String {
     json!({
         "base_url": base_url,
         "api_key": "phase15-secret",
         "model": "phase15-model",
-        "timeout_ms": 250,
+        "timeout_ms": timeout_ms,
         "max_retries": 0,
         "batch_size": 1,
         "cache": {
