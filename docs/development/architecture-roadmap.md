@@ -62,7 +62,7 @@ Phase 15 SQL Execution / True Streaming / Provider Cache (done)
 Phase 16 Read-only / No External I/O (done)
         |
         v
-Phase 17 Developer Documentation / v0.3.1 Release (in_progress)
+Phase 17 Developer Documentation / v0.3.1 Release (done)
 ```
 
 Phase 00–15 均已完成开发验收。Phase 15 的 EX15-01–19 全部闭合：15.1 host feasibility probe 确认 same-connection SAVEPOINT / repeated inner transaction 可行并收敛 `xClose` cleanup-failure contract；本地 correctness/resource/quality/CI/docs review 已通过；revision `b0d5a3da9c5c0266218e01c51d6d34a1be0a6b9d` 的 repository CI `35586275713` 与六目标 Release Matrix `35586275736` 全部成功。Phase 13/14 的 Provider/format4/Native/SQL tx adapter 记录继续作为历史实现证据，当前产品合同以 Phase 15 收敛后的 SQL-only / format3 / Provider-owned cache 设计为准。具体证据见 [Phase 15 计划](phases/15-sql-execution-provider-cache.md)。
@@ -81,7 +81,7 @@ Phase 15 的目标由 [Interfaces](../design/interfaces.md)、[Explicit Transact
 
 Phase 15 已进入 v0.3.0 正式发布基线。实现修复 revision `b0d5a3da9c5c0266218e01c51d6d34a1be0a6b9d` 的 repository CI `35586275713` 与六目标 Release Matrix `35586275736` 均通过。
 
-Phase 16 的安全执行选项已完成 2026-10-16 的完整本地验收：Core、scalar/rows/explicit transaction、synthetic Provider、quality 与 canonical CI 均通过。当前 v0.3.1 文档与发布进度见 [Phase 17](phases/17-developer-documentation-release.md)。
+Phase 16 的安全执行选项已完成 2026-10-16 的完整本地验收：Core、scalar/rows/explicit transaction、synthetic Provider、quality 与 canonical CI 均通过。Phase 17 亦已完成 v0.3.1 完整手册、文档 CI、六平台正式发布、资产与发布制品回归；精确源码/tag/CI 与 checksum 证据见 [Phase 17](phases/17-developer-documentation-release.md)。
 
 ## 2. 为什么 Version Storage 必须早于 Cypher Engine
 

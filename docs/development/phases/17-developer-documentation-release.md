@@ -1,6 +1,6 @@
 # Phase 17：完整开发者手册与 v0.3.1 发布
 
-**状态：`in_progress`**
+**状态：`done`**
 
 ## 目标与输入
 
@@ -32,8 +32,8 @@
 | DOC17-05 | Markdown 查询单一来源；全部可执行 Cypher 登记并断言结果或错误；Provider/CSV 使用合成 fixture | 已通过 |
 | DOC17-06 | 版本驱动生成器与只检查模式、覆盖/链接/锚点/空白检查接入 CI；无静默跳过 | 已通过 |
 | DOC17-07 | Phase 16、完整 `cargo make quality`、`scripts/ci.sh` 及最终 diff review 通过 | 已通过 |
-| DOC17-08 | 最终候选精确 SHA 的 CI 与六平台 Release Matrix 通过；annotated v0.3.1 tag 发布 | 待验收 |
-| DOC17-09 | tag CI/Matrix、六包+SHA256SUMS、VERSION/双扩展/许可和发布制品文档回归通过 | 待验收 |
+| DOC17-08 | 最终候选精确 SHA 的 CI 与六平台 Release Matrix 通过；annotated v0.3.1 tag 发布 | 已通过 |
+| DOC17-09 | tag CI/Matrix、六包+SHA256SUMS、VERSION/双扩展/许可和发布制品文档回归通过 | 已通过 |
 
 ## 验证与完成标准
 
@@ -72,3 +72,26 @@ Phase 16 review 另闭合了字符串插值子表达式的 prepare 检查，包�
 修复采用 Homebrew Python 3.14 + 同源 SQLite，CI 显式选择其 python3；Python boundary probes 的不合格环境改为失败。Runtime 与示例文本不因该环境问题改写，最终候选仍须重新取得自己的 CI 与六平台结果。
 
 首轮 Release Matrix `38770018229` 的六个平台全部成功，CI `38770018246` 的 quality、Linux 和 Windows 也全部成功；仅 macOS Python 环境导致该轮 CI 整体失败。后续修复候选仍需新的完整检查。发布说明中的用户手册链接统一为固定 v0.3.1 在线地址，使同一正文在仓库和 GitHub Release 页面均有效；发布验收记录链接到主分支的实际更新记录。
+
+### 最终候选、tag 与正式发布验收（2026-10-16）
+
+发布源码冻结为 `8a66f19eff835e603aa5b3fa60ae5aca3214df67`。其 [CI 38772676914](https://github.com/bYiyLi/Lithograph/actions/runs/38772676914) 的 4 个 jobs 与 [Release Matrix 38772676779](https://github.com/bYiyLi/Lithograph/actions/runs/38772676779) 的 storage fixture + 六平台 7 个 jobs 全部成功，才创建并推送 annotated `v0.3.1`。tag object 为 `522bdac750039d2364016e07cc54bf0d43ffdd32`，远端 peeled commit 与冻结源码一致。中间候选 `5c9e0b8` 在固定发布链接最终整理后被替代，其未完成检查主动取消，不作为验收成功证据。
+
+Tag 的 [CI 38774756406](https://github.com/bYiyLi/Lithograph/actions/runs/38774756406) 与 [Release Matrix 38774756423](https://github.com/bYiyLi/Lithograph/actions/runs/38774756423) 均成功；后者 8 个 jobs 包含正式 publish job。GitHub [v0.3.1 Release](https://github.com/bYiyLi/Lithograph/releases/tag/v0.3.1) 的 `publishedAt=2026-10-15T17:19:19Z`（北京时间 2026-10-16），`isDraft=false`、`isPrerelease=false`。
+
+从正式 Release 下载六包和 `SHA256SUMS`，逐包核对原始资产 SHA-256、唯一完整文件集合、VERSION、主扩展/Provider、ELF/Mach-O/PE 的 x64/arm64 machine、两份许可证，以及 README 三个固定 v0.3.1 入口。文本内容与固定 tag blobs 一致，正常化 Windows CRLF 后比较文本，checksum 始终检查原始字节。
+
+| 正式资产 | SHA-256 |
+| --- | --- |
+| `lithograph-linux-x64.tar.gz` | `b4170e31a307e71f243365d4629b359f8e2e1c1fcf9703722c7f314b858a8d1d` |
+| `lithograph-linux-arm64.tar.gz` | `1f0081ce3478f69575153e1c0b9cf7a22922a21170bd22c0404a4a2692e95e80` |
+| `lithograph-macos-x64.tar.gz` | `8ee1b0cb824d7f2c45101d1d84ed49c23378fdc95be621a2c0fa7994d918dd92` |
+| `lithograph-macos-arm64.tar.gz` | `27de06ef3528c477d3730274c525ca081bbad4f711f9dd32615811e97237c6fe` |
+| `lithograph-windows-x64.zip` | `3efed000b48dabfa2ea8748900955b8db2af99bb33b6353acf36fa84ac92d1a9` |
+| `lithograph-windows-arm64.zip` | `d7ceb9eceeccb318099ed668a5d15b1a9aa165e9eaad72564782fe91dc0bbd43` |
+
+实际下载的 macOS arm64 主扩展在 Darwin arm64 / Homebrew SQLite 3.51.0 重新通过：526 × 2 Cypher、125 条 Guide/Reference SQL及 Python boundary probes、4 个 Python 应用程序、C host 编译运行、172 条函数签名和 38 个 Procedure 的生成一致性。没有用本地 debug build 替代发布库。
+
+同一发布主库 + 发布 OpenAI-compatible Provider 通过普通 `.load` basename 检查、OpenAI-compatible smoke、7 项 Provider cache gate；发布主库 + synthetic Provider + 发布真实 Provider 的 Phase 13 probe 20/20 通过，包含安全选项零 embedding 调用、加载顺序、历史/Graph View、失败原子性、scalar/rows、只读 main 与 explicit staged Semantic。对真实远程服务的配置模板不计入已通过示例；Provider 回归使用 synthetic Provider 和本地测试服务。
+
+DOC17-01–09 与前置 Phase 16 全部闭合。提交、推送、tag 和正式 Release 已实际完成；本次发布后的记录提交只同步 Development 验收与状态，不改变冻结源码、用户手册、二进制、tag 或发布资产。发布源码与该记录提交之间只能有 Development 文档差异；固定 v0.3.1 用户手册始终由 immutable tag 提供。

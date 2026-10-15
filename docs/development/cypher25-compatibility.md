@@ -203,6 +203,8 @@ Phase 10 完成时，最终 executable inherited openCypher TCK runner 在当时
 
 完整开发者手册的覆盖以独立 [documentation-coverage.json](documentation-coverage.json) 核对 50 个 family、151 个 required 子项、38 个 delta/supplement 项，另核对 48 个公开接口/配置项。526 个 Markdown Cypher 示例分别经过 scalar/rows，共 1,052 次结果/错误断言；169 个函数名称、172 条签名和 38 个 Procedure 按 v0.3.1 运行时核对。此文档映射不改变本实现矩阵的 `done` 规则。Phase 16 是 execution option，亦不增加 Cypher 语言分母；正式发布与远端精确 SHA 证据见 [Phase 17](phases/17-developer-documentation-release.md)。
 
+正式 v0.3.1 的冻结源码为 `8a66f19eff835e603aa5b3fa60ae5aca3214df67`，候选与 tag 的 CI/六平台 Release Matrix 均成功。下载的 macOS arm64 正式制品再次通过全部 1,052 次 Cypher 示例与接口/Provider 回归；完整资产、SHA 和检查链接见 [Phase 17 发布验收](phases/17-developer-documentation-release.md)。
+
 ## 5. 2025.06+ Cypher 25 Delta Inventory
 
 除 frozen Cypher 5/openCypher inheritance 外，Profile 必须显式覆盖 2025.06 之后加入 Cypher 25 的新/改变能力。当前 inventory 至少包含：
