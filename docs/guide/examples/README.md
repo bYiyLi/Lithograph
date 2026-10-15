@@ -6,6 +6,8 @@
 
 这里的应用示例只使用 SQLite SQL，不要求 SDK、账号或外部服务。每次检查都创建临时数据库；不把业务数据库传给验证工具。Python 工具只依赖标准库，要求 Python 3.11+。Python 应用示例另要求其 SQLite 为 3.45.0+ 且允许扩展加载；文档 Cypher 与 inventory 工具还可以使用 `--sqlite3` 指定符合要求的 SQLite CLI。
 
+macOS 可以使用 `brew install sqlite python@3.14`，将该 Python 的 `libexec/bin` 和 `bin` 放在其它 Python 之前，再确认 `python3` 的实际 runtime。CI 采用这份 Homebrew Python，并在完整门禁前实际启用/关闭 SQLite extension loading。`verify.py` 的完整验收必须运行 Python 边界探针；`--sqlite3` 增加 CLI 回归覆盖，不替代或跳过 Python 检查。只有 `--inventory-only` 可以单独通过 CLI 导出清单。
+
 | 文件 | 用途 |
 | --- | --- |
 | [python_quickstart.py](python_quickstart.py) | 参数绑定、图写入、stream、Tag、history、integrity |

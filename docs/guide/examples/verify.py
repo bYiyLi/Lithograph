@@ -176,6 +176,11 @@ def main():
     parser.add_argument("--export-inventory", type=Path)
     parser.add_argument("--inventory-only", action="store_true")
     args = parser.parse_args()
+    if not args.inventory_only:
+        require(python_sqlite_supported(),
+                "Required Python boundary probes need Python SQLite 3.45.0+ with "
+                "enable_load_extension; --sqlite3 adds CLI regression coverage and "
+                "does not replace the Python probes")
     with tempfile.TemporaryDirectory(prefix="lithograph-doc-version-") as fixture:
         with DocGraph(args.extension, fixture, args.sqlite3) as graph:
             graph.check_version()
@@ -183,10 +188,7 @@ def main():
         export_inventory(args.extension, args.export_inventory, args.sqlite3)
     if not args.inventory_only:
         verify_guides(args.extension, args.sqlite3)
-        if python_sqlite_supported():
-            verify_boundaries(args.extension)
-        else:
-            print("SKIP Python boundary probes: host Python SQLite is older than 3.45.0")
+        verify_boundaries(args.extension)
 
 
 if __name__ == "__main__":

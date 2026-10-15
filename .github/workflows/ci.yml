@@ -49,15 +49,31 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.14'
-      - name: Install SQLite
-        run: brew install sqlite
+      - name: Install SQLite and Python
+        run: brew install sqlite python@3.14
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.98.1 --profile minimal --component clippy --component rustfmt
-      - name: Select Homebrew SQLite
-        run: echo "LITHOGRAPH_SQLITE3=$(brew --prefix sqlite)/bin/sqlite3" >> "$GITHUB_ENV"
+      - name: Select Homebrew SQLite and Python
+        run: |
+          echo "LITHOGRAPH_SQLITE3=$(brew --prefix sqlite)/bin/sqlite3" >> "$GITHUB_ENV"
+          echo "$(brew --prefix python@3.14)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix python@3.14)/libexec/bin" >> "$GITHUB_PATH"
+      - name: Verify Python SQLite extension loading
+        run: |
+          python3 - <<'PY'
+          import sqlite3
+          import sys
+          print(sys.executable)
+          print("Python", sys.version)
+          print("SQLite", sqlite3.sqlite_version)
+          assert sqlite3.sqlite_version_info >= (3, 45, 0), "Python requires SQLite 3.45+"
+          db = sqlite3.connect(":memory:")
+          try:
+              db.enable_load_extension(True)
+              db.enable_load_extension(False)
+          finally:
+              db.close()
+          PY
       - name: Run canonical gates
         run: ./scripts/ci.sh
 

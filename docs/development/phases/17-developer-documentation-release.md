@@ -64,3 +64,9 @@ Phase 16 review 另闭合了字符串插值子表达式的 prepare 检查，包�
 `cargo make quality` 与 `scripts/ci.sh` 均完整退出 0。Core/test-support、extension、Provider 保持原有分组；没有跳过 HTTP fixture。覆盖率 regions 83.56%、functions 84.38%、lines 85.43%，全部阈值通过；inherited TCK 为 3,777 applicable passed、0 failed，120 项仍使用原有显式分类，18 个冻结 fixtures 均通过。SQLite 3.45.0/3.51.0/3.53.4 的真实加载、SQL surface、双扩展、NOMEM/rollback 与 Provider cache 门禁通过。
 
 最终文档执行结果为 526 示例 × scalar/rows = 1,052 次，另有 125 条 Guide/Reference SQL、4 个 Python 程序及 C host 编译运行全部通过。172 条函数签名/38 个 Procedure 的生成一致性、验证器 self-test、78 页链接/锚点/覆盖和 whitespace 检查均通过。远端候选 SHA 与正式发布尚待下节实际记录，不使用本地成功替代六平台验收。
+
+### 首轮远端候选与 macOS Python 修复
+
+候选 `7aacd96dd55aa17f08e4f49af10adfcc086deefe` 已提交并推送。首轮 CI `38770018246` 中，Linux canonical gates 和 Windows load/ABI gates 通过；macOS 的 526 × 2 Cypher 与 125 条 SQL 均通过，但 `actions/setup-python` 的 macOS Python SQLite 旧于最低版本且禁用 extension loading，使原生 Python 示例失败。这是可复现的验证环境问题，不能将该候选记作完整 CI 成功，也不能跳过 Python 示例发布。
+
+修复采用 Homebrew Python 3.14 + 同源 SQLite，CI 显式选择其 python3；Python boundary probes 的不合格环境改为失败。Runtime 与示例文本不因该环境问题改写，最终候选仍须重新取得自己的 CI 与六平台结果。
