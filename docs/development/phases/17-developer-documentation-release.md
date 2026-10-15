@@ -70,3 +70,5 @@ Phase 16 review 另闭合了字符串插值子表达式的 prepare 检查，包�
 候选 `7aacd96dd55aa17f08e4f49af10adfcc086deefe` 已提交并推送。首轮 CI `38770018246` 中，Linux canonical gates 和 Windows load/ABI gates 通过；macOS 的 526 × 2 Cypher 与 125 条 SQL 均通过，但 `actions/setup-python` 的 macOS Python SQLite 旧于最低版本且禁用 extension loading，使原生 Python 示例失败。这是可复现的验证环境问题，不能将该候选记作完整 CI 成功，也不能跳过 Python 示例发布。
 
 修复采用 Homebrew Python 3.14 + 同源 SQLite，CI 显式选择其 python3；Python boundary probes 的不合格环境改为失败。Runtime 与示例文本不因该环境问题改写，最终候选仍须重新取得自己的 CI 与六平台结果。
+
+首轮 Release Matrix `38770018229` 的六个平台全部成功，CI `38770018246` 的 quality、Linux 和 Windows 也全部成功；仅 macOS Python 环境导致该轮 CI 整体失败。后续修复候选仍需新的完整检查。发布说明中的用户手册链接统一为固定 v0.3.1 在线地址，使同一正文在仓库和 GitHub Release 页面均有效；发布验收记录链接到主分支的实际更新记录。
