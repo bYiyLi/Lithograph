@@ -1,150 +1,154 @@
 # Procedure Reference
 
-当前 v0.3.0 发布基线。完整公开签名见 [Inventory](procedure-inventory.md)。本页补充参数语义、默认值、Commit 效果及限制；名称不省略 `lithograph.` / `db.` 前缀。
+适用于 Lithograph v0.3.1 · [产品手册](../guide/README.md) · [接口参考](README.md) · [运行时签名清单](procedure-inventory.md)
 
-Procedure 通过 Cypher `CALL name(...)` 调用，返回行可接 `YIELD` / `RETURN`。本页的方括号表示可选位置参数，不是实际调用字符。可选参数通常通过省略提供默认值，不应把 null 当作任意可选参数的默认值。
+本入口按职责连接全部公开 Procedure。每个专题给出真实输入类型、默认值、输出、关键失败和版本/事务影响。[CALL 与 YIELD](../cypher/procedure-calls.md) 解释语言调用规则；[SQL API](sql-api.md) 解释如何在 SQLite 内执行。[版本共享对象](versioning.md) 拥有 Descriptor、Commit Data、Patch 与冲突对象的字段说明。
+
+<a id="calling-conventions"></a>
+
+## 公共调用规则
+
+`CALL` 名称保留 `db.` / `lithograph.` 前缀。本文签名中的方括号表示可省略的位置参数，不是 Cypher 字符；可选参数通过省略取得默认值，不能假定 null 或 `{}` 等于省略。后置 `YIELD` 引用真实输出列，投影别名使用普通 Cypher 规则。
+
+```text
+CALL db.labels() YIELD label RETURN label
+CALL lithograph.log('branch/main', 100) YIELD commit, parents RETURN commit, parents
+```
+
+Procedure 在所属 clause 收到的每一行上调用，结果与该输入行组合。写操作不能放在可能重复的 UNWIND/MATCH 后再假定只执行一次；需要多次调用时明确处理重复和原子边界。返回零行、空输出与一行 null 不等价。
+
+`READ`/`WRITE` 是执行分类，不能单靠它推断是否创建 Commit：ref/Data/Session write、GC 和 index rebuild 都可能是 WRITE，却不创建 graph Commit。`db.index.semantic.rebuild` 为 READ，但拥有明确 committed-target maintenance lifecycle，并可能调用外部 Provider。
+
+<a id="图元信息与全文检索"></a>
 
 ## 图元信息与全文检索
 
-| Procedure | 参数和行为 |
-| --- | --- |
-| `db.labels()` | 当前 Snapshot / Graph View 中实际存在的 Label，返回 `label` |
-| `db.propertyKeys()` | 当前图可见 Property key，返回 `propertyKey` |
-| `db.relationshipTypes()` | 当前图可见 Relationship Type，返回 `relationshipType` |
-| `db.index.fulltext.queryNodes(indexName,queryString[,options])` | 全文节点索引；返回 `node,score` |
-| `db.index.fulltext.queryRelationships(indexName,queryString[,options])` | 全文关系索引；返回 `relationship,score` |
+| Procedure | 精确参考 | 返回列 |
+| --- | --- | --- |
+| `db.labels()` | [可见 Label](procedures/graph.md#proc-db-labels) | `label :: STRING` |
+| `db.propertyKeys()` | [可见 Property key](procedures/graph.md#proc-db-propertykeys) | `propertyKey :: STRING` |
+| `db.relationshipTypes()` | [可见 Type](procedures/graph.md#proc-db-relationshiptypes) | `relationshipType :: STRING` |
+| `db.index.fulltext.queryNodes(...)` | [全文 Node 查询](procedures/fulltext.md#proc-db-index-fulltext-querynodes) | `node :: NODE, score :: FLOAT` |
+| `db.index.fulltext.queryRelationships(...)` | [全文 Relationship 查询](procedures/fulltext.md#proc-db-index-fulltext-queryrelationships) | `relationship :: RELATIONSHIP, score :: FLOAT` |
 
-全文 options 默认 `{}`，支持 `skip`、`limit`、`analyzer`；skip 非负、limit 为合法非负整数，省略 limit 不额外施加该限制。`analyzer` 是当前 SQLite connection 可构造的完整 FTS5 tokenizer specification；省略时采用 IndexDefinition 的 specification。它只改变本次查询文本的分词，不改变 IndexDefinition 或已索引文档。名称必须对应当前选定版本的正确索引 target family。
-
-默认 tokenizer 为 `unicode61`；Porter stemming 使用 `porter unicode61`。`standard-no-stop-words` / `english` 不再有 Lithograph 特殊映射。第三方 tokenizer 通过宿主 SQLite extension 在每个实际 connection 上注册，不是 Neo4j/Lucene analyzer plugin。score 由检索语义定义，非概率；业务分页与 top-k 应显式限制结果量。例子见 [Search](../guide/search.md)。
+[全文查询专题](procedures/fulltext.md) 同时拥有 queryString、分页、analyzer override、FTS5/tokenizer 与 score 的行为。它们不创建 Commit；Full-text 仍可能调用宿主 native tokenizer，安全只读选项会拒绝。
 
 <a id="managed-semantic-procedures"></a>
+<a id="managed-semantic"></a>
 
 ## Managed Semantic
 
-当前 Managed Semantic 公开 5 个 procedure：
+| Procedure | 精确参考 |
+| --- | --- |
+| `db.index.semantic.createNodeIndex(...)` | [创建 Node Semantic Index](procedures/semantic.md#proc-db-index-semantic-createnodeindex) |
+| `db.index.semantic.createRelationshipIndex(...)` | [创建 Relationship Semantic Index](procedures/semantic.md#proc-db-index-semantic-createrelationshipindex) |
+| `db.index.semantic.queryNodes(...)` | [文本检索 Node](procedures/semantic.md#proc-db-index-semantic-querynodes) |
+| `db.index.semantic.queryRelationships(...)` | [文本检索 Relationship](procedures/semantic.md#proc-db-index-semantic-queryrelationships) |
+| `db.index.semantic.rebuild(...)` | [重建 connection-local Semantic/HNSW](procedures/semantic.md#proc-db-index-semantic-rebuild) |
 
-| Procedure | Mode | 输入 / 输出 |
-| --- | --- | --- |
-| `db.index.semantic.createNodeIndex(indexName,labels,sourceProperty,options)` | WRITE | 无输出列；创建 versioned Node Semantic Index |
-| `db.index.semantic.createRelationshipIndex(indexName,relationshipTypes,sourceProperty,options)` | WRITE | 无输出列；创建 versioned Relationship Semantic Index |
-| `db.index.semantic.queryNodes(indexName,queryString,options)` | READ | `node,score` |
-| `db.index.semantic.queryRelationships(indexName,queryString,options)` | READ | `relationship,score` |
-| `db.index.semantic.rebuild(name,version)` | READ | `name,commit,indexedEntities,embeddedTexts` |
+完整参数、providerConfig 持久化、staged-state 可见性、Graph View、失败与 cache 边界统一见 [Semantic 专题](procedures/semantic.md)。不提供 `db.index.semantic.cache.*` Kernel Procedure；具体 Provider 的 cache 属于 [Provider 配置参考](openai-compatible-provider.md)。
 
-create 的 `labels` / `relationshipTypes` 是非空 `LIST<STRING>`；`sourceProperty` 只有实际 String 值参与。options 必须包含 `provider`、`providerConfig`、`dimensions`、`similarity`。dimensions 为 1–4096；v1 similarity 为 `cosine` / `euclidean`。CREATE 只执行当前 connection 上 Provider 的本地 `validate`，不调用 `embedBatch`。
-
-query options 必须包含非负 `limit`，可选非负 `skip`；未知 key / null / 错误类型返回 `INVALID_ARGUMENT`。实际 query/rebuild 每次都要求目标历史 Semantic definition 指定的 Provider 当前注册并通过 validation。query 是 graph read，summary commit 为 pinned Commit。Lithograph Core 只维护 execution-local embedding work state与可重建 TEMP Semantic/HNSW materialization；跨 execution 的 persistent embedding cache完全属于具体 Provider。
-
-`rebuild` 的 version 是现有 committed version descriptor。它只重建当前 connection 的 TEMP Semantic/HNSW materialization，不写 Lithograph `main`、不创建 Commit、不移动 ref；`summary.queryType="read"`，`summary.commit` 为实际 pin 的 target Commit。普通 Semantic query 可以通过 `lithograph()` 与 `lithograph_rows()` 执行，也可以在 active explicit transaction 中读取 staged state；`rebuild` 因显式 committed-target lifecycle 不能放入 active explicit transaction / Merge candidate。
-
-Provider/config/source 都属于 versioned IndexDefinition。Semantic definition 的 Diff/Patch 使用普通 Index logical slot；Patch/Merge/Rebase/Revert 发布新增/改变 definition 前会再次验证 Provider，失败不会移动 Branch。SHOW/DROP/history inspection 不要求 Provider 当前存在。完整示例见 [Search](../guide/search.md#managed-semantic-text-search)。
+<a id="branch-与-tag"></a>
 
 ## Branch 与 Tag
 
-| Procedure | 参数语义与结果 |
+| Procedure | 精确参考 |
 | --- | --- |
-| `lithograph.branch.create(name[,from])` | from 为 Descriptor，省略从 active Branch head 创建；返回 name,commit；不切换 active Branch |
-| `lithograph.branch.list()` | 返回 name,commit,active，按名称排序 |
-| `lithograph.branch.delete(name)` | 返回 name,previousCommit；不能删除 main 或 connection active Branch |
-| `lithograph.branch.checkout(name)` | 改变 connection active Branch，要求 SQLite autocommit；v0.1.0–v0.2.1 adapter 曾有已知执行缺陷，v0.3.0 SQL surface 已修复 |
-| `lithograph.tag.create(name,target)` | target 为 Descriptor，返回 name,commit |
-| `lithograph.tag.list()` | 返回 name,commit |
-| `lithograph.tag.move(name,target)` | 显式移动已有 Tag，返回 name,previousCommit,commit |
-| `lithograph.tag.delete(name)` | 返回 name,previousCommit |
+| `lithograph.branch.create` | [创建 Branch](procedures/versioning.md#proc-lithograph-branch-create) |
+| `lithograph.branch.checkout` | [切换 connection active Branch](procedures/versioning.md#proc-lithograph-branch-checkout) |
+| `lithograph.branch.list` | [列出 Branch](procedures/versioning.md#proc-lithograph-branch-list) |
+| `lithograph.branch.delete` | [删除 Branch ref](procedures/versioning.md#proc-lithograph-branch-delete) |
+| `lithograph.tag.create` | [创建 Tag](procedures/versioning.md#proc-lithograph-tag-create) |
+| `lithograph.tag.list` | [列出 Tag](procedures/versioning.md#proc-lithograph-tag-list) |
+| `lithograph.tag.move` | [移动 Tag](procedures/versioning.md#proc-lithograph-tag-move) |
+| `lithograph.tag.delete` | [删除 Tag](procedures/versioning.md#proc-lithograph-tag-delete) |
 
-这些操作不为引用变化创建 graph Commit。Branch 与 Tag 名称各有 namespace。name 不是 Descriptor：传 `release` 与传 `tag/release` 含义不同。参数已有目标的操作不再使用 query branch override。
+这些操作改变 ref/connection state，不为 ref 变化创建 graph Commit。name 与 Descriptor 是不同输入类型；完整合法名称与版本解析见 [共享对象](versioning.md#descriptors)。
+
+<a id="commit-与可修改-data"></a>
 
 ## Commit 与可修改 Data
 
-| Procedure | 参数语义与结果 |
+| Procedure | 精确参考 |
 | --- | --- |
-| `lithograph.commit.get(version)` | 返回 commit,parents,author,message,committedAt,hasData,data；version 先解析成 Commit |
-| `lithograph.commit.create([data])` | 在目标 Branch 创建 empty-delta Commit；返回 commit；可附任意 JSON Data |
-| `lithograph.commit.data.set(version,data)` | 设置/替换整个 Data，而不是 merge JSON；返回 commit,data |
-| `lithograph.commit.data.clear(version)` | 删除 Data，返回 commit；不改变 Commit identity |
+| `lithograph.commit.get` | [读取 immutable metadata 与 Data](procedures/versioning.md#proc-lithograph-commit-get) |
+| `lithograph.commit.create` | [显式 empty-delta Commit](procedures/versioning.md#proc-lithograph-commit-create) |
+| `lithograph.commit.data.set` | [设置完整 Data](procedures/versioning.md#proc-lithograph-commit-data-set) |
+| `lithograph.commit.data.clear` | [清除 Data](procedures/versioning.md#proc-lithograph-commit-data-clear) |
 
-Data 参数是任意 JSON 值，包含 null；`hasData:false` 与 `hasData:true,data:null` 不等价。Data 不进入 diff/merge/rewrite，不能作为 immutable audit 事实。author/message/committedAt 是 Commit 自身的 immutable metadata。`committedAt` 是 INTEGER，单位为 UNIX epoch 微秒，不是 seconds；Session list 的 `createdAt` 使用同一单位。
+Data 是可修改 sidecar，`hasData=false` 与显式 JSON null 不等价；不能作为 immutable audit。精确字段见 [Commit 与 Data](versioning.md)。
+
+<a id="history-与-structural-patch"></a>
 
 ## History 与 Structural Patch
 
-`lithograph.log([version[,limit[,cursor]]])`：version 默认 active Branch head，limit 默认 100。返回 commit,parents,author,message,committedAt,cursor。遍历 pinned 起点可达 DAG；把最后一行非空 cursor 用于下一页，保持原起点不变。cursor 为 opaque token，不接受自行拼接的 offset。
+| Procedure | 精确参考 |
+| --- | --- |
+| `lithograph.log` | [固定起点的 DAG 分页](procedures/versioning.md#proc-lithograph-log) |
+| `lithograph.diff` | [Snapshot 差异](procedures/versioning.md#proc-lithograph-diff) |
+| `lithograph.patch.apply` | [同库原子 Patch 应用](procedures/versioning.md#proc-lithograph-patch-apply) |
 
-`lithograph.diff(before,after)`：两个参数均为 Descriptor，返回一个 `patch` Map：
+Patch 属于结构化逻辑变化，完整 `format/databaseId/from/to/operations`、slot 与 typed before/after 见 [Patch 对象](versioning.md)。不要把结果 JSON stringify 后再丢失 tagged value 类型。
 
-```text
-{format:1, databaseId:<uuid>, from:<commit descriptor>, to:<commit descriptor>, operations:[...]}
-```
-
-operations 使用稳定的逻辑槽位描述 Node / Label / Relationship / Property / Schema / Index 变化。Family 为 AddNode、DeleteNode、AddLabel、RemoveLabel、AddRelationship、DeleteRelationship、SetProperty、RemoveProperty、SetSchema、CreateIndex、DropIndex、SetIndex；以实际返回的字段和值类型为准，不把程序内存地址或物理 SQLite row 作为 Patch。
-
-`lithograph.patch.apply(patch)`：接收 Diff 返回的完整 Map，经 `$patch` 绑定并保留 tagged value 编码。仅适用于同 databaseId；校验所有 before condition，原子写入一个新 Commit，返回 commit。from/to 记录 provenance，不直接决定目标 Branch 的移动方式；重复 slot、非法类型或条件不匹配不能当作成功忽略。
-
-推荐从 Diff 得到可用 Patch，不手写内部对象 hash。完整 round-trip 见 [版本工作流](../guide/examples/version_workflow.py)。Patch 不是 Cypher mutation 的替代语法，也不含 Tag、Branch 或 Commit Data。
+<a id="merge-session"></a>
 
 ## Merge Session
 
-| Procedure | 必需参数与默认 | 作用 |
-| --- | --- | --- |
-| `merge.start` | source Descriptor；可选 expectedHead Commit Descriptor | 用 query branch 选择 target，建立 Session；不移动 Branch |
-| `merge.get` | session id | 读取 session,targetBranch,ours,theirs,revision,status,unresolved |
-| `merge.list` | 可选正 limit 和 cursor；默认 100 | 分页列出未结束 Session，返回 createdAt / cursor 等列 |
-| `merge.conflicts` | session；可选正 limit 和 cursor；默认 100 | 当前 revision 的 conflict inventory |
-| `merge.resolve` | session,expectedRevision,resolutions | 原子应用一批选择，返回更新后的 Session 状态 |
-| `merge.finalize` | session,expectedRevision | revision + target-head CAS；返回 status,commit，成功移除 Session |
-| `merge.abort` | session,expectedRevision | 移除 Session，返回 session，无图 Commit |
+| Procedure | 精确参考 |
+| --- | --- |
+| `lithograph.merge.start` | [pin inputs 并建立 Session](procedures/merge.md#proc-lithograph-merge-start) |
+| `lithograph.merge.get` | [读取当前 revision/status](procedures/merge.md#proc-lithograph-merge-get) |
+| `lithograph.merge.list` | [分页枚举 open Session](procedures/merge.md#proc-lithograph-merge-list) |
+| `lithograph.merge.conflicts` | [分页读取 conflict inventory](procedures/merge.md#proc-lithograph-merge-conflicts) |
+| `lithograph.merge.resolve` | [revision CAS 保存 resolution](procedures/merge.md#proc-lithograph-merge-resolve) |
+| `lithograph.merge.finalize` | [验证 target head 并发布](procedures/merge.md#proc-lithograph-merge-finalize) |
+| `lithograph.merge.abort` | [revision CAS 放弃 Session](procedures/merge.md#proc-lithograph-merge-abort) |
 
-表内均需 `lithograph.` 前缀。Session id 是引擎返回的 `merge-session/...` 字符串，revision 是正整数。resolutions 是 Map 列表，每项 `{conflictId,choice}`；choice 为 `ours` / `theirs` / `value`，最后一种还需要类型正确的 `value`。
+candidate 检查通过普通只读 query 和 `options.mergeSession` 完成。[Merge 专题](procedures/merge.md) 说明完整状态机；[Merge 指南](../guide/merge.md) 按任务组织恢复与冲突解决。
 
-start / get / list / conflicts / resolve / abort 不接受 author/message；finalize 可以使用 author/message 作为新合并 Commit metadata，但不能重新指定 branch。除 start 外的 Session 操作不能覆盖已经固定的目标。
-
-start 的 status：up_to_date、fast_forward、conflicted、ready；finalize 成功：up_to_date、fast_forward、merged。冲突未解决不能 finalize；head 或 revision 变化时失败并保留 Session。candidate query 不是 Procedure，而是普通只读 query + `options.mergeSession`。详见 [Merge 指南](../guide/merge.md)。
+<a id="历史改写与撤销"></a>
 
 ## 历史改写与撤销
 
-| Procedure | 行为和注意事项 |
+| Procedure | 精确参考 |
 | --- | --- |
-| `lithograph.rebase(onto[,options])` | onto 为 Descriptor；procedure options 仅包含 resolutions。返回 status,commit,rewritten,conflicts；conflicted 时 commit 为 null，整个操作未应用。重写以 first-parent sequence 为准，新 Commit 保留各自原 author/message，不复制 Data/Tag |
-| `lithograph.squash(since)` | since 为目标 HEAD 的祖先且不等于 HEAD；返回 from,previousHead,commit；最终 Snapshot 不变，新 parent=since |
-| `lithograph.reset(target)` | target 为 Descriptor；返回 from,to，只移动目标 Branch，不创建 Commit |
-| `lithograph.revert(commit[,options])` | commit 必须是 `commit/<id>`；普通 Commit 省略 options；Merge Commit 必须 `{mainline:1}` 或 `{mainline:2}`；Root 不允许 |
+| `lithograph.rebase` | [first-parent sequence replay](procedures/versioning.md#proc-lithograph-rebase) |
+| `lithograph.squash` | [压缩为新的 delta](procedures/versioning.md#proc-lithograph-squash) |
+| `lithograph.reset` | [移动目标 Branch head](procedures/versioning.md#proc-lithograph-reset) |
+| `lithograph.revert` | [反向变化形成新 Commit](procedures/versioning.md#proc-lithograph-revert) |
 
-Rebase resolutions 使用 conflicts 返回的 conflictId，并根据槽位选择 ours/theirs/value。冲突返回还标识 replay 的 sourceCommit，不要把它当作 Merge Session 的 conflict inventory。普通成功、up-to-date、fast-forward 情况按返回 status 区分，不仅看有没有 SQL 异常。
+操作前对需要保留的旧 head 建立 Tag/Branch。旧 Commit 只有在不可达并执行 GC 后才删除；单纯保存字符串不保护它。
 
-操作前保留原 head 的 Tag，检查影响面。旧 Commit 只有在失去所有保护引用并执行 GC 后才可能被删除；Commit 字符串自身不是 GC root。
+<a id="返回值类型与-introspection-注意事项"></a>
 
 ## 返回值类型与 introspection 注意事项
 
-v0.1.0–v0.2.1 的 `SHOW PROCEDURES.returnDescription[*].type` 把所有输出写成 STRING，`argumentDescription` 也未提供实际参数清单；见 [DOC-V010-03](known-issues.md)。不要把这些字段用于自动转换结果，或据空 argumentDescription 判断 procedure 没有参数。
+运行时签名索引见 [Inventory](procedure-inventory.md)，本手册各条目中的实际类型表用于解码判断。部分 metadata 仍把 Procedure 的 `returnDescription[*].type` 统一报为 STRING，`argumentDescription` 也不保证是完整参数清单；不应把这个 metadata 缺口解释为“真实结果都是 String”或“Procedure 无参数”。实际结果必须按 [Values](values.md) 解码，并按各接口正文处理 nullable 字段、Map、List、Node 与 Relationship。
 
-| 字段 / 对象 | 实际值类型 |
-| --- | --- |
-| 普通 name、commit、previousCommit、descriptor、status、cursor、session | STRING；不存在的 cursor / nullable结果可能为 null |
-| `branch.list.active`、`commit.get.hasData` | BOOLEAN |
-| `commit.get.parents`、`log.parents` | LIST<STRING> |
-| author、message | STRING 或 null |
-| committedAt、createdAt | INTEGER，UNIX epoch 微秒 |
-| revision、unresolved、indexedEntities、GC 删除计数 | INTEGER |
-| `commit.get.data`、`commit.data.set.data` | 任意 JSON value，可能为 null |
-| `diff.patch` | MAP，operations 为 LIST<MAP> |
-| Full-text node / relationship、score | 分别为 NODE / RELATIONSHIP、FLOAT |
-| Semantic node / relationship、score | 分别为 NODE / RELATIONSHIP、FLOAT |
-| Semantic indexedEntities / embeddedTexts | INTEGER |
-| conflict.slot / base / ours / theirs / resolution | 由具体冲突槽位决定的 typed value / Map / null；不要 stringify 后丢失结构 |
-| `rebase.rewritten`、`rebase.conflicts` | LIST<MAP> |
+INTEGER 包括 revision/计数和 UNIX epoch **微秒** 时间；大整数遵守 tagged wrapper。Commit Data 可以是任意 JSON 值；Patch/conflict/resolution 保留其结构，不能强制转换成 String。
 
-说明中的 UNION/null 属于字段语义，不代表所有 procedure 的同名字段都可以随意换类型。JSON 跨语言编码继续遵守 [Values](values.md)，例如大 INTEGER 使用 tagged wrapper。
+<a id="索引维护与-gc"></a>
 
 ## 索引维护与 GC
 
-`lithograph.index.rebuild(name,version)`：两个参数均为非空字符串，version 是明确 Descriptor。仅支持持久 Standard Index 的 RANGE/TEXT/POINT / Relationship LOOKUP family，不支持 Node LOOKUP、FULLTEXT、VECTOR。返回 `name,commit,indexedEntities`；commit 是实际 anchor，不创建新 Commit、不移动 Branch。
+| Procedure | 精确参考 |
+| --- | --- |
+| `lithograph.index.rebuild` | [persistent Standard Index generation](procedures/maintenance.md#proc-lithograph-index-rebuild) |
+| `lithograph.gc` | [不可达历史回收](procedures/maintenance.md#proc-lithograph-gc) |
 
-`lithograph.index.rebuild(name,version)` 拥有明确 committed-target maintenance lifecycle，可从普通 SQL execution surface 调用，包括 `lithograph()` / `lithograph_rows()`；但不能嵌入 caller-owned SQLite transaction、active Lithograph explicit transaction、transaction-owning subquery 或 Merge candidate，也不接受不适用的 historical execution options。
+GC 是不可逆的历史删除，执行前建立保留引用与一致性备份。rebuild 只恢复 derived data；两者的上下文约束不同，见[维护专题](procedures/maintenance.md)。
 
-Managed Semantic 不复用 `lithograph.index.rebuild`；使用上节的 `db.index.semantic.rebuild`。Phase 15 中它只重建当前 connection 的 TEMP Semantic/HNSW materialization，不写 Lithograph `main`、不创建 Commit，也不维护 Provider-owned persistent cache。
+<a id="context-summary"></a>
 
-`lithograph.gc()`：无参数，显式删除所有 Branch、Tag、open Merge Session 都不可达的历史和相关 derived data。返回 `commits,layers,schemas,checkpoints,commitData` 的删除数量。不会以“压缩数据库文件”为理由忽略可达历史；文件物理空间处理仍属于 SQLite 运维。
+## 上下文速查
 
-GC 是不可逆历史回收，不能通过 reset 恢复已删除 Commit。先建立保留策略与一致性备份，再执行。详情见 [维护](../guide/operations.md)。
+| family | Commit/状态影响 | `graphView` / `at` / active Lithograph tx |
+| --- | --- | --- |
+| 图元信息 | 纯读取 | 支持可见图、历史、staged state |
+| Full-text query | 纯 graph read，TEMP derived build | 支持可见图、历史、staged state |
+| Semantic create/query | create 为 Schema write；query 可调用 Provider | create 按 Schema write 限制；query 支持可见图、历史、staged state |
+| Semantic rebuild | committed-target TEMP maintenance | 不接受 graphView/at；拒绝 active tx/candidate |
+| Version Procedure（含 Merge、GC） | 依各条目改变 Commit/ref/Data/Session | 不接受 graphView/at；active tx/candidate 拒绝 |
+| Standard Index rebuild | persisted derived generation | 支持 caller-owned SQLite transaction；拒绝 active tx/candidate |
 
-依据：[公开注册表](../../crates/lithograph-core/src/query/registry.rs)、[版本执行](../../crates/lithograph-core/src/query/version/mod.rs)、[设计](../design.md)。
+`readOnlyNoExternalIO` 的完整 allowlist/拒绝行为见 [Execution Options](execution-options.md)，不能把所有 READ mode 一概当作无外部 I/O。没有实际执行成功的返回不能当作已提交；尤其 rows interface 需要读到 summary 并完成外层 SQL statement。

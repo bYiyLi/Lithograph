@@ -42,6 +42,19 @@ pub struct AstNode {
 }
 
 impl AstNode {
+    /// Find an alias owned by this projection, excluding nested expressions/queries.
+    pub(crate) fn surface_projection_alias(&self) -> Option<&AstNode> {
+        if matches!(self.kind, AstKind::Expression(_) | AstKind::Subquery(_)) {
+            return None;
+        }
+        if self.kind == AstKind::ProjectionAlias {
+            return Some(self);
+        }
+        self.children
+            .iter()
+            .find_map(AstNode::surface_projection_alias)
+    }
+
     pub fn descendants(&self) -> impl Iterator<Item = &AstNode> {
         let mut stack = vec![self];
         std::iter::from_fn(move || {

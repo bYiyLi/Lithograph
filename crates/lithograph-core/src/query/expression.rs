@@ -393,16 +393,6 @@ fn compile_map_projection(node: &AstNode, base: String) -> QueryResult<Expr> {
 }
 
 fn compile_map_projection_item(item: &AstNode, base: &str) -> QueryResult<Option<(String, Expr)>> {
-    if let Some(property) = item
-        .descendants()
-        .find(|child| child.kind == AstKind::PropertyKey)
-        .and_then(|child| child.text.clone())
-    {
-        let property = unescape_identifier(&property);
-        let expression =
-            Expr::Property(Box::new(Expr::Variable(base.to_owned())), property.clone());
-        return Ok(Some((property, expression)));
-    }
     if let Some(key) = item
         .descendants()
         .find(|child| child.kind == AstKind::MapKey)
@@ -419,6 +409,16 @@ fn compile_map_projection_item(item: &AstNode, base: &str) -> QueryResult<Option
             })
             .ok_or_else(|| QueryError::semantic("map projection item is missing its expression"))?;
         return Ok(Some((parse_map_key(key)?, compile_expression(value)?)));
+    }
+    if let Some(property) = item
+        .descendants()
+        .find(|child| child.kind == AstKind::PropertyKey)
+        .and_then(|child| child.text.clone())
+    {
+        let property = unescape_identifier(&property);
+        let expression =
+            Expr::Property(Box::new(Expr::Variable(base.to_owned())), property.clone());
+        return Ok(Some((property, expression)));
     }
     Ok(item
         .children
@@ -1267,8 +1267,13 @@ fn parse_string(text: &str) -> QueryResult<String> {
         return Err(QueryError::semantic("invalid String literal"));
     }
     let mut output = String::new();
-    let mut chars = text[1..text.len() - 1].chars();
+    let mut chars = text[1..text.len() - 1].chars().peekable();
     while let Some(ch) = chars.next() {
+        if ch as u32 == u32::from(quote) && chars.peek() == Some(&ch) {
+            output.push(ch);
+            chars.next();
+            continue;
+        }
         if ch != '\\' {
             output.push(ch);
             continue;

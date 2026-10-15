@@ -58,6 +58,7 @@ fn infer_general_function(
                 CypherType::LocalTime,
                 CypherType::LocalDateTime,
                 CypherType::ZonedDateTime,
+                CypherType::Uuid,
             ],
             CypherType::String,
             "toString() input type cannot be converted to String",

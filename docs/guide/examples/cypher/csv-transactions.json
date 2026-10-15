@@ -1,0 +1,32 @@
+{
+  "examples": [
+    {"id":"csv-headers","path":"docs/cypher/load-csv.md","fixture":"csv","params":{"source":"fixture:people.csv"},"columns":["name","age","record"],"rows":[["Ada","36",2],["Bo","",3],["Chen",null,4]]},
+    {"id":"csv-no-headers","path":"docs/cypher/load-csv.md","fixture":"csv","params":{"source":"fixture:people.csv"},"columns":["id","age"],"rows":[["id","age"],["p1","36"],["p2",""],["p3",null]]},
+    {"id":"csv-context-outside","path":"docs/cypher/load-csv.md","columns":["source","record"],"rows":[[null,null]]},
+    {"id":"csv-import","path":"docs/cypher/load-csv.md","fixture":"csv","params":{"source":"fixture:people.csv"},"columns":["name","age"],"rows":[["Ada",36],["Bo",null],["Chen",null]]},
+    {"id":"csv-import-count","path":"docs/cypher/load-csv.md","setup":["csv-import"],"columns":["people","knownAges"],"rows":[[3,1]]},
+    {"id":"csv-ordinary-malformed","path":"docs/cypher/load-csv.md","fixture":"csv","params":{"source":"fixture:malformed.csv"},"error":"RESOURCE_ERROR"},
+    {"id":"csv-ordinary-rollback","path":"docs/cypher/load-csv.md","setup":["csv-ordinary-malformed"],"columns":["remaining"],"rows":[[0]]},
+    {"id":"csv-null-source","path":"docs/cypher/load-csv.md","error":"TYPE_ERROR"},
+    {"id":"csv-invalid-delimiter","path":"docs/cypher/load-csv.md","fixture":"csv","params":{"source":"fixture:people.csv"},"error":"INVALID_ARGUMENT"},
+    {"id":"csv-batch-return","path":"docs/cypher/transaction-subqueries.md","columns":["value","stored"],"rows":[[1,1],[2,2],[3,3]]},
+    {"id":"csv-batch-check","path":"docs/cypher/transaction-subqueries.md","setup":["csv-batch-return"],"columns":["items"],"rows":[[3]]},
+    {"id":"csv-batch-read","path":"docs/cypher/transaction-subqueries.md","columns":["doubled"],"rows":[[2],[4],[6]]},
+    {"id":"csv-batch-continue","path":"docs/cypher/transaction-subqueries.md","columns":["value","stored","started","committed"],"rows":[[1,1,true,true],[2,null,true,false],[3,3,true,true]]},
+    {"id":"csv-batch-continue-state","path":"docs/cypher/transaction-subqueries.md","setup":["csv-batch-continue"],"columns":["value"],"rows":[[1],[3]]},
+    {"id":"csv-batch-whole-rollback","path":"docs/cypher/transaction-subqueries.md","columns":["value","stored","committed"],"rows":[[1,null,false],[2,null,false],[3,3,true]]},
+    {"id":"csv-batch-break","path":"docs/cypher/transaction-subqueries.md","columns":["value","started","committed"],"rows":[[1,true,true],[2,true,false],[3,false,false]]},
+    {"id":"csv-batch-fail","path":"docs/cypher/transaction-subqueries.md","error":"TYPE_ERROR"},
+    {"id":"csv-batch-fail-state","path":"docs/cypher/transaction-subqueries.md","setup":["csv-batch-fail"],"columns":["value"],"rows":[[1]]},
+    {"id":"csv-batch-invalid-status","path":"docs/cypher/transaction-subqueries.md","error":"SEMANTIC_ERROR"},
+    {"id":"csv-batch-retry-type","path":"docs/cypher/transaction-subqueries.md","columns":["value","committed"],"rows":[[2,false]]},
+    {"id":"csv-batch-concurrent","path":"docs/cypher/transaction-subqueries.md","columns":["stored"],"rows":[[1],[2],[3]]},
+    {"id":"csv-batch-malformed","path":"docs/cypher/transaction-subqueries.md","fixture":"csv","params":{"source":"fixture:malformed.csv"},"error":"RESOURCE_ERROR"},
+    {"id":"csv-batch-malformed-state","path":"docs/cypher/transaction-subqueries.md","setup":["csv-batch-malformed"],"columns":["name"],"rows":[["Ada"],["Bo"]]},
+    {"id":"csv-batch-zero","path":"docs/cypher/transaction-subqueries.md","error":"INVALID_ARGUMENT"},
+    {"id":"csv-batch-null","path":"docs/cypher/transaction-subqueries.md","params":{"batchSize":null},"error":"TYPE_ERROR"},
+    {"id":"csv-batch-invalid-disjoint","path":"docs/cypher/transaction-subqueries.md","error":"SEMANTIC_ERROR"},
+    {"id":"csv-batch-union","path":"docs/cypher/transaction-subqueries.md","error":"SEMANTIC_ERROR"},
+    {"id":"csv-batch-nested","path":"docs/cypher/transaction-subqueries.md","error":"SEMANTIC_ERROR"}
+  ]
+}

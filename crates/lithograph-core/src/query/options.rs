@@ -33,6 +33,7 @@ impl GraphViewSelector {
 pub struct ExecutionOptions {
     pub snapshot: SnapshotSelector,
     pub graph_view: GraphViewSelector,
+    pub read_only_no_external_io: bool,
     pub merge_session: Option<MergeSessionSelector>,
     pub(crate) write_branch: Option<String>,
     pub(crate) author: Option<String>,
@@ -45,6 +46,7 @@ impl Default for ExecutionOptions {
         Self {
             snapshot: SnapshotSelector::Current,
             graph_view: GraphViewSelector::default(),
+            read_only_no_external_io: false,
             merge_session: None,
             write_branch: None,
             author: None,
@@ -69,6 +71,15 @@ impl ExecutionOptions {
         let message = optional_nullable_string(object, "message")?;
         let (snapshot, write_branch) = parse_snapshot_option(object)?;
         let graph_view = parse_graph_view_option(object)?;
+        let read_only_no_external_io = match object.get("readOnlyNoExternalIO") {
+            None => false,
+            Some(JsonValue::Bool(value)) => *value,
+            Some(_) => {
+                return Err(QueryError::invalid_argument(
+                    "options.readOnlyNoExternalIO must be a Boolean",
+                ));
+            }
+        };
         let merge_session = parse_merge_session(object)?;
         if merge_session.is_some()
             && (object.contains_key("branch")
@@ -83,6 +94,7 @@ impl ExecutionOptions {
         Ok(Self {
             snapshot,
             graph_view,
+            read_only_no_external_io,
             merge_session,
             write_branch,
             author,
@@ -199,7 +211,13 @@ fn validate_top_level_keys(object: &Map<String, JsonValue>) -> QueryResult<()> {
     for key in object.keys() {
         if !matches!(
             key.as_str(),
-            "branch" | "at" | "author" | "message" | "graphView" | "mergeSession"
+            "branch"
+                | "at"
+                | "author"
+                | "message"
+                | "graphView"
+                | "readOnlyNoExternalIO"
+                | "mergeSession"
         ) {
             return Err(QueryError::invalid_argument(format!(
                 "unknown execution option {key}"

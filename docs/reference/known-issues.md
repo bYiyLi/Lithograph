@@ -1,8 +1,28 @@
-# v0.1.0 已知问题与接入规避
+<a id="v010-已知问题与接入规避"></a>
 
-这些问题最初在**实际已发布 v0.1.0 macOS arm64 制品**上复现，不是新的设计要求。v0.2.1 release gate 重新确认其中部分历史行为。**v0.3.0 已删除 application Native query ABI，并修复旧 `branch.checkout` adapter 问题；本页 Native 复现步骤只适用于旧 release tag，不是当前接入指南。**
+# 已知问题、版本适用范围与规避
+
+适用版本：**v0.3.1** · [产品手册](../guide/README.md) · [接口参考](README.md)
+
+## 当前版本
+
+`SHOW PROCEDURES` 的参数/结果 metadata 仍不完整：v0.3.1 中，`lithograph.branch.list` 的 argumentDescription 为空，active 被描述为 STRING，但实际返回 Boolean。范围与规避见 [DOC-V010-03](#procedure-metadata)。接口名称/signature 仍可用于发现；不要仅凭错误 metadata 自动生成返回类型绑定。
+
+旧 checkout adapter 问题已在 v0.3.0 修复，application Native query ABI 已在 v0.3.0 删除；这两项不属于 v0.3.1 当前缺陷。本页保留历史复现，避免把旧版本限制误套到当前接口。
+
+<a id="index-create-statement"></a>
+
+## SHOW INDEXES 的 createStatement 完整性
+
+v0.3.1 的 FULLTEXT/VECTOR `createStatement` 只输出基础创建形式，不能独立作为多 Label/Type、additional property 和 OPTIONS 的完整导出。复制 definition 时应同时保存 `labelsOrTypes`、`properties`、`options` 等实际字段，按 [索引参考](../cypher/indexes.md) 重新构造；需要保留完整版本化定义时使用公开 Diff/Patch 对象。不能只复制这个字符串后假定索引配置完全相同。
+
+## 历史制品证据
+
+下列历史问题最初在**实际已发布 v0.1.0 macOS arm64 制品**复现。v0.2.1 release gate 重新确认过部分旧行为。历史 Native 操作只适用于对应旧 tag。
 
 验证制品：`lithograph-macos-arm64.tar.gz`，SHA-256 `71a50eb3d7b745dc5a616a12ad1c4bc06578b0ee17a4f7f7e1d4c0c4f7c0e278`。SQL 入口在 SQLite 3.45.0 / 3.51.0 上复现；Native 入口使用 SQLite 3.51.0。其他平台共享相关代码，但本次没有逐个平台复现，不将推断写成实测。
+
+<a id="historical-checkout"></a>
 
 ## DOC-V010-01：branch.checkout 被 adapter 的事务边界拒绝
 
@@ -22,6 +42,8 @@ SELECT lithograph('CALL lithograph.branch.checkout(''probe'')');
 
 **规避：每次 query 显式传 `options:{"branch":"probe"}`。**读历史用 `at`，SQL / Native explicit transaction 在 begin 中指定 branch。无需 checkout 就能创建、读写、合并目标 Branch。不要直接改内部 connection state 或库表来绕过错误。
 
+<a id="historical-native-null"></a>
+
 ## DOC-V010-02：Native NULL JSON 不自动使用空 object
 
 预期：可省略的 params/options 支持默认空 object。实际：`NULL,0` 被解码为空字符串，不能作为有效 JSON；普通 execute 的 params/options 分别返回 `INVALID_ARGUMENT`，tx_execute 的空 params 也复现了同类失败并自动 abort。
@@ -30,9 +52,11 @@ SELECT lithograph('CALL lithograph.branch.checkout(''probe'')');
 
 普通 Native execute 的最小复现仅保留在旧 tag；当前 SQL surface 省略第二/第三参数时使用 `{}` 默认值，不存在该 Native NULL decoder。
 
+<a id="procedure-metadata"></a>
+
 ## DOC-V010-03：Procedure introspection 参数/结果 metadata 不完整
 
-`SHOW PROCEDURES YIELD *` 的 `returnDescription[*].type` 在 v0.1.0 全部写成 `STRING`；`argumentDescription` 也为空。实际返回值并非全是字符串，例如 `branch.list.active` 是 BOOLEAN、`commit.get.parents` 是 LIST、`diff.patch` 是 MAP、全文 score 是 FLOAT。
+**仍影响 v0.3.1。** `SHOW PROCEDURES YIELD *` 的 `returnDescription[*].type` 在 v0.1.0 全部写成 `STRING`，当前实现也保留该问题；`argumentDescription` 也为空。实际返回值并非全是字符串，例如 `branch.list.active` 是 BOOLEAN、`commit.get.parents` 是 LIST、`diff.patch` 是 MAP、全文 score 是 FLOAT。
 
 下面两个查询用于对比真实元信息和真实值；假定数据库已初始化：
 
@@ -53,4 +77,4 @@ SELECT lithograph('CALL lithograph.branch.list()');
 
 本机系统 Python 缺少 `enable_load_extension`；macOS SDK 的 SQLite header 不公开此次编译所需加载入口。手册因此要求选择明确支持 extension loading 的 Python/SQLite 构建，C 编译同时指定同一安装前缀的 include/lib。这些环境前提见 [安装](../guide/installation.md) 和 [集成](../guide/integration.md)。
 
-上述发布问题均有明确规避路径；v0.2.1 未宣称修复。后续发布若修复，应针对新制品重新验证、更新该版本文档，不把 v0.1.0 的原始证据静默抹掉。
+当前 metadata 问题有明确规避路径；后续修复应针对对应版本制品重新验证后再更新状态。历史问题记录只说明其对应版本，不覆盖当前 SQL-only 接入合同。

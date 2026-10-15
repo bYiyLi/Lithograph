@@ -470,7 +470,7 @@ fn vector(values: &[Value]) -> QueryResult<Value> {
     };
     let coordinate_type = VectorCoordinateType::parse(coordinate_type)
         .ok_or_else(|| QueryError::semantic("vector coordinate type is unsupported"))?;
-    let numbers = vector_input(&values[0])?;
+    let numbers = vector_input(&values[0], coordinate_type)?;
     if numbers.len() != dimension {
         return Err(QueryError::new(
             QueryErrorKind::Type,
@@ -636,14 +636,31 @@ fn euclidean_squared_f32(left: &[f32], right: &[f32]) -> f32 {
         .sum()
 }
 
-fn vector_input(value: &Value) -> QueryResult<Vec<f64>> {
+fn vector_input(value: &Value, kind: VectorCoordinateType) -> QueryResult<Vec<Value>> {
     match value {
-        Value::List(values) => values.iter().map(number_value).collect(),
+        Value::List(values) => Ok(values.clone()),
         Value::String(value) => value
             .trim_matches(['[', ']'])
             .split(',')
             .map(|value| {
-                value.trim().parse::<f64>().map_err(|_| {
+                let value = value.trim();
+                if let Ok(value) = value.parse::<i64>() {
+                    return Ok(Value::Integer(value));
+                }
+                let digits = value
+                    .strip_prefix('+')
+                    .or_else(|| value.strip_prefix('-'))
+                    .unwrap_or(value);
+                if !matches!(kind, VectorCoordinateType::F32 | VectorCoordinateType::F64)
+                    && !digits.is_empty()
+                    && digits.bytes().all(|digit| digit.is_ascii_digit())
+                {
+                    return Err(QueryError::new(
+                        QueryErrorKind::Type,
+                        "vector integer String coordinate is outside the INTEGER64 range",
+                    ));
+                }
+                value.parse::<f64>().map(Value::Float).map_err(|_| {
                     QueryError::new(QueryErrorKind::Type, "vector String contains non-number")
                 })
             })
@@ -655,46 +672,75 @@ fn vector_input(value: &Value) -> QueryResult<Vec<f64>> {
     }
 }
 
-fn cast_vector(kind: VectorCoordinateType, values: &[f64]) -> QueryResult<VectorValues> {
-    let integer = |value: f64, minimum: f64, maximum: f64| {
-        if value.is_finite() && value.fract() == 0.0 && (minimum..=maximum).contains(&value) {
-            Ok(value as i64)
-        } else {
-            Err(QueryError::new(
+fn cast_vector(kind: VectorCoordinateType, values: &[Value]) -> QueryResult<VectorValues> {
+    let integer = |value: &Value, minimum: i64, maximum: i64| {
+        let invalid = || {
+            QueryError::new(
                 QueryErrorKind::Type,
                 "vector coordinate cannot be represented by its declared type",
-            ))
+            )
+        };
+        let value = match value {
+            Value::Integer(value) => *value,
+            Value::Float(value)
+                if value.is_finite()
+                    && value.fract() == 0.0
+                    && *value >= i64::MIN as f64
+                    && *value < -(i64::MIN as f64) =>
+            {
+                *value as i64
+            }
+            _ => return Err(invalid()),
+        };
+        if (minimum..=maximum).contains(&value) {
+            Ok(value)
+        } else {
+            Err(invalid())
         }
     };
     Ok(match kind {
         VectorCoordinateType::I8 => VectorValues::I8(
             values
                 .iter()
-                .map(|value| integer(*value, i8::MIN as f64, i8::MAX as f64).map(|v| v as i8))
+                .map(|value| {
+                    integer(value, i64::from(i8::MIN), i64::from(i8::MAX)).map(|v| v as i8)
+                })
                 .collect::<QueryResult<_>>()?,
         ),
         VectorCoordinateType::I16 => VectorValues::I16(
             values
                 .iter()
-                .map(|value| integer(*value, i16::MIN as f64, i16::MAX as f64).map(|v| v as i16))
+                .map(|value| {
+                    integer(value, i64::from(i16::MIN), i64::from(i16::MAX)).map(|v| v as i16)
+                })
                 .collect::<QueryResult<_>>()?,
         ),
         VectorCoordinateType::I32 => VectorValues::I32(
             values
                 .iter()
-                .map(|value| integer(*value, i32::MIN as f64, i32::MAX as f64).map(|v| v as i32))
+                .map(|value| {
+                    integer(value, i64::from(i32::MIN), i64::from(i32::MAX)).map(|v| v as i32)
+                })
                 .collect::<QueryResult<_>>()?,
         ),
         VectorCoordinateType::I64 => VectorValues::I64(
             values
                 .iter()
-                .map(|value| integer(*value, i64::MIN as f64, i64::MAX as f64))
+                .map(|value| integer(value, i64::MIN, i64::MAX))
                 .collect::<QueryResult<_>>()?,
         ),
-        VectorCoordinateType::F32 => {
-            VectorValues::F32(values.iter().map(|value| *value as f32).collect())
-        }
-        VectorCoordinateType::F64 => VectorValues::F64(values.to_vec()),
+        VectorCoordinateType::F32 => VectorValues::F32(
+            values
+                .iter()
+                .map(|value| number_value(value).map(|value| value as f32))
+                .collect::<QueryResult<_>>()?,
+        ),
+        VectorCoordinateType::F64 => VectorValues::F64(
+            values
+                .iter()
+                .map(number_value)
+                .collect::<QueryResult<_>>()?,
+        ),
     })
 }
 

@@ -1,6 +1,12 @@
 # 版本管理
 
-适用 v0.3.0。本页先用独立演示库解释日常操作，再介绍会改写 Branch 历史的操作。完整可执行流程见 [version_workflow.py](examples/version_workflow.py)；合并冲突独立见 [Merge Session](merge.md)。
+[产品手册](README.md) · [Cypher 语言手册](../cypher/index.md) · [接口参考](../reference/README.md)
+
+本文适用 **v0.3.1**（`CY25-2026.08`，storage format `3`）。
+
+本页先用独立演示库解释日常操作，再介绍会改写 Branch 历史的操作。完整可执行流程见 [version_workflow.py](examples/version_workflow.py)；合并冲突独立见 [Merge Session](merge.md)。
+
+<a id="descriptors"></a>
 
 ## Commit、Branch、Tag 与 Descriptor
 
@@ -13,6 +19,8 @@ Commit 保存 immutable 图、Schema 和 Index definition；Branch 是随写入�
 | `expectedHead` | 只接受已解析的 `commit/<64-hex-id>` |
 
 Branch / Tag 会移动，Commit Descriptor 不会。一次操作开始时解析并固定版本；要让多次读取使用同一 Snapshot，先获取 Commit，再让后续读取全部使用它。
+
+<a id="branch-workflow"></a>
 
 ## 创建分支并读写
 
@@ -32,7 +40,9 @@ SELECT lithograph('CALL lithograph.branch.list()');
 
 `main` 是 `light`，`feature` 是 `dark`。Query-level Branch 不改变 connection 默认的 `main`。同一数据库不同连接可以执行不同分支，但写入仍共享 SQLite 单文件 writer。
 
-**v0.1.0–v0.2.1 历史限制：**`lithograph.branch.checkout(name)` 会被旧 SQL/Native adapter 的事务边界错误拒绝。v0.3.0 SQL execution surface 已修复该问题，可以在 SQLite autocommit mode 直接 checkout；active caller-owned / Lithograph explicit transaction 中仍按事务边界合同拒绝。旧版本复现与规避见 [已知问题](../reference/known-issues.md)。
+**v0.1.0–v0.2.1 历史限制：**`lithograph.branch.checkout(name)` 会被旧 SQL/Native adapter 的事务边界错误拒绝。v0.3.1 SQL execution surface 已修复该问题，可以在 SQLite autocommit mode 直接 checkout；active caller-owned / Lithograph explicit transaction 中仍按事务边界合同拒绝。旧版本复现与规避见 [已知问题](../reference/known-issues.md)。
+
+<a id="history"></a>
 
 ## 查看历史和时间旅行
 
@@ -60,6 +70,8 @@ if cursor is not None:
 
 上面使用 [示例 helper](examples/version_workflow.py) 的 `one` / `query` 和已经打开的 `db`。不要解析 cursor，也不要换一个起点后复用它。完整分页循环在同一示例文件中。
 
+<a id="commit-data"></a>
+
 ## Commit Data 与显式标记
 
 ```sql
@@ -79,6 +91,8 @@ SELECT lithograph(
 Commit Data 可为任意 JSON，包括 `null`；`hasData` 区分“没有 Data”和“Data 显式为 null”。set / clear 不创建 Commit，不移动引用，也不进入 Diff、Merge、Rebase 或 Squash。需要不可变、可版本化的业务事实时，把它保存为图数据。
 
 `commit.create` 主动创建 empty-delta Commit，不是提交未保存数据。author/message 在 Commit 创建后不可修改；不要用它们替代需要后续修改的 Data。
+
+<a id="diff-patch"></a>
 
 ## Diff 与 Patch
 
@@ -100,6 +114,8 @@ applied = one(db, "CALL lithograph.patch.apply($patch)",
 
 只有同一 `databaseId` 的 Patch 可应用。每个 before condition 都必须满足，整体成功产生一个 Commit，否则不产生部分更改。`from/to` 是 provenance，不代表直接把 Branch ref 移到 `to`，也不表示要求当前 head 必须等于 `from`。保留 tagged values，不做有损 JSON 类型转换。
 
+<a id="history-rewrite"></a>
+
 ## Rebase、Squash、Reset、Revert 的选择
 
 这些操作会改变目标 Branch 观察到的历史。先为旧 head 建立保留 Tag，并对持久库做一致性备份；在独立 Branch 演练，不盲目重试。
@@ -113,7 +129,7 @@ applied = one(db, "CALL lithograph.patch.apply($patch)",
 
 调用形式都是正常 Cypher procedure，不是新的 query grammar：
 
-```cypher
+```text
 CALL lithograph.rebase($onto, {resolutions:$resolutions})
 CALL lithograph.squash($since)
 CALL lithograph.reset($target)
@@ -128,8 +144,10 @@ Revert 普通 Commit 不传第二个参数；Root 不能 revert。Revert Merge C
 
 Reset / Squash / Rebase 后旧 Commit 不被即时删除；只要还被 Branch、Tag 或 open Merge Session 保护，就不会被 GC。删除最后一个引用后再 GC 可能永久删除它们，不能依赖“我还保存着 Commit 字符串”阻止回收。
 
+<a id="ref-maintenance"></a>
+
 ## 引用维护与范围
 
 `tag.move` 显式更改 Tag；`tag.delete` / `branch.delete` 删除引用但不立刻删除 Commit。`main` 不可删除；不能删除 connection 当前 active Branch。名称按大小写区分，具体限制见 [Limits](../reference/limits.md)。
 
-没有远程 clone / fetch / push / pull API。完整数据库备份可以复制整个 repository，但不能把两个独立数据库的 identity space 用版本 API 隐式合并。Procedure 的参数、结果列和限制见 [Reference](../reference/procedures.md)。
+没有远程 clone / fetch / push / pull API。完整数据库备份可以复制整个 repository，但不能把两个独立数据库的 identity space 用版本 API 隐式合并。共享 Descriptor、Patch 与 History cursor 格式见 [Versioning Reference](../reference/versioning.md)；每个 Procedure 的参数和结果见 [Versioning Procedures](../reference/procedures/versioning.md)。

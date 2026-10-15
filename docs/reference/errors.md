@@ -1,6 +1,8 @@
 # Error Reference
 
-当前 v0.3.0 发布基线。SQL 异常前缀为 `LITHOGRAPH_<CATEGORY>:`，parse/semantic 等定位信息以可选 `[line=N,column=N]` suffix 保留；调用方同时检查 SQLite primary result code，不要只匹配英语 message。
+适用版本：**v0.3.1** · [产品手册](../guide/README.md) · [接口参考](README.md)
+
+SQL 异常前缀为 `LITHOGRAPH_<CATEGORY>:`，parse/semantic 等定位信息以可选 `[line=N,column=N]` suffix 保留；调用方同时检查 SQLite primary result code，不要只匹配英语 message。
 
 | 稳定 category | 常见原因 | 调用方处理 |
 | --- | --- | --- |
@@ -10,7 +12,7 @@
 | `SCHEMA_ERROR` | Graph Type、DDL、Index 配置不合法 | 检查当前 Schema 与 frozen profile |
 | `CONSTRAINT_ERROR` | 当前数据或候选状态违反约束 | 修改数据/迁移方案，不自动删除约束 |
 | `NOT_INITIALIZED` | 尚未初始化 graph | 由 provisioning 步骤显式 init |
-| `INVALID_ARGUMENT` | JSON、option、Descriptor、参数形状或调用状态不合法 | 修复调用 |
+| `INVALID_ARGUMENT` | JSON、option、Descriptor、参数形状、调用状态不合法，或 `readOnlyNoExternalIO` 拒绝操作 | 修复调用 |
 | `GRAPH_VIEW_VIOLATION` | 写入越出 selector，或触及不可见依赖 | 在允许的完整边界内重建操作 |
 | `VERSION_NOT_FOUND` | Commit/Descriptor 不存在或已被 GC | 核实 databaseId、保留引用和备份 |
 | `BRANCH_NOT_FOUND` | Branch name 不存在 | 查 branch.list，不静默创建同名空分支 |
@@ -29,11 +31,15 @@
 | `IO_ERROR` | 文件、网络、打开、只读写入等 I/O 失败 | 检查权限、路径、空间与来源，不暴露凭据 |
 | `INTERNAL_ERROR` | 内部失败、panic boundary 或清理失败 | 保留脱敏复现；清理失败时丢弃 connection |
 
+<a id="sqlite-result-codes"></a>
+
 ## SQLite code 仍然重要
 
 普通语法/参数/语义错误常见为 `SQLITE_ERROR` (1)；调用状态误用可为 `SQLITE_MISUSE` (21)。忙/锁分别可能是 `SQLITE_BUSY` (5) / `SQLITE_LOCKED` (6)。取消固定使用 `SQLITE_INTERRUPT` (9) + `INTERRUPTED`，不再归入 `RESOURCE_ERROR`。
 
 资源失败可能是 NOMEM (7)、TOOBIG (18)、FULL (13)；I/O 类还包括 READONLY 等 code。不要假定某个 category 永远只对应一个 code；使用实际返回值。
+
+<a id="atomicity-after-error"></a>
 
 ## 错误后的原子性
 
@@ -42,3 +48,20 @@
 独立 `IN TRANSACTIONS` 的已成功 batch 仍然持久化；错误不意味着整次导入没有副作用。已经向调用方发送的 ROW 也不等于整个操作成功，必须检查最终返回码/事务提交。
 
 排障时记录版本、SQLite runtime、操作名、参数**形状**、category/code、Commit/Session revision。避免记录完整 credentials、私有文档、向量正文或含 token 的 URL。依据：[错误映射](../../crates/lithograph-extension/src/execution.rs)、[SQL API](sql-api.md)、[Error Categories](../design/interfaces.md#error-categories)。
+
+<a id="identification-and-retry"></a>
+
+## 机器识别与重试
+
+category prefix 和可选尾部位置是稳定识别部分，message 用于人类诊断，不承诺可解析。`line` / `column` 是 1-based；不存在时省略，不能假定是 0。宿主 SQLite 自身也可返回没有 Lithograph prefix 的错误，例如连接打开失败、宿主 statement 语法错误或 NOMEM 的 canonical `out of memory`；优先检查 SQLite code。
+
+| 情况 | 下一步 |
+| --- | --- |
+| `INVALID_ARGUMENT` 且安全选项拒绝 | 缩小 query 到允许能力；不要自动去掉安全选项重试 |
+| `BRANCH_HEAD_MOVED` / `MERGE_SESSION_CHANGED` | 重新读取对象和 revision，重新审查；不直接覆盖旧预期 |
+| `BUSY` | 先关闭泄漏 cursor/transaction，再使用宿主有上限 busy timeout/退避 |
+| active explicit transaction execution 失败 | 认为整体已自动 abort；检查实际清理结果，再建立新 transaction |
+| batch 导入 error/取消/最终序列化失败 | 检查已 durable batch 与业务键，从已确认位置恢复，避免重复写 |
+| cleanup / quarantine / `INTERNAL_ERROR` | 丢弃无法证明安全的连接，保存脱敏复现 |
+
+错误之后的 transaction/cursor/pool 精确规则见 [Transactions Reference](transactions.md)。`lithograph_validate()` 只验证静态语义；通过 validate 不能预先排除运行时 type/constraint/I/O/resource 错误，也不验证 execution options policy。

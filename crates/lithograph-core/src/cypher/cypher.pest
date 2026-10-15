@@ -247,7 +247,7 @@ comparison_suffix = {
 label_is_predicate = {
     KW_IS ~ (KW_LABELED ~ label_disjunction | KW_NOT ~ KW_LABELED? ~ label_disjunction)
 }
-comparison_operator = { "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "=~" }
+comparison_operator = { "=~" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" }
 additive_expression = { multiplicative_expression ~ (additive_operator ~ multiplicative_expression)* }
 additive_operator = { "+" | "-" | "||" }
 multiplicative_expression = { power_expression ~ (multiplicative_operator ~ power_expression)* }

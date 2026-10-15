@@ -1,14 +1,22 @@
 # 部署、备份与维护
 
-适用 v0.3.0 发布基线，并保留旧版本升级边界。Lithograph 运行在应用的 SQLite connection 中，没有独立管理 Server。以下操作涉及已有数据时，先确认文件路径、扩展版本、目标 Branch 与保留策略；不要直接修改 `_lithograph_*` 表。
+[产品手册](README.md) · [Cypher 语言手册](../cypher/index.md) · [接口参考](../reference/README.md)
+
+本文适用 **v0.3.1**（`CY25-2026.08`，storage format `3`）。
+
+Lithograph 运行在应用的 SQLite connection 中，没有独立管理 Server。以下操作涉及已有数据时，先确认文件路径、扩展版本、目标 Branch 与保留策略；不要直接修改 `_lithograph_*` 表。
+
+<a id="deployment-checks"></a>
 
 ## 部署前检查
 
-固定 v0.3.0 制品及 SHA-256；在实际应用进程内检查 SQLite 3.45.0+、FTS5、extension loading、CPU 架构与动态库依赖。测试环境能加载不代表生产容器、沙箱或另一个语言 binding 能加载。新部署应先在一次性数据库中运行 [快速入门](getting-started.md)。
+固定 v0.3.1 制品及 SHA-256；在实际应用进程内检查 SQLite 3.45.0+、FTS5、extension loading、CPU 架构与动态库依赖。测试环境能加载不代表生产容器、沙箱或另一个语言 binding 能加载。新部署应先在一次性数据库中运行 [快速入门](getting-started.md)。
 
 新库由 provisioning 步骤调用 `lithograph_init()`。已有库在启动时读取 `lithograph_version()` 并检查 `databaseId` / `storageFormat.current`；不要每个请求都执行 init 或 integrity scan。数据库文件、目录和备份位置的访问权限由宿主配置。
 
 连接池中的每个连接都要加载扩展。用明确的 query `branch` / `at` 上下文，避免把应用的目标状态存成难以追踪的隐式连接状态。所有连接仍然受同一文件的 SQLite writer 限制。
+
+<a id="backup"></a>
 
 ## 一致性备份
 
@@ -16,13 +24,13 @@
 
 数据库正在写入时，不要只复制主 `.sqlite` 文件，更不要删除正在使用的 `-wal` / `-shm` 文件。使用 SQLite Online Backup API，或者关闭所有连接后按 SQLite 的一致性要求处理完整文件状态。
 
-Python 的 backup 示例使用已经打开的 source connection `db`，并拒绝覆盖已有目标：
+Python 的 backup 示例使用已经打开的 source connection `db`，并拒绝覆盖已有目标。先确认 source 没有 active Lithograph/caller-owned 写事务，也没有未完成的写 cursor；先提交或取消该工作，避免从持有 pending write 的同一 connection 开始 backup 而等待自己释放写入：
 
 ```python
 from pathlib import Path
 import sqlite3
 
-destination = Path("backup-2026-09-16.sqlite").resolve()
+destination = Path("graph-backup.sqlite").resolve()
 with destination.open("xb"):
     pass  # Reserve a new path; FileExistsError prevents accidental overwrite.
 backup = sqlite3.connect(str(destination))
@@ -36,23 +44,31 @@ finally:
 
 SQLite CLI 也提供 `.backup`；它是 CLI 命令而不是 Cypher。无论使用哪种入口，都应在源端仍可用时用独立 connection 读取备份，核对版本、databaseId、关键 Branch head 和业务查询，并执行 `lithograph_integrity_check()`。备份策略还需要应用自己的异地保留、加密、访问控制与恢复演练。
 
+<a id="restore"></a>
+
 ## 从备份恢复
 
 先把备份放在新的隔离路径，加载相容扩展验证。确认完整性、目标 Branch 和代表性业务数据之后，停止原库所有 reader/writer，再由应用的部署流程切换到恢复文件。不要覆盖仍被连接池打开的数据库，也不要把旧文件残留的 WAL sidecar 搬到另一份恢复副本旁边。
 
 恢复保留相同 databaseId；它是原 repository 的副本，不是新的独立 identity space。两个副本分别继续写入后，不存在远程 fetch/push 或跨文件 branch merge API；应用不得把这种复制误当成支持多主同步。
 
+<a id="storage-format"></a>
+
 ## 存储格式
 
-v0.3.0 的 fresh/current Lithograph storage format 是 **3**。Managed Semantic 的 persistent text→Vector cache 不属于 Lithograph storage，因此不会创建 format 4、`_lithograph_embedding_cache` 或相关 metadata/migration。历史 v0.2.0/v0.2.1 release 的 format 4 行为只适用于对应 release tag。
+v0.3.1 的 fresh/current Lithograph storage format 是 **3**。Managed Semantic 的 persistent text→Vector cache 不属于 Lithograph storage，因此不会创建 format 4、`_lithograph_embedding_cache` 或相关 metadata/migration。历史 v0.2.0/v0.2.1 release 的 format 4 行为只适用于对应 release tag。
 
 打开低于当前 writable format 的旧开发 fixture 时，以当前 `lithograph_init()` / storage compatibility contract 为准；高于当前支持范围的文件必须停止使用当前 binary，不能手工修改 format marker。升级/回退前始终先做一致性备份和应用回归。
+
+<a id="integrity"></a>
 
 ## 完整性检查与损坏处理
 
 `SELECT lithograph_integrity_check();` 返回 `ok,errors,checked`。这是显式的完整检查，不是每次读写都自动重算全部历史。SQL `PRAGMA integrity_check` 检查 SQLite 自身结构，不能替代 Lithograph 的版本化 graph invariants；反过来也不要用只读业务查询成功证明整个文件健康。
 
 检查失败时停止 mutation，在原文件的安全副本上分析，保留脱敏错误、版本和环境。不要执行 DELETE、DROP、额外 trigger 或改 format marker 来“修复”内部表。缺失可重建缓存与 canonical 历史损坏是不同问题；后者需要有效备份或明确的恢复方案。
+
+<a id="index-rebuild"></a>
 
 ## 显式重建标准索引
 
@@ -72,30 +88,17 @@ SELECT lithograph(
 
 重建在同一写事务中原子发布，失败不会暴露半成品。全量扫描/构建可能长时间占用 writer，安排维护窗口并测量真实空间和耗时。普通只读查询遇到标准索引缓存缺失时可以使用正确但更慢的 fallback；不要通过手工删除内部表来触发重建。
 
+<a id="provider-cache"></a>
+
 ## Managed Semantic / Provider cache
 
-Lithograph Core 没有 persistent Embedding Result Cache，也没有 cache stats/configure/clear procedure。OpenAI-compatible Provider 可在 Semantic Index 的 versioned `providerConfig` 中启用自己的独立 SQLite cache：
+需要跨 execution 的 embedding cache 时，先按 [Provider 使用指南](embedding-providers.md) 显式配置随附 Provider 的独立 SQLite cache，再做检索与重开验证。完整配置、缓存预算、失败语义和文件约束见 [OpenAI-compatible Provider Reference](../reference/openai-compatible-provider.md)。
 
-```cypher
-{
-  provider:'openai-compatible',
-  providerConfig:{
-    model:'text-embedding-3-small',
-    api_key_env:'OPENAI_API_KEY',
-    cache:{
-      enabled:true,
-      path:'./openai-embedding-cache.db',
-      max_bytes:1073741824
-    }
-  },
-  dimensions:1536,
-  similarity:'cosine'
-}
-```
-
-cache DB 与 Lithograph `main` 必须是不同文件。Provider 负责 marker/schema、atomic publish、FIFO budget、并发/锁等待和损坏处理；Lithograph integrity/GC 不扫描或修复它。直接删除/替换 Provider cache 只影响后续命中率，不改变 graph correctness。
+cache DB 必须独立于 Lithograph `main`。它包含 derived embedding vectors、hash 和缓存元数据，按宿主权限单独保护；关闭相关 Provider 连接后删除/替换该文件只会影响后续命中率。Lithograph repository backup、integrity 与 GC 不维护它。Core 没有 persistent Embedding Result Cache，也没有 cache stats/configure/clear Procedure。
 
 `db.index.semantic.rebuild(name,version)` 仍是显式维护入口，但只重建当前 connection 的 TEMP Semantic/HNSW materialization，返回 `name,commit,indexedEntities,embeddedTexts`；它不维护 Provider cache。
+
+<a id="history-gc"></a>
 
 ## 历史保留与 GC
 
@@ -105,6 +108,8 @@ Branch head、Tag 和未结束的 Merge Session 都保护相应可达历史。�
 
 GC 不删除仍被保留引用保护的历史；物理文件也不保证立刻缩小。SQLite VACUUM / checkpoint 的时机、锁与额外磁盘需求由宿主维护，不把它们与逻辑 GC 或创建 graph Commit 混淆。
 
+<a id="resources"></a>
+
 ## 性能与资源管理
 
 先用代表性的查询、数据规模和并发方式测量，再调整模型、索引和宿主参数。至少区分首次建索引、已有持久 generation 的 reopen、少量增量变化以及完全缺缓存的查询。它们不是同一个“冷启动”状态。
@@ -113,12 +118,14 @@ GC 不删除仍被保留引用保护的历史；物理文件也不保证立刻�
 
 EXPLAIN 无执行副作用；PROFILE 实际执行，写查询也会写入。出现索引未被选择时先检查类型约束与查询计划，而不是强制删建索引。迁移、GC 和 rebuild 与线上写请求共享资源，避免把人工审查或无界网络工作放进 Lithograph explicit transaction。
 
-WAL、synchronous、busy timeout、线程模式和 TEMP 位置由宿主 SQLite 决定，Lithograph 不替你静默修改。没有适合所有产品的默认吞吐/延迟承诺；最终优化验收见 [Phase 11](../development/phases/11-performance-optimization.md)，早期基线及其限制见 [Performance Evidence](../research/phase11-performance-evidence.md)。旧基线不是 v0.1.0 最终延迟数据，机器、规模和缓存状态必须一起阅读。
+WAL、synchronous、busy timeout、线程模式和 TEMP 位置由宿主 SQLite 决定，Lithograph 不替你静默修改。资源边界见 [Limits](../reference/limits.md)。应用自己的性能验收同时记录机器、图规模、Query、结果消费方式、并发与 cache 状态；不要把其它机器或早期版本的结果当成当前部署的延迟保证。
+
+<a id="security"></a>
 
 ## 安全边界
 
 扩展是本机代码，仅加载可信、校验过的文件，加载后关闭动态加载入口。SQL / Cypher 参数都使用绑定；query parser 不是应用认证、权限或沙箱。Graph View 不能阻止有原始 API 权限的调用方省略 selector。
 
-LOAD CSV 与 remote Embedding Provider 都可能访问宿主文件/网络。不要给不可信请求无限制提交 SQL、Cypher、文件 URI、Provider endpoint/config 或网络 URL 的能力。应用负责请求取消、并发上限、敏感日志脱敏，以及数据与备份的加密策略。显式写入 Semantic `providerConfig.api_key` / secret header 会进入 versioned Schema/history/backup；需要避免持久化 credential 时使用 Provider 支持的 indirection（例如 `api_key_env`）。
+需要接受不可信 Cypher 时，由宿主强制设置 `readOnlyNoExternalIO:true`，操作流程见 [安全执行](safe-execution.md)。LOAD CSV 与 remote Embedding Provider 都可能访问宿主文件/网络。不要给不可信请求无限制提交 SQL、Cypher、文件 URI、Provider endpoint/config 或网络 URL 的能力。应用负责请求取消、并发上限、敏感日志脱敏，以及数据与备份的加密策略。显式写入 Semantic `providerConfig.api_key` / secret header 会进入 versioned Schema/history/backup；需要避免持久化 credential 时使用 Provider 支持的 indirection（例如 `api_key_env`）。
 
-备份机制依据 [SQLite Online Backup API](https://www.sqlite.org/backup.html) 与 [Python sqlite3](https://docs.python.org/3/library/sqlite3.html)。产品行为依据 [SQL API](../reference/sql-api.md)、[维护 Procedure](../reference/procedures.md) 与 [技术设计](../design.md)。
+备份机制依据 [SQLite Online Backup API](https://www.sqlite.org/backup.html) 与 [Python sqlite3](https://docs.python.org/3/library/sqlite3.html)。产品行为依据 [SQL API](../reference/sql-api.md)、[维护 Procedure](../reference/procedures/maintenance.md) 与 [事务生命周期](../reference/transactions.md)。

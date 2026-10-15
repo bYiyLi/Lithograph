@@ -30,6 +30,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
       - name: Install SQLite
         run: sudo apt-get update && sudo apt-get install -y sqlite3 libsqlite3-dev
       - name: Install pinned Rust toolchain
@@ -46,6 +49,9 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
       - name: Install SQLite
         run: brew install sqlite
       - name: Install pinned Rust toolchain

@@ -1,0 +1,1054 @@
+{
+  "examples": [
+    {
+      "id": "path-pattern-setup",
+      "path": "docs/cypher/patterns.md",
+      "columns": [
+        "people"
+      ],
+      "rows": [
+        [
+          2
+        ]
+      ]
+    },
+    {
+      "id": "path-pattern-label-expression",
+      "path": "docs/cypher/patterns.md",
+      "setup": [
+        "path-pattern-setup"
+      ],
+      "columns": [
+        "name"
+      ],
+      "rows": [
+        [
+          "Bo"
+        ],
+        [
+          "Core"
+        ]
+      ]
+    },
+    {
+      "id": "path-pattern-dynamic-label",
+      "path": "docs/cypher/patterns.md",
+      "setup": [
+        "path-pattern-setup"
+      ],
+      "params": {
+        "label": "Person"
+      },
+      "columns": [
+        "name"
+      ],
+      "rows": [
+        [
+          "An"
+        ],
+        [
+          "Bo"
+        ]
+      ]
+    },
+    {
+      "id": "path-pattern-inline-predicate",
+      "path": "docs/cypher/patterns.md",
+      "setup": [
+        "path-pattern-setup"
+      ],
+      "columns": [
+        "source",
+        "target",
+        "since"
+      ],
+      "rows": [
+        [
+          "An",
+          "Bo",
+          2024
+        ]
+      ]
+    },
+    {
+      "id": "path-pattern-connected",
+      "path": "docs/cypher/patterns.md",
+      "setup": [
+        "path-pattern-setup"
+      ],
+      "columns": [
+        "person",
+        "friend",
+        "team"
+      ],
+      "rows": [
+        [
+          "An",
+          "Bo",
+          "Core"
+        ]
+      ]
+    },
+    {
+      "id": "path-pattern-named-path",
+      "path": "docs/cypher/patterns.md",
+      "setup": [
+        "path-pattern-setup"
+      ],
+      "columns": [
+        "hops",
+        "names",
+        "types"
+      ],
+      "rows": [
+        [
+          1,
+          [
+            "An",
+            "Bo"
+          ],
+          [
+            "KNOWS"
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "path-pattern-comprehension",
+      "path": "docs/cypher/patterns.md",
+      "setup": [
+        "path-pattern-setup"
+      ],
+      "columns": [
+        "hasFriend",
+        "friends"
+      ],
+      "rows": [
+        [
+          true,
+          [
+            "Bo"
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "path-quantified-setup",
+      "path": "docs/cypher/quantified-paths.md",
+      "columns": [
+        "roads"
+      ],
+      "rows": [
+        [
+          5
+        ]
+      ]
+    },
+    {
+      "id": "path-legacy-variable-length",
+      "path": "docs/cypher/quantified-paths.md",
+      "setup": [
+        "path-quantified-setup"
+      ],
+      "columns": [
+        "hops",
+        "relationships"
+      ],
+      "rows": [
+        [
+          1,
+          1
+        ],
+        [
+          2,
+          2
+        ],
+        [
+          2,
+          2
+        ]
+      ]
+    },
+    {
+      "id": "path-quantified-relationship",
+      "path": "docs/cypher/quantified-paths.md",
+      "setup": [
+        "path-quantified-setup"
+      ],
+      "columns": [
+        "hops",
+        "cost"
+      ],
+      "rows": [
+        [
+          1,
+          9
+        ],
+        [
+          2,
+          2
+        ],
+        [
+          2,
+          4
+        ]
+      ]
+    },
+    {
+      "id": "path-quantified-zero",
+      "path": "docs/cypher/quantified-paths.md",
+      "setup": [
+        "path-quantified-setup"
+      ],
+      "columns": [
+        "name",
+        "hops",
+        "edges"
+      ],
+      "rows": [
+        [
+          "A",
+          0,
+          0
+        ],
+        [
+          "B",
+          1,
+          1
+        ],
+        [
+          "C",
+          1,
+          1
+        ],
+        [
+          "D",
+          1,
+          1
+        ]
+      ]
+    },
+    {
+      "id": "path-quantified-group",
+      "path": "docs/cypher/quantified-paths.md",
+      "setup": [
+        "path-quantified-setup"
+      ],
+      "columns": [
+        "starts",
+        "ends",
+        "costs"
+      ],
+      "rows": [
+        [
+          [
+            "A",
+            "B"
+          ],
+          [
+            "B",
+            "D"
+          ],
+          [
+            1,
+            1
+          ]
+        ],
+        [
+          [
+            "A",
+            "C"
+          ],
+          [
+            "C",
+            "D"
+          ],
+          [
+            2,
+            2
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "path-quantified-filter",
+      "path": "docs/cypher/quantified-paths.md",
+      "setup": [
+        "path-quantified-setup"
+      ],
+      "columns": [
+        "hops",
+        "costs"
+      ],
+      "rows": [
+        [
+          2,
+          [
+            1,
+            1
+          ]
+        ],
+        [
+          2,
+          [
+            2,
+            2
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "path-quantified-invalid-repeatable",
+      "path": "docs/cypher/quantified-paths.md",
+      "error": "SEMANTIC_ERROR"
+    },
+    {
+      "id": "path-mode-setup",
+      "path": "docs/cypher/path-selection.md",
+      "columns": [
+        "links"
+      ],
+      "rows": [
+        [
+          2
+        ]
+      ]
+    },
+    {
+      "id": "path-mode-default",
+      "path": "docs/cypher/path-selection.md",
+      "setup": [
+        "path-mode-setup"
+      ],
+      "columns": [
+        "target",
+        "hops"
+      ],
+      "rows": [
+        [
+          "B",
+          1
+        ],
+        [
+          "A",
+          2
+        ]
+      ]
+    },
+    {
+      "id": "path-mode-acyclic",
+      "path": "docs/cypher/path-selection.md",
+      "setup": [
+        "path-mode-setup"
+      ],
+      "columns": [
+        "target",
+        "hops"
+      ],
+      "rows": [
+        [
+          "B",
+          1
+        ]
+      ]
+    },
+    {
+      "id": "path-mode-repeatable",
+      "path": "docs/cypher/path-selection.md",
+      "setup": [
+        "path-mode-setup"
+      ],
+      "columns": [
+        "target",
+        "hops"
+      ],
+      "rows": [
+        [
+          "B",
+          3
+        ]
+      ]
+    },
+    {
+      "id": "path-mode-invalid-combination",
+      "path": "docs/cypher/path-selection.md",
+      "error": "SEMANTIC_ERROR"
+    },
+    {
+      "id": "path-selector-shortest",
+      "path": "docs/cypher/path-selection.md",
+      "setup": [
+        "path-quantified-setup"
+      ],
+      "columns": [
+        "hops"
+      ],
+      "rows": [
+        [
+          1
+        ]
+      ]
+    },
+    {
+      "id": "path-selector-k",
+      "path": "docs/cypher/path-selection.md",
+      "setup": [
+        "path-quantified-setup"
+      ],
+      "columns": [
+        "hops"
+      ],
+      "rows": [
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    {
+      "id": "path-selector-groups",
+      "path": "docs/cypher/path-selection.md",
+      "setup": [
+        "path-quantified-setup"
+      ],
+      "columns": [
+        "hops"
+      ],
+      "rows": [
+        [
+          1
+        ],
+        [
+          2
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    {
+      "id": "path-selector-parameter",
+      "path": "docs/cypher/path-selection.md",
+      "setup": [
+        "path-quantified-setup"
+      ],
+      "params": {
+        "count": 2
+      },
+      "columns": [
+        "selected"
+      ],
+      "rows": [
+        [
+          2
+        ]
+      ]
+    },
+    {
+      "id": "path-selector-post-filter",
+      "path": "docs/cypher/path-selection.md",
+      "setup": [
+        "path-quantified-setup"
+      ],
+      "columns": [
+        "hops"
+      ],
+      "rows": []
+    },
+    {
+      "id": "path-selector-pre-filter",
+      "path": "docs/cypher/path-selection.md",
+      "setup": [
+        "path-quantified-setup"
+      ],
+      "columns": [
+        "hops"
+      ],
+      "rows": [
+        [
+          2
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    {
+      "id": "path-union-distinct",
+      "path": "docs/cypher/composition.md",
+      "columns": [
+        "value"
+      ],
+      "rows": [
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    {
+      "id": "path-union-all",
+      "path": "docs/cypher/composition.md",
+      "columns": [
+        "value",
+        "copies"
+      ],
+      "rows": [
+        [
+          1,
+          2
+        ]
+      ]
+    },
+    {
+      "id": "path-union-column-error",
+      "path": "docs/cypher/composition.md",
+      "error": "SEMANTIC_ERROR"
+    },
+    {
+      "id": "path-union-flavor-error",
+      "path": "docs/cypher/composition.md",
+      "error": "SEMANTIC_ERROR"
+    },
+    {
+      "id": "path-when-first",
+      "path": "docs/cypher/composition.md",
+      "columns": [
+        "route"
+      ],
+      "rows": [
+        [
+          "chosen"
+        ]
+      ]
+    },
+    {
+      "id": "path-when-no-branch",
+      "path": "docs/cypher/composition.md",
+      "columns": [
+        "value"
+      ],
+      "rows": []
+    },
+    {
+      "id": "path-when-correlated",
+      "path": "docs/cypher/composition.md",
+      "columns": [
+        "n",
+        "kind"
+      ],
+      "rows": [
+        [
+          0,
+          "zero"
+        ],
+        [
+          1,
+          "nonzero"
+        ]
+      ]
+    },
+    {
+      "id": "path-next-rows",
+      "path": "docs/cypher/composition.md",
+      "columns": [
+        "result"
+      ],
+      "rows": [
+        [
+          11
+        ],
+        [
+          21
+        ]
+      ]
+    },
+    {
+      "id": "path-next-union",
+      "path": "docs/cypher/composition.md",
+      "columns": [
+        "result"
+      ],
+      "rows": [
+        [
+          2
+        ],
+        [
+          3
+        ]
+      ]
+    },
+    {
+      "id": "path-next-empty-return",
+      "path": "docs/cypher/composition.md",
+      "columns": [
+        "value"
+      ],
+      "rows": []
+    },
+    {
+      "id": "path-next-finish",
+      "path": "docs/cypher/composition.md",
+      "columns": [
+        "value"
+      ],
+      "rows": [
+        [
+          1
+        ]
+      ]
+    },
+    {
+      "id": "path-next-scope-error",
+      "path": "docs/cypher/composition.md",
+      "error": "SEMANTIC_ERROR"
+    },
+    {
+      "id": "path-subquery-correlated",
+      "path": "docs/cypher/subqueries.md",
+      "columns": [
+        "x",
+        "product"
+      ],
+      "rows": [
+        [
+          1,
+          10
+        ],
+        [
+          1,
+          20
+        ],
+        [
+          2,
+          20
+        ],
+        [
+          2,
+          40
+        ]
+      ]
+    },
+    {
+      "id": "path-subquery-global-import",
+      "path": "docs/cypher/subqueries.md",
+      "columns": [
+        "x",
+        "product"
+      ],
+      "rows": [
+        [
+          11,
+          22
+        ],
+        [
+          11,
+          33
+        ]
+      ]
+    },
+    {
+      "id": "path-subquery-empty-scope-error",
+      "path": "docs/cypher/subqueries.md",
+      "error": "SEMANTIC_ERROR"
+    },
+    {
+      "id": "path-subquery-legacy-import",
+      "path": "docs/cypher/subqueries.md",
+      "columns": [
+        "x",
+        "value"
+      ],
+      "rows": [
+        [
+          2,
+          20
+        ]
+      ]
+    },
+    {
+      "id": "path-subquery-unit-write",
+      "path": "docs/cypher/subqueries.md",
+      "columns": [
+        "value"
+      ],
+      "rows": [
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    {
+      "id": "path-subquery-count-empty",
+      "path": "docs/cypher/subqueries.md",
+      "columns": [
+        "outerValue",
+        "total"
+      ],
+      "rows": [
+        [
+          7,
+          0
+        ]
+      ]
+    },
+    {
+      "id": "path-subquery-union",
+      "path": "docs/cypher/subqueries.md",
+      "columns": [
+        "value",
+        "doubled"
+      ],
+      "rows": [
+        [
+          3,
+          6
+        ],
+        [
+          4,
+          8
+        ]
+      ]
+    },
+    {
+      "id": "path-subquery-expression",
+      "path": "docs/cypher/subqueries.md",
+      "columns": [
+        "x",
+        "selected",
+        "total",
+        "values"
+      ],
+      "rows": [
+        [
+          1,
+          false,
+          1,
+          [
+            10
+          ]
+        ],
+        [
+          2,
+          true,
+          2,
+          [
+            10,
+            20
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "path-subquery-null-collect",
+      "path": "docs/cypher/subqueries.md",
+      "columns": [
+        "values",
+        "total",
+        "anyNode"
+      ],
+      "rows": [
+        [
+          [
+            null,
+            1
+          ],
+          2,
+          false
+        ]
+      ]
+    },
+    {
+      "id": "path-procedure-setup",
+      "path": "docs/cypher/procedure-calls.md",
+      "columns": [
+        "nodes"
+      ],
+      "rows": [
+        [
+          3
+        ]
+      ]
+    },
+    {
+      "id": "path-procedure-yield",
+      "path": "docs/cypher/procedure-calls.md",
+      "setup": [
+        "path-procedure-setup"
+      ],
+      "columns": [
+        "name"
+      ],
+      "rows": [
+        [
+          "Person"
+        ],
+        [
+          "Project"
+        ]
+      ]
+    },
+    {
+      "id": "path-procedure-standalone",
+      "path": "docs/cypher/procedure-calls.md",
+      "setup": [
+        "path-procedure-setup"
+      ],
+      "columns": [
+        "label"
+      ],
+      "row_count": 3
+    },
+    {
+      "id": "path-procedure-correlated",
+      "path": "docs/cypher/procedure-calls.md",
+      "setup": [
+        "path-procedure-setup"
+      ],
+      "columns": [
+        "prefix",
+        "label"
+      ],
+      "rows": [
+        [
+          "P",
+          "Person"
+        ],
+        [
+          "P",
+          "Project"
+        ],
+        [
+          "T",
+          "Team"
+        ]
+      ]
+    },
+    {
+      "id": "path-procedure-show",
+      "path": "docs/cypher/procedure-calls.md",
+      "columns": [
+        "name",
+        "mode"
+      ],
+      "rows": [
+        [
+          "db.labels",
+          "READ"
+        ]
+      ]
+    },
+    {
+      "id": "path-procedure-unknown-yield",
+      "path": "docs/cypher/procedure-calls.md",
+      "error": "SEMANTIC_ERROR"
+    },
+    {
+      "id": "path-procedure-embedded-star-error",
+      "path": "docs/cypher/procedure-calls.md",
+      "error": "SEMANTIC_ERROR"
+    },
+    {
+      "id": "path-writing-create",
+      "path": "docs/cypher/writing.md",
+      "columns": [
+        "source",
+        "target",
+        "type"
+      ],
+      "rows": [
+        [
+          "An",
+          "Bo",
+          "KNOWS"
+        ]
+      ]
+    },
+    {
+      "id": "path-writing-insert",
+      "path": "docs/cypher/writing.md",
+      "columns": [
+        "name",
+        "person",
+        "reader"
+      ],
+      "rows": [
+        [
+          "Chen",
+          true,
+          true
+        ]
+      ]
+    },
+    {
+      "id": "path-writing-dynamic-create",
+      "path": "docs/cypher/writing.md",
+      "columns": [
+        "author",
+        "hasLabel",
+        "type",
+        "title"
+      ],
+      "rows": [
+        [
+          "Dai",
+          true,
+          "WROTE",
+          "Graph"
+        ]
+      ]
+    },
+    {
+      "id": "path-writing-merge",
+      "path": "docs/cypher/writing.md",
+      "columns": [
+        "id",
+        "hits",
+        "processed"
+      ],
+      "rows": [
+        [
+          1,
+          2,
+          3
+        ],
+        [
+          2,
+          1,
+          3
+        ]
+      ]
+    },
+    {
+      "id": "path-writing-merge-null-error",
+      "path": "docs/cypher/writing.md",
+      "error": "SEMANTIC_ERROR"
+    },
+    {
+      "id": "path-writing-set-map",
+      "path": "docs/cypher/writing.md",
+      "columns": [
+        "properties"
+      ],
+      "rows": [
+        [
+          {
+            "a": 1,
+            "c": 3
+          }
+        ]
+      ]
+    },
+    {
+      "id": "path-writing-replace-map",
+      "path": "docs/cypher/writing.md",
+      "columns": [
+        "properties",
+        "removed"
+      ],
+      "rows": [
+        [
+          {
+            "c": 4
+          },
+          null
+        ]
+      ]
+    },
+    {
+      "id": "path-writing-dynamic-key",
+      "path": "docs/cypher/writing.md",
+      "columns": [
+        "removed",
+        "kept"
+      ],
+      "rows": [
+        [
+          null,
+          1
+        ]
+      ]
+    },
+    {
+      "id": "path-writing-labels",
+      "path": "docs/cypher/writing.md",
+      "columns": [
+        "person",
+        "draft",
+        "published",
+        "name"
+      ],
+      "rows": [
+        [
+          true,
+          false,
+          true,
+          null
+        ]
+      ]
+    },
+    {
+      "id": "path-writing-delete-setup",
+      "path": "docs/cypher/writing.md",
+      "columns": [
+        "relation"
+      ],
+      "rows": [
+        [
+          1
+        ]
+      ]
+    },
+    {
+      "id": "path-writing-delete-error",
+      "path": "docs/cypher/writing.md",
+      "setup": [
+        "path-writing-delete-setup"
+      ],
+      "error": "CONSTRAINT_ERROR"
+    },
+    {
+      "id": "path-writing-detach-delete",
+      "path": "docs/cypher/writing.md",
+      "setup": [
+        "path-writing-delete-setup"
+      ],
+      "columns": [
+        "deletedParents",
+        "remainingChildren"
+      ],
+      "rows": [
+        [
+          1,
+          1
+        ]
+      ]
+    },
+    {
+      "id": "path-writing-foreach",
+      "path": "docs/cypher/writing.md",
+      "columns": [
+        "requested",
+        "created"
+      ],
+      "rows": [
+        [
+          3,
+          3
+        ]
+      ]
+    },
+    {
+      "id": "path-writing-dynamic-key-error",
+      "path": "docs/cypher/writing.md",
+      "error": "TYPE_ERROR"
+    }
+  ]
+}

@@ -11,6 +11,7 @@ import tempfile
 
 from python_quickstart import open_graph, query, require
 from version_workflow import expect_error, head
+from doc_runtime import DocGraph, python_sqlite_supported
 
 
 GUIDE = Path(__file__).resolve().parent.parent
@@ -18,13 +19,9 @@ SQL_PAGES = (
     "installation.md", "getting-started.md", "graph-and-cypher.md",
     "schema-and-indexes.md", "search.md", "versioning.md",
     "transactions.md", "graph-views.md", "operations.md",
+    "import.md", "safe-execution.md",
 )
-
-def python_sqlite_supported():
-    return (
-        sqlite3.sqlite_version_info >= (3, 45, 0)
-        and hasattr(sqlite3.Connection, "enable_load_extension")
-    )
+SQL_REFERENCE_PAGES = ("sql-api.md", "values.md")
 
 
 def sql_blocks(path):
@@ -40,10 +37,6 @@ def statements(block):
             pending = ""
     require(not pending.strip(), "Incomplete SQL block: " + pending)
 
-def requires_external_provider(block):
-    return "db.index.semantic." in block
-
-
 def verify_guides(extension, sqlite_cli):
     python_enabled = python_sqlite_supported()
     require(
@@ -51,14 +44,16 @@ def verify_guides(extension, sqlite_cli):
         "Python SQLite is older than 3.45.0; pass --sqlite3 with a supported CLI",
     )
     count = 0
-    for name in SQL_PAGES:
-        path = GUIDE / name
+    pages = [(GUIDE / name, "guide/" + name) for name in SQL_PAGES]
+    pages += [(GUIDE.parent / "reference" / name, "reference/" + name)
+              for name in SQL_REFERENCE_PAGES]
+    for path, name in pages:
         blocks = sql_blocks(path)
         require(bool(blocks), "Missing SQL examples: " + name)
-        executable_blocks = [
-            block for block in blocks if not requires_external_provider(block)
-        ]
-        skipped_blocks = len(blocks) - len(executable_blocks)
+        require(not any("db.index.semantic." in block for block in blocks),
+                name + ": real-service SQL must be an explicitly labelled text template; "
+                "register synthetic Provider examples in the Cypher manifest")
+        executable_blocks = blocks
         page_statements = [
             statement for block in executable_blocks for statement in statements(block)
         ]
@@ -68,13 +63,13 @@ def verify_guides(extension, sqlite_cli):
             try:
                 for statement in page_statements:
                     db.execute(statement).fetchall()
-                if name == "getting-started.md":
+                if name == "guide/getting-started.md":
                     require(query(db, "MATCH (p:Person) RETURN p.name")["rows"] == [["Alicia"]],
                             "Tutorial current state")
                     require(query(db, "MATCH (p:Person) RETURN p.name",
                         options={"at": "tag/before-rename"})["rows"] == [["Alice"]],
                         "Tutorial historical state")
-                if name == "search.md":
+                if name == "guide/search.md":
                     result = query(db, "MATCH (d:Doc) SEARCH d IN (VECTOR INDEX doc_embedding "
                         "FOR vector([1.0,0.0],2,FLOAT64) LIMIT 1) RETURN d.id")
                     require(result["rows"] == [["graph"]], "Vector nearest result")
@@ -94,9 +89,6 @@ def verify_guides(extension, sqlite_cli):
             name,
             len(executable_blocks),
             "blocks",
-            "(skipped external-provider blocks:",
-            skipped_blocks,
-            ")",
         )
     print("SQL statements verified:", count)
 
@@ -137,8 +129,10 @@ def verify_boundaries(extension):
         described = {field["name"]: field["type"] for field in catalog["rows"][0][1]}
         actual = query(db, "CALL lithograph.branch.list()")
         active = actual["rows"][0][actual["columns"].index("active")]
-        require(described["active"] == "STRING" and isinstance(active, bool),
-                "Expected the documented v0.1.0 introspection type discrepancy")
+        require(isinstance(active, bool), "Branch active field is not Boolean")
+        if described["active"] != "BOOLEAN":
+            print("NOTICE: returnDescription active type is", described["active"],
+                  "while the returned value is Boolean; use the Procedure Reference")
         db.execute("BEGIN")
         query(db, "CREATE (:Rollback) FINISH")
         query(db, "CREATE (:Rollback) FINISH")
@@ -154,26 +148,25 @@ def verify_boundaries(extension):
         require(json.loads(db.execute("SELECT lithograph_integrity_check()").fetchone()[0])["ok"],
                 "Integrity failure after boundary tests")
         print("PASS: rejected writes/options/structural params, typed JSON, rollback, "
-              "LOAD CSV, checkout/introspection limitations, integrity")
+              "LOAD CSV, checkout/introspection, integrity")
     finally:
         db.close()
 
 
-def export_inventory(extension, directory):
-    require(
-        python_sqlite_supported(),
-        "Inventory export requires Python SQLite 3.45.0+ with extension loading",
-    )
+def export_inventory(extension, directory, sqlite_cli=None):
     directory.mkdir(parents=True, exist_ok=True)
-    db = open_graph(extension)
-    try:
-        for name in ("FUNCTIONS", "PROCEDURES"):
-            result = query(db, "SHOW " + name + " YIELD *")
-            (directory / (name.lower() + ".json")).write_text(
-                json.dumps(result, ensure_ascii=False, indent=2) + "\n")
-            print(name, len(result["rows"]), "rows; columns:", result["columns"])
-    finally:
-        db.close()
+    with tempfile.TemporaryDirectory(prefix="lithograph-export-docs-") as fixture:
+        with DocGraph(extension, fixture, sqlite_cli) as graph:
+            version = graph.check_version()
+            # databaseId is fixture-specific and is not part of the exported version baseline.
+            version.pop("databaseId", None)
+            (directory / "version.json").write_text(
+                json.dumps(version, ensure_ascii=False, indent=2) + "\n")
+            for name in ("FUNCTIONS", "PROCEDURES"):
+                result = graph.query("SHOW " + name + " YIELD *")
+                (directory / (name.lower() + ".json")).write_text(
+                    json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+                print(name, len(result["rows"]), "rows; columns:", result["columns"])
 
 
 def main():
@@ -183,8 +176,11 @@ def main():
     parser.add_argument("--export-inventory", type=Path)
     parser.add_argument("--inventory-only", action="store_true")
     args = parser.parse_args()
+    with tempfile.TemporaryDirectory(prefix="lithograph-doc-version-") as fixture:
+        with DocGraph(args.extension, fixture, args.sqlite3) as graph:
+            graph.check_version()
     if args.export_inventory:
-        export_inventory(args.extension, args.export_inventory)
+        export_inventory(args.extension, args.export_inventory, args.sqlite3)
     if not args.inventory_only:
         verify_guides(args.extension, args.sqlite3)
         if python_sqlite_supported():

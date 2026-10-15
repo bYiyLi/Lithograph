@@ -819,8 +819,7 @@ fn append_unique(columns: &mut Vec<String>, name: String) {
 
 fn projection_column(item: &AstNode, source: &str) -> QueryResult<String> {
     if let Some(alias) = item
-        .descendants()
-        .find(|node| node.kind == AstKind::ProjectionAlias)
+        .surface_projection_alias()
         .and_then(|node| node.text.clone())
     {
         return Ok(alias);

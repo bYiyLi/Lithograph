@@ -161,18 +161,16 @@ impl Analyzer<'_> {
     ) -> Result<(), FrontendError> {
         for postfix in node.descendants().filter(|node| {
             matches!(node.kind, AstKind::Expression(ExpressionKind::Postfix))
-                && node
-                    .descendants()
-                    .any(|child| child.kind == AstKind::PropertyKey)
+                && node.children.iter().skip(1).any(|suffix| {
+                    suffix
+                        .descendants()
+                        .any(|child| child.kind == AstKind::PropertyKey)
+                })
         }) {
-            let Some(variable) = postfix
-                .descendants()
-                .find(|child| child.kind == AstKind::Variable)
-                .and_then(|child| child.text.as_deref())
-            else {
+            let Some(variable) = postfix.children.first().and_then(simple_value_variable) else {
                 continue;
             };
-            if scope.get(&unescape_identifier(variable)) == Some(&BindingKind::Path) {
+            if scope.get(&variable) == Some(&BindingKind::Path) {
                 return Err(
                     self.semantic_error(postfix.span, "Path values do not expose graph properties")
                 );
@@ -308,6 +306,13 @@ fn simple_value_variable(node: &AstNode) -> Option<String> {
                 | AstKind::LabelName
                 | AstKind::RelationshipTypeName
                 | AstKind::Subscript
+                | AstKind::Expression(
+                    ExpressionKind::List
+                        | ExpressionKind::Map
+                        | ExpressionKind::Case
+                        | ExpressionKind::FunctionCall
+                        | ExpressionKind::InterpolatedString
+                )
         )
     }) {
         return None;
@@ -337,15 +342,7 @@ fn first_argument_variable(node: &AstNode) -> Option<String> {
         .children
         .iter()
         .find(|child| child.kind == AstKind::ArgumentList)?;
-    if arguments
-        .descendants()
-        .any(|child| matches!(child.kind, AstKind::Subscript | AstKind::PropertyKey))
-    {
-        return None;
-    }
-    arguments
-        .descendants()
-        .find(|child| child.kind == AstKind::Variable)
-        .and_then(|child| child.text.as_deref())
-        .map(unescape_identifier)
+    super::types::immediate_expressions(arguments)
+        .first()
+        .and_then(|argument| simple_value_variable(argument))
 }

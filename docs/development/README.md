@@ -38,7 +38,7 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 
 ## 3. 当前基线
 
-**状态分界：Phase 00–15 全部 `done`。** Phase 11 是在已完成的基础功能/规模验收之上增加的性能专项，不回开Phase 10，也不把Phase 10单次scale通过解释成全场景低延迟保证。Phase 11 已完成format3、persistent Standard Index、邻接keyset、query-owned resolved state/read guard、增量index overlay、实测热点优化以及固定性能机/并发/repository gate。Phase 12–14 的 Native/format4/SQL tx adapter 记录保留当时真实完成证据，不作为最新目标合同；Phase 15 已完成 application SQL-only、true streaming、explicit transaction normal execution surface 与 Provider-owned embedding cache 的最终收敛。
+**状态分界：Phase 00–16 全部 `done`。** Phase 11 是在已完成的基础功能/规模验收之上增加的性能专项，不回开Phase 10，也不把Phase 10单次scale通过解释成全场景低延迟保证。Phase 11 已完成format3、persistent Standard Index、邻接keyset、query-owned resolved state/read guard、增量index overlay、实测热点优化以及固定性能机/并发/repository gate。Phase 12–14 的 Native/format4/SQL tx adapter 记录保留当时真实完成证据，不作为最新目标合同；Phase 15 已完成 application SQL-only、true streaming、explicit transaction normal execution surface 与 Provider-owned embedding cache 的最终收敛。
 
 **Phase 12 已完成并进入 v0.1.1 发布基线。** [Full-text / FTS5 Tokenizer 扩展](phases/12-fulltext-tokenizer.md) 根据 [Full-text](../design/full-text.md) 接入宿主 connection 已注册 tokenizer 的原生 specification，移除两个旧 analyzer 名称的特殊映射，并闭合配置、历史/cache、query-time analyzer、失败原子性、version publication 与 Native/SQL integration。
 
@@ -48,7 +48,11 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 
 **Phase 15 已完成开发验收并进入 v0.3.0 发布基线。** [SQL Execution Surface、True Streaming 与 Provider-owned Cache](phases/15-sql-execution-provider-cache.md) 已完成 application SQL-only、真正的 `lithograph_rows()` execution stream、normal execution surface 复用 explicit transaction、application Native query ABI / `lithograph_tx_execute()` 删除、current storage format 3 与 Provider-owned embedding cache。实现修复 revision `b0d5a3da9c5c0266218e01c51d6d34a1be0a6b9d` 的 repository CI `35586275713` 与六目标 Release Matrix `35586275736` 均成功。
 
-当前仓库实现已经完成 Phase 00–15。current-graph engine 已闭合 query composition、aggregation、advanced path、expression/function/value、mutation、versioned Graph Type/Constraint、lookup/range/text/point/full-text/vector index、Raw Vector `SEARCH`、Managed Semantic、`LOAD CSV`、Cypher transaction batching、SQL-only normal execution 与 explicit transaction。`lithograph_rows()` 已支持 read/write/external-I/O/transaction-subquery true streaming；application Native query ABI 与专用 `tx_execute` 已删除；Lithograph Core 不再拥有 persistent embedding result cache。
+**Phase 17 正在实施。** [完整开发者手册与 v0.3.1 发布](phases/17-developer-documentation-release.md) 按 Guide / Cypher / Reference 职责组织公开文档，建立 Markdown 示例、运行时 inventory、覆盖与链接门禁，依赖 Phase 16 完成后发布 v0.3.1。当前状态与执行证据由该 Phase 维护。
+
+**Phase 16 已完成开发验收。** [只读且禁止外部 I/O 的 Cypher execution option](phases/16-safe-execution-option.md) 在共享 SQL execution core 上增加 query-local 安全约束；完整 AST（含插值）检查、SQL scalar/rows/explicit transaction、synthetic Provider 零调用拒绝、完整 Core/quality/CI 均通过。旧本机权限阻塞已解决，实际证据见 Phase 计划；v0.3.1 的远端与发布验收由 Phase 17 记录。
+
+当前仓库实现已经完成 Phase 00–16。current-graph engine 已闭合 query composition、aggregation、advanced path、expression/function/value、mutation、versioned Graph Type/Constraint、lookup/range/text/point/full-text/vector index、Raw Vector `SEARCH`、Managed Semantic、`LOAD CSV`、Cypher transaction batching、SQL-only normal execution 与 explicit transaction。`lithograph_rows()` 已支持 read/write/external-I/O/transaction-subquery true streaming；application Native query ABI 与专用 `tx_execute` 已删除；Lithograph Core 不再拥有 persistent embedding result cache。
 
 当前 Design 进一步确认了通用版本化状态能力：Commit 保持 immutable；Commit Data 是可修改 JSON sidecar；Tag 是显式可移动但不会随写入自动前进的 named ref；允许显式创建 empty-delta Commit；History 需要 opaque cursor 做 bounded DAG traversal；SQL explicit transaction 可以把多个标准 Cypher current-graph execution 组合为一个最终 Commit，并通过 `expectedHead` 提供 transaction-start CAS；Merge 使用 durable Merge Session，把大量 conflict 的分页/逐步 resolution 与最终 Commit/Branch move 分开，并通过 session revision + target-head CAS 支持上层在 finalize 前验证 exact candidate。它们不回开已完成的 Phase 02/05：Phase 05 保持“一次普通 top-level mutating query -> 一个 Commit”的 auto-commit foundation，Phase 08 的 `IN TRANSACTIONS` 继续“每个 mutating batch -> 一个 Commit”，多 execution 单 Commit与 Merge Session 的 version-atomicity foundation来自 Phase 09，Phase 15 负责把 normal SQL execution surface 接到同一 staged lifecycle。Phase 09 同时把 storage format 从 development baseline `1` 显式迁移到首个公开 release 的 format `2`；Phase 10 负责当时的 migration/scale/recovery closure。
 
@@ -68,6 +72,8 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 - Phase 13：`done`；
 - Phase 14：`done`；
 - Phase 15：`done`；
+- Phase 16：`done`；
+- Phase 17：`in_progress`；
 - `docs/development/cypher25-compatibility.md` 保留 Phase 00–15 已执行证据；Full-text family、Phase 12 provider、Phase 13 Managed Semantic 与 Phase 15 SQL execution / Provider cache supplemental inventory 均已闭合为 `done`。Phase 14/15 都不改变冻结 Cypher 语言 coverage 分母。
 
 ## 4. 路线总览
@@ -90,6 +96,8 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 | [13 Managed Semantic Vector / Embedding Provider](phases/13-managed-semantic-vector.md) | `done` | 保留 Raw Vector；新增 SQLite Embedding Provider、Semantic Index、format4 Embedding cache、文本 query/rebuild/cache maintenance | 01、07–12 |
 | [14 SQL Explicit Transaction Adapter](phases/14-sql-explicit-transaction.md) | `done` | 新增四个 SQL `tx_*` scalar，复用既有 Native explicit transaction core；真实 SQLite、Native ABI、quality/coverage 与六目标 hosted Release Matrix 全部闭合 | 01、05、09 |
 | [15 SQL Execution Surface、True Streaming 与 Provider-owned Cache](phases/15-sql-execution-provider-cache.md) | `done` | SQL-only application surface、真正 rows execution stream、normal surfaces 复用 explicit tx、删除 Native query ABI、Provider-owned embedding cache | 01、04–14 |
+| [16 只读且禁止外部 I/O 的 Cypher execution option](phases/16-safe-execution-option.md) | `done` | Query-local 只读、禁止 LOAD CSV / Provider I/O；scalar/rows 与 explicit transaction 共用 Core 安全检查 | 15 |
+| [17 完整开发者手册与 v0.3.1 发布](phases/17-developer-documentation-release.md) | `in_progress` | 完整用户文档、可执行示例、覆盖/生成/链接 CI 与 v0.3.1 真实发布验收 | 16 |
 
 Phase 15 的 EX15-01–19 已全部闭合。实现 revision `b0d5a3da9c5c0266218e01c51d6d34a1be0a6b9d` 的 repository CI `35586275713` 与 hosted Release Matrix `35586275736` 均成功，Linux/macOS/Windows x64/arm64 六目标 artifact build/load/symbol/runtime 全部通过；10M streaming/resource 与本地 acceptance 数值见 Phase 15 计划。
 

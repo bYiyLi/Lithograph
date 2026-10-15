@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise v0.1.0 version operations on temporary databases, never user data."""
+"""Exercise current SQL version operations on temporary databases, never user data."""
 
 import argparse
 import json
@@ -129,11 +129,10 @@ def rewrite_workflow(db):
     one(db, "CALL lithograph.revert($commit)", {"commit": changed}, {"branch": "rewrite"})
     require(query(db, view, options={"branch": "rewrite"})["rows"] == before, "Revert failed")
     one(db, "CALL lithograph.reset('tag/baseline')", options={"branch": "rewrite"})
-    # v0.1.0 SQL Bridge checkout hits its internal transaction boundary.
-    expect_error(lambda: query(db, "CALL lithograph.branch.checkout('rewrite')"),
-                 "TRANSACTION_BOUNDARY_REQUIRED")
-    require(query(db, "MATCH (p:Person) RETURN p.name", options={"branch": "rewrite"})["rows"]
-            == [["Alice"]], "Explicit Branch selection failed")
+    query(db, "CALL lithograph.branch.checkout('rewrite')")
+    require(query(db, "MATCH (p:Person) RETURN p.name")["rows"] == [["Alice"]],
+            "Connection Branch checkout failed")
+    query(db, "CALL lithograph.branch.checkout('main')")
     query(db, "CALL lithograph.branch.delete('rewrite')")
     query(db, "CALL lithograph.tag.create('movable', 'tag/baseline')")
     query(db, "CALL lithograph.tag.move('movable', 'branch/main')")
@@ -142,7 +141,7 @@ def rewrite_workflow(db):
     query(db, "CALL lithograph.merge.list(10)")
     query(db, "CALL lithograph.merge.abort($session,$revision)", session)
     query(db, "CALL lithograph.gc()")
-    print("PASS: rebase, squash, revert, reset, checkout limitation, refs, session abort, GC")
+    print("PASS: rebase, squash, revert, reset, checkout, refs, session abort, GC")
 
 
 def main():

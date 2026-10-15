@@ -197,6 +197,12 @@ Phase 10 的 release-level compatibility evidence 已闭合三个最终 family�
 
 Phase 10 完成时，最终 executable inherited openCypher TCK runner 在当时 worktree 上执行 3,897 个 scenarios：3,777 个 applicable scenarios 全部通过、0 failure；其余 120 个全部由显式 machine-readable reason 分类为产品面之外或已被 Cypher 25 语义取代，没有 unexplained skip。Phase 10 targeted compatibility suite 4/4、hardening 6/6、recovery 10/10 同时通过。因此 `EXPLAIN`、`PROFILE` 与 Error compatibility 三行当时由 `partial` 提升为 `done`，当时 matrix 已无 partial family。该历史报告不覆盖后续发现；当前 Full-text family 的待修复项和新 provider 验收见 Phase 12 supplemental inventory。
 
+### v0.3.1 / Phase 16–17 regression evidence
+
+2026-10-16 的最终本地工作树在完整 `cargo make quality` 和 `scripts/ci.sh` 中再次通过 3,777 个 applicable inherited TCK scenarios，0 failure，原有 120 个分类未变；18 个冻结 Cypher fixtures 全部执行通过。文档暴露的 projection scope、path function 类型判断、regex/string/map projection、UUID conversion、INTEGER64 Vector、Full-text 和 rows Schema 验证问题均补回默认回归。legacy variable-length 空区间仍返回空结果，不改 TCK 预期或排除项。
+
+完整开发者手册的覆盖以独立 [documentation-coverage.json](documentation-coverage.json) 核对 50 个 family、151 个 required 子项、38 个 delta/supplement 项，另核对 48 个公开接口/配置项。526 个 Markdown Cypher 示例分别经过 scalar/rows，共 1,052 次结果/错误断言；169 个函数名称、172 条签名和 38 个 Procedure 按 v0.3.1 运行时核对。此文档映射不改变本实现矩阵的 `done` 规则。Phase 16 是 execution option，亦不增加 Cypher 语言分母；正式发布与远端精确 SHA 证据见 [Phase 17](phases/17-developer-documentation-release.md)。
+
 ## 5. 2025.06+ Cypher 25 Delta Inventory
 
 除 frozen Cypher 5/openCypher inheritance 外，Profile 必须显式覆盖 2025.06 之后加入 Cypher 25 的新/改变能力。当前 inventory 至少包含：

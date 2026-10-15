@@ -1,70 +1,75 @@
 # 版本边界、类型与配置限制
 
-当前 v0.3.0 发布基线。本页列出应用可依赖的入口约束，不把内部 cache budget、性能实测或机器容量当作通用硬上限。v0.2.0/v0.2.1 的历史 format4 行为仅适用于对应 release tag。
+适用版本：**v0.3.1** · [产品手册](../guide/README.md) · [接口参考](README.md)
+
+本页维护跨主题的平台与资源边界，以及各参数限制的查阅入口；完整配置表由对应语言/API 专题维护。内部 cache budget、性能实测和机器容量不构成通用硬上限。
+
+<a id="platform-and-storage"></a>
 
 ## 平台与存储
 
-SQLite 最低 3.45.0，必须可加载扩展并支持 FTS5。仅 connection 的 main 承载 graph repository；单文件多 Branch 仍共享 writer。预编译包提供 Linux/macOS/Windows x64/arm64，不等于保证任意 Linux libc、任意旧 OS 或所有 SQLite binding 都相容；必须在实际部署运行时 smoke-test。
+SQLite 最低 **3.45.0**，必须允许 extension loading 并支持 FTS5。一个 SQLite `main` database 对应一个 graph repository；ATTACH 的其它 schema 不参与，操作另一个图必须把该文件作为另一连接的 main 打开。单文件的多个 Branch 共享 SQLite writer。
 
-当前 fresh/current Lithograph storage format 为 **3**。Phase 15 不保留 format4 migration/compatibility；高于当前支持范围的数据库必须使用对应历史 binary/tag 处理，不能手工改 storage marker。内部 `_lithograph_*` namespace 保留，不插入、删除、重命名或加 trigger/index。
+预编译包提供 Linux/macOS/Windows x64/arm64；宿主 OS、libc、CPU 架构和 SQLite binding 必须匹配，发布资产的存在不代表任意运行环境均可加载。部署前执行实际 `.load`、version/init 和 SQL smoke；环境步骤见 [安装](../guide/installation.md)。
+
+fresh/current storage format 为 **3**，扩展 min/max 与数据库 current 以 `lithograph_version()` 为准。v0.2.0/v0.2.1 曾使用的 format4 是历史 release contract，当前不提供 format4 migration/compatibility；高于当前范围的库须用对应 binary/tag 处理。不得手改 marker、改变宿主 `PRAGMA user_version` 或直接修改保留的 `_lithograph_*` namespace。
+
+<a id="names-descriptors-json"></a>
 
 ## 名称、Descriptor 与 JSON
 
-Branch/Tag name 是大小写敏感 UTF-8，1–255 bytes。禁止 NUL / ASCII control、开头或结尾的 `/`、空路径段、`.` / `..` 路径段。main 不可删除。不要把这一名字限制自动套用于所有 Cypher Label / Property identifier。
+Branch/Tag name 是大小写敏感 UTF-8，1–255 bytes。禁止 NUL/ASCII control、开头或结尾 `/`、空路径段、`.` / `..` 路径段；main 不可删除。这个限制不自动适用于 Cypher Label、Relationship Type 或 Property identifier。
 
-Commit Descriptor 为 `commit/<64 hex>`；branch/tag Descriptor 为对应前缀加 name。query `branch` 只接受 name。revision/分页 limit 必须为正整数，cursor 原样传回同一查询起点/Session revision。
+Descriptor、Session revision、分页 cursor、Patch 等完整字段规则见 [Versioning Reference](versioning.md)。query `branch` 接受 name，不接受 `branch/` Descriptor；`at` 接受完整 Descriptor，见 [Execution Options](execution-options.md)。
 
-INTEGER 是 signed 64-bit；跨 JSON 的大整数用 [Integer tag](values.md)。SQL scalar 总 envelope 与每个单独 SQLite value 受宿主 `SQLITE_LIMIT_LENGTH` 等限制；没有一个与运行时配置无关的“无限 JSON 返回值”。过大结果应投影必要字段、分页或使用 streaming，但单行仍需要可编码。
+INTEGER 为 signed 64-bit，JSON safe range 外使用 Integer tag。SQL scalar 总 envelope、stream 的单行/summary TEXT 均受宿主 `SQLITE_LIMIT_LENGTH` 和实际资源限制；streaming 不免除单个值必须可编码的要求。类型、嵌套 tag 和宿主精度规则见 [Values](values.md)。
 
-Vector 支持 I8/I16/I32/I64/F32/F64 坐标；输入也接受相应 `INTEGER8/16/32/64`、`FLOAT32/64` 等别名。输出 canonical coordinateType 为 `I8` 等短名，不保证保留输入的别名拼写。Vector dimension 必须与 values 长度一致，坐标必须在对应类型允许范围内。
+<a id="execution-resources"></a>
+
+## 执行与资源
+
+- 一个 connection 的 active execution cursor 必须及时完整消费或关闭；慢速 side-effect consumer 会延长 writer hold。
+- `ORDER BY`、DISTINCT、聚合等 semantic barrier 可使用 bounded memory 和 TEMP/disk spill；配置宿主临时目录与磁盘空间时需计入这部分成本。
+- SQLite busy timeout、取消、线程模式和单个 statement 的资源限制属于宿主配置；query options 不提供任意 timeout/readOnly 配置。
+- Lithograph explicit transaction 从 begin 起取得 writer，纯读长任务优先使用普通 pinned read；事务与连接池规则见 [Transactions](transactions.md)。
+- `readOnlyNoExternalIO` 限制本次 Cypher 的 mutation/外部 I/O，允许当前 SQLite database、TEMP/spill 等正常工作；它不创建 OS sandbox。精确 allowlist 见 [安全选项](execution-options.md#read-only-no-external-io)。
+
+<a id="full-text-index-config"></a>
 
 ## Full-text indexConfig
 
-| Key | 默认 | 允许值 |
-| --- | --- | --- |
-| `fulltext.analyzer` | `unicode61` | 非空、无 NUL、且当前 SQLite connection 能由 FTS5 成功构造的完整 tokenizer specification |
-| `fulltext.eventually_consistent` | `false` | BOOLEAN |
+Full-text DDL 的 `fulltext.analyzer`、`fulltext.eventually_consistent` 默认值、类型、FTS5 tokenizer specification 规则由 [Index 语言参考](../cypher/indexes.md) 维护。query string、query options、analyzer 运行要求和 score 见 [Full-text Procedure](procedures/fulltext.md)。
 
-通过 `OPTIONS {indexConfig:{...}}` 声明。specification 直接遵守 FTS5 tokenizer grammar，例如 `porter unicode61` 或 `unicode61 remove_diacritics 0 tokenchars '-_'`；Lithograph 不再把 `standard-no-stop-words` / `english` 映射到内置实现。第三方 tokenizer 由宿主 SQLite extension 在**每个实际 connection** 上注册；数据库只版本化 specification 字符串，不持久化 native 实现。派生缓存和 eventual-consistency metadata 不改变历史 Snapshot 的正确性要求。
+第三方 tokenizer 必须在**每个实际 SQLite connection** 注册；数据库只版本化 specification，不持久化 native 实现。Derived cache/eventual-consistency 不改变历史 Snapshot 的结果正确性要求。FTS5 tokenizer 名称不等同于 Neo4j analyzer 名称，不能依赖自动 alias。
+
+<a id="vector-index-config"></a>
 
 ## Vector indexConfig
 
-| Key | 默认 | 允许值 / 范围 |
-| --- | --- | --- |
-| `vector.dimensions` | 未显式固定 | INTEGER 1–4096 |
-| `vector.similarity_function` | `cosine` | `cosine`、`euclidean` |
-| `vector.quantization.type` | `binary` | `none`、`scalar`、`binary` |
-| `vector.quantization.enabled` | 未给出 | legacy BOOLEAN；未给 type 时 true→scalar、false→none |
-| `vector.default_search_expansion_factor` | none:1.0；scalar:1.5；binary:3.0 | 有限数值，1.0–10000.0 |
-| `vector.hnsw.m` | 16 | INTEGER 1–512 |
-| `vector.hnsw.ef_construction` | 100 | INTEGER 1–3200 |
+Vector 支持 I8/I16/I32/I64/F32/F64，dimension 为 1–4096，编码见 [Vector value](values.md#temporal-point-uuid-vector)。DDL 的 dimensions、similarity、quantization、expansion、HNSW 参数完整范围与优先级见 [Index 语言参考](../cypher/indexes.md)，SEARCH 的参数与执行规则见 [Search 语言参考](../cypher/search.md)。
 
-提供 type 时以 type 为准；新应用避免同时提供 legacy quantization flag。Full-text / Vector OPTIONS 只接受 `indexConfig` Map，其中仅允许各 family 的已知 key，值必须为 DDL 支持的 literal。不要把 Query options 放进 Index OPTIONS，反之亦然。
+Index OPTIONS 与 query options 是不同输入，不能互换。索引参数不承诺延迟 SLA；维度、过滤条件、数据分布、Recall 与内存需求由应用实际 workload 验证。
 
-上述参数决定索引配置，不是延迟 SLA。合理维度、过滤条件、数据分布、Recall 与内存取舍应由应用自己的 workload 验证。
+<a id="managed-semantic-limits"></a>
 
 ## Managed Semantic 限制
 
-| 项目 | 当前限制 |
+Managed Semantic 只接受单个 STRING source Property，按 exact UTF-8 bytes 工作，不自动 trim/lower/concat/chunk/truncate；输出为 finite FLOAT32。Core 不提供 persistent embedding result cache；execution-local 去重与 TEMP work 不替代 Provider cache。
+
+| 查阅内容 | 唯一完整参考 |
 | --- | --- |
-| source Property | exactly one Property；只有实际 `STRING` 值参与 |
-| source transform | exact UTF-8 bytes；不 trim/lower/concat/chunk/truncate |
-| dimensions | INTEGER 1–4096 |
-| output coordinate type | 固定 FLOAT32，全部 coordinate 必须 finite |
-| similarity | `cosine`、`euclidean` |
-| query options | 必需 `limit >= 0`；可选 `skip >= 0`；未知 key 拒绝 |
-| Lithograph Core persistent cache | 不提供；Core 只有 execution-local 去重/TEMP work state |
-| OpenAI-compatible Provider cache | omitted/disabled 不触碰文件；enabled 必须显式 `path`，使用独立 SQLite DB |
-| Provider cache budget | `max_bytes > 0`；FIFO enforcement，单 entry 超预算时结果仍可返回但不缓存 |
-| OpenAI-compatible provider batch_size | 1–2048 items；不提供 tokenizer/chunk/truncate |
-| OpenAI-compatible timeout/retry | bounded positive timeout 与有限 retry；具体范围由 Provider 本地 validation 固定 |
-| OpenAI-compatible redirect | 不跟随；任何 3xx 作为 endpoint error 返回 |
-| OpenAI-compatible proxy | 不自动读取 process environment proxy；v1 无独立 proxy config |
+| create/query/rebuild 参数、dimensions、limit/skip、历史与事务边界 | [Semantic Procedure](procedures/semantic.md) |
+| endpoint/auth、batch、timeout/retry、redirect/proxy、独立 cache | [OpenAI-compatible Provider](openai-compatible-provider.md) |
+| SPI、semantic identity、内存所有权、取消和错误 | [Embedding Provider SPI](embedding-provider-spi.md) |
+| 加载、配置和完整查询流程 | [Provider 指南](../guide/embedding-providers.md) |
 
-OpenAI-compatible Provider cache identity 包含会改变 embedding vector 的有效 endpoint/model/request/header/auth semantics 与 exact text；timeout/retry/batch/cache policy 等纯 operational 参数不分裂 embedding space。secret/header value 只以 digest 进入 cache identity，cache DB 不保存 raw text 或 credential。任何实际 semantic query/rebuild 即使 cache 已 warm 仍要求目标 Provider 当前可用。Provider config 中直接写入的 `api_key` / secret header 会进入 versioned history；`api_key_env` 只保存变量名。
+实际 semantic query/rebuild 即使 cache 已 warm 仍要求目标 Provider 当前可用。Provider config 中直接写入的 secret 会进入 versioned history，环境变量引用只保存变量名；配置前按 Provider Reference 选择 credential 输入。安全选项启用时禁止 Managed Semantic，不因 cache hit 而豁免。
 
-## 不属于此产品表面的能力
+<a id="不属于此产品表面的能力"></a>
+<a id="product-surface"></a>
 
-没有独立 Server、远程图同步协议、Neo4j Bolt/HTTP 服务、账号角色管理、APOC 安装或 SDK 包安装承诺。v0.2.0 提供的是**独立 SQLite extension** `lithograph-openai-compatible`，不是 Kernel 内嵌模型服务。Graph View 是执行子图边界，不是安全授权。
+## 产品表面与兼容范围
 
-更多兼容范围见 [Cypher Compatibility](cypher-compatibility.md)。依据：[Index config parser](../../crates/lithograph-core/src/query/schema/command/index_config.rs)、[Value types](../../crates/lithograph-core/src/cypher/value.rs)、[设计](../design.md)。
+Lithograph 作为标准 SQLite loadable extension 使用。独立 Server、Bolt/HTTP 图服务、账号角色管理、APOC 或远程图同步不属于本产品表面。随附 OpenAI-compatible Provider 是独立 SQLite extension，通过 `EmbeddingProviderV1` 连接，不是 Kernel 内嵌模型服务。
+
+Cypher 支持范围和排除范围见 [Compatibility](cypher-compatibility.md)。当前缺陷与规避见 [Known Issues](known-issues.md)；宿主未启用 extension loading 属于环境前提，不把它记录为产品缺陷。

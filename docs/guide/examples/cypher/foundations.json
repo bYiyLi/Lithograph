@@ -1,0 +1,835 @@
+{
+  "examples": [
+    {
+      "id": "foundation-syntax-version",
+      "path": "docs/cypher/syntax.md",
+      "columns": [
+        "answer"
+      ],
+      "rows": [
+        [
+          42
+        ]
+      ]
+    },
+    {
+      "id": "foundation-syntax-names",
+      "path": "docs/cypher/syntax.md",
+      "columns": [
+        "total",
+        "name",
+        "object"
+      ],
+      "rows": [
+        [
+          7,
+          "示例",
+          {
+            "a`b": 3
+          }
+        ]
+      ]
+    },
+    {
+      "id": "foundation-syntax-params",
+      "path": "docs/cypher/syntax.md",
+      "columns": [
+        "name",
+        "next",
+        "missing"
+      ],
+      "rows": [
+        [
+          "阿青",
+          3,
+          true
+        ]
+      ],
+      "params": {
+        "name": "阿青",
+        "0limit": 2,
+        "nullable": null
+      }
+    },
+    {
+      "id": "foundation-syntax-missing-param",
+      "path": "docs/cypher/syntax.md",
+      "error": "INVALID_ARGUMENT"
+    },
+    {
+      "id": "foundation-syntax-literals",
+      "path": "docs/cypher/syntax.md",
+      "columns": [
+        "hex",
+        "octal",
+        "exponential",
+        "quoted",
+        "unicode"
+      ],
+      "rows": [
+        [
+          42,
+          42,
+          2000.0,
+          "it's",
+          "中文"
+        ]
+      ]
+    },
+    {
+      "id": "foundation-syntax-comments",
+      "path": "docs/cypher/syntax.md",
+      "columns": [
+        "value"
+      ],
+      "rows": [
+        [
+          4
+        ]
+      ]
+    },
+    {
+      "id": "foundation-model-duplicates",
+      "path": "docs/cypher/query-model.md",
+      "columns": [
+        "value"
+      ],
+      "rows": [
+        [
+          1
+        ],
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    {
+      "id": "foundation-model-zero",
+      "path": "docs/cypher/query-model.md",
+      "columns": [
+        "value"
+      ],
+      "rows": []
+    },
+    {
+      "id": "foundation-model-scope",
+      "path": "docs/cypher/query-model.md",
+      "columns": [
+        "result"
+      ],
+      "rows": [
+        [
+          10
+        ]
+      ]
+    },
+    {
+      "id": "foundation-model-scope-error",
+      "path": "docs/cypher/query-model.md",
+      "error": "SEMANTIC_ERROR"
+    },
+    {
+      "id": "foundation-model-page",
+      "path": "docs/cypher/query-model.md",
+      "columns": [
+        "key",
+        "name"
+      ],
+      "rows": [
+        [
+          2,
+          "乙"
+        ]
+      ]
+    },
+    {
+      "id": "foundation-model-write-visibility",
+      "path": "docs/cypher/query-model.md",
+      "columns": [
+        "total"
+      ],
+      "rows": [
+        [
+          2
+        ]
+      ]
+    },
+    {
+      "id": "foundation-model-finish",
+      "path": "docs/cypher/query-model.md",
+      "columns": [],
+      "rows": []
+    },
+    {
+      "id": "foundation-reading-data",
+      "path": "docs/cypher/reading.md",
+      "columns": [
+        "created"
+      ],
+      "rows": [
+        [
+          1
+        ]
+      ]
+    },
+    {
+      "id": "foundation-reading-match",
+      "path": "docs/cypher/reading.md",
+      "columns": [
+        "person",
+        "recommendation"
+      ],
+      "rows": [
+        [
+          "阿青",
+          "白川"
+        ]
+      ],
+      "setup": [
+        "foundation-reading-data"
+      ]
+    },
+    {
+      "id": "foundation-reading-optional",
+      "path": "docs/cypher/reading.md",
+      "columns": [
+        "person",
+        "recommendation"
+      ],
+      "rows": [
+        [
+          "白川",
+          null
+        ],
+        [
+          "阿青",
+          "白川"
+        ],
+        [
+          "陈禾",
+          null
+        ]
+      ],
+      "setup": [
+        "foundation-reading-data"
+      ]
+    },
+    {
+      "id": "foundation-reading-optional-filter",
+      "path": "docs/cypher/reading.md",
+      "columns": [
+        "person",
+        "recommendation"
+      ],
+      "rows": [
+        [
+          "阿青",
+          "白川"
+        ]
+      ],
+      "setup": [
+        "foundation-reading-data"
+      ]
+    },
+    {
+      "id": "foundation-reading-filter",
+      "path": "docs/cypher/reading.md",
+      "columns": [
+        "allowed"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "foundation-reading-with",
+      "path": "docs/cypher/reading.md",
+      "columns": [
+        "name",
+        "age"
+      ],
+      "rows": [
+        [
+          "阿青",
+          30
+        ],
+        [
+          "白川",
+          20
+        ]
+      ],
+      "setup": [
+        "foundation-reading-data"
+      ]
+    },
+    {
+      "id": "foundation-reading-distinct",
+      "path": "docs/cypher/reading.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    {
+      "id": "foundation-reading-let",
+      "path": "docs/cypher/reading.md",
+      "columns": [
+        "price",
+        "quantity",
+        "subtotal",
+        "payable"
+      ],
+      "rows": [
+        [
+          20,
+          3,
+          60,
+          65
+        ]
+      ]
+    },
+    {
+      "id": "foundation-reading-let-error",
+      "path": "docs/cypher/reading.md",
+      "error": "SEMANTIC_ERROR"
+    },
+    {
+      "id": "foundation-reading-unwind",
+      "path": "docs/cypher/reading.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          1
+        ],
+        [
+          2
+        ],
+        [
+          null
+        ]
+      ]
+    },
+    {
+      "id": "foundation-reading-for",
+      "path": "docs/cypher/reading.md",
+      "columns": [
+        "value"
+      ],
+      "rows": [
+        [
+          1
+        ],
+        [
+          2
+        ],
+        [
+          3
+        ]
+      ]
+    },
+    {
+      "id": "foundation-reading-unwind-scalar",
+      "path": "docs/cypher/reading.md",
+      "columns": [
+        "x",
+        "y"
+      ],
+      "rows": [
+        [
+          5,
+          6
+        ]
+      ]
+    },
+    {
+      "id": "foundation-reading-pagination",
+      "path": "docs/cypher/reading.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          2
+        ],
+        [
+          3
+        ]
+      ],
+      "params": {
+        "offset": 1,
+        "limit": 2
+      }
+    },
+    {
+      "id": "foundation-reading-finish",
+      "path": "docs/cypher/reading.md",
+      "columns": [],
+      "rows": []
+    },
+    {
+      "id": "foundation-expression-precedence",
+      "path": "docs/cypher/expressions.md",
+      "columns": [
+        "arithmetic",
+        "grouped",
+        "power",
+        "logic",
+        "chained"
+      ],
+      "rows": [
+        [
+          14,
+          20,
+          512.0,
+          true,
+          true
+        ]
+      ]
+    },
+    {
+      "id": "foundation-expression-concat",
+      "path": "docs/cypher/expressions.md",
+      "columns": [
+        "quotient",
+        "fraction",
+        "text",
+        "list",
+        "appended",
+        "prepended"
+      ],
+      "rows": [
+        [
+          3,
+          3.5,
+          "甲乙",
+          [
+            1,
+            2,
+            3
+          ],
+          [
+            1,
+            2
+          ],
+          [
+            0,
+            1
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "foundation-expression-division-error",
+      "path": "docs/cypher/expressions.md",
+      "error": "TYPE_ERROR"
+    },
+    {
+      "id": "foundation-expression-access",
+      "path": "docs/cypher/expressions.md",
+      "columns": [
+        "name",
+        "missing",
+        "last",
+        "part",
+        "outOfRange",
+        "unknownSlice"
+      ],
+      "rows": [
+        [
+          "阿青",
+          null,
+          30,
+          [
+            20,
+            30
+          ],
+          null,
+          null
+        ]
+      ]
+    },
+    {
+      "id": "foundation-expression-map",
+      "path": "docs/cypher/expressions.md",
+      "columns": [
+        "result"
+      ],
+      "rows": [
+        [
+          {
+            "name": "阿青",
+            "score": 11,
+            "role": "member",
+            "missing": null
+          }
+        ]
+      ]
+    },
+    {
+      "id": "foundation-expression-comprehension",
+      "path": "docs/cypher/expressions.md",
+      "columns": [
+        "transformed",
+        "empty",
+        "unknown"
+      ],
+      "rows": [
+        [
+          [
+            20,
+            30
+          ],
+          [],
+          null
+        ]
+      ]
+    },
+    {
+      "id": "foundation-expression-pattern-comprehension",
+      "path": "docs/cypher/expressions.md",
+      "columns": [
+        "names"
+      ],
+      "rows": [
+        [
+          [
+            "白川"
+          ]
+        ]
+      ],
+      "setup": [
+        "foundation-reading-data"
+      ]
+    },
+    {
+      "id": "foundation-expression-predicates",
+      "path": "docs/cypher/expressions.md",
+      "columns": [
+        "member",
+        "unknown",
+        "suffix",
+        "regex",
+        "normalized",
+        "typed"
+      ],
+      "rows": [
+        [
+          true,
+          null,
+          true,
+          true,
+          true,
+          true
+        ]
+      ]
+    },
+    {
+      "id": "foundation-expression-case",
+      "path": "docs/cypher/expressions.md",
+      "columns": [
+        "level",
+        "state",
+        "absent"
+      ],
+      "rows": [
+        [
+          "中",
+          "缺失",
+          null
+        ]
+      ]
+    },
+    {
+      "id": "foundation-expression-interpolation",
+      "path": "docs/cypher/expressions.md",
+      "columns": [
+        "message"
+      ],
+      "rows": [
+        [
+          "读者=阿青，数量=3，缺失=null"
+        ]
+      ]
+    },
+    {
+      "id": "foundation-aggregation-implicit",
+      "path": "docs/cypher/aggregation.md",
+      "columns": [
+        "category",
+        "total",
+        "amount"
+      ],
+      "rows": [
+        [
+          "乙",
+          1,
+          4
+        ],
+        [
+          "甲",
+          2,
+          8
+        ]
+      ]
+    },
+    {
+      "id": "foundation-aggregation-explicit",
+      "path": "docs/cypher/aggregation.md",
+      "columns": [
+        "parity",
+        "total",
+        "amount"
+      ],
+      "rows": [
+        [
+          0,
+          2,
+          6
+        ],
+        [
+          1,
+          2,
+          4
+        ]
+      ]
+    },
+    {
+      "id": "foundation-aggregation-global",
+      "path": "docs/cypher/aggregation.md",
+      "columns": [
+        "category",
+        "total"
+      ],
+      "rows": [
+        [
+          "所有",
+          2
+        ]
+      ]
+    },
+    {
+      "id": "foundation-aggregation-group-error",
+      "path": "docs/cypher/aggregation.md",
+      "error": "SEMANTIC_ERROR"
+    },
+    {
+      "id": "foundation-aggregation-distinct",
+      "path": "docs/cypher/aggregation.md",
+      "columns": [
+        "rows",
+        "present",
+        "uniqueValues",
+        "amount",
+        "uniqueAmount"
+      ],
+      "rows": [
+        [
+          4,
+          3,
+          2,
+          4,
+          3
+        ]
+      ]
+    },
+    {
+      "id": "foundation-aggregation-empty",
+      "path": "docs/cypher/aggregation.md",
+      "columns": [
+        "rows",
+        "present",
+        "amount",
+        "values",
+        "average",
+        "smallest",
+        "largest",
+        "deviation"
+      ],
+      "rows": [
+        [
+          0,
+          0,
+          0,
+          [],
+          null,
+          null,
+          null,
+          null
+        ]
+      ]
+    },
+    {
+      "id": "foundation-aggregation-empty-grouped",
+      "path": "docs/cypher/aggregation.md",
+      "columns": [
+        "key",
+        "total"
+      ],
+      "rows": []
+    },
+    {
+      "id": "foundation-aggregation-null",
+      "path": "docs/cypher/aggregation.md",
+      "columns": [
+        "rows",
+        "present",
+        "amount",
+        "values",
+        "average"
+      ],
+      "rows": [
+        [
+          2,
+          0,
+          0,
+          [],
+          null
+        ]
+      ]
+    },
+    {
+      "id": "foundation-aggregation-filter",
+      "path": "docs/cypher/aggregation.md",
+      "columns": [
+        "value",
+        "occurrences"
+      ],
+      "rows": [
+        [
+          1,
+          2
+        ]
+      ]
+    },
+    {
+      "id": "foundation-aggregation-collect-order",
+      "path": "docs/cypher/aggregation.md",
+      "columns": [
+        "ordered"
+      ],
+      "rows": [
+        [
+          [
+            1,
+            2,
+            3
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "foundation-aggregation-distinct-star-error",
+      "path": "docs/cypher/aggregation.md",
+      "error": "SEMANTIC_ERROR"
+    },
+    {
+      "id": "foundation-syntax-error",
+      "path": "docs/cypher/syntax.md",
+      "error": "PARSE_ERROR"
+    },
+    {
+      "id": "foundation-reading-return-star",
+      "path": "docs/cypher/reading.md",
+      "columns": [
+        "number"
+      ],
+      "rows": [
+        [
+          1
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    {
+      "id": "foundation-property-exists",
+      "path": "docs/cypher/expressions.md",
+      "columns": [
+        "present",
+        "missing",
+        "unknown"
+      ],
+      "rows": [
+        [
+          true,
+          false,
+          null
+        ]
+      ]
+    },
+    {
+      "id": "foundation-property-exists-type-error",
+      "path": "docs/cypher/expressions.md",
+      "error": "TYPE_ERROR"
+    },
+    {
+      "id": "foundation-native-store-create",
+      "path": "docs/cypher/types.md",
+      "columns": [
+        "created"
+      ],
+      "rows": [
+        [
+          1
+        ]
+      ]
+    },
+    {
+      "id": "foundation-native-store-read",
+      "path": "docs/cypher/types.md",
+      "setup": [
+        "foundation-native-store-create"
+      ],
+      "columns": [
+        "embedding",
+        "identity"
+      ],
+      "rows": [
+        [
+          {
+            "$type": "Vector",
+            "coordinateType": "I64",
+            "dimension": 1,
+            "values": [
+              {
+                "$type": "Integer",
+                "value": "9007199254740993"
+              }
+            ]
+          },
+          {
+            "$type": "UUID",
+            "value": "550e8400-e29b-41d4-a716-446655440000"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "foundation-subquery-nested-call",
+      "path": "docs/cypher/subqueries.md",
+      "columns": [
+        "result"
+      ],
+      "rows": [
+        [
+          8
+        ]
+      ]
+    }
+  ]
+}

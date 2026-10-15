@@ -1,0 +1,481 @@
+{
+  "examples": [
+    {
+      "id": "schema-graph-set",
+      "path": "docs/cypher/graph-types.md",
+      "columns": [],
+      "rows": []
+    },
+    {
+      "id": "schema-graph-create",
+      "path": "docs/cypher/graph-types.md",
+      "setup": [
+        "schema-graph-set"
+      ],
+      "columns": [
+        "source",
+        "target"
+      ],
+      "rows": [
+        [
+          "Ada",
+          "Lin"
+        ]
+      ]
+    },
+    {
+      "id": "schema-graph-invalid",
+      "path": "docs/cypher/graph-types.md",
+      "setup": [
+        "schema-graph-set"
+      ],
+      "error": "CONSTRAINT_ERROR"
+    },
+    {
+      "id": "schema-graph-add",
+      "path": "docs/cypher/graph-types.md",
+      "columns": [],
+      "rows": []
+    },
+    {
+      "id": "schema-graph-alter",
+      "path": "docs/cypher/graph-types.md",
+      "setup": [
+        "schema-graph-add"
+      ],
+      "columns": [],
+      "rows": []
+    },
+    {
+      "id": "schema-graph-drop",
+      "path": "docs/cypher/graph-types.md",
+      "setup": [
+        "schema-graph-alter"
+      ],
+      "columns": [],
+      "rows": []
+    },
+    {
+      "id": "schema-graph-show-empty",
+      "path": "docs/cypher/graph-types.md",
+      "columns": [
+        "specification"
+      ],
+      "rows": [
+        [
+          "{}"
+        ]
+      ]
+    },
+    {
+      "id": "schema-graph-show-virtual",
+      "path": "docs/cypher/graph-types.md",
+      "columns": [
+        "nodes",
+        "relationships"
+      ],
+      "rows": [
+        [
+          0,
+          0
+        ]
+      ]
+    },
+    {
+      "id": "schema-constraint-key",
+      "path": "docs/cypher/constraints.md",
+      "columns": [],
+      "rows": []
+    },
+    {
+      "id": "schema-constraint-type",
+      "path": "docs/cypher/constraints.md",
+      "columns": [],
+      "rows": []
+    },
+    {
+      "id": "schema-constraint-data",
+      "path": "docs/cypher/constraints.md",
+      "setup": [
+        "schema-constraint-key",
+        "schema-constraint-type"
+      ],
+      "columns": [],
+      "rows": []
+    },
+    {
+      "id": "schema-constraint-duplicate",
+      "path": "docs/cypher/constraints.md",
+      "setup": [
+        "schema-constraint-data"
+      ],
+      "error": "CONSTRAINT_ERROR"
+    },
+    {
+      "id": "schema-constraint-wrong-type",
+      "path": "docs/cypher/constraints.md",
+      "setup": [
+        "schema-constraint-type"
+      ],
+      "error": "CONSTRAINT_ERROR"
+    },
+    {
+      "id": "schema-constraint-existence",
+      "path": "docs/cypher/constraints.md",
+      "columns": [],
+      "rows": []
+    },
+    {
+      "id": "schema-constraint-relationship",
+      "path": "docs/cypher/constraints.md",
+      "columns": [],
+      "rows": []
+    },
+    {
+      "id": "schema-constraint-idempotent",
+      "path": "docs/cypher/constraints.md",
+      "setup": [
+        "schema-constraint-type"
+      ],
+      "columns": [],
+      "rows": []
+    },
+    {
+      "id": "schema-constraint-drop",
+      "path": "docs/cypher/constraints.md",
+      "setup": [
+        "schema-constraint-type"
+      ],
+      "columns": [],
+      "rows": []
+    },
+    {
+      "id": "schema-constraint-show",
+      "path": "docs/cypher/constraints.md",
+      "setup": [
+        "schema-constraint-key"
+      ],
+      "columns": [
+        "name",
+        "type",
+        "properties"
+      ],
+      "rows": [
+        [
+          "account_key",
+          "NODE_KEY",
+          [
+            "tenant",
+            "id"
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "schema-index-lookup",
+      "path": "docs/cypher/indexes.md",
+      "columns": [],
+      "rows": []
+    },
+    {
+      "id": "schema-index-range",
+      "path": "docs/cypher/indexes.md",
+      "columns": [],
+      "rows": []
+    },
+    {
+      "id": "schema-index-data",
+      "path": "docs/cypher/indexes.md",
+      "columns": [],
+      "rows": []
+    },
+    {
+      "id": "schema-index-query",
+      "path": "docs/cypher/indexes.md",
+      "setup": [
+        "schema-index-range",
+        "schema-index-data"
+      ],
+      "columns": [
+        "name"
+      ],
+      "rows": [
+        [
+          "Ada"
+        ]
+      ]
+    },
+    {
+      "id": "schema-index-text",
+      "path": "docs/cypher/indexes.md",
+      "columns": [],
+      "rows": []
+    },
+    {
+      "id": "schema-index-point",
+      "path": "docs/cypher/indexes.md",
+      "columns": [],
+      "rows": []
+    },
+    {
+      "id": "schema-index-fulltext",
+      "path": "docs/cypher/indexes.md",
+      "columns": [],
+      "rows": []
+    },
+    {
+      "id": "schema-index-vector",
+      "path": "docs/cypher/indexes.md",
+      "columns": [],
+      "rows": []
+    },
+    {
+      "id": "schema-index-vector-invalid",
+      "path": "docs/cypher/indexes.md",
+      "error": "SCHEMA_ERROR"
+    },
+    {
+      "id": "schema-index-show",
+      "path": "docs/cypher/indexes.md",
+      "setup": [
+        "schema-index-vector"
+      ],
+      "columns": [
+        "name",
+        "type",
+        "properties"
+      ],
+      "rows": [
+        [
+          "doc_embedding",
+          "VECTOR",
+          [
+            "embedding",
+            "lang",
+            "published"
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "schema-index-drop",
+      "path": "docs/cypher/indexes.md",
+      "setup": [
+        "schema-index-vector"
+      ],
+      "columns": [],
+      "rows": []
+    },
+    {
+      "id": "schema-search-data",
+      "path": "docs/cypher/search.md",
+      "columns": [],
+      "rows": []
+    },
+    {
+      "id": "schema-search-top",
+      "path": "docs/cypher/search.md",
+      "setup": [
+        "schema-index-vector",
+        "schema-search-data"
+      ],
+      "columns": [
+        "name",
+        "score"
+      ],
+      "rows": [
+        [
+          "Graph",
+          1.0
+        ],
+        [
+          "History",
+          0.5
+        ]
+      ]
+    },
+    {
+      "id": "schema-search-null",
+      "path": "docs/cypher/search.md",
+      "setup": [
+        "schema-index-vector",
+        "schema-search-data"
+      ],
+      "columns": [
+        "name",
+        "score"
+      ],
+      "rows": [
+        [
+          null,
+          null
+        ]
+      ]
+    },
+    {
+      "id": "schema-search-zero",
+      "path": "docs/cypher/search.md",
+      "setup": [
+        "schema-index-vector",
+        "schema-search-data"
+      ],
+      "columns": [
+        "name"
+      ],
+      "rows": []
+    },
+    {
+      "id": "schema-search-invalid-filter",
+      "path": "docs/cypher/search.md",
+      "setup": [
+        "schema-index-vector"
+      ],
+      "error": "SEMANTIC_ERROR"
+    },
+    {
+      "id": "schema-search-invalid-limit",
+      "path": "docs/cypher/search.md",
+      "setup": [
+        "schema-index-vector"
+      ],
+      "error": "SEMANTIC_ERROR"
+    },
+    {
+      "id": "schema-search-rel-index",
+      "path": "docs/cypher/search.md",
+      "columns": [],
+      "rows": []
+    },
+    {
+      "id": "schema-search-rel-data",
+      "path": "docs/cypher/search.md",
+      "columns": [],
+      "rows": []
+    },
+    {
+      "id": "schema-search-relationship",
+      "path": "docs/cypher/search.md",
+      "setup": [
+        "schema-search-rel-index",
+        "schema-search-rel-data"
+      ],
+      "columns": [
+        "name"
+      ],
+      "rows": [
+        [
+          "pair"
+        ]
+      ]
+    },
+    {
+      "id": "schema-diagnostics-explain",
+      "path": "docs/cypher/diagnostics.md",
+      "columns": [
+        "plan"
+      ],
+      "rows": [
+        [
+          "00 Project"
+        ]
+      ]
+    },
+    {
+      "id": "schema-diagnostics-explain-write",
+      "path": "docs/cypher/diagnostics.md",
+      "columns": [
+        "plan"
+      ],
+      "row_count": 1
+    },
+    {
+      "id": "schema-diagnostics-explain-check",
+      "path": "docs/cypher/diagnostics.md",
+      "setup": [
+        "schema-diagnostics-explain-write"
+      ],
+      "columns": [
+        "count"
+      ],
+      "rows": [
+        [
+          0
+        ]
+      ]
+    },
+    {
+      "id": "schema-diagnostics-profile",
+      "path": "docs/cypher/diagnostics.md",
+      "columns": [
+        "square"
+      ],
+      "rows": [
+        [
+          1
+        ],
+        [
+          4
+        ],
+        [
+          9
+        ]
+      ]
+    },
+    {
+      "id": "schema-diagnostics-profile-write",
+      "path": "docs/cypher/diagnostics.md",
+      "columns": [],
+      "rows": []
+    },
+    {
+      "id": "schema-diagnostics-profile-check",
+      "path": "docs/cypher/diagnostics.md",
+      "setup": [
+        "schema-diagnostics-profile-write"
+      ],
+      "columns": [
+        "count"
+      ],
+      "rows": [
+        [
+          1
+        ]
+      ]
+    },
+    {
+      "id": "schema-diagnostics-functions",
+      "path": "docs/cypher/diagnostics.md",
+      "columns": [
+        "name",
+        "aggregating"
+      ],
+      "rows": [
+        [
+          "abs",
+          false
+        ],
+        [
+          "count",
+          true
+        ]
+      ]
+    },
+    {
+      "id": "schema-diagnostics-procedures",
+      "path": "docs/cypher/diagnostics.md",
+      "columns": [
+        "name"
+      ],
+      "rows": [
+        [
+          "db.labels"
+        ]
+      ]
+    },
+    {
+      "id": "schema-diagnostics-show-error",
+      "path": "docs/cypher/diagnostics.md",
+      "error": "SEMANTIC_ERROR"
+    }
+  ]
+}

@@ -99,6 +99,8 @@ fn run_boundary_checks(
     synthetic: &str,
     checks: &mut Vec<&'static str>,
 ) -> Result<(), Box<dyn Error>> {
+    check_safe_execution_never_calls_provider(lithograph, synthetic)?;
+    checks.push("safe-execution-blocks-provider-before-embedding");
     check_graph_view_relationships(lithograph, synthetic)?;
     checks.push("relationship-endpoint-graph-view");
     check_history_provider_selection(lithograph, synthetic)?;
@@ -122,6 +124,46 @@ fn run_boundary_checks(
     check_explicit_transaction_staged_semantic(lithograph, synthetic)?;
     checks.push("explicit-transaction-staged-semantic");
     Ok(())
+}
+
+fn check_safe_execution_never_calls_provider(
+    lithograph: &str,
+    synthetic: &str,
+) -> Result<(), Box<dyn Error>> {
+    let fixture = FileDatabaseFixture::new(0x1316)?;
+    let create = semantic_node_create("safe_sem", "Doc", "text", "synthetic-a", "{}", 4, "cosine");
+    let query = "CALL db.index.semantic.queryNodes('safe_sem','probe',{limit:1}) YIELD node RETURN node.text";
+    let safe = sql_literal(r#"{"readOnlyNoExternalIO":true}"#);
+    let (_, stdout, stderr) = execute_script_allowing_failure(
+        fixture.path(),
+        &format!(
+            "{lithograph}\n{synthetic}\n.bail off\n\
+             SELECT lithograph_init();\n\
+             SELECT lithograph('CREATE (:Doc {{text:''hello''}}) FINISH');\n\
+             SELECT lithograph({create});\n\
+             SELECT 'before=' || synthetic_embedding_embed_calls('synthetic-a');\n\
+             SELECT lithograph({query}, '{{}}', {safe});\n\
+             SELECT event FROM lithograph_rows({query}, '{{}}', {safe});\n\
+             SELECT 'after=' || synthetic_embedding_embed_calls('synthetic-a');\n\
+             SELECT lithograph({query});\n\
+             SELECT 'default=' || synthetic_embedding_embed_calls('synthetic-a');",
+            create = sql_literal(&create),
+            query = sql_literal(query),
+        ),
+    )?;
+    require_line(&stdout, "before=0")?;
+    require_line(&stdout, "after=0")?;
+    require(
+        prefixed_value(&stdout, "default=")?.parse::<u64>()? > 0,
+        "default Semantic execution did not reach the synthetic Provider",
+    )?;
+    require(
+        stderr
+            .matches("LITHOGRAPH_INVALID_ARGUMENT: options.readOnlyNoExternalIO forbids")
+            .count()
+            == 2,
+        "safe scalar/rows Semantic execution did not both reject before Provider call",
+    )
 }
 
 fn required_path_arg(index: usize, label: &str) -> Result<PathBuf, Box<dyn Error>> {

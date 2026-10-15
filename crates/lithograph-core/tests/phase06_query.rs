@@ -5,6 +5,8 @@ use lithograph_core::query::{ExecutionOptions, QueryCursor, prepare};
 use lithograph_core::storage::{create_storage_schema, initialize_root};
 use rusqlite::Connection;
 
+#[path = "phase06_query/conversion.rs"]
+mod conversion;
 #[path = "phase06_query/mutation.rs"]
 mod mutation;
 #[path = "phase06_query/path_scale.rs"]

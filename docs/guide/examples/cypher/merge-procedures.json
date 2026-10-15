@@ -1,0 +1,336 @@
+{
+  "examples": [
+    {
+      "id": "mp-start",
+      "path": "docs/reference/procedures/merge.md",
+      "columns": [
+        "targetBranch",
+        "revision",
+        "status",
+        "unresolved",
+        "sameCommit"
+      ],
+      "rows": [
+        [
+          "main",
+          1,
+          "up_to_date",
+          0,
+          true
+        ]
+      ]
+    },
+    {
+      "id": "mp-get",
+      "path": "docs/reference/procedures/merge.md",
+      "columns": [
+        "revision",
+        "status",
+        "unresolved",
+        "sameSession"
+      ],
+      "rows": [
+        [
+          1,
+          "up_to_date",
+          0,
+          true
+        ]
+      ]
+    },
+    {
+      "id": "mp-list",
+      "path": "docs/reference/procedures/merge.md",
+      "columns": [
+        "sameSession",
+        "targetBranch",
+        "revision",
+        "hasCreationTime",
+        "cursor"
+      ],
+      "rows": [
+        [
+          true,
+          "main",
+          1,
+          true,
+          null
+        ]
+      ]
+    },
+    {
+      "id": "mp-list-invalid-limit",
+      "path": "docs/reference/procedures/merge.md",
+      "error": "INVALID_ARGUMENT"
+    },
+    {
+      "id": "mp-list-safe",
+      "path": "docs/reference/procedures/merge.md",
+      "options": {
+        "readOnlyNoExternalIO": true
+      },
+      "columns": [
+        "targetBranch",
+        "revision"
+      ],
+      "rows": []
+    },
+    {
+      "id": "mp-fixture-base",
+      "path": "docs/reference/procedures/merge.md",
+      "columns": [],
+      "rows": []
+    },
+    {
+      "id": "mp-fixture-branch",
+      "path": "docs/reference/procedures/merge.md",
+      "setup": [
+        "mp-fixture-base"
+      ],
+      "columns": [
+        "name"
+      ],
+      "rows": [
+        [
+          "review"
+        ]
+      ]
+    },
+    {
+      "id": "mp-fixture-ours",
+      "path": "docs/reference/procedures/merge.md",
+      "setup": [
+        "mp-fixture-branch"
+      ],
+      "columns": [
+        "name"
+      ],
+      "rows": [
+        [
+          "ours"
+        ]
+      ]
+    },
+    {
+      "id": "mp-fixture-theirs",
+      "path": "docs/reference/procedures/merge.md",
+      "setup": [
+        "mp-fixture-ours"
+      ],
+      "options": {
+        "branch": "review"
+      },
+      "columns": [
+        "name"
+      ],
+      "rows": [
+        [
+          "theirs"
+        ]
+      ]
+    },
+    {
+      "id": "mp-conflicts",
+      "path": "docs/reference/procedures/merge.md",
+      "setup": [
+        "mp-fixture-theirs"
+      ],
+      "columns": [
+        "status",
+        "unresolved",
+        "base",
+        "ours",
+        "theirs",
+        "resolution",
+        "cursor"
+      ],
+      "rows": [
+        [
+          "conflicted",
+          1,
+          "base",
+          "ours",
+          "theirs",
+          null,
+          null
+        ]
+      ]
+    },
+    {
+      "id": "mp-resolve",
+      "path": "docs/reference/procedures/merge.md",
+      "setup": [
+        "mp-fixture-theirs"
+      ],
+      "columns": [
+        "nextRevision",
+        "status",
+        "unresolved"
+      ],
+      "rows": [
+        [
+          2,
+          "ready",
+          0
+        ]
+      ]
+    },
+    {
+      "id": "mp-resolve-value",
+      "path": "docs/reference/procedures/merge.md",
+      "setup": [
+        "mp-fixture-theirs"
+      ],
+      "columns": [
+        "nextRevision",
+        "status",
+        "unresolved"
+      ],
+      "rows": [
+        [
+          2,
+          "ready",
+          0
+        ]
+      ]
+    },
+    {
+      "id": "mp-resolve-duplicate",
+      "path": "docs/reference/procedures/merge.md",
+      "setup": [
+        "mp-fixture-theirs"
+      ],
+      "error": "INVALID_ARGUMENT"
+    },
+    {
+      "id": "mp-finalize",
+      "path": "docs/reference/procedures/merge.md",
+      "setup": [
+        "mp-fixture-theirs"
+      ],
+      "columns": [
+        "prepared",
+        "unresolved",
+        "status",
+        "parentCount"
+      ],
+      "rows": [
+        [
+          "ready",
+          0,
+          "merged",
+          2
+        ]
+      ]
+    },
+    {
+      "id": "mp-finalize-up-to-date",
+      "path": "docs/reference/procedures/merge.md",
+      "columns": [
+        "status",
+        "resolvedCommit"
+      ],
+      "rows": [
+        [
+          "up_to_date",
+          true
+        ]
+      ]
+    },
+    {
+      "id": "mp-finalize-unresolved",
+      "path": "docs/reference/procedures/merge.md",
+      "setup": [
+        "mp-fixture-theirs"
+      ],
+      "error": "MERGE_CONFLICT"
+    },
+    {
+      "id": "mp-abort",
+      "path": "docs/reference/procedures/merge.md",
+      "columns": [
+        "removed"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "mp-abort-stale",
+      "path": "docs/reference/procedures/merge.md",
+      "setup": [
+        "mp-fixture-theirs"
+      ],
+      "error": "MERGE_SESSION_CHANGED"
+    },
+    {
+      "id": "mp-get-missing",
+      "path": "docs/reference/procedures/merge.md",
+      "error": "MERGE_SESSION_NOT_FOUND"
+    },
+    {
+      "id": "mp-start-safe-rejected",
+      "path": "docs/reference/procedures/merge.md",
+      "options": {
+        "readOnlyNoExternalIO": true
+      },
+      "error": "INVALID_ARGUMENT"
+    },
+    {
+      "id": "mp-resolve-noop",
+      "path": "docs/reference/procedures/merge.md",
+      "setup": [
+        "mp-fixture-theirs"
+      ],
+      "columns": [
+        "firstRevision",
+        "repeatedRevision"
+      ],
+      "rows": [
+        [
+          2,
+          2
+        ]
+      ]
+    },
+    {
+      "id": "mp-fixture-fast-forward",
+      "path": "docs/reference/procedures/merge.md",
+      "setup": [
+        "mp-fixture-branch"
+      ],
+      "options": {
+        "branch": "review"
+      },
+      "columns": [
+        "name"
+      ],
+      "rows": [
+        [
+          "source-only"
+        ]
+      ]
+    },
+    {
+      "id": "mp-finalize-fast-forward",
+      "path": "docs/reference/procedures/merge.md",
+      "setup": [
+        "mp-fixture-fast-forward"
+      ],
+      "columns": [
+        "prepared",
+        "status",
+        "sourceCommit"
+      ],
+      "rows": [
+        [
+          "fast_forward",
+          "fast_forward",
+          true
+        ]
+      ]
+    }
+  ]
+}

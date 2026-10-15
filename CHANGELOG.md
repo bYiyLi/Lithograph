@@ -4,6 +4,26 @@ Lithograph 的用户可见版本变化记录在此文件。版本遵循 Semantic
 
 ## Unreleased
 
+## 0.3.1 - 2026-10-16
+
+### Added
+
+- `readOnlyNoExternalIO` execution option：在共享 Core prepare 阶段限制完整 AST 的写入和外部 I/O，支持 scalar、rows 与 active explicit transaction。
+- 完整中文开发者手册、Cypher 语言与函数参考、分类 Procedure、Provider 配置/SPI，以及可执行文档示例、覆盖和链接门禁。
+
+### Fixed
+
+- UUID 字符串转换的 frontend 类型检查与实际 runtime 对齐。
+- 修复 regex operator、双写引号、Map projection、子查询投影 alias/modifier、count DISTINCT-star 校验和 Full-text 纯负查询。
+- INTEGER64 Vector List/String 构造保留原整数精度，严格拒绝整数文本越界。
+- 修复 rows 的约束验证和 Full-text CREATE TEMP Schema 自锁；tokenizer validation 与原生 SQLite specification grammar 对齐。
+- 更新 rustls 至 0.23.46，满足当前安全公告要求。
+
+### Compatibility
+
+- 默认执行语义、`CY25-2026.08`、storage format 3 与 Provider SPI V1 保持兼容。
+- v0.2.x format 4 数据库仍须按历史升级边界处理，不能通过修改 marker 迁移。
+
 ## 0.3.0 - 2026-09-21
 
 Phase 15 SQL-only execution、true streaming 与 Provider-owned cache release。

@@ -331,6 +331,7 @@ pub fn prepare(
     let ast = cypher::parse(query)?;
     cypher::analyze(&ast, query)?;
     validate_parameters(&ast.root, &params)?;
+    super::safety::validate(&ast, &options)?;
     let context = prepare_context(connection, &ast, params, &options)?;
     if let Some(schema) = super::schema::prepare_schema(
         connection,
@@ -1069,8 +1070,7 @@ pub(crate) fn lower_projection(
             let expression_node = first_surface_expression(item)?;
             let expression = compile_expression(expression_node)?;
             let column = item
-                .descendants()
-                .find(|n| matches!(n.kind, AstKind::ProjectionAlias))
+                .surface_projection_alias()
                 .and_then(|n| n.text.clone())
                 .or_else(|| {
                     source

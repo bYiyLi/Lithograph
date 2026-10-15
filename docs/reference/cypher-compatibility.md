@@ -1,4 +1,4 @@
-# Cypher 25 Compatibility — current development baseline
+# Cypher 25 兼容范围 — v0.3.1
 
 Lithograph 当前语言基线仍是冻结的 **`CY25-2026.08`**：Cypher 25 current-graph surface，以及截至 2026.08 公开 additions；证据于 2026-09-09 冻结。它不是“任意未来 Cypher 25 文档页面上的所有内容”，也不是 Neo4j Server 的全部产品能力。
 
@@ -18,7 +18,7 @@ Lithograph 当前语言基线仍是冻结的 **`CY25-2026.08`**：Cypher 25 curr
 
 完整 clause/feature 验收清单由 [Compatibility Matrix](../development/cypher25-compatibility.md) 管理。本页是用户侧范围摘要，不另设第二套验收状态。每个输入仍需满足准确 syntax、类型、作用域、adapter 与事务限制。
 
-[Function Reference](functions.md) 保留冻结 profile 的 function inventory；[Procedure Inventory](procedure-inventory.md) 区分 33 个 v0.1.0 历史签名与当前 5 个 Managed Semantic procedure，当前 `SHOW PROCEDURES` 总数为 38。客户端可以通过 SHOW 自检，但不能因为名称登记存在就忽略 transaction/context 限制。
+[Function Reference](functions.md) 与 [Procedure Inventory](procedure-inventory.md) 由当前版本的运行时清单核对。v0.3.1 的 `SHOW PROCEDURES` 共 38 个条目，包含 5 个 Managed Semantic Procedure。客户端可以通过 SHOW 自检，但不能因为名称登记存在就忽略 transaction/context 限制；参数与实际返回类型以完整接口正文为准。
 
 ## 不属于此 compatibility profile
 
@@ -40,6 +40,6 @@ Lithograph 不提供 Bolt/HTTP 数据库服务器或 Neo4j driver 协议。APOC 
 
 仓库记录的 release-level inherited openCypher TCK evidence 为：3,897 个 scenario 中 3,777 个 applicable 全部通过，其余 120 个有明确的 profile 排除或 superseded 原因；另有 Cypher 25 专项 fixtures 与 feature/regression suites。该证据记录于 [兼容矩阵](../development/cypher25-compatibility.md)，不是本次编写手册重新运行出来的全套测试结果。
 
-本次文档验证另行使用已发布 v0.1.0 制品执行指南 SQL、Python 与 C 示例，并记录实际发现的 adapter / introspection 差异；范围见 [验证记录](../guide/examples/README.md)。测试通过不构成任意输入、任意数据规模下绝无缺陷的保证。
+v0.3.1 文档示例通过目标版本的真实 SQLite SQL surface 执行，具体范围见 [验证入口](../guide/examples/README.md) 与 [文档 Phase](../development/phases/17-developer-documentation-release.md)。v0.1.0 的实际制品验证仍作为历史记录保留，不能替代本版本验收。测试通过只证明对应输入和环境。
 
-未来 profile 更新应明确新的版本和变化；v0.1.0 文档不根据外部手册的后续更新静默改变原有能力范围。
+完整的语言说明见 [Cypher 手册](../cypher/index.md)。未来 Profile 升级单独明确版本和变化，固定 tag 的手册不随外部在线文档静默扩大能力范围。

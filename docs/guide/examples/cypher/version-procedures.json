@@ -1,0 +1,434 @@
+{
+  "examples": [
+    {
+      "id": "vp-branch-create",
+      "path": "docs/reference/procedures/versioning.md",
+      "columns": [
+        "name",
+        "valid"
+      ],
+      "rows": [
+        [
+          "feature",
+          true
+        ]
+      ]
+    },
+    {
+      "id": "vp-branch-list",
+      "path": "docs/reference/procedures/versioning.md",
+      "setup": [
+        "vp-branch-create"
+      ],
+      "columns": [
+        "name",
+        "active"
+      ],
+      "rows": [
+        [
+          "feature",
+          false
+        ],
+        [
+          "main",
+          true
+        ]
+      ]
+    },
+    {
+      "id": "vp-branch-checkout",
+      "path": "docs/reference/procedures/versioning.md",
+      "setup": [
+        "vp-branch-create"
+      ],
+      "columns": [
+        "name"
+      ],
+      "rows": [
+        [
+          "feature"
+        ]
+      ]
+    },
+    {
+      "id": "vp-branch-delete",
+      "path": "docs/reference/procedures/versioning.md",
+      "setup": [
+        "vp-branch-create"
+      ],
+      "columns": [
+        "name"
+      ],
+      "rows": [
+        [
+          "feature"
+        ]
+      ]
+    },
+    {
+      "id": "vp-branch-delete-main-error",
+      "path": "docs/reference/procedures/versioning.md",
+      "error": "INVALID_ARGUMENT"
+    },
+    {
+      "id": "vp-tag-create",
+      "path": "docs/reference/procedures/versioning.md",
+      "columns": [
+        "name"
+      ],
+      "rows": [
+        [
+          "baseline"
+        ]
+      ]
+    },
+    {
+      "id": "vp-tag-list",
+      "path": "docs/reference/procedures/versioning.md",
+      "setup": [
+        "vp-tag-create"
+      ],
+      "columns": [
+        "name"
+      ],
+      "rows": [
+        [
+          "baseline"
+        ]
+      ]
+    },
+    {
+      "id": "vp-tag-move",
+      "path": "docs/reference/procedures/versioning.md",
+      "setup": [
+        "vp-tag-create",
+        "vp-commit-create"
+      ],
+      "columns": [
+        "name",
+        "moved"
+      ],
+      "rows": [
+        [
+          "baseline",
+          true
+        ]
+      ]
+    },
+    {
+      "id": "vp-tag-delete",
+      "path": "docs/reference/procedures/versioning.md",
+      "setup": [
+        "vp-tag-create"
+      ],
+      "columns": [
+        "name"
+      ],
+      "rows": [
+        [
+          "baseline"
+        ]
+      ]
+    },
+    {
+      "id": "vp-commit-get",
+      "path": "docs/reference/procedures/versioning.md",
+      "columns": [
+        "parentCount",
+        "hasData",
+        "data"
+      ],
+      "rows": [
+        [
+          0,
+          false,
+          null
+        ]
+      ]
+    },
+    {
+      "id": "vp-commit-create",
+      "path": "docs/reference/procedures/versioning.md",
+      "columns": [
+        "valid"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "vp-data-set",
+      "path": "docs/reference/procedures/versioning.md",
+      "columns": [
+        "stage",
+        "approved"
+      ],
+      "rows": [
+        [
+          2,
+          true
+        ]
+      ]
+    },
+    {
+      "id": "vp-data-null",
+      "path": "docs/reference/procedures/versioning.md",
+      "columns": [
+        "data"
+      ],
+      "rows": [
+        [
+          null
+        ]
+      ]
+    },
+    {
+      "id": "vp-data-null-get",
+      "path": "docs/reference/procedures/versioning.md",
+      "setup": [
+        "vp-data-null"
+      ],
+      "columns": [
+        "hasData",
+        "data"
+      ],
+      "rows": [
+        [
+          true,
+          null
+        ]
+      ]
+    },
+    {
+      "id": "vp-data-clear",
+      "path": "docs/reference/procedures/versioning.md",
+      "setup": [
+        "vp-data-set"
+      ],
+      "columns": [
+        "valid"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "vp-log",
+      "path": "docs/reference/procedures/versioning.md",
+      "columns": [
+        "parentCount",
+        "cursor"
+      ],
+      "rows": [
+        [
+          0,
+          null
+        ]
+      ]
+    },
+    {
+      "id": "vp-log-limit-error",
+      "path": "docs/reference/procedures/versioning.md",
+      "error": "INVALID_ARGUMENT"
+    },
+    {
+      "id": "vp-diff",
+      "path": "docs/reference/procedures/versioning.md",
+      "columns": [
+        "format",
+        "operations",
+        "sameIdentity"
+      ],
+      "rows": [
+        [
+          1,
+          0,
+          true
+        ]
+      ]
+    },
+    {
+      "id": "vp-patch-empty",
+      "path": "docs/reference/procedures/versioning.md",
+      "columns": [
+        "valid"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "vp-rebase",
+      "path": "docs/reference/procedures/versioning.md",
+      "columns": [
+        "status",
+        "rewritten",
+        "conflicts"
+      ],
+      "rows": [
+        [
+          "up_to_date",
+          0,
+          0
+        ]
+      ]
+    },
+    {
+      "id": "vp-rebase-options-error",
+      "path": "docs/reference/procedures/versioning.md",
+      "error": "INVALID_ARGUMENT"
+    },
+    {
+      "id": "vp-write",
+      "path": "docs/reference/procedures/versioning.md",
+      "columns": [
+        "name"
+      ],
+      "rows": [
+        [
+          "Alice"
+        ]
+      ]
+    },
+    {
+      "id": "vp-squash",
+      "path": "docs/reference/procedures/versioning.md",
+      "setup": [
+        "vp-tag-create",
+        "vp-write"
+      ],
+      "columns": [
+        "hadHistory",
+        "replaced"
+      ],
+      "rows": [
+        [
+          true,
+          true
+        ]
+      ]
+    },
+    {
+      "id": "vp-reset",
+      "path": "docs/reference/procedures/versioning.md",
+      "setup": [
+        "vp-tag-create",
+        "vp-write"
+      ],
+      "columns": [
+        "moved"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "vp-revert",
+      "path": "docs/reference/procedures/versioning.md",
+      "setup": [
+        "vp-write"
+      ],
+      "columns": [
+        "valid"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "vp-revert-descriptor-error",
+      "path": "docs/reference/procedures/versioning.md",
+      "error": "INVALID_ARGUMENT"
+    },
+    {
+      "id": "vp-log-continuation",
+      "path": "docs/reference/procedures/versioning.md",
+      "setup": [
+        "vp-commit-create"
+      ],
+      "columns": [
+        "parentCount",
+        "nextCursor"
+      ],
+      "rows": [
+        [
+          0,
+          null
+        ]
+      ]
+    },
+    {
+      "id": "vp-patch-branch",
+      "path": "docs/reference/procedures/versioning.md",
+      "setup": [
+        "vp-tag-create",
+        "vp-write"
+      ],
+      "columns": [
+        "name"
+      ],
+      "rows": [
+        [
+          "replay"
+        ]
+      ]
+    },
+    {
+      "id": "vp-patch-checkout",
+      "path": "docs/reference/procedures/versioning.md",
+      "setup": [
+        "vp-patch-branch"
+      ],
+      "columns": [
+        "name"
+      ],
+      "rows": [
+        [
+          "replay"
+        ]
+      ]
+    },
+    {
+      "id": "vp-patch-graph",
+      "path": "docs/reference/procedures/versioning.md",
+      "setup": [
+        "vp-patch-checkout"
+      ],
+      "columns": [
+        "operations",
+        "valid"
+      ],
+      "rows": [
+        [
+          3,
+          true
+        ]
+      ]
+    },
+    {
+      "id": "vp-patch-graph-verify",
+      "path": "docs/reference/procedures/versioning.md",
+      "setup": [
+        "vp-patch-graph"
+      ],
+      "columns": [
+        "name"
+      ],
+      "rows": [
+        [
+          "Alice"
+        ]
+      ]
+    }
+  ]
+}

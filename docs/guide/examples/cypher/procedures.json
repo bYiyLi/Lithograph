@@ -1,0 +1,455 @@
+{
+  "examples": [
+    {
+      "id": "proc-graph-data",
+      "path": "docs/reference/procedures/graph.md",
+      "columns": [
+        "created"
+      ],
+      "rows": [
+        [
+          1
+        ]
+      ]
+    },
+    {
+      "id": "proc-graph-labels",
+      "path": "docs/reference/procedures/graph.md",
+      "setup": [
+        "proc-graph-data"
+      ],
+      "columns": [
+        "label"
+      ],
+      "rows": [
+        [
+          "Person"
+        ],
+        [
+          "Visible"
+        ]
+      ]
+    },
+    {
+      "id": "proc-graph-propertykeys",
+      "path": "docs/reference/procedures/graph.md",
+      "setup": [
+        "proc-graph-data"
+      ],
+      "columns": [
+        "propertyKey"
+      ],
+      "rows": [
+        [
+          "name"
+        ],
+        [
+          "since"
+        ]
+      ]
+    },
+    {
+      "id": "proc-graph-relationshiptypes",
+      "path": "docs/reference/procedures/graph.md",
+      "setup": [
+        "proc-graph-data"
+      ],
+      "columns": [
+        "relationshipType"
+      ],
+      "rows": [
+        [
+          "KNOWS"
+        ]
+      ]
+    },
+    {
+      "id": "proc-graph-bad-argument",
+      "path": "docs/reference/procedures/graph.md",
+      "error": "SEMANTIC_ERROR"
+    },
+    {
+      "id": "proc-ft-data",
+      "path": "docs/reference/procedures/fulltext.md",
+      "columns": [
+        "created"
+      ],
+      "rows": [
+        [
+          1
+        ]
+      ]
+    },
+    {
+      "id": "proc-ft-index",
+      "path": "docs/reference/procedures/fulltext.md",
+      "columns": [],
+      "rows": []
+    },
+    {
+      "id": "proc-ft-phrase",
+      "path": "docs/reference/procedures/fulltext.md",
+      "setup": [
+        "proc-ft-data",
+        "proc-ft-index"
+      ],
+      "columns": [
+        "id",
+        "ranked"
+      ],
+      "rows": [
+        [
+          "a",
+          true
+        ]
+      ]
+    },
+    {
+      "id": "proc-ft-flat",
+      "path": "docs/reference/procedures/fulltext.md",
+      "setup": [
+        "proc-ft-data",
+        "proc-ft-index"
+      ],
+      "columns": [
+        "id"
+      ],
+      "rows": [
+        [
+          "a"
+        ]
+      ]
+    },
+    {
+      "id": "proc-ft-field",
+      "path": "docs/reference/procedures/fulltext.md",
+      "setup": [
+        "proc-ft-data",
+        "proc-ft-index"
+      ],
+      "columns": [
+        "id"
+      ],
+      "rows": [
+        [
+          "c"
+        ]
+      ]
+    },
+    {
+      "id": "proc-ft-prefix",
+      "path": "docs/reference/procedures/fulltext.md",
+      "setup": [
+        "proc-ft-data",
+        "proc-ft-index"
+      ],
+      "columns": [
+        "id"
+      ],
+      "rows": [
+        [
+          "c"
+        ]
+      ]
+    },
+    {
+      "id": "proc-ft-boolean",
+      "path": "docs/reference/procedures/fulltext.md",
+      "setup": [
+        "proc-ft-data",
+        "proc-ft-index"
+      ],
+      "columns": [
+        "id"
+      ],
+      "rows": [
+        [
+          "a"
+        ]
+      ]
+    },
+    {
+      "id": "proc-ft-analyzer",
+      "path": "docs/reference/procedures/fulltext.md",
+      "setup": [
+        "proc-ft-data",
+        "proc-ft-index"
+      ],
+      "columns": [
+        "ranked"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "proc-ft-rel-data",
+      "path": "docs/reference/procedures/fulltext.md",
+      "columns": [
+        "created"
+      ],
+      "rows": [
+        [
+          1
+        ]
+      ]
+    },
+    {
+      "id": "proc-ft-rel-index",
+      "path": "docs/reference/procedures/fulltext.md",
+      "columns": [],
+      "rows": []
+    },
+    {
+      "id": "proc-ft-rel-query",
+      "path": "docs/reference/procedures/fulltext.md",
+      "setup": [
+        "proc-ft-rel-data",
+        "proc-ft-rel-index"
+      ],
+      "columns": [
+        "note",
+        "ranked"
+      ],
+      "rows": [
+        [
+          "graph friends",
+          true
+        ]
+      ]
+    },
+    {
+      "id": "proc-ft-invalid-options",
+      "path": "docs/reference/procedures/fulltext.md",
+      "setup": [
+        "proc-ft-data",
+        "proc-ft-index"
+      ],
+      "error": "SEMANTIC_ERROR"
+    },
+    {
+      "id": "proc-sem-data",
+      "path": "docs/reference/procedures/semantic.md",
+      "columns": [
+        "created"
+      ],
+      "rows": [
+        [
+          1
+        ]
+      ]
+    },
+    {
+      "id": "proc-sem-node-create",
+      "path": "docs/reference/procedures/semantic.md",
+      "columns": [],
+      "rows": [],
+      "provider": true
+    },
+    {
+      "id": "proc-sem-rel-data",
+      "path": "docs/reference/procedures/semantic.md",
+      "columns": [
+        "created"
+      ],
+      "rows": [
+        [
+          1
+        ]
+      ]
+    },
+    {
+      "id": "proc-sem-rel-create",
+      "path": "docs/reference/procedures/semantic.md",
+      "columns": [],
+      "rows": [],
+      "provider": true
+    },
+    {
+      "id": "proc-sem-node-query",
+      "path": "docs/reference/procedures/semantic.md",
+      "setup": [
+        "proc-sem-data",
+        "proc-sem-node-create"
+      ],
+      "columns": [
+        "id",
+        "similar"
+      ],
+      "rows": [
+        [
+          "a",
+          true
+        ]
+      ],
+      "provider": true
+    },
+    {
+      "id": "proc-sem-rel-query",
+      "path": "docs/reference/procedures/semantic.md",
+      "setup": [
+        "proc-sem-rel-data",
+        "proc-sem-rel-create"
+      ],
+      "columns": [
+        "text",
+        "similar"
+      ],
+      "rows": [
+        [
+          "alpha",
+          true
+        ]
+      ],
+      "provider": true
+    },
+    {
+      "id": "proc-sem-rebuild",
+      "path": "docs/reference/procedures/semantic.md",
+      "setup": [
+        "proc-sem-data",
+        "proc-sem-node-create"
+      ],
+      "columns": [
+        "name",
+        "indexedEntities",
+        "embeddedTexts"
+      ],
+      "rows": [
+        [
+          "doc_sem",
+          1,
+          1
+        ]
+      ],
+      "provider": true
+    },
+    {
+      "id": "proc-sem-missing-limit",
+      "path": "docs/reference/procedures/semantic.md",
+      "setup": [
+        "proc-sem-data",
+        "proc-sem-node-create"
+      ],
+      "error": "INVALID_ARGUMENT",
+      "provider": true
+    },
+    {
+      "id": "proc-sem-invalid-dimensions",
+      "path": "docs/reference/procedures/semantic.md",
+      "error": "SCHEMA_ERROR",
+      "provider": true
+    },
+    {
+      "id": "proc-maint-data",
+      "path": "docs/reference/procedures/maintenance.md",
+      "columns": [
+        "created"
+      ],
+      "rows": [
+        [
+          1
+        ]
+      ]
+    },
+    {
+      "id": "proc-maint-index",
+      "path": "docs/reference/procedures/maintenance.md",
+      "columns": [],
+      "rows": []
+    },
+    {
+      "id": "proc-maint-rebuild",
+      "path": "docs/reference/procedures/maintenance.md",
+      "setup": [
+        "proc-maint-data",
+        "proc-maint-index"
+      ],
+      "columns": [
+        "name",
+        "indexedEntities"
+      ],
+      "rows": [
+        [
+          "item_sku",
+          2
+        ]
+      ]
+    },
+    {
+      "id": "proc-maint-gc",
+      "path": "docs/reference/procedures/maintenance.md",
+      "columns": [
+        "keptHistory",
+        "validCounts"
+      ],
+      "rows": [
+        [
+          true,
+          true
+        ]
+      ]
+    },
+    {
+      "id": "proc-graph-view-hidden",
+      "path": "docs/reference/procedures/graph.md",
+      "setup": [
+        "proc-graph-data"
+      ],
+      "options": {
+        "graphView": {
+          "requireAllLabels": [
+            "Hidden"
+          ]
+        }
+      },
+      "columns": [
+        "propertyKey"
+      ],
+      "rows": []
+    },
+    {
+      "id": "proc-ft-near",
+      "path": "docs/reference/procedures/fulltext.md",
+      "setup": [
+        "proc-ft-data",
+        "proc-ft-index"
+      ],
+      "columns": [
+        "id"
+      ],
+      "rows": [
+        [
+          "a"
+        ]
+      ]
+    },
+    {
+      "id": "proc-sem-zero-limit",
+      "path": "docs/reference/procedures/semantic.md",
+      "setup": [
+        "proc-sem-data",
+        "proc-sem-node-create"
+      ],
+      "provider": true,
+      "columns": [
+        "id"
+      ],
+      "rows": []
+    },
+    {
+      "id": "proc-ft-pure-prohibited",
+      "path": "docs/reference/procedures/fulltext.md",
+      "setup": [
+        "proc-ft-data",
+        "proc-ft-index"
+      ],
+      "columns": [
+        "id"
+      ],
+      "rows": []
+    }
+  ]
+}

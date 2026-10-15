@@ -1,0 +1,482 @@
+{
+  "examples": [
+    {
+      "id": "foundation-values-numeric",
+      "path": "docs/cypher/types.md",
+      "columns": [
+        "integerType",
+        "floatType",
+        "nullType",
+        "equal"
+      ],
+      "rows": [
+        [
+          "INTEGER NOT NULL",
+          "FLOAT NOT NULL",
+          "NULL",
+          true
+        ]
+      ]
+    },
+    {
+      "id": "foundation-values-overflow",
+      "path": "docs/cypher/types.md",
+      "error": "TYPE_ERROR"
+    },
+    {
+      "id": "foundation-values-containers",
+      "path": "docs/cypher/types.md",
+      "columns": [
+        "nullableList",
+        "emptyList",
+        "mixed",
+        "record"
+      ],
+      "rows": [
+        [
+          "LIST<INTEGER> NOT NULL",
+          "LIST<NOTHING> NOT NULL",
+          [
+            1,
+            "x",
+            null
+          ],
+          {
+            "name": "Ada",
+            "values": [
+              1,
+              2
+            ]
+          }
+        ]
+      ]
+    },
+    {
+      "id": "foundation-values-graph",
+      "path": "docs/cypher/types.md",
+      "columns": [
+        "nodeType",
+        "relationshipType",
+        "pathType",
+        "hops",
+        "samePath"
+      ],
+      "rows": [
+        [
+          "NODE NOT NULL",
+          "RELATIONSHIP NOT NULL",
+          "PATH NOT NULL",
+          1,
+          true
+        ]
+      ]
+    },
+    {
+      "id": "foundation-values-property",
+      "path": "docs/cypher/types.md",
+      "columns": [
+        "items",
+        "empty",
+        "absent",
+        "stored"
+      ],
+      "rows": [
+        [
+          [
+            1,
+            2
+          ],
+          [],
+          true,
+          false
+        ]
+      ]
+    },
+    {
+      "id": "foundation-values-property-mixed-error",
+      "path": "docs/cypher/types.md",
+      "error": "TYPE_ERROR"
+    },
+    {
+      "id": "foundation-values-property-null-error",
+      "path": "docs/cypher/types.md",
+      "error": "TYPE_ERROR"
+    },
+    {
+      "id": "foundation-values-property-map-error",
+      "path": "docs/cypher/types.md",
+      "error": "TYPE_ERROR"
+    },
+    {
+      "id": "foundation-values-temporal",
+      "path": "docs/cypher/types.md",
+      "columns": [
+        "day",
+        "localTime",
+        "zonedTime",
+        "localDateTime",
+        "zonedDateTime",
+        "span"
+      ],
+      "rows": [
+        [
+          "2026-10-15",
+          "12:30:00.123",
+          "12:30:00+08:00",
+          "2026-10-15T12:30:00",
+          "2026-10-15T12:30:00+08:00[Asia/Shanghai]",
+          "P1DT2H"
+        ]
+      ]
+    },
+    {
+      "id": "foundation-values-temporal-arithmetic",
+      "path": "docs/cypher/types.md",
+      "columns": [
+        "monthEnd",
+        "sameDuration",
+        "ordered"
+      ],
+      "rows": [
+        [
+          "2024-02-29",
+          false,
+          null
+        ]
+      ]
+    },
+    {
+      "id": "foundation-values-timezone-error",
+      "path": "docs/cypher/types.md",
+      "error": "TYPE_ERROR"
+    },
+    {
+      "id": "foundation-values-point",
+      "path": "docs/cypher/types.md",
+      "columns": [
+        "longitude",
+        "latitude",
+        "srid",
+        "distance"
+      ],
+      "rows": [
+        [
+          -179.0,
+          30.0,
+          4326,
+          5.0
+        ]
+      ]
+    },
+    {
+      "id": "foundation-values-vector",
+      "path": "docs/cypher/types.md",
+      "columns": [
+        "kind",
+        "dimension",
+        "coordinates",
+        "equal"
+      ],
+      "rows": [
+        [
+          "VECTOR<INTEGER8 NOT NULL>(2) NOT NULL",
+          2,
+          [
+            1,
+            2
+          ],
+          true
+        ]
+      ]
+    },
+    {
+      "id": "foundation-values-vector-dimension-error",
+      "path": "docs/cypher/types.md",
+      "error": "TYPE_ERROR"
+    },
+    {
+      "id": "foundation-values-uuid",
+      "path": "docs/cypher/types.md",
+      "columns": [
+        "canonical",
+        "text",
+        "same",
+        "randomStringType"
+      ],
+      "rows": [
+        [
+          {
+            "$type": "UUID",
+            "value": "550e8400-e29b-41d4-a716-446655440000"
+          },
+          "550e8400-e29b-41d4-a716-446655440000",
+          true,
+          "STRING NOT NULL"
+        ]
+      ]
+    },
+    {
+      "id": "foundation-values-uuid-error",
+      "path": "docs/cypher/types.md",
+      "error": "TYPE_ERROR"
+    },
+    {
+      "id": "foundation-values-type-predicate",
+      "path": "docs/cypher/types.md",
+      "columns": [
+        "nullable",
+        "required",
+        "nullableElements",
+        "requiredElements",
+        "unionType",
+        "shaped"
+      ],
+      "rows": [
+        [
+          true,
+          false,
+          true,
+          false,
+          true,
+          true
+        ]
+      ]
+    },
+    {
+      "id": "foundation-values-conversion",
+      "path": "docs/cypher/types.md",
+      "columns": [
+        "integer",
+        "float",
+        "boolean",
+        "invalidText",
+        "invalidType",
+        "convertedList"
+      ],
+      "rows": [
+        [
+          42,
+          2.5,
+          false,
+          null,
+          null,
+          [
+            3,
+            null,
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "foundation-values-null",
+      "path": "docs/cypher/null-and-ordering.md",
+      "columns": [
+        "equal",
+        "unequal",
+        "missing",
+        "chosen"
+      ],
+      "rows": [
+        [
+          null,
+          null,
+          true,
+          "fallback"
+        ]
+      ]
+    },
+    {
+      "id": "foundation-values-logic",
+      "path": "docs/cypher/null-and-ordering.md",
+      "columns": [
+        "andUnknown",
+        "andFalse",
+        "orTrue",
+        "orUnknown",
+        "xorUnknown",
+        "negated"
+      ],
+      "rows": [
+        [
+          null,
+          false,
+          true,
+          null,
+          null,
+          null
+        ]
+      ]
+    },
+    {
+      "id": "foundation-values-filter-null",
+      "path": "docs/cypher/null-and-ordering.md",
+      "columns": [
+        "keep"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "foundation-values-equality",
+      "path": "docs/cypher/null-and-ordering.md",
+      "columns": [
+        "precise",
+        "same",
+        "booleanOrder"
+      ],
+      "rows": [
+        [
+          false,
+          true,
+          true
+        ]
+      ]
+    },
+    {
+      "id": "foundation-values-cross-type-error",
+      "path": "docs/cypher/null-and-ordering.md",
+      "error": "TYPE_ERROR"
+    },
+    {
+      "id": "foundation-values-vector-equality-error",
+      "path": "docs/cypher/null-and-ordering.md",
+      "error": "TYPE_ERROR"
+    },
+    {
+      "id": "foundation-values-containment",
+      "path": "docs/cypher/null-and-ordering.md",
+      "columns": [
+        "unknown",
+        "found",
+        "empty",
+        "sameEmpty",
+        "unequal",
+        "unknownList"
+      ],
+      "rows": [
+        [
+          null,
+          true,
+          false,
+          true,
+          false,
+          null
+        ]
+      ]
+    },
+    {
+      "id": "foundation-values-comparison",
+      "path": "docs/cypher/null-and-ordering.md",
+      "columns": [
+        "familyOrder",
+        "listOrder",
+        "unknownListOrder",
+        "pointOrder"
+      ],
+      "rows": [
+        [
+          true,
+          true,
+          null,
+          null
+        ]
+      ]
+    },
+    {
+      "id": "foundation-values-order",
+      "path": "docs/cypher/null-and-ordering.md",
+      "columns": [
+        "value"
+      ],
+      "rows": [
+        [
+          {
+            "a": 1
+          }
+        ],
+        [
+          []
+        ],
+        [
+          "b"
+        ],
+        [
+          true
+        ],
+        [
+          1.5
+        ],
+        [
+          2
+        ],
+        [
+          null
+        ]
+      ]
+    },
+    {
+      "id": "foundation-values-nan",
+      "path": "docs/cypher/null-and-ordering.md",
+      "columns": [
+        "detected",
+        "equal",
+        "unequal",
+        "less",
+        "greaterOrEqual",
+        "missing"
+      ],
+      "rows": [
+        [
+          true,
+          false,
+          true,
+          false,
+          false,
+          false
+        ]
+      ]
+    },
+    {
+      "id": "foundation-values-nan-order",
+      "path": "docs/cypher/null-and-ordering.md",
+      "columns": [
+        "kind"
+      ],
+      "rows": [
+        [
+          "-inf"
+        ],
+        [
+          "1"
+        ],
+        [
+          "inf"
+        ],
+        [
+          "NaN"
+        ],
+        [
+          "null"
+        ]
+      ]
+    },
+    {
+      "id": "foundation-values-string-null",
+      "path": "docs/cypher/null-and-ordering.md",
+      "columns": [
+        "stringPredicate",
+        "nullPredicate"
+      ],
+      "rows": [
+        [
+          null,
+          null
+        ]
+      ]
+    }
+  ]
+}

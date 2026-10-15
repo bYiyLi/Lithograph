@@ -1,50 +1,116 @@
-# 当前可执行示例与历史验证记录
+<a id="当前可执行示例与历史验证记录"></a>
 
-这些代码面向第三方应用开发者，不是 SDK，也不要求阅读引擎实现。当前 quickstart / transaction 示例按 v0.3.0 SQL-only 发布基线维护；下方“历史验证”部分单独保留 v0.1.0 发布制品事实。
+# 可运行示例与文档验证
 
-| 文件 | 用途与安全范围 |
+适用版本：Lithograph v0.3.1 · [产品手册](../README.md) · [Cypher 手册](../../cypher/index.md)
+
+这里的应用示例只使用 SQLite SQL，不要求 SDK、账号或外部服务。每次检查都创建临时数据库；不把业务数据库传给验证工具。Python 工具只依赖标准库，要求 Python 3.11+。Python 应用示例另要求其 SQLite 为 3.45.0+ 且允许扩展加载；文档 Cypher 与 inventory 工具还可以使用 `--sqlite3` 指定符合要求的 SQLite CLI。
+
+| 文件 | 用途 |
 | --- | --- |
-| [python_quickstart.py](python_quickstart.py) | 标准库 Python、内存库；SQL 参数绑定、图写入、stream、Tag、history、integrity |
-| [version_workflow.py](version_workflow.py) | 独立临时目录；持久 Session/重连/冲突/CAS、Diff/Patch、Data、历史改写、GC、备份恢复 |
-| [sql_transaction.py](sql_transaction.py) | 标准库 Python；`tx_begin -> lithograph()* -> tx_commit/abort`，不绑定 C API |
-| [native_transaction.c](native_transaction.c) | C 语言 SQLite host；通过标准 SQLite API 加载 extension 并执行同一 SQL-only surface |
-| [verify.py](verify.py) | 提取指南 SQL，在独立空库执行；额外检查失败路径、类型保真和 CSV |
-| [generate_reference.py](generate_reference.py) | 从已验证发布制品的 SHOW 导出重建 function/procedure reference tables |
+| [python_quickstart.py](python_quickstart.py) | 参数绑定、图写入、stream、Tag、history、integrity |
+| [version_workflow.py](version_workflow.py) | Session 重连、冲突/CAS、Diff/Patch、Commit Data、历史改写、GC、备份恢复 |
+| [sql_transaction.py](sql_transaction.py) | 多次 execution 合并为一个 Commit，显式提交和回滚 |
+| [streaming.py](streaming.py) | 完整消费、提前关闭、晚期错误、scalar/rows 混用、事务失败清理和安全选项 |
+| [native_transaction.c](native_transaction.c) | C host 通过标准 SQLite API 加载扩展并执行同一 SQL surface |
+| [verify.py](verify.py) | 按页执行 Guide SQL，并验证拒绝路径、类型编码、回滚与 CSV |
+| [verify_cypher.py](verify_cypher.py) | 从 Markdown 读取所有可执行 Cypher，断言结果和具体错误 |
+| [generate_reference.py](generate_reference.py) | 生成函数/Procedure 索引及受管理的签名块，支持只检查 |
+| [check_docs.py](check_docs.py) | 检查公开手册本地链接、锚点与冻结 Profile 覆盖映射 |
 
-示例不接受已有业务数据库作为默认目标，不需要账户、密钥或外部服务。Python 代码只依赖标准库；运行时仍须能加载本机扩展。C 示例使用 POSIX dynamic loader，不提供未经验证的 Windows build 脚本。
+<a id="应用示例运行"></a>
 
-## 应用示例运行
+## 应用示例
 
-在仓库根目录，替换扩展为实际绝对路径：
+在仓库根目录运行，替换成本机可信扩展的绝对路径：
 
 ```sh
 python3 -B docs/guide/examples/python_quickstart.py /absolute/path/lithograph.dylib
 python3 -B docs/guide/examples/version_workflow.py /absolute/path/lithograph.dylib
 python3 -B docs/guide/examples/sql_transaction.py /absolute/path/lithograph.dylib
+python3 -B docs/guide/examples/streaming.py /absolute/path/lithograph.dylib
 ```
 
-程序全部断言成功后输出 PASS，失败返回非零。C 编译与运行见 [Integration](../integration.md)；当前 C 示例不调用 Lithograph application query ABI。
+断言全部成功后输出 PASS；失败返回非零。C host 的前置条件、编译与运行命令见 [Integration 的 C/C++ 接入](../integration.md#c-host)。
 
-## 文档 SQL 回归
+<a id="文档-sql-回归"></a>
+
+## Guide SQL 回归
 
 ```sh
 python3 -B docs/guide/examples/verify.py /absolute/path/lithograph.dylib \
   --sqlite3 /absolute/path/to/sqlite3
 ```
 
-`--sqlite3` 可省略，省略时只使用 Python 绑定的 SQLite。指定时必须使用实际可执行 CLI 路径；脚本在临时工作目录运行 CLI，因此不依赖当前目录的文件。每篇指南的 SQL 块按出现顺序执行，但不同指南的库彼此隔离。
+每篇指南的 `sql` 块按出现顺序运行；不同页面使用独立空库。`--sqlite3` 指定时还会使用该 CLI 重跑 Guide SQL。实服务 Provider 命令用 `text` 明确标为配置模板；带 Provider 的可执行语义示例使用下面的 synthetic fixture，不静默跳过后记作成功。
 
-该检查不自动执行 shell 安装指令、含示意变量的语法参考、以及明确用于复现旧版本错误的 Known Issues 块。安装制品校验、C host 和历史 Known Issues probes 是独立验证项，不能把“有一个脚本 PASS”写成整套手册全部已验证。
+## Cypher 示例登记与执行
 
-## Reference inventory 再生成
+每个可执行 `cypher` fence 的上一行必须是稳定的 `<!-- example: unique-id -->`。完整语法模板使用 `text` fence。查询文本只保留在 Markdown；`cypher/` 下的 JSON 只保存数据准备关系与断言，例如：
+
+```json
+{
+  "examples": [
+    {
+      "id": "reading-projection",
+      "path": "docs/cypher/reading.md",
+      "setup": ["reading-data"],
+      "params": {"minimum": 18},
+      "options": {},
+      "columns": ["name"],
+      "rows": [["Alice"]]
+    }
+  ]
+}
+```
+
+`setup` 引用其它 Markdown 示例 ID，按依赖顺序执行，同一次数据库准备中去重；循环依赖失败。每个示例在 scalar 和 rows surface 分别重新初始化一个临时数据库，包括以该 surface 执行全部 setup。确定结果使用 `columns` 与 `rows`；生成的 descriptor、计划或其他不稳定值可使用 `row_count` 配合正文解释。预期失败使用 `error: "TYPE_ERROR"` 等精确错误 code。Integer 精确比较，Integer、Float 和 Boolean 不混同；Float 使用相对 `1e-9`、绝对 `1e-12` 容差。
+
+`provider: true` 表示必须加载仓库的 synthetic Provider；缺少 `--provider` 会失败。`fixture: "csv"` 从 [LOAD CSV](../../cypher/load-csv.md) 中带 `fixture` 注释的教学 CSV fence 创建临时 `people.csv` 和 `malformed.csv`，避免重复维护测试数据。参数中的 `fixture:people.csv`、`fixture:malformed.csv` 或 `{{csv_uri}}` 替换为对应 URI，`{{csv_path}}` 替换为 people.csv 本地路径。任何私有路径或 credential 都不进入文件。
+
+```sh
+python3 -B docs/guide/examples/verify_cypher.py --check
+python3 -B docs/guide/examples/verify_cypher.py /absolute/path/lithograph.dylib \
+  --provider /absolute/path/synthetic_embedding_provider.dylib
+```
+
+可用 `--only 'reading|path-'` 定向执行，或 `--surface scalar` / `--surface rows` 诊断单个入口；正式门禁默认执行 `both`，不传 `--only`。rows 检查 columns-first、连续 ordinal、行宽、summary-last 和完整事件消费。登记检查覆盖全部 `docs/cypher/`、`docs/reference/`、`docs/guide/` Markdown：未登记、重名、失效 metadata、缺少断言、setup 循环均失败。`--self-test` 检查验证器不会把大整数精度丢失、错误 code 前缀或循环 setup 判为通过。固定示例结果不会替代完整实现的兼容测试。
+
+<a id="reference-inventory-再生成"></a>
+<a id="reference-generation"></a>
+
+## Reference inventory 生成
+
+直接从目标扩展更新结构化内容：
+
+```sh
+python3 -B docs/guide/examples/generate_reference.py \
+  --extension /absolute/path/lithograph.dylib
+python3 -B docs/guide/examples/generate_reference.py \
+  --extension /absolute/path/lithograph.dylib --check
+```
+
+工具核对 `lithograph_version()` 与 workspace 版本、`CY25-2026.08` 和 storage format 3，再读取 `SHOW FUNCTIONS/PROCEDURES YIELD *`。`--check` 不写文件。只更新函数/Procedure 索引，以及函数正文的 `function-signatures` 标记块；参数语义、错误、null 行为及示例保持人工维护。登记 metadata 不能作为完整解码合同。
+
+需要留存检查输入时，先导出到不提交的 target 目录：
 
 ```sh
 python3 -B docs/guide/examples/verify.py /absolute/path/lithograph.dylib \
-  --export-inventory target/developer-docs-v010 --inventory-only
-python3 -B docs/guide/examples/generate_reference.py target/developer-docs-v010
+  --export-inventory target/developer-docs --inventory-only
+python3 -B docs/guide/examples/generate_reference.py target/developer-docs --check
 ```
 
-导出先检查 `extension == 0.1.0`，再执行 `SHOW FUNCTIONS YIELD *` 与 `SHOW PROCEDURES YIELD *`。JSON 临时输出留在 target，不提交；生成的两个 Markdown 表是用户 Reference。不要拿未来版本的导出覆盖标为 v0.1.0 的表。
+导出包含 `version.json`、`functions.json` 和 `procedures.json`，必须与当前目标版本一致；旧发布事实保留在历史记录中。
+
+## 链接与覆盖门禁
+
+```sh
+python3 -B docs/guide/examples/check_docs.py
+```
+
+默认检查 README、Guide、Cypher、Reference 和 Release 的本地文件/章节链接，并核对 [覆盖映射](../../development/documentation-coverage.json)。分母直接提取自兼容矩阵：每个 capability family 的 `Required coverage` 子项、Cypher 25 Delta 和 Phase 12/13/15 supplemental inventory 都必须逐项映射，不能只登记 family 名称。每个 required 子项提供准确文档落点与已登记示例；非 Cypher runtime/SPI inventory 可以提供 `verification.command/reason`，历史已替代项必须明确标记 `superseded` 并提供原因和当前替代引用。遗漏、重复、未知项和失效引用均失败。函数与 Procedure 的逐项覆盖另外由生成索引的全量行与链接检查共同证明。`scripts/ci.sh` 在真实扩展和 synthetic Provider 构建后运行这些门禁。
+
+下面保留的 v0.1.0 记录只代表当时发布制品，不覆盖当前 v0.3.1 的结果。
 
 ## v0.1.0 历史验证记录
 
@@ -56,7 +122,9 @@ python3 -B docs/guide/examples/generate_reference.py target/developer-docs-v010
 
 解压后的 `lithograph.dylib` 用于示例，而不是用修改后的引擎重新 build 来替代发布版本。基线源码为 v0.1.0 tag 的 `19b5bd9`；编写手册期间未修改引擎实现或重发资产。
 
-## 已验证的范围
+<a id="已验证的范围"></a>
+
+## v0.1.0 已验证的范围
 
 | 检查 | 环境与结果 |
 | --- | --- |
@@ -70,8 +138,10 @@ python3 -B docs/guide/examples/generate_reference.py target/developer-docs-v010
 
 全部验证命令的本地执行结果同时记录在 [当日开发日志](../../vlog/2026-09-16.md)。这个表区分成功教程与预期失败 probe；已知问题见 [Known Issues](../../reference/known-issues.md)，不宣称缺陷已修复。
 
-## 不包含的验证
+<a id="不包含的验证"></a>
 
-本轮没有重新运行六平台 Release Matrix、完整 Rust CI、全部 inherited TCK 或大规模性能压测。Linux/Windows 制品存在于已发布资产，但本轮运行示例的平台是 macOS arm64；也没有为所有 Node.js/Rust/Go binding 声称兼容性已实测。
+## v0.1.0 不包含的验证
 
-本手册和示例不依赖新的 engine behavior。用户文档可以纠错，但 v0.1.0 的事实不能被未来实现结果替换；修复发布缺陷应进入独立的实现、回归和新版本发布流程。
+该次 v0.1.0 文档验证没有重新运行六平台 Release Matrix、完整 Rust CI、全部 inherited TCK 或大规模性能压测。Linux/Windows 制品存在于已发布资产，但本轮运行示例的平台是 macOS arm64；也没有为所有 Node.js/Rust/Go binding 声称兼容性已实测。
+
+当时 v0.1.0 手册与示例不依赖新的 engine behavior。用户文档可以纠错，但 v0.1.0 的事实不能被未来实现结果替换；修复发布缺陷应进入独立的实现、回归和新版本发布流程。

@@ -506,7 +506,10 @@ impl LithographError {
     fn to_sqlite_error(&self) -> SqliteError {
         SqliteError::SqliteFailure(
             ffi::Error::new(self.sqlite_code),
-            Some(self.public_message()),
+            // A vtab callback returns the native code directly. Leave NOMEM
+            // text to SQLite instead of allocating and installing a custom
+            // message that would hide the host's canonical "out of memory".
+            (self.sqlite_code & 0xff != ffi::SQLITE_NOMEM).then(|| self.public_message()),
         )
     }
 

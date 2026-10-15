@@ -732,7 +732,7 @@ pub(super) fn pagination(
     snapshot: &Snapshot<'_>,
     params: &BTreeMap<String, Value>,
 ) -> QueryResult<Option<usize>> {
-    let Some(node) = body.descendants().find(|node| node.kind == kind) else {
+    let Some(node) = body.children.iter().find(|node| node.kind == kind) else {
         return Ok(None);
     };
     let expression = surface_expressions(node)

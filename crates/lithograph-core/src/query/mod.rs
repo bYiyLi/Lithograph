@@ -14,6 +14,7 @@ mod name_expression;
 mod options;
 mod plan;
 pub(crate) mod registry;
+mod safety;
 mod schema;
 mod semantic_index;
 mod spill;

@@ -64,8 +64,7 @@ fn static_projection_aliases(
     };
     for item in direct_projection_items(body) {
         let Some(alias) = item
-            .descendants()
-            .find(|node| node.kind == AstKind::ProjectionAlias)
+            .surface_projection_alias()
             .and_then(|node| node.text.clone())
         else {
             continue;

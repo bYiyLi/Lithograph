@@ -253,16 +253,22 @@ fn check_constructor_failure_is_atomic(
         "{tokenizer_load}\n{lithograph_load}\nSELECT {};",
         lithograph_call(resource_create)
     );
-    match fixture.execute_script(&resource_script) {
-        Err(FixtureError::Sqlite { stderr, .. }) => require(
-            stderr.contains("out of memory"),
-            "SQL Bridge must expose SQLite's canonical SQLITE_NOMEM text",
-        )?,
-        Err(error) => return Err(error.into()),
-        Ok(_) => {
-            return Err(
-                "resource-failing tokenizer constructor unexpectedly published Index".into(),
-            );
+    let resource_rows_script = format!(
+        "{tokenizer_load}\n{lithograph_load}\nSELECT event,data FROM lithograph_rows('{}');",
+        resource_create.replace('\'', "''")
+    );
+    for script in [resource_script, resource_rows_script] {
+        match fixture.execute_script(&script) {
+            Err(FixtureError::Sqlite { stderr, .. }) => require(
+                stderr.contains("out of memory"),
+                "SQL Bridge must expose SQLite's canonical SQLITE_NOMEM text",
+            )?,
+            Err(error) => return Err(error.into()),
+            Ok(_) => {
+                return Err(
+                    "resource-failing tokenizer constructor unexpectedly published Index".into(),
+                );
+            }
         }
     }
     let show = fixture.execute_script(&format!(

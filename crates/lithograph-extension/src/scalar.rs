@@ -267,6 +267,14 @@ unsafe fn scalar_boundary(
 }
 
 unsafe fn scalar_error(context: *mut ffi::sqlite3_context, error: &LithographError) {
+    if error.sqlite_code & 0xff == ffi::SQLITE_NOMEM {
+        // A native callback can return NOMEM without setting SQLite's malloc
+        // failure flag. Use the dedicated API so the host owns canonical OOM
+        // reporting, without allocating a custom error message first.
+        // SAFETY: `context` belongs to the active SQLite scalar callback.
+        unsafe { ffi::sqlite3_result_error_nomem(context) };
+        return;
+    }
     let message = error.public_message();
     let Ok(length) = c_int::try_from(message.len()) else {
         let fallback = b"LITHOGRAPH_RESOURCE_ERROR: scalar error message is too large";

@@ -1,0 +1,3349 @@
+{
+  "profile": "CY25-2026.08",
+  "capabilities": [
+    {
+      "family": "Lexical / identifiers / parameters",
+      "path": "docs/cypher/syntax.md",
+      "examples": [
+        "foundation-syntax-version",
+        "foundation-syntax-names",
+        "foundation-syntax-literals",
+        "foundation-syntax-params",
+        "foundation-syntax-missing-param",
+        "foundation-syntax-comments",
+        "mp-list-safe",
+        "mp-start-safe-rejected"
+      ],
+      "required": [
+        {
+          "item": "keywords",
+          "path": "docs/cypher/syntax.md",
+          "anchor": "identifiers",
+          "examples": [
+            "foundation-syntax-version",
+            "foundation-syntax-names"
+          ]
+        },
+        {
+          "item": "escaped/unescaped identifiers",
+          "path": "docs/cypher/syntax.md",
+          "anchor": "identifiers",
+          "examples": [
+            "foundation-syntax-names"
+          ]
+        },
+        {
+          "item": "Unicode",
+          "path": "docs/cypher/syntax.md",
+          "anchor": "identifiers",
+          "examples": [
+            "foundation-syntax-names",
+            "foundation-syntax-literals"
+          ]
+        },
+        {
+          "item": "parameter naming",
+          "path": "docs/cypher/syntax.md",
+          "anchor": "parameters",
+          "examples": [
+            "foundation-syntax-params",
+            "foundation-syntax-missing-param"
+          ]
+        },
+        {
+          "item": "comments",
+          "path": "docs/cypher/syntax.md",
+          "anchor": "comments",
+          "examples": [
+            "foundation-syntax-comments"
+          ]
+        },
+        {
+          "item": "query options",
+          "path": "docs/reference/execution-options.md",
+          "anchor": "read-only-no-external-io",
+          "examples": [
+            "mp-list-safe",
+            "mp-start-safe-rejected"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "Literals / operators",
+      "path": "docs/cypher/expressions.md",
+      "examples": [
+        "foundation-expression-precedence",
+        "foundation-values-logic",
+        "foundation-syntax-literals",
+        "foundation-values-numeric",
+        "foundation-values-overflow",
+        "foundation-syntax-names",
+        "foundation-expression-concat",
+        "foundation-expression-comprehension",
+        "foundation-expression-map",
+        "foundation-expression-access",
+        "foundation-values-temporal",
+        "foundation-values-point",
+        "foundation-values-vector",
+        "foundation-values-uuid",
+        "foundation-expression-division-error"
+      ],
+      "required": [
+        {
+          "item": "boolean",
+          "path": "docs/cypher/syntax.md",
+          "anchor": "literals",
+          "examples": [
+            "foundation-expression-precedence",
+            "foundation-values-logic"
+          ]
+        },
+        {
+          "item": "numeric",
+          "path": "docs/cypher/expressions.md",
+          "anchor": "arithmetic",
+          "examples": [
+            "foundation-syntax-literals",
+            "foundation-values-numeric",
+            "foundation-values-overflow"
+          ]
+        },
+        {
+          "item": "string",
+          "path": "docs/cypher/syntax.md",
+          "anchor": "literals",
+          "examples": [
+            "foundation-syntax-literals",
+            "foundation-syntax-names"
+          ]
+        },
+        {
+          "item": "list",
+          "path": "docs/cypher/expressions.md",
+          "anchor": "comprehensions",
+          "examples": [
+            "foundation-expression-concat",
+            "foundation-expression-comprehension"
+          ]
+        },
+        {
+          "item": "map",
+          "path": "docs/cypher/expressions.md",
+          "anchor": "maps",
+          "examples": [
+            "foundation-expression-map",
+            "foundation-expression-access"
+          ]
+        },
+        {
+          "item": "temporal/spatial/vector/UUID literals/constructors",
+          "path": "docs/cypher/types.md",
+          "anchor": "value-families",
+          "examples": [
+            "foundation-values-temporal",
+            "foundation-values-point",
+            "foundation-values-vector",
+            "foundation-values-uuid"
+          ]
+        },
+        {
+          "item": "operator precedence",
+          "path": "docs/cypher/expressions.md",
+          "anchor": "precedence",
+          "examples": [
+            "foundation-expression-precedence",
+            "foundation-expression-division-error"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "Null / equality / ordering",
+      "path": "docs/cypher/null-and-ordering.md",
+      "examples": [
+        "foundation-values-logic",
+        "foundation-values-filter-null",
+        "foundation-values-string-null",
+        "foundation-values-comparison",
+        "foundation-values-cross-type-error",
+        "foundation-values-order",
+        "foundation-values-nan-order",
+        "foundation-values-nan",
+        "foundation-values-equality"
+      ],
+      "required": [
+        {
+          "item": "three-valued logic",
+          "path": "docs/cypher/null-and-ordering.md",
+          "anchor": "three-valued-logic",
+          "examples": [
+            "foundation-values-logic",
+            "foundation-values-filter-null",
+            "foundation-values-string-null"
+          ]
+        },
+        {
+          "item": "comparison",
+          "path": "docs/cypher/null-and-ordering.md",
+          "anchor": "direct-comparison",
+          "examples": [
+            "foundation-values-comparison",
+            "foundation-values-cross-type-error"
+          ]
+        },
+        {
+          "item": "ordering",
+          "path": "docs/cypher/null-and-ordering.md",
+          "anchor": "order-by",
+          "examples": [
+            "foundation-values-order",
+            "foundation-values-nan-order"
+          ]
+        },
+        {
+          "item": "NaN",
+          "path": "docs/cypher/null-and-ordering.md",
+          "anchor": "nan-and-infinity",
+          "examples": [
+            "foundation-values-nan",
+            "foundation-values-nan-order"
+          ]
+        },
+        {
+          "item": "type ordering where specified",
+          "path": "docs/cypher/null-and-ordering.md",
+          "anchor": "order-by",
+          "examples": [
+            "foundation-values-order",
+            "foundation-values-equality"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "MATCH",
+      "path": "docs/cypher/reading.md",
+      "examples": [
+        "foundation-reading-match",
+        "path-pattern-named-path",
+        "path-pattern-label-expression",
+        "path-pattern-inline-predicate",
+        "path-pattern-connected"
+      ],
+      "required": [
+        {
+          "item": "node/relationship pattern",
+          "path": "docs/cypher/reading.md",
+          "anchor": "match",
+          "examples": [
+            "foundation-reading-match",
+            "path-pattern-named-path"
+          ]
+        },
+        {
+          "item": "labels/types/property predicates",
+          "path": "docs/cypher/patterns.md",
+          "anchor": "pattern-properties-predicates",
+          "examples": [
+            "path-pattern-label-expression",
+            "path-pattern-inline-predicate"
+          ]
+        },
+        {
+          "item": "multiple patterns",
+          "path": "docs/cypher/patterns.md",
+          "anchor": "pattern-bindings",
+          "examples": [
+            "path-pattern-connected"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "OPTIONAL MATCH",
+      "path": "docs/cypher/reading.md",
+      "examples": [
+        "foundation-reading-optional",
+        "schema-search-null",
+        "foundation-reading-optional-filter"
+      ],
+      "required": [
+        {
+          "item": "outer/null preservation",
+          "path": "docs/cypher/reading.md",
+          "anchor": "optional-match",
+          "examples": [
+            "foundation-reading-optional",
+            "schema-search-null"
+          ]
+        },
+        {
+          "item": "predicate placement/composition",
+          "path": "docs/cypher/reading.md",
+          "anchor": "optional-match",
+          "examples": [
+            "foundation-reading-optional",
+            "foundation-reading-optional-filter"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "FILTER / WHERE",
+      "path": "docs/cypher/reading.md",
+      "examples": [
+        "foundation-reading-filter",
+        "foundation-expression-predicates",
+        "path-pattern-comprehension",
+        "foundation-reading-with",
+        "foundation-model-scope-error"
+      ],
+      "required": [
+        {
+          "item": "predicate expressions",
+          "path": "docs/cypher/reading.md",
+          "anchor": "filter",
+          "examples": [
+            "foundation-reading-filter",
+            "foundation-expression-predicates"
+          ]
+        },
+        {
+          "item": "pattern predicates",
+          "path": "docs/cypher/patterns.md",
+          "anchor": "pattern-expression",
+          "examples": [
+            "path-pattern-comprehension"
+          ]
+        },
+        {
+          "item": "scope",
+          "path": "docs/cypher/reading.md",
+          "anchor": "return-with",
+          "examples": [
+            "foundation-reading-with",
+            "foundation-model-scope-error"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "RETURN / WITH / LET",
+      "path": "docs/cypher/reading.md",
+      "examples": [
+        "foundation-reading-with",
+        "foundation-reading-distinct",
+        "foundation-model-scope",
+        "foundation-model-scope-error",
+        "foundation-reading-let",
+        "foundation-reading-let-error",
+        "foundation-reading-return-star",
+        "foundation-aggregation-filter",
+        "foundation-aggregation-group-error",
+        "foundation-reading-pagination",
+        "foundation-aggregation-collect-order"
+      ],
+      "required": [
+        {
+          "item": "projection",
+          "path": "docs/cypher/reading.md",
+          "anchor": "return-with",
+          "examples": [
+            "foundation-reading-with",
+            "foundation-reading-distinct"
+          ]
+        },
+        {
+          "item": "alias/scope",
+          "path": "docs/cypher/reading.md",
+          "anchor": "let",
+          "examples": [
+            "foundation-model-scope",
+            "foundation-model-scope-error",
+            "foundation-reading-let",
+            "foundation-reading-let-error"
+          ]
+        },
+        {
+          "item": "star",
+          "path": "docs/cypher/reading.md",
+          "anchor": "return-star",
+          "examples": [
+            "foundation-reading-return-star"
+          ]
+        },
+        {
+          "item": "aggregation boundary",
+          "path": "docs/cypher/aggregation.md",
+          "anchor": "composition",
+          "examples": [
+            "foundation-aggregation-filter",
+            "foundation-aggregation-group-error"
+          ]
+        },
+        {
+          "item": "ordering",
+          "path": "docs/cypher/reading.md",
+          "anchor": "order-pagination",
+          "examples": [
+            "foundation-reading-pagination",
+            "foundation-aggregation-collect-order"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "UNWIND / FOR",
+      "path": "docs/cypher/reading.md",
+      "examples": [
+        "foundation-reading-unwind",
+        "foundation-reading-for",
+        "foundation-reading-unwind-scalar",
+        "foundation-model-zero",
+        "foundation-aggregation-empty",
+        "foundation-model-scope-error"
+      ],
+      "required": [
+        {
+          "item": "list-to-row expansion",
+          "path": "docs/cypher/reading.md",
+          "anchor": "unwind-for",
+          "examples": [
+            "foundation-reading-unwind",
+            "foundation-reading-for",
+            "foundation-reading-unwind-scalar"
+          ]
+        },
+        {
+          "item": "null/empty semantics",
+          "path": "docs/cypher/reading.md",
+          "anchor": "unwind-for",
+          "examples": [
+            "foundation-model-zero",
+            "foundation-reading-unwind",
+            "foundation-aggregation-empty"
+          ]
+        },
+        {
+          "item": "scope",
+          "path": "docs/cypher/reading.md",
+          "anchor": "unwind-for",
+          "examples": [
+            "foundation-reading-for",
+            "foundation-model-scope-error"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "Aggregation / GROUP BY",
+      "path": "docs/cypher/aggregation.md",
+      "examples": [
+        "foundation-aggregation-implicit",
+        "foundation-aggregation-explicit",
+        "foundation-aggregation-global",
+        "foundation-aggregation-group-error",
+        "foundation-aggregation-null",
+        "foundation-aggregation-empty",
+        "foundation-aggregation-distinct",
+        "foundation-aggregation-distinct-star-error",
+        "foundation-aggregation-filter",
+        "foundation-aggregation-collect-order"
+      ],
+      "required": [
+        {
+          "item": "implicit/explicit grouping",
+          "path": "docs/cypher/aggregation.md",
+          "anchor": "group-by",
+          "examples": [
+            "foundation-aggregation-implicit",
+            "foundation-aggregation-explicit",
+            "foundation-aggregation-global",
+            "foundation-aggregation-group-error"
+          ]
+        },
+        {
+          "item": "aggregates",
+          "path": "docs/cypher/aggregation.md",
+          "anchor": "null-and-functions",
+          "examples": [
+            "foundation-aggregation-null",
+            "foundation-aggregation-empty"
+          ]
+        },
+        {
+          "item": "distinct",
+          "path": "docs/cypher/aggregation.md",
+          "anchor": "distinct",
+          "examples": [
+            "foundation-aggregation-distinct",
+            "foundation-aggregation-distinct-star-error"
+          ]
+        },
+        {
+          "item": "ordering interaction",
+          "path": "docs/cypher/aggregation.md",
+          "anchor": "composition",
+          "examples": [
+            "foundation-aggregation-filter",
+            "foundation-aggregation-collect-order"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "ORDER BY / SKIP / LIMIT",
+      "path": "docs/cypher/reading.md",
+      "examples": [
+        "foundation-reading-with",
+        "foundation-aggregation-collect-order",
+        "foundation-reading-pagination",
+        "path-selector-parameter",
+        "foundation-aggregation-explicit"
+      ],
+      "required": [
+        {
+          "item": "expression visibility",
+          "path": "docs/cypher/reading.md",
+          "anchor": "order-pagination",
+          "examples": [
+            "foundation-reading-with",
+            "foundation-aggregation-collect-order"
+          ]
+        },
+        {
+          "item": "parameters",
+          "path": "docs/cypher/reading.md",
+          "anchor": "order-pagination",
+          "examples": [
+            "foundation-reading-pagination",
+            "path-selector-parameter"
+          ]
+        },
+        {
+          "item": "aggregation composition",
+          "path": "docs/cypher/aggregation.md",
+          "anchor": "composition",
+          "examples": [
+            "foundation-aggregation-explicit",
+            "foundation-aggregation-collect-order"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "UNION",
+      "path": "docs/cypher/composition.md",
+      "examples": [
+        "path-union-distinct",
+        "path-union-column-error",
+        "path-union-all",
+        "path-union-flavor-error",
+        "path-subquery-union"
+      ],
+      "required": [
+        {
+          "item": "column contract",
+          "path": "docs/cypher/composition.md",
+          "anchor": "union",
+          "examples": [
+            "path-union-distinct",
+            "path-union-column-error"
+          ]
+        },
+        {
+          "item": "ALL/DISTINCT",
+          "path": "docs/cypher/composition.md",
+          "anchor": "union",
+          "examples": [
+            "path-union-all",
+            "path-union-distinct",
+            "path-union-flavor-error"
+          ]
+        },
+        {
+          "item": "type reconciliation",
+          "path": "docs/cypher/composition.md",
+          "anchor": "union",
+          "examples": [
+            "path-union-distinct",
+            "path-union-column-error"
+          ]
+        },
+        {
+          "item": "subquery composition",
+          "path": "docs/cypher/subqueries.md",
+          "anchor": "subquery-union-nesting",
+          "examples": [
+            "path-subquery-union",
+            "path-union-all"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "WHEN",
+      "path": "docs/cypher/composition.md",
+      "examples": [
+        "path-when-first",
+        "path-when-no-branch",
+        "path-when-correlated"
+      ],
+      "required": [
+        {
+          "item": "conditional composed queries",
+          "path": "docs/cypher/composition.md",
+          "anchor": "when",
+          "examples": [
+            "path-when-first",
+            "path-when-no-branch"
+          ]
+        },
+        {
+          "item": "scope/result compatibility",
+          "path": "docs/cypher/composition.md",
+          "anchor": "when",
+          "examples": [
+            "path-when-correlated",
+            "path-when-first"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "NEXT",
+      "path": "docs/cypher/composition.md",
+      "examples": [
+        "path-next-rows",
+        "path-next-union",
+        "path-next-empty-return",
+        "path-next-finish",
+        "path-next-scope-error"
+      ],
+      "required": [
+        {
+          "item": "sequential query composition and row handoff",
+          "path": "docs/cypher/composition.md",
+          "anchor": "next",
+          "examples": [
+            "path-next-rows",
+            "path-next-union",
+            "path-next-empty-return",
+            "path-next-finish",
+            "path-next-scope-error"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "CALL subqueries",
+      "path": "docs/cypher/subqueries.md",
+      "examples": [
+        "path-subquery-correlated",
+        "path-subquery-global-import",
+        "path-subquery-legacy-import",
+        "path-subquery-empty-scope-error",
+        "path-subquery-union",
+        "path-union-distinct",
+        "foundation-subquery-nested-call"
+      ],
+      "required": [
+        {
+          "item": "imported variables",
+          "path": "docs/cypher/subqueries.md",
+          "anchor": "subquery-scope",
+          "examples": [
+            "path-subquery-correlated",
+            "path-subquery-global-import",
+            "path-subquery-legacy-import"
+          ]
+        },
+        {
+          "item": "scope isolation",
+          "path": "docs/cypher/subqueries.md",
+          "anchor": "subquery-scope",
+          "examples": [
+            "path-subquery-empty-scope-error",
+            "path-subquery-global-import"
+          ]
+        },
+        {
+          "item": "nested subqueries",
+          "path": "docs/cypher/subqueries.md",
+          "anchor": "nested-call",
+          "examples": [
+            "foundation-subquery-nested-call"
+          ]
+        },
+        {
+          "item": "UNION",
+          "path": "docs/cypher/subqueries.md",
+          "anchor": "subquery-union-nesting",
+          "examples": [
+            "path-subquery-union",
+            "path-union-distinct"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "EXISTS/COUNT/COLLECT subquery expressions",
+      "path": "docs/cypher/subqueries.md",
+      "examples": [
+        "path-subquery-expression",
+        "path-subquery-count-empty",
+        "path-subquery-null-collect"
+      ],
+      "required": [
+        {
+          "item": "correlation",
+          "path": "docs/cypher/subqueries.md",
+          "anchor": "exists-count-collect",
+          "examples": [
+            "path-subquery-expression"
+          ]
+        },
+        {
+          "item": "aggregation",
+          "path": "docs/cypher/subqueries.md",
+          "anchor": "exists-count-collect",
+          "examples": [
+            "path-subquery-count-empty",
+            "path-subquery-expression"
+          ]
+        },
+        {
+          "item": "null/empty semantics",
+          "path": "docs/cypher/subqueries.md",
+          "anchor": "exists-count-collect",
+          "examples": [
+            "path-subquery-null-collect",
+            "path-subquery-count-empty"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "CREATE / INSERT",
+      "path": "docs/cypher/writing.md",
+      "examples": [
+        "path-writing-create",
+        "path-writing-insert",
+        "path-writing-dynamic-create",
+        "foundation-values-property",
+        "path-subquery-unit-write",
+        "path-writing-foreach",
+        "foundation-model-write-visibility"
+      ],
+      "required": [
+        {
+          "item": "node/relationship creation",
+          "path": "docs/cypher/writing.md",
+          "anchor": "create-insert",
+          "examples": [
+            "path-writing-create",
+            "path-writing-insert",
+            "path-writing-dynamic-create"
+          ]
+        },
+        {
+          "item": "properties",
+          "path": "docs/cypher/writing.md",
+          "anchor": "create-insert",
+          "examples": [
+            "path-writing-create",
+            "foundation-values-property"
+          ]
+        },
+        {
+          "item": "multi-row behavior",
+          "path": "docs/cypher/writing.md",
+          "anchor": "write-atomicity",
+          "examples": [
+            "path-subquery-unit-write",
+            "path-writing-foreach",
+            "foundation-model-write-visibility"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "SET / REMOVE",
+      "path": "docs/cypher/writing.md",
+      "examples": [
+        "path-writing-labels",
+        "path-writing-dynamic-key",
+        "path-writing-dynamic-key-error",
+        "path-writing-set-map",
+        "path-writing-replace-map",
+        "foundation-values-property"
+      ],
+      "required": [
+        {
+          "item": "property/label mutation",
+          "path": "docs/cypher/writing.md",
+          "anchor": "set-remove-labels",
+          "examples": [
+            "path-writing-labels",
+            "path-writing-dynamic-key",
+            "path-writing-dynamic-key-error"
+          ]
+        },
+        {
+          "item": "map update",
+          "path": "docs/cypher/writing.md",
+          "anchor": "set-properties",
+          "examples": [
+            "path-writing-set-map",
+            "path-writing-replace-map"
+          ]
+        },
+        {
+          "item": "null-removes-property",
+          "path": "docs/cypher/writing.md",
+          "anchor": "set-properties",
+          "examples": [
+            "path-writing-set-map",
+            "path-writing-dynamic-key",
+            "foundation-values-property"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "DELETE / DETACH DELETE",
+      "path": "docs/cypher/writing.md",
+      "examples": [
+        "path-writing-detach-delete",
+        "path-writing-delete-error",
+        "path-writing-delete-setup"
+      ],
+      "required": [
+        {
+          "item": "entity deletion",
+          "path": "docs/cypher/writing.md",
+          "anchor": "delete",
+          "examples": [
+            "path-writing-detach-delete"
+          ]
+        },
+        {
+          "item": "relationship integrity",
+          "path": "docs/cypher/writing.md",
+          "anchor": "delete",
+          "examples": [
+            "path-writing-delete-error",
+            "path-writing-detach-delete"
+          ]
+        },
+        {
+          "item": "row behavior",
+          "path": "docs/cypher/writing.md",
+          "anchor": "delete",
+          "examples": [
+            "path-writing-detach-delete",
+            "path-writing-delete-setup"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "MERGE",
+      "path": "docs/cypher/writing.md",
+      "examples": [
+        "path-writing-merge",
+        "path-writing-merge-null-error",
+        "schema-constraint-duplicate"
+      ],
+      "required": [
+        {
+          "item": "match/create branches",
+          "path": "docs/cypher/writing.md",
+          "anchor": "merge",
+          "examples": [
+            "path-writing-merge",
+            "path-writing-merge-null-error"
+          ]
+        },
+        {
+          "item": "ON MATCH/CREATE semantics",
+          "path": "docs/cypher/writing.md",
+          "anchor": "merge",
+          "examples": [
+            "path-writing-merge"
+          ]
+        },
+        {
+          "item": "locking/concurrency",
+          "path": "docs/cypher/writing.md",
+          "anchor": "merge",
+          "examples": [
+            "path-writing-merge",
+            "schema-constraint-duplicate"
+          ],
+          "verification": {
+            "command": "cargo test --locked -p lithograph-core --test phase05_mutation",
+            "reason": "顺序 MERGE 示例说明 match/create；专项 stale writer/CAS 与第二连接 tests 证明 SQLite writer 和 Branch head 并发边界，不把顺序示例当成锁证明。"
+          }
+        }
+      ]
+    },
+    {
+      "family": "FOREACH",
+      "path": "docs/cypher/writing.md",
+      "examples": [
+        "path-writing-foreach",
+        "foundation-model-scope-error"
+      ],
+      "required": [
+        {
+          "item": "update-only iteration and variable scope",
+          "path": "docs/cypher/writing.md",
+          "anchor": "foreach",
+          "examples": [
+            "path-writing-foreach",
+            "foundation-model-scope-error"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "Pattern semantics",
+      "path": "docs/cypher/patterns.md",
+      "examples": [
+        "path-pattern-connected",
+        "path-pattern-named-path",
+        "path-pattern-comprehension",
+        "path-pattern-label-expression",
+        "path-pattern-dynamic-label",
+        "path-pattern-inline-predicate",
+        "path-writing-dynamic-create"
+      ],
+      "required": [
+        {
+          "item": "directions",
+          "path": "docs/cypher/patterns.md",
+          "anchor": "pattern-syntax",
+          "examples": [
+            "path-pattern-connected",
+            "path-pattern-named-path"
+          ]
+        },
+        {
+          "item": "anonymous elements",
+          "path": "docs/cypher/patterns.md",
+          "anchor": "pattern-syntax",
+          "examples": [
+            "path-pattern-connected",
+            "path-pattern-comprehension"
+          ]
+        },
+        {
+          "item": "label expressions",
+          "path": "docs/cypher/patterns.md",
+          "anchor": "pattern-labels-types",
+          "examples": [
+            "path-pattern-label-expression",
+            "path-pattern-dynamic-label"
+          ]
+        },
+        {
+          "item": "relationship type expressions",
+          "path": "docs/cypher/patterns.md",
+          "anchor": "pattern-labels-types",
+          "examples": [
+            "path-pattern-inline-predicate",
+            "path-writing-dynamic-create"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "Quantified / variable-length patterns",
+      "path": "docs/cypher/quantified-paths.md",
+      "examples": [
+        "path-quantified-group",
+        "path-legacy-variable-length",
+        "path-quantified-zero",
+        "path-quantified-relationship",
+        "path-quantified-filter",
+        "path-quantified-invalid-repeatable"
+      ],
+      "required": [
+        {
+          "item": "group variables",
+          "path": "docs/cypher/quantified-paths.md",
+          "anchor": "quantified-group-pattern",
+          "examples": [
+            "path-quantified-group"
+          ]
+        },
+        {
+          "item": "bounds",
+          "path": "docs/cypher/quantified-paths.md",
+          "anchor": "quantified-bounds",
+          "examples": [
+            "path-legacy-variable-length",
+            "path-quantified-zero",
+            "path-quantified-relationship"
+          ]
+        },
+        {
+          "item": "predicates",
+          "path": "docs/cypher/quantified-paths.md",
+          "anchor": "quantified-predicates",
+          "examples": [
+            "path-quantified-group",
+            "path-quantified-filter"
+          ]
+        },
+        {
+          "item": "result cardinality",
+          "path": "docs/cypher/quantified-paths.md",
+          "anchor": "quantified-relationship",
+          "examples": [
+            "path-quantified-relationship",
+            "path-quantified-zero",
+            "path-quantified-invalid-repeatable"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "Match modes",
+      "path": "docs/cypher/path-selection.md",
+      "examples": [
+        "path-mode-default",
+        "path-mode-repeatable",
+        "path-mode-invalid-combination"
+      ],
+      "required": [
+        {
+          "item": "repeatable/different relationship semantics",
+          "path": "docs/cypher/path-selection.md",
+          "anchor": "match-mode",
+          "examples": [
+            "path-mode-default",
+            "path-mode-repeatable",
+            "path-mode-invalid-combination"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "Path modes",
+      "path": "docs/cypher/path-selection.md",
+      "examples": [
+        "path-mode-default",
+        "path-mode-acyclic",
+        "path-mode-repeatable",
+        "path-mode-invalid-combination"
+      ],
+      "required": [
+        {
+          "item": "walk/trail/acyclic constraints as Profile specifies",
+          "path": "docs/cypher/path-selection.md",
+          "anchor": "path-mode",
+          "examples": [
+            "path-mode-default",
+            "path-mode-acyclic",
+            "path-mode-repeatable",
+            "path-mode-invalid-combination"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "Path selectors / shortest",
+      "path": "docs/cypher/path-selection.md",
+      "examples": [
+        "path-selector-shortest",
+        "path-selector-pre-filter",
+        "path-selector-post-filter",
+        "path-selector-k",
+        "path-selector-groups",
+        "path-selector-parameter",
+        "path-mode-default",
+        "path-mode-acyclic",
+        "path-mode-invalid-combination"
+      ],
+      "required": [
+        {
+          "item": "ANY/ALL shortest",
+          "path": "docs/cypher/path-selection.md",
+          "anchor": "path-selectors",
+          "examples": [
+            "path-selector-shortest",
+            "path-selector-pre-filter",
+            "path-selector-post-filter"
+          ]
+        },
+        {
+          "item": "k/group selectors",
+          "path": "docs/cypher/path-selection.md",
+          "anchor": "path-selectors",
+          "examples": [
+            "path-selector-k",
+            "path-selector-groups",
+            "path-selector-parameter"
+          ]
+        },
+        {
+          "item": "mix with path modes",
+          "path": "docs/cypher/path-selection.md",
+          "anchor": "path-mode-combinations",
+          "examples": [
+            "path-mode-default",
+            "path-mode-acyclic",
+            "path-mode-invalid-combination"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "Runtime values",
+      "path": "docs/cypher/types.md",
+      "examples": [
+        "foundation-values-numeric",
+        "foundation-values-containers",
+        "foundation-values-graph",
+        "foundation-values-property"
+      ],
+      "required": [
+        {
+          "item": "Boolean/Integer/Float/String/List/Map/Node/Relationship/Path",
+          "path": "docs/cypher/types.md",
+          "anchor": "value-families",
+          "examples": [
+            "foundation-values-numeric",
+            "foundation-values-containers",
+            "foundation-values-graph",
+            "foundation-values-property"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "Temporal / Duration",
+      "path": "docs/cypher/functions/temporal.md",
+      "examples": [
+        "foundation-values-temporal",
+        "fn-date",
+        "fn-datetime",
+        "fn-duration",
+        "fn-temporal-invalid-date",
+        "fn-temporal-invalid-map",
+        "foundation-values-temporal-arithmetic",
+        "fn-duration-between",
+        "fn-duration-indays",
+        "fn-duration-inmonths",
+        "fn-duration-inseconds",
+        "fn-format",
+        "foundation-values-timezone-error"
+      ],
+      "required": [
+        {
+          "item": "constructors",
+          "path": "docs/cypher/types.md",
+          "anchor": "temporal-values",
+          "examples": [
+            "foundation-values-temporal",
+            "fn-date",
+            "fn-datetime",
+            "fn-duration",
+            "fn-temporal-invalid-date",
+            "fn-temporal-invalid-map"
+          ]
+        },
+        {
+          "item": "arithmetic",
+          "path": "docs/cypher/types.md",
+          "anchor": "temporal-values",
+          "examples": [
+            "foundation-values-temporal-arithmetic",
+            "fn-duration-between",
+            "fn-duration-indays",
+            "fn-duration-inmonths",
+            "fn-duration-inseconds"
+          ]
+        },
+        {
+          "item": "formatting",
+          "path": "docs/cypher/functions/temporal.md",
+          "anchor": "fn-format",
+          "examples": [
+            "fn-format",
+            "foundation-values-temporal"
+          ]
+        },
+        {
+          "item": "timezone/DST semantics",
+          "path": "docs/cypher/types.md",
+          "anchor": "temporal-values",
+          "examples": [
+            "foundation-values-temporal",
+            "foundation-values-timezone-error",
+            "fn-datetime"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "Spatial Point",
+      "path": "docs/cypher/functions/spatial.md",
+      "examples": [
+        "foundation-values-point",
+        "fn-spatial-null-crs",
+        "fn-point",
+        "fn-spatial-missing-coordinate",
+        "fn-point-distance",
+        "fn-point-withinbbox",
+        "foundation-values-comparison",
+        "schema-index-point"
+      ],
+      "required": [
+        {
+          "item": "CRS",
+          "path": "docs/cypher/types.md",
+          "anchor": "point-values",
+          "examples": [
+            "foundation-values-point",
+            "fn-spatial-null-crs"
+          ]
+        },
+        {
+          "item": "constructors",
+          "path": "docs/cypher/functions/spatial.md",
+          "anchor": "fn-point",
+          "examples": [
+            "fn-point",
+            "fn-spatial-missing-coordinate"
+          ]
+        },
+        {
+          "item": "comparison/functions",
+          "path": "docs/cypher/functions/spatial.md",
+          "anchor": "fn-point-distance",
+          "examples": [
+            "fn-point-distance",
+            "fn-point-withinbbox",
+            "foundation-values-comparison"
+          ]
+        },
+        {
+          "item": "point index integration",
+          "path": "docs/cypher/indexes.md",
+          "anchor": "text-point",
+          "examples": [
+            "schema-index-point",
+            "foundation-values-point"
+          ],
+          "verification": {
+            "command": "cargo test --locked -p lithograph-core --test phase07_schema",
+            "reason": "专项执行 PointIndex 与扫描的 bbox/distance/dateline/signed-zero 等价，并检查 Planner 使用索引。"
+          }
+        }
+      ]
+    },
+    {
+      "family": "VECTOR",
+      "path": "docs/cypher/functions/vector.md",
+      "examples": [
+        "foundation-values-vector",
+        "fn-vector-integer64-exact",
+        "foundation-values-vector-dimension-error",
+        "foundation-native-store-create",
+        "foundation-native-store-read",
+        "fn-vector",
+        "fn-vector_dimension_count",
+        "fn-vector_distance",
+        "fn-vector-similarity-cosine",
+        "fn-vector-similarity-euclidean",
+        "fn-vector-zero-cosine"
+      ],
+      "required": [
+        {
+          "item": "coordinate types",
+          "path": "docs/cypher/types.md",
+          "anchor": "vector-values",
+          "examples": [
+            "foundation-values-vector",
+            "fn-vector-integer64-exact"
+          ]
+        },
+        {
+          "item": "dimension",
+          "path": "docs/cypher/types.md",
+          "anchor": "vector-values",
+          "examples": [
+            "foundation-values-vector",
+            "foundation-values-vector-dimension-error"
+          ]
+        },
+        {
+          "item": "storage",
+          "path": "docs/cypher/types.md",
+          "anchor": "native-property-storage",
+          "examples": [
+            "foundation-native-store-create",
+            "foundation-native-store-read"
+          ]
+        },
+        {
+          "item": "conversion",
+          "path": "docs/cypher/functions/vector.md",
+          "anchor": "fn-vector",
+          "examples": [
+            "fn-vector",
+            "fn-vector_dimension_count",
+            "foundation-values-vector"
+          ]
+        },
+        {
+          "item": "similarity/distance",
+          "path": "docs/cypher/functions/vector.md",
+          "anchor": "fn-vector_distance",
+          "examples": [
+            "fn-vector_distance",
+            "fn-vector-similarity-cosine",
+            "fn-vector-similarity-euclidean",
+            "fn-vector-zero-cosine"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "UUID",
+      "path": "docs/cypher/functions/scalar.md",
+      "examples": [
+        "foundation-values-uuid",
+        "foundation-values-uuid-error",
+        "fn-uuid-string",
+        "fn-uuid-bits",
+        "fn-uuid-mostsignificantbits",
+        "fn-uuid-leastsignificantbits",
+        "foundation-native-store-create",
+        "foundation-native-store-read"
+      ],
+      "required": [
+        {
+          "item": "native type",
+          "path": "docs/cypher/types.md",
+          "anchor": "uuid-values",
+          "examples": [
+            "foundation-values-uuid",
+            "foundation-values-uuid-error"
+          ]
+        },
+        {
+          "item": "constructors",
+          "path": "docs/cypher/functions/scalar.md",
+          "anchor": "fn-uuid",
+          "examples": [
+            "fn-uuid-string",
+            "fn-uuid-bits"
+          ]
+        },
+        {
+          "item": "bit helpers",
+          "path": "docs/cypher/functions/scalar.md",
+          "anchor": "fn-uuid-mostsignificantbits",
+          "examples": [
+            "fn-uuid-mostsignificantbits",
+            "fn-uuid-leastsignificantbits"
+          ]
+        },
+        {
+          "item": "storage/equality",
+          "path": "docs/cypher/types.md",
+          "anchor": "native-property-storage",
+          "examples": [
+            "foundation-native-store-create",
+            "foundation-native-store-read",
+            "foundation-values-uuid"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "String interpolation",
+      "path": "docs/cypher/expressions.md",
+      "examples": [
+        "foundation-expression-interpolation"
+      ],
+      "required": [
+        {
+          "item": "`s\"...{expr}...\"` / `S\"...\"` semantics",
+          "path": "docs/cypher/expressions.md",
+          "anchor": "interpolation",
+          "examples": [
+            "foundation-expression-interpolation"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "Built-in functions",
+      "path": "docs/cypher/functions/scalar.md",
+      "examples": [
+        "fn-abs",
+        "fn-acos",
+        "fn-aggregation-duration",
+        "fn-aggregation-empty",
+        "fn-all",
+        "fn-all-predicate-error",
+        "fn-allreduce",
+        "fn-any",
+        "fn-asin",
+        "fn-atan",
+        "fn-atan2",
+        "fn-avg",
+        "fn-btrim",
+        "fn-cardinality",
+        "fn-cardinality-type-error",
+        "fn-ceil",
+        "fn-ceiling",
+        "fn-char_length",
+        "fn-character_length",
+        "fn-coalesce",
+        "fn-coll-distinct",
+        "fn-coll-flatten",
+        "fn-coll-flatten-depth-error",
+        "fn-coll-indexof",
+        "fn-coll-insert",
+        "fn-coll-insert-index-error",
+        "fn-coll-max",
+        "fn-coll-min",
+        "fn-coll-remove",
+        "fn-coll-remove-index-error",
+        "fn-coll-sort",
+        "fn-collect",
+        "fn-collect_list",
+        "fn-cos",
+        "fn-cosh",
+        "fn-cot",
+        "fn-coth",
+        "fn-count",
+        "fn-date",
+        "fn-date-realtime",
+        "fn-date-statement",
+        "fn-date-transaction",
+        "fn-date-truncate",
+        "fn-datetime",
+        "fn-datetime-fromepoch",
+        "fn-datetime-fromepochmillis",
+        "fn-datetime-realtime",
+        "fn-datetime-statement",
+        "fn-datetime-transaction",
+        "fn-datetime-truncate",
+        "fn-db-namefromelementid",
+        "fn-degrees",
+        "fn-duration",
+        "fn-duration-between",
+        "fn-duration-indays",
+        "fn-duration-inmonths",
+        "fn-duration-inseconds",
+        "fn-duration_between",
+        "fn-e",
+        "fn-elementid",
+        "fn-endnode",
+        "fn-exists",
+        "fn-exists-argument-error",
+        "fn-exists-null-endpoint",
+        "fn-exp",
+        "fn-file",
+        "fn-floor",
+        "fn-format",
+        "fn-haversin",
+        "fn-head",
+        "fn-id",
+        "fn-isempty",
+        "fn-isempty-input-error",
+        "fn-isnan",
+        "fn-keys",
+        "fn-labels",
+        "fn-last",
+        "fn-left",
+        "fn-left-null-length-error",
+        "fn-length",
+        "fn-linenumber",
+        "fn-list-reverse",
+        "fn-ln",
+        "fn-local_datetime",
+        "fn-local_time",
+        "fn-localdatetime",
+        "fn-localdatetime-realtime",
+        "fn-localdatetime-statement",
+        "fn-localdatetime-transaction",
+        "fn-localdatetime-truncate",
+        "fn-localtime",
+        "fn-localtime-realtime",
+        "fn-localtime-statement",
+        "fn-localtime-transaction",
+        "fn-localtime-truncate",
+        "fn-log",
+        "fn-log10",
+        "fn-lower",
+        "fn-ltrim",
+        "fn-mathematical-domain",
+        "fn-mathematical-null",
+        "fn-max",
+        "fn-min",
+        "fn-nodes",
+        "fn-none",
+        "fn-normalize",
+        "fn-nullif",
+        "fn-path_length",
+        "fn-percentile_cont",
+        "fn-percentile_disc",
+        "fn-percentilecont",
+        "fn-percentiledisc",
+        "fn-pi",
+        "fn-point",
+        "fn-point-distance",
+        "fn-point-withinbbox",
+        "fn-properties",
+        "fn-radians",
+        "fn-rand",
+        "fn-randomuuid",
+        "fn-range",
+        "fn-range-zero-step-error",
+        "fn-reduce",
+        "fn-regex-pattern-error",
+        "fn-relationships",
+        "fn-replace",
+        "fn-replace-limit-error",
+        "fn-right",
+        "fn-round",
+        "fn-round-modes",
+        "fn-rtrim",
+        "fn-scalar-null",
+        "fn-sign",
+        "fn-sin",
+        "fn-single",
+        "fn-single-list-error",
+        "fn-sinh",
+        "fn-size",
+        "fn-spatial-missing-coordinate",
+        "fn-spatial-null-crs",
+        "fn-split",
+        "fn-split-invalid-element-error",
+        "fn-sqrt",
+        "fn-startnode",
+        "fn-stdev",
+        "fn-stdev_pop",
+        "fn-stdev_samp",
+        "fn-stdevp",
+        "fn-string-indexof",
+        "fn-string-join",
+        "fn-string-regexreplace",
+        "fn-string-reverse",
+        "fn-substring",
+        "fn-substring-negative-error",
+        "fn-sum",
+        "fn-tail",
+        "fn-tan",
+        "fn-tanh",
+        "fn-temporal-invalid-date",
+        "fn-temporal-invalid-map",
+        "fn-temporal-null",
+        "fn-time",
+        "fn-time-realtime",
+        "fn-time-statement",
+        "fn-time-transaction",
+        "fn-time-truncate",
+        "fn-timestamp",
+        "fn-toboolean",
+        "fn-toboolean-type-error",
+        "fn-tobooleanlist",
+        "fn-tobooleanlist-input-error",
+        "fn-tobooleanornull",
+        "fn-tofloat",
+        "fn-tofloatlist",
+        "fn-tofloatornull",
+        "fn-tointeger",
+        "fn-tointegerlist",
+        "fn-tointegerornull",
+        "fn-tolower",
+        "fn-tostring",
+        "fn-tostring-container-error",
+        "fn-tostringlist",
+        "fn-tostringornull",
+        "fn-toupper",
+        "fn-trim",
+        "fn-type",
+        "fn-upper",
+        "fn-uuid-bits",
+        "fn-uuid-leastsignificantbits",
+        "fn-uuid-mostsignificantbits",
+        "fn-uuid-random",
+        "fn-uuid-string",
+        "fn-valuetype",
+        "fn-vector",
+        "fn-vector-integer64-exact",
+        "fn-vector-null",
+        "fn-vector-similarity-cosine",
+        "fn-vector-similarity-euclidean",
+        "fn-vector-unknown-metric",
+        "fn-vector-zero-cosine",
+        "fn-vector_dimension_count",
+        "fn-vector_distance",
+        "fn-vector_norm",
+        "fn-zoned_datetime",
+        "fn-zoned_time"
+      ],
+      "required": [
+        {
+          "item": "complete current-graph function inventory from frozen Manual",
+          "path": "docs/reference/functions.md",
+          "examples": [
+            "fn-abs",
+            "fn-acos",
+            "fn-aggregation-duration",
+            "fn-aggregation-empty",
+            "fn-all",
+            "fn-all-predicate-error",
+            "fn-allreduce",
+            "fn-any",
+            "fn-asin",
+            "fn-atan",
+            "fn-atan2",
+            "fn-avg",
+            "fn-btrim",
+            "fn-cardinality",
+            "fn-cardinality-type-error",
+            "fn-ceil",
+            "fn-ceiling",
+            "fn-char_length",
+            "fn-character_length",
+            "fn-coalesce",
+            "fn-coll-distinct",
+            "fn-coll-flatten",
+            "fn-coll-flatten-depth-error",
+            "fn-coll-indexof",
+            "fn-coll-insert",
+            "fn-coll-insert-index-error",
+            "fn-coll-max",
+            "fn-coll-min",
+            "fn-coll-remove",
+            "fn-coll-remove-index-error",
+            "fn-coll-sort",
+            "fn-collect",
+            "fn-collect_list",
+            "fn-cos",
+            "fn-cosh",
+            "fn-cot",
+            "fn-coth",
+            "fn-count",
+            "fn-date",
+            "fn-date-realtime",
+            "fn-date-statement",
+            "fn-date-transaction",
+            "fn-date-truncate",
+            "fn-datetime",
+            "fn-datetime-fromepoch",
+            "fn-datetime-fromepochmillis",
+            "fn-datetime-realtime",
+            "fn-datetime-statement",
+            "fn-datetime-transaction",
+            "fn-datetime-truncate",
+            "fn-db-namefromelementid",
+            "fn-degrees",
+            "fn-duration",
+            "fn-duration-between",
+            "fn-duration-indays",
+            "fn-duration-inmonths",
+            "fn-duration-inseconds",
+            "fn-duration_between",
+            "fn-e",
+            "fn-elementid",
+            "fn-endnode",
+            "fn-exists",
+            "fn-exists-argument-error",
+            "fn-exists-null-endpoint",
+            "fn-exp",
+            "fn-file",
+            "fn-floor",
+            "fn-format",
+            "fn-haversin",
+            "fn-head",
+            "fn-id",
+            "fn-isempty",
+            "fn-isempty-input-error",
+            "fn-isnan",
+            "fn-keys",
+            "fn-labels",
+            "fn-last",
+            "fn-left",
+            "fn-left-null-length-error",
+            "fn-length",
+            "fn-linenumber",
+            "fn-list-reverse",
+            "fn-ln",
+            "fn-local_datetime",
+            "fn-local_time",
+            "fn-localdatetime",
+            "fn-localdatetime-realtime",
+            "fn-localdatetime-statement",
+            "fn-localdatetime-transaction",
+            "fn-localdatetime-truncate",
+            "fn-localtime",
+            "fn-localtime-realtime",
+            "fn-localtime-statement",
+            "fn-localtime-transaction",
+            "fn-localtime-truncate",
+            "fn-log",
+            "fn-log10",
+            "fn-lower",
+            "fn-ltrim",
+            "fn-mathematical-domain",
+            "fn-mathematical-null",
+            "fn-max",
+            "fn-min",
+            "fn-nodes",
+            "fn-none",
+            "fn-normalize",
+            "fn-nullif",
+            "fn-path_length",
+            "fn-percentile_cont",
+            "fn-percentile_disc",
+            "fn-percentilecont",
+            "fn-percentiledisc",
+            "fn-pi",
+            "fn-point",
+            "fn-point-distance",
+            "fn-point-withinbbox",
+            "fn-properties",
+            "fn-radians",
+            "fn-rand",
+            "fn-randomuuid",
+            "fn-range",
+            "fn-range-zero-step-error",
+            "fn-reduce",
+            "fn-regex-pattern-error",
+            "fn-relationships",
+            "fn-replace",
+            "fn-replace-limit-error",
+            "fn-right",
+            "fn-round",
+            "fn-round-modes",
+            "fn-rtrim",
+            "fn-scalar-null",
+            "fn-sign",
+            "fn-sin",
+            "fn-single",
+            "fn-single-list-error",
+            "fn-sinh",
+            "fn-size",
+            "fn-spatial-missing-coordinate",
+            "fn-spatial-null-crs",
+            "fn-split",
+            "fn-split-invalid-element-error",
+            "fn-sqrt",
+            "fn-startnode",
+            "fn-stdev",
+            "fn-stdev_pop",
+            "fn-stdev_samp",
+            "fn-stdevp",
+            "fn-string-indexof",
+            "fn-string-join",
+            "fn-string-regexreplace",
+            "fn-string-reverse",
+            "fn-substring",
+            "fn-substring-negative-error",
+            "fn-sum",
+            "fn-tail",
+            "fn-tan",
+            "fn-tanh",
+            "fn-temporal-invalid-date",
+            "fn-temporal-invalid-map",
+            "fn-temporal-null",
+            "fn-time",
+            "fn-time-realtime",
+            "fn-time-statement",
+            "fn-time-transaction",
+            "fn-time-truncate",
+            "fn-timestamp",
+            "fn-toboolean",
+            "fn-toboolean-type-error",
+            "fn-tobooleanlist",
+            "fn-tobooleanlist-input-error",
+            "fn-tobooleanornull",
+            "fn-tofloat",
+            "fn-tofloatlist",
+            "fn-tofloatornull",
+            "fn-tointeger",
+            "fn-tointegerlist",
+            "fn-tointegerornull",
+            "fn-tolower",
+            "fn-tostring",
+            "fn-tostring-container-error",
+            "fn-tostringlist",
+            "fn-tostringornull",
+            "fn-toupper",
+            "fn-trim",
+            "fn-type",
+            "fn-upper",
+            "fn-uuid-bits",
+            "fn-uuid-leastsignificantbits",
+            "fn-uuid-mostsignificantbits",
+            "fn-uuid-random",
+            "fn-uuid-string",
+            "fn-valuetype",
+            "fn-vector",
+            "fn-vector-integer64-exact",
+            "fn-vector-null",
+            "fn-vector-similarity-cosine",
+            "fn-vector-similarity-euclidean",
+            "fn-vector-unknown-metric",
+            "fn-vector-zero-cosine",
+            "fn-vector_dimension_count",
+            "fn-vector_distance",
+            "fn-vector_norm",
+            "fn-zoned_datetime",
+            "fn-zoned_time"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "Aggregating functions",
+      "path": "docs/cypher/functions/aggregation.md",
+      "examples": [
+        "fn-aggregation-duration",
+        "fn-aggregation-empty",
+        "fn-avg",
+        "fn-collect",
+        "fn-collect_list",
+        "fn-count",
+        "fn-max",
+        "fn-min",
+        "fn-percentile_cont",
+        "fn-percentile_disc",
+        "fn-percentilecont",
+        "fn-percentiledisc",
+        "fn-stdev",
+        "fn-stdev_pop",
+        "fn-stdev_samp",
+        "fn-stdevp",
+        "fn-sum",
+        "foundation-aggregation-null",
+        "foundation-aggregation-empty",
+        "foundation-aggregation-explicit"
+      ],
+      "required": [
+        {
+          "item": "complete frozen Manual inventory and null/group semantics",
+          "path": "docs/cypher/aggregation.md",
+          "anchor": "null-and-functions",
+          "examples": [
+            "fn-aggregation-duration",
+            "fn-aggregation-empty",
+            "fn-avg",
+            "fn-collect",
+            "fn-collect_list",
+            "fn-count",
+            "fn-max",
+            "fn-min",
+            "fn-percentile_cont",
+            "fn-percentile_disc",
+            "fn-percentilecont",
+            "fn-percentiledisc",
+            "fn-stdev",
+            "fn-stdev_pop",
+            "fn-stdev_samp",
+            "fn-stdevp",
+            "fn-sum",
+            "foundation-aggregation-null",
+            "foundation-aggregation-empty",
+            "foundation-aggregation-explicit"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "Procedure CALL",
+      "path": "docs/cypher/procedure-calls.md",
+      "examples": [
+        "proc-graph-labels",
+        "proc-graph-propertykeys",
+        "proc-graph-relationshiptypes",
+        "vp-branch-create",
+        "vp-tag-create",
+        "vp-commit-get",
+        "vp-diff",
+        "mp-start",
+        "mp-conflicts",
+        "mp-resolve",
+        "mp-finalize",
+        "path-procedure-yield",
+        "path-procedure-unknown-yield",
+        "path-procedure-standalone",
+        "path-procedure-correlated",
+        "path-procedure-embedded-star-error"
+      ],
+      "required": [
+        {
+          "item": "built-in current-graph procedures",
+          "path": "docs/cypher/procedure-calls.md",
+          "anchor": "procedure-discovery",
+          "examples": [
+            "proc-graph-labels",
+            "proc-graph-propertykeys",
+            "proc-graph-relationshiptypes"
+          ]
+        },
+        {
+          "item": "Lithograph Version Procedures",
+          "path": "docs/reference/procedures.md",
+          "examples": [
+            "vp-branch-create",
+            "vp-tag-create",
+            "vp-commit-get",
+            "vp-diff",
+            "mp-start",
+            "mp-conflicts",
+            "mp-resolve",
+            "mp-finalize"
+          ]
+        },
+        {
+          "item": "YIELD",
+          "path": "docs/cypher/procedure-calls.md",
+          "anchor": "procedure-yield",
+          "examples": [
+            "path-procedure-yield",
+            "path-procedure-unknown-yield"
+          ]
+        },
+        {
+          "item": "scope/result contract",
+          "path": "docs/cypher/procedure-calls.md",
+          "anchor": "procedure-cardinality",
+          "examples": [
+            "path-procedure-standalone",
+            "path-procedure-correlated",
+            "path-procedure-embedded-star-error"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "Graph Type",
+      "path": "docs/cypher/graph-types.md",
+      "examples": [
+        "schema-graph-set",
+        "schema-graph-add",
+        "schema-graph-alter",
+        "schema-graph-drop",
+        "schema-graph-show-empty",
+        "schema-graph-show-virtual",
+        "schema-graph-invalid",
+        "schema-graph-create"
+      ],
+      "required": [
+        {
+          "item": "SET/EXTEND/ALTER/SHOW/DROP element semantics",
+          "path": "docs/cypher/graph-types.md",
+          "anchor": "changes",
+          "examples": [
+            "schema-graph-set",
+            "schema-graph-add",
+            "schema-graph-alter",
+            "schema-graph-drop",
+            "schema-graph-show-empty",
+            "schema-graph-show-virtual",
+            "schema-graph-invalid"
+          ]
+        },
+        {
+          "item": "open schema",
+          "path": "docs/cypher/graph-types.md",
+          "anchor": "syntax",
+          "examples": [
+            "schema-graph-create",
+            "schema-graph-invalid"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "Constraints",
+      "path": "docs/cypher/constraints.md",
+      "examples": [
+        "schema-constraint-key",
+        "schema-constraint-existence",
+        "schema-constraint-type",
+        "schema-constraint-relationship",
+        "schema-constraint-duplicate",
+        "schema-constraint-wrong-type",
+        "schema-constraint-idempotent",
+        "schema-constraint-drop"
+      ],
+      "required": [
+        {
+          "item": "key/unique/existence/type and Profile-defined forms",
+          "path": "docs/cypher/constraints.md",
+          "anchor": "create",
+          "examples": [
+            "schema-constraint-key",
+            "schema-constraint-existence",
+            "schema-constraint-type",
+            "schema-constraint-relationship",
+            "schema-constraint-duplicate",
+            "schema-constraint-wrong-type",
+            "schema-constraint-idempotent",
+            "schema-constraint-drop"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "Lookup index",
+      "path": "docs/cypher/indexes.md",
+      "examples": [
+        "schema-index-lookup",
+        "schema-index-show",
+        "path-pattern-connected"
+      ],
+      "required": [
+        {
+          "item": "DDL",
+          "path": "docs/cypher/indexes.md",
+          "anchor": "lookup",
+          "examples": [
+            "schema-index-lookup"
+          ]
+        },
+        {
+          "item": "SHOW",
+          "path": "docs/cypher/indexes.md",
+          "anchor": "show",
+          "examples": [
+            "schema-index-lookup",
+            "schema-index-show"
+          ]
+        },
+        {
+          "item": "planner integration",
+          "path": "docs/cypher/indexes.md",
+          "anchor": "lookup",
+          "examples": [
+            "schema-index-lookup",
+            "path-pattern-connected"
+          ],
+          "verification": {
+            "command": "cargo test --locked -p lithograph-core --test phase07_schema",
+            "reason": "文档示例展示 DDL/查询写法；标准索引专项检查实际计划、scan/seek、复合键、类型证明、历史与 spatial/text result 等价。"
+          }
+        }
+      ]
+    },
+    {
+      "family": "Range index",
+      "path": "docs/cypher/indexes.md",
+      "examples": [
+        "schema-index-range",
+        "schema-index-show",
+        "schema-index-query",
+        "foundation-reading-pagination"
+      ],
+      "required": [
+        {
+          "item": "DDL",
+          "path": "docs/cypher/indexes.md",
+          "anchor": "range",
+          "examples": [
+            "schema-index-range"
+          ]
+        },
+        {
+          "item": "SHOW",
+          "path": "docs/cypher/indexes.md",
+          "anchor": "show",
+          "examples": [
+            "schema-index-range",
+            "schema-index-show"
+          ]
+        },
+        {
+          "item": "seek/ordering semantics",
+          "path": "docs/cypher/indexes.md",
+          "anchor": "range",
+          "examples": [
+            "schema-index-query",
+            "foundation-reading-pagination"
+          ],
+          "verification": {
+            "command": "cargo test --locked -p lithograph-core --test phase07_schema",
+            "reason": "文档示例展示 DDL/查询写法；标准索引专项检查实际计划、scan/seek、复合键、类型证明、历史与 spatial/text result 等价。"
+          }
+        }
+      ]
+    },
+    {
+      "family": "Text index",
+      "path": "docs/cypher/indexes.md",
+      "examples": [
+        "schema-index-text",
+        "schema-index-show",
+        "foundation-expression-predicates"
+      ],
+      "required": [
+        {
+          "item": "DDL",
+          "path": "docs/cypher/indexes.md",
+          "anchor": "text-point",
+          "examples": [
+            "schema-index-text"
+          ]
+        },
+        {
+          "item": "SHOW",
+          "path": "docs/cypher/indexes.md",
+          "anchor": "show",
+          "examples": [
+            "schema-index-text",
+            "schema-index-show"
+          ]
+        },
+        {
+          "item": "text seek semantics",
+          "path": "docs/cypher/indexes.md",
+          "anchor": "text-point",
+          "examples": [
+            "schema-index-text",
+            "foundation-expression-predicates"
+          ],
+          "verification": {
+            "command": "cargo test --locked -p lithograph-core --test phase07_schema",
+            "reason": "文档示例展示 DDL/查询写法；标准索引专项检查实际计划、scan/seek、复合键、类型证明、历史与 spatial/text result 等价。"
+          }
+        }
+      ]
+    },
+    {
+      "family": "Point index",
+      "path": "docs/cypher/indexes.md",
+      "examples": [
+        "schema-index-point",
+        "schema-index-show",
+        "fn-point-distance",
+        "fn-point-withinbbox"
+      ],
+      "required": [
+        {
+          "item": "DDL",
+          "path": "docs/cypher/indexes.md",
+          "anchor": "text-point",
+          "examples": [
+            "schema-index-point"
+          ]
+        },
+        {
+          "item": "SHOW",
+          "path": "docs/cypher/indexes.md",
+          "anchor": "show",
+          "examples": [
+            "schema-index-point",
+            "schema-index-show"
+          ]
+        },
+        {
+          "item": "spatial seek semantics",
+          "path": "docs/cypher/indexes.md",
+          "anchor": "text-point",
+          "examples": [
+            "schema-index-point",
+            "fn-point-distance",
+            "fn-point-withinbbox"
+          ],
+          "verification": {
+            "command": "cargo test --locked -p lithograph-core --test phase07_schema",
+            "reason": "文档示例展示 DDL/查询写法；标准索引专项检查实际计划、scan/seek、复合键、类型证明、历史与 spatial/text result 等价。"
+          }
+        }
+      ]
+    },
+    {
+      "family": "Full-text index",
+      "path": "docs/cypher/indexes.md",
+      "examples": [
+        "schema-index-fulltext",
+        "proc-ft-analyzer",
+        "proc-ft-phrase",
+        "proc-ft-rel-query",
+        "proc-ft-flat",
+        "proc-ft-invalid-options"
+      ],
+      "required": [
+        {
+          "item": "DDL",
+          "path": "docs/cypher/indexes.md",
+          "anchor": "fulltext",
+          "examples": [
+            "schema-index-fulltext"
+          ]
+        },
+        {
+          "item": "原生 FTS5 analyzer specification",
+          "path": "docs/cypher/indexes.md",
+          "anchor": "fulltext",
+          "examples": [
+            "schema-index-fulltext",
+            "proc-ft-analyzer"
+          ]
+        },
+        {
+          "item": "queryNodes/queryRelationships",
+          "path": "docs/reference/procedures/fulltext.md",
+          "anchor": "query-string",
+          "examples": [
+            "proc-ft-phrase",
+            "proc-ft-rel-query"
+          ]
+        },
+        {
+          "item": "query-time analyzer",
+          "path": "docs/reference/procedures/fulltext.md",
+          "anchor": "analyzer",
+          "examples": [
+            "proc-ft-analyzer"
+          ]
+        },
+        {
+          "item": "score/options",
+          "path": "docs/reference/procedures/fulltext.md",
+          "anchor": "proc-db-index-fulltext-querynodes",
+          "examples": [
+            "proc-ft-flat",
+            "proc-ft-invalid-options"
+          ]
+        },
+        {
+          "item": "历史/cache/connection 与失败原子性",
+          "path": "docs/reference/procedures/fulltext.md",
+          "anchor": "context-errors",
+          "examples": [
+            "proc-ft-phrase",
+            "proc-ft-rel-query",
+            "proc-ft-invalid-options"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "Vector index",
+      "path": "docs/cypher/indexes.md",
+      "examples": [
+        "schema-index-vector",
+        "schema-index-vector-invalid",
+        "schema-search-invalid-filter",
+        "schema-index-show"
+      ],
+      "required": [
+        {
+          "item": "DDL",
+          "path": "docs/cypher/indexes.md",
+          "anchor": "vector",
+          "examples": [
+            "schema-index-vector"
+          ]
+        },
+        {
+          "item": "dimension/similarity/quantization/filter properties",
+          "path": "docs/cypher/indexes.md",
+          "anchor": "vector",
+          "examples": [
+            "schema-index-vector",
+            "schema-index-vector-invalid",
+            "schema-search-invalid-filter"
+          ]
+        },
+        {
+          "item": "SHOW",
+          "path": "docs/cypher/indexes.md",
+          "anchor": "show",
+          "examples": [
+            "schema-index-show"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "SEARCH",
+      "path": "docs/cypher/search.md",
+      "examples": [
+        "schema-search-top",
+        "schema-search-null",
+        "schema-search-relationship",
+        "schema-search-invalid-filter",
+        "schema-search-zero",
+        "schema-search-invalid-limit"
+      ],
+      "required": [
+        {
+          "item": "MATCH/OPTIONAL MATCH vector ANN subclause",
+          "path": "docs/cypher/search.md",
+          "anchor": "patterns",
+          "examples": [
+            "schema-search-top",
+            "schema-search-null",
+            "schema-search-relationship"
+          ]
+        },
+        {
+          "item": "filter",
+          "path": "docs/cypher/search.md",
+          "anchor": "filters",
+          "examples": [
+            "schema-search-top",
+            "schema-search-invalid-filter"
+          ]
+        },
+        {
+          "item": "LIMIT",
+          "path": "docs/cypher/search.md",
+          "anchor": "syntax",
+          "examples": [
+            "schema-search-top",
+            "schema-search-zero",
+            "schema-search-invalid-limit"
+          ]
+        },
+        {
+          "item": "SCORE",
+          "path": "docs/cypher/search.md",
+          "anchor": "score",
+          "examples": [
+            "schema-search-top"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "LOAD CSV",
+      "path": "docs/cypher/load-csv.md",
+      "examples": [
+        "csv-headers",
+        "csv-no-headers",
+        "csv-invalid-delimiter",
+        "csv-ordinary-malformed",
+        "csv-null-source",
+        "csv-batch-malformed",
+        "csv-batch-malformed-state"
+      ],
+      "required": [
+        {
+          "item": "headers",
+          "path": "docs/cypher/load-csv.md",
+          "anchor": "header-example",
+          "examples": [
+            "csv-headers",
+            "csv-no-headers"
+          ]
+        },
+        {
+          "item": "field parsing",
+          "path": "docs/cypher/load-csv.md",
+          "anchor": "fields",
+          "examples": [
+            "csv-no-headers",
+            "csv-invalid-delimiter",
+            "csv-ordinary-malformed"
+          ]
+        },
+        {
+          "item": "URI source",
+          "path": "docs/cypher/load-csv.md",
+          "anchor": "sources",
+          "examples": [
+            "csv-headers",
+            "csv-null-source"
+          ]
+        },
+        {
+          "item": "periodic transaction composition",
+          "path": "docs/cypher/transaction-subqueries.md",
+          "anchor": "csv-composition",
+          "examples": [
+            "csv-batch-malformed",
+            "csv-batch-malformed-state"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "IN TRANSACTIONS",
+      "path": "docs/cypher/transaction-subqueries.md",
+      "examples": [
+        "csv-batch-return",
+        "csv-batch-zero",
+        "csv-batch-null",
+        "csv-batch-continue",
+        "csv-batch-break",
+        "csv-batch-fail",
+        "csv-batch-retry-type",
+        "csv-batch-invalid-status",
+        "csv-batch-whole-rollback",
+        "csv-batch-fail-state",
+        "csv-batch-malformed-state"
+      ],
+      "required": [
+        {
+          "item": "batch size",
+          "path": "docs/cypher/transaction-subqueries.md",
+          "anchor": "syntax",
+          "examples": [
+            "csv-batch-return",
+            "csv-batch-zero",
+            "csv-batch-null"
+          ]
+        },
+        {
+          "item": "error behavior",
+          "path": "docs/cypher/transaction-subqueries.md",
+          "anchor": "error-modes",
+          "examples": [
+            "csv-batch-continue",
+            "csv-batch-break",
+            "csv-batch-fail",
+            "csv-batch-retry-type"
+          ]
+        },
+        {
+          "item": "status output",
+          "path": "docs/cypher/transaction-subqueries.md",
+          "anchor": "status",
+          "examples": [
+            "csv-batch-continue",
+            "csv-batch-invalid-status"
+          ]
+        },
+        {
+          "item": "independent batch transaction boundaries",
+          "path": "docs/cypher/transaction-subqueries.md",
+          "anchor": "boundaries",
+          "examples": [
+            "csv-batch-whole-rollback",
+            "csv-batch-fail-state",
+            "csv-batch-malformed-state"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "IN CONCURRENT TRANSACTIONS",
+      "path": "docs/cypher/transaction-subqueries.md",
+      "examples": [
+        "csv-batch-concurrent",
+        "csv-batch-invalid-disjoint",
+        "csv-batch-check"
+      ],
+      "required": [
+        {
+          "item": "concurrent batching",
+          "path": "docs/cypher/transaction-subqueries.md",
+          "anchor": "concurrent",
+          "examples": [
+            "csv-batch-concurrent"
+          ]
+        },
+        {
+          "item": "DISJOINT BY semantics",
+          "path": "docs/cypher/transaction-subqueries.md",
+          "anchor": "concurrent",
+          "examples": [
+            "csv-batch-concurrent",
+            "csv-batch-invalid-disjoint"
+          ]
+        },
+        {
+          "item": "SQLite serialized commit",
+          "path": "docs/cypher/transaction-subqueries.md",
+          "anchor": "concurrent",
+          "examples": [
+            "csv-batch-concurrent",
+            "csv-batch-check"
+          ],
+          "verification": {
+            "command": "cargo test --locked -p lithograph-core --test phase08_search_ingestion",
+            "reason": "文档并发例验证声明与结果，专项 fixture 检查独立 batch commit 边界及 SQLite single-writer 语义。"
+          }
+        }
+      ]
+    },
+    {
+      "family": "EXPLAIN",
+      "path": "docs/cypher/diagnostics.md",
+      "examples": [
+        "schema-diagnostics-explain",
+        "schema-diagnostics-explain-write",
+        "schema-diagnostics-explain-check"
+      ],
+      "required": [
+        {
+          "item": "semantic validation + plan without execution",
+          "path": "docs/cypher/diagnostics.md",
+          "anchor": "explain",
+          "examples": [
+            "schema-diagnostics-explain",
+            "schema-diagnostics-explain-write",
+            "schema-diagnostics-explain-check"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "PROFILE",
+      "path": "docs/cypher/diagnostics.md",
+      "examples": [
+        "schema-diagnostics-profile",
+        "schema-diagnostics-profile-write",
+        "schema-diagnostics-profile-check"
+      ],
+      "required": [
+        {
+          "item": "execution + operator runtime counters",
+          "path": "docs/cypher/diagnostics.md",
+          "anchor": "profile",
+          "examples": [
+            "schema-diagnostics-profile",
+            "schema-diagnostics-profile-write",
+            "schema-diagnostics-profile-check"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "SHOW current graph surfaces",
+      "path": "docs/cypher/diagnostics.md",
+      "examples": [
+        "schema-diagnostics-functions",
+        "schema-diagnostics-procedures",
+        "schema-index-show",
+        "schema-constraint-show",
+        "schema-graph-show-empty",
+        "schema-graph-show-virtual",
+        "schema-diagnostics-show-error"
+      ],
+      "required": [
+        {
+          "item": "functions/procedures/indexes/constraints/current graph type",
+          "path": "docs/cypher/diagnostics.md",
+          "anchor": "show",
+          "examples": [
+            "schema-diagnostics-functions",
+            "schema-diagnostics-procedures",
+            "schema-index-show",
+            "schema-constraint-show",
+            "schema-graph-show-empty",
+            "schema-graph-show-virtual",
+            "schema-diagnostics-show-error"
+          ]
+        }
+      ]
+    },
+    {
+      "family": "Error compatibility",
+      "path": "docs/cypher/expressions.md",
+      "examples": [
+        "foundation-syntax-error",
+        "foundation-model-scope-error",
+        "foundation-expression-division-error",
+        "schema-constraint-duplicate",
+        "csv-batch-union",
+        "csv-batch-nested",
+        "csv-batch-zero"
+      ],
+      "required": [
+        {
+          "item": "syntax position",
+          "path": "docs/cypher/syntax.md",
+          "anchor": "syntax-errors",
+          "examples": [
+            "foundation-syntax-error"
+          ]
+        },
+        {
+          "item": "semantic/type/constraint failures",
+          "path": "docs/reference/errors.md",
+          "anchor": "atomicity-after-error",
+          "examples": [
+            "foundation-model-scope-error",
+            "foundation-expression-division-error",
+            "schema-constraint-duplicate"
+          ]
+        },
+        {
+          "item": "transaction errors",
+          "path": "docs/cypher/transaction-subqueries.md",
+          "anchor": "errors",
+          "examples": [
+            "csv-batch-union",
+            "csv-batch-nested",
+            "csv-batch-zero"
+          ]
+        }
+      ]
+    }
+  ],
+  "surfaces": [
+    {
+      "kind": "sql",
+      "name": "lithograph_init",
+      "path": "docs/reference/sql-api.md",
+      "anchor": "initialization"
+    },
+    {
+      "kind": "sql",
+      "name": "lithograph",
+      "path": "docs/reference/sql-api.md",
+      "anchor": "scalar-envelope"
+    },
+    {
+      "kind": "sql",
+      "name": "lithograph_rows",
+      "path": "docs/reference/sql-api.md",
+      "anchor": "rows-execution-stream"
+    },
+    {
+      "kind": "sql",
+      "name": "lithograph_tx_begin",
+      "path": "docs/reference/sql-api.md",
+      "anchor": "sql-explicit-transactions"
+    },
+    {
+      "kind": "sql",
+      "name": "lithograph_tx_commit",
+      "path": "docs/reference/sql-api.md",
+      "anchor": "sql-explicit-transactions"
+    },
+    {
+      "kind": "sql",
+      "name": "lithograph_tx_abort",
+      "path": "docs/reference/sql-api.md",
+      "anchor": "sql-explicit-transactions"
+    },
+    {
+      "kind": "sql",
+      "name": "lithograph_validate",
+      "path": "docs/reference/sql-api.md",
+      "anchor": "validation"
+    },
+    {
+      "kind": "sql",
+      "name": "lithograph_version",
+      "path": "docs/reference/sql-api.md",
+      "anchor": "initialization"
+    },
+    {
+      "kind": "sql",
+      "name": "lithograph_integrity_check",
+      "path": "docs/reference/sql-api.md",
+      "anchor": "integrity-check"
+    },
+    {
+      "kind": "option",
+      "name": "branch",
+      "path": "docs/reference/execution-options.md",
+      "anchor": "ordinary-execution"
+    },
+    {
+      "kind": "option",
+      "name": "at",
+      "path": "docs/reference/execution-options.md",
+      "anchor": "ordinary-execution"
+    },
+    {
+      "kind": "option",
+      "name": "author",
+      "path": "docs/reference/execution-options.md",
+      "anchor": "ordinary-execution"
+    },
+    {
+      "kind": "option",
+      "name": "message",
+      "path": "docs/reference/execution-options.md",
+      "anchor": "ordinary-execution"
+    },
+    {
+      "kind": "option",
+      "name": "graphView",
+      "path": "docs/reference/execution-options.md",
+      "anchor": "graph-view"
+    },
+    {
+      "kind": "option",
+      "name": "readOnlyNoExternalIO",
+      "path": "docs/reference/execution-options.md",
+      "anchor": "read-only-no-external-io"
+    },
+    {
+      "kind": "option",
+      "name": "mergeSession",
+      "path": "docs/reference/execution-options.md",
+      "anchor": "ordinary-execution"
+    },
+    {
+      "kind": "option",
+      "name": "expectedHead",
+      "path": "docs/reference/execution-options.md",
+      "anchor": "transaction-begin-options"
+    },
+    {
+      "kind": "provider-config",
+      "name": "base_url",
+      "path": "docs/reference/openai-compatible-provider.md",
+      "anchor": "configuration"
+    },
+    {
+      "kind": "provider-config",
+      "name": "api_key",
+      "path": "docs/reference/openai-compatible-provider.md",
+      "anchor": "configuration"
+    },
+    {
+      "kind": "provider-config",
+      "name": "api_key_env",
+      "path": "docs/reference/openai-compatible-provider.md",
+      "anchor": "configuration"
+    },
+    {
+      "kind": "provider-config",
+      "name": "model",
+      "path": "docs/reference/openai-compatible-provider.md",
+      "anchor": "configuration"
+    },
+    {
+      "kind": "provider-config",
+      "name": "send_dimensions",
+      "path": "docs/reference/openai-compatible-provider.md",
+      "anchor": "configuration"
+    },
+    {
+      "kind": "provider-config",
+      "name": "encoding_format",
+      "path": "docs/reference/openai-compatible-provider.md",
+      "anchor": "configuration"
+    },
+    {
+      "kind": "provider-config",
+      "name": "user",
+      "path": "docs/reference/openai-compatible-provider.md",
+      "anchor": "configuration"
+    },
+    {
+      "kind": "provider-config",
+      "name": "organization",
+      "path": "docs/reference/openai-compatible-provider.md",
+      "anchor": "configuration"
+    },
+    {
+      "kind": "provider-config",
+      "name": "project",
+      "path": "docs/reference/openai-compatible-provider.md",
+      "anchor": "configuration"
+    },
+    {
+      "kind": "provider-config",
+      "name": "headers",
+      "path": "docs/reference/openai-compatible-provider.md",
+      "anchor": "configuration"
+    },
+    {
+      "kind": "provider-config",
+      "name": "timeout_ms",
+      "path": "docs/reference/openai-compatible-provider.md",
+      "anchor": "configuration"
+    },
+    {
+      "kind": "provider-config",
+      "name": "max_retries",
+      "path": "docs/reference/openai-compatible-provider.md",
+      "anchor": "configuration"
+    },
+    {
+      "kind": "provider-config",
+      "name": "batch_size",
+      "path": "docs/reference/openai-compatible-provider.md",
+      "anchor": "configuration"
+    },
+    {
+      "kind": "provider-config",
+      "name": "semantic_identity",
+      "path": "docs/reference/openai-compatible-provider.md",
+      "anchor": "configuration"
+    },
+    {
+      "kind": "provider-config",
+      "name": "cache",
+      "path": "docs/reference/openai-compatible-provider.md",
+      "anchor": "configuration"
+    },
+    {
+      "kind": "provider-config",
+      "name": "cache.enabled",
+      "path": "docs/reference/openai-compatible-provider.md",
+      "anchor": "configuration"
+    },
+    {
+      "kind": "provider-config",
+      "name": "cache.path",
+      "path": "docs/reference/openai-compatible-provider.md",
+      "anchor": "configuration"
+    },
+    {
+      "kind": "provider-config",
+      "name": "cache.max_bytes",
+      "path": "docs/reference/openai-compatible-provider.md",
+      "anchor": "configuration"
+    },
+    {
+      "kind": "supplemental",
+      "name": "json-values",
+      "path": "docs/reference/values.md"
+    },
+    {
+      "kind": "supplemental",
+      "name": "transaction-lifecycle",
+      "path": "docs/reference/transactions.md"
+    },
+    {
+      "kind": "supplemental",
+      "name": "version-objects",
+      "path": "docs/reference/versioning.md"
+    },
+    {
+      "kind": "supplemental",
+      "name": "provider-spi",
+      "path": "docs/reference/embedding-provider-spi.md"
+    },
+    {
+      "kind": "supplemental",
+      "name": "fts5-binding",
+      "path": "docs/reference/procedures/fulltext.md"
+    },
+    {
+      "kind": "supplemental",
+      "name": "managed-semantic",
+      "path": "docs/reference/procedures/semantic.md"
+    },
+    {
+      "kind": "supplemental",
+      "name": "sql-streaming",
+      "path": "docs/guide/integration.md"
+    },
+    {
+      "kind": "supplemental",
+      "name": "safe-execution",
+      "path": "docs/guide/safe-execution.md"
+    },
+    {
+      "kind": "supplemental",
+      "name": "profile-delta",
+      "path": "docs/reference/cypher-compatibility.md"
+    },
+    {
+      "kind": "option",
+      "name": "graphView.requireAllLabels",
+      "path": "docs/reference/execution-options.md",
+      "anchor": "graph-view"
+    },
+    {
+      "kind": "option",
+      "name": "graphView.excludeAnyLabels",
+      "path": "docs/reference/execution-options.md",
+      "anchor": "graph-view"
+    },
+    {
+      "kind": "option",
+      "name": "mergeSession.id",
+      "path": "docs/reference/execution-options.md",
+      "anchor": "ordinary-execution"
+    },
+    {
+      "kind": "option",
+      "name": "mergeSession.revision",
+      "path": "docs/reference/execution-options.md",
+      "anchor": "ordinary-execution"
+    }
+  ],
+  "inventories": [
+    {
+      "section": "5. 2025.06+ Cypher 25 Delta Inventory",
+      "item": "Cypher 25 query version prefix；",
+      "path": "docs/cypher/syntax.md",
+      "anchor": "preamble",
+      "examples": [
+        "foundation-syntax-version"
+      ]
+    },
+    {
+      "section": "5. 2025.06+ Cypher 25 Delta Inventory",
+      "item": "`WHEN`、`NEXT`；",
+      "path": "docs/cypher/composition.md",
+      "anchor": "when",
+      "examples": [
+        "path-when-first",
+        "path-when-no-branch",
+        "path-when-correlated",
+        "path-next-rows",
+        "path-next-union",
+        "path-next-finish"
+      ]
+    },
+    {
+      "section": "5. 2025.06+ Cypher 25 Delta Inventory",
+      "item": "GQL-aligned syntax/aliases introduced through Cypher 25；",
+      "path": "docs/reference/functions.md",
+      "examples": [
+        "fn-character_length",
+        "fn-char_length",
+        "fn-lower",
+        "fn-upper",
+        "fn-duration_between",
+        "foundation-reading-for",
+        "path-writing-insert",
+        "foundation-aggregation-explicit"
+      ]
+    },
+    {
+      "section": "5. 2025.06+ Cypher 25 Delta Inventory",
+      "item": "path/match mode updates including `ACYCLIC` and later selector combinations；",
+      "path": "docs/cypher/path-selection.md",
+      "anchor": "path-mode-combinations",
+      "examples": [
+        "path-mode-acyclic",
+        "path-mode-repeatable",
+        "path-mode-invalid-combination",
+        "path-selector-k",
+        "path-selector-groups"
+      ]
+    },
+    {
+      "section": "5. 2025.06+ Cypher 25 Delta Inventory",
+      "item": "temporal `format()` and constructor format patterns；",
+      "path": "docs/cypher/functions/temporal.md",
+      "anchor": "temporal-patterns",
+      "examples": [
+        "fn-format",
+        "fn-date",
+        "fn-datetime",
+        "foundation-values-temporal",
+        "fn-temporal-invalid-date"
+      ]
+    },
+    {
+      "section": "5. 2025.06+ Cypher 25 Delta Inventory",
+      "item": "`VECTOR` value/type/functions；",
+      "path": "docs/cypher/types.md",
+      "anchor": "vector-values",
+      "examples": [
+        "foundation-values-vector",
+        "foundation-values-vector-dimension-error",
+        "foundation-native-store-create",
+        "foundation-native-store-read",
+        "fn-vector_distance",
+        "fn-vector_norm"
+      ]
+    },
+    {
+      "section": "5. 2025.06+ Cypher 25 Delta Inventory",
+      "item": "vector index evolution；",
+      "path": "docs/cypher/indexes.md",
+      "anchor": "vector",
+      "examples": [
+        "schema-index-vector",
+        "schema-index-vector-invalid",
+        "schema-index-show"
+      ]
+    },
+    {
+      "section": "5. 2025.06+ Cypher 25 Delta Inventory",
+      "item": "`SEARCH` ANN subclause and filtering extensions；",
+      "path": "docs/cypher/search.md",
+      "anchor": "filters",
+      "examples": [
+        "schema-search-top",
+        "schema-search-null",
+        "schema-search-invalid-filter",
+        "schema-search-invalid-limit",
+        "schema-search-relationship"
+      ]
+    },
+    {
+      "section": "5. 2025.06+ Cypher 25 Delta Inventory",
+      "item": "Graph Types / element types / property type constraints；",
+      "path": "docs/cypher/graph-types.md",
+      "anchor": "properties",
+      "examples": [
+        "schema-graph-set",
+        "schema-graph-add",
+        "schema-graph-alter",
+        "schema-graph-invalid",
+        "schema-constraint-type",
+        "schema-constraint-wrong-type"
+      ]
+    },
+    {
+      "section": "5. 2025.06+ Cypher 25 Delta Inventory",
+      "item": "`FOR`；",
+      "path": "docs/cypher/reading.md",
+      "anchor": "unwind-for",
+      "examples": [
+        "foundation-reading-for",
+        "foundation-reading-unwind-scalar"
+      ]
+    },
+    {
+      "section": "5. 2025.06+ Cypher 25 Delta Inventory",
+      "item": "composable `SHOW` updates applicable to current graph；",
+      "path": "docs/cypher/diagnostics.md",
+      "anchor": "yield",
+      "examples": [
+        "schema-diagnostics-functions",
+        "schema-diagnostics-procedures",
+        "schema-index-show",
+        "schema-constraint-show",
+        "schema-graph-show-virtual"
+      ]
+    },
+    {
+      "section": "5. 2025.06+ Cypher 25 Delta Inventory",
+      "item": "`GROUP BY` and aggregation visibility updates；",
+      "path": "docs/cypher/aggregation.md",
+      "anchor": "group-by",
+      "examples": [
+        "foundation-aggregation-explicit",
+        "foundation-aggregation-global",
+        "foundation-aggregation-group-error",
+        "foundation-aggregation-filter",
+        "foundation-aggregation-collect-order"
+      ]
+    },
+    {
+      "section": "5. 2025.06+ Cypher 25 Delta Inventory",
+      "item": "current string functions introduced through 2026.05；",
+      "path": "docs/cypher/functions/string.md",
+      "examples": [
+        "fn-btrim",
+        "fn-left",
+        "fn-left-null-length-error",
+        "fn-lower",
+        "fn-ltrim",
+        "fn-normalize",
+        "fn-regex-pattern-error",
+        "fn-replace",
+        "fn-replace-limit-error",
+        "fn-right",
+        "fn-rtrim",
+        "fn-split",
+        "fn-split-invalid-element-error",
+        "fn-string-indexof",
+        "fn-string-join",
+        "fn-string-regexreplace",
+        "fn-string-reverse",
+        "fn-substring",
+        "fn-substring-negative-error",
+        "fn-tolower",
+        "fn-tostring",
+        "fn-tostring-container-error",
+        "fn-tostringornull",
+        "fn-toupper",
+        "fn-trim",
+        "fn-upper"
+      ]
+    },
+    {
+      "section": "5. 2025.06+ Cypher 25 Delta Inventory",
+      "item": "`PROPERTY_EXISTS`；",
+      "path": "docs/cypher/expressions.md",
+      "anchor": "property-exists",
+      "examples": [
+        "foundation-property-exists",
+        "foundation-property-exists-type-error"
+      ]
+    },
+    {
+      "section": "5. 2025.06+ Cypher 25 Delta Inventory",
+      "item": "native `UUID`；",
+      "path": "docs/cypher/types.md",
+      "anchor": "uuid-values",
+      "examples": [
+        "foundation-values-uuid",
+        "foundation-values-uuid-error",
+        "foundation-native-store-create",
+        "foundation-native-store-read",
+        "fn-uuid-bits",
+        "fn-uuid-mostsignificantbits",
+        "fn-uuid-leastsignificantbits"
+      ]
+    },
+    {
+      "section": "5. 2025.06+ Cypher 25 Delta Inventory",
+      "item": "string interpolation；",
+      "path": "docs/cypher/expressions.md",
+      "anchor": "interpolation",
+      "examples": [
+        "foundation-expression-interpolation"
+      ]
+    },
+    {
+      "section": "5. 2025.06+ Cypher 25 Delta Inventory",
+      "item": "`IN CONCURRENT TRANSACTIONS` / `DISJOINT BY` current semantics。",
+      "path": "docs/cypher/transaction-subqueries.md",
+      "anchor": "concurrent",
+      "examples": [
+        "csv-batch-concurrent",
+        "csv-batch-invalid-disjoint"
+      ]
+    },
+    {
+      "section": "Phase 12 FTS5 provider supplemental inventory",
+      "item": "原生 specification、默认值、取消两个名称的特殊映射",
+      "path": "docs/cypher/indexes.md",
+      "anchor": "fulltext",
+      "examples": [
+        "schema-index-fulltext",
+        "proc-ft-analyzer"
+      ],
+      "verification": {
+        "command": "cargo test --locked -p lithograph-core --test phase12_fulltext_tokenizer",
+        "reason": "验证原生 tokenizer specification/default、拒绝旧 analyzer alias；示例仅演示实际 DDL 与 query override。"
+      }
+    },
+    {
+      "section": "Phase 12 FTS5 provider supplemental inventory",
+      "item": "构造验证、失败原子性、planning/no-op 边界",
+      "path": "docs/reference/procedures/fulltext.md",
+      "anchor": "context-errors",
+      "examples": [
+        "proc-ft-index",
+        "proc-ft-invalid-options"
+      ],
+      "verification": {
+        "command": "cargo test --locked -p lithograph-core --test phase12_fulltext_tokenizer",
+        "reason": "专项 fixture 验证构造失败 rollback、EXPLAIN/no-op validation；文档示例给出合法创建与非法 option。"
+      }
+    },
+    {
+      "section": "Phase 12 FTS5 provider supplemental inventory",
+      "item": "Node/Relationship、完整定义、cache/history/connection",
+      "path": "docs/reference/procedures/fulltext.md",
+      "anchor": "context-errors",
+      "examples": [
+        "proc-ft-phrase",
+        "proc-ft-rel-query"
+      ],
+      "verification": {
+        "command": "cargo test --locked -p lithograph-core --test phase12_fulltext_tokenizer",
+        "reason": "覆盖 Node/Relationship FTS、完整定义、cache 删除与历史 Snapshot、connection 生命周期。"
+      }
+    },
+    {
+      "section": "Phase 12 FTS5 provider supplemental inventory",
+      "item": "Query-time analyzer、表达式/flags/synonym、score/pagination/lifetime",
+      "path": "docs/reference/procedures/fulltext.md",
+      "anchor": "analyzer",
+      "examples": [
+        "proc-ft-analyzer",
+        "proc-ft-phrase",
+        "proc-ft-flat",
+        "proc-ft-field",
+        "proc-ft-near"
+      ],
+      "verification": {
+        "command": "cargo test --locked -p lithograph-core --test phase12_fulltext_tokenizer",
+        "reason": "专项 synthetic tokenizer 验证 QUERY flags/synonym/lifetime；可执行使用例验证 analyzer、查询表达式与实际 score。"
+      }
+    },
+    {
+      "section": "Phase 12 FTS5 provider supplemental inventory",
+      "item": "真实 SQLite 双 extension、Native/staged/SQL parity",
+      "path": "docs/reference/native-api.md",
+      "anchor": "application-boundary",
+      "reason": "该历史验收行包含的 Native/staged application query ABI 已在 Phase 15 删除；当前应用以两个标准 SQL execution surface 与 SQL transaction lifecycle 接入，FTS5 双 extension 仍由当前 CI 验证。",
+      "applicability": "superseded",
+      "replacement": "docs/reference/sql-api.md#entrypoints"
+    },
+    {
+      "section": "Phase 12 FTS5 provider supplemental inventory",
+      "item": "Cypher/Vector/version regression、完整 gates 与文档同步",
+      "path": "docs/reference/cypher-compatibility.md",
+      "verification": {
+        "command": "scripts/ci.sh",
+        "reason": "默认 gates 运行 frozen TCK/CY25、Full-text/Vector/version regression 与文档一致性检查。"
+      }
+    },
+    {
+      "section": "Phase 13 Managed Semantic supplemental inventory",
+      "item": "Provider ABI / load order / validation / lifetime",
+      "path": "docs/reference/embedding-provider-spi.md",
+      "anchor": "registration",
+      "examples": [
+        "provider-development-create",
+        "provider-development-invalid-config",
+        "provider-development-failure-query"
+      ],
+      "verification": {
+        "command": "scripts/sqlite-3534-smoke.sh \"$extension\" \"$provider\"",
+        "reason": "构建并加载 synthetic Provider，调用 phase13 probe 校验 ABI、加载顺序、validation、取消与生命周期。"
+      }
+    },
+    {
+      "section": "Phase 13 Managed Semantic supplemental inventory",
+      "item": "Semantic Schema / SHOW / Diff-Patch-Merge-Rebase-Revert / Native staged create",
+      "path": "docs/reference/procedures/semantic.md",
+      "anchor": "create-options",
+      "examples": [
+        "proc-sem-node-create",
+        "proc-sem-rel-create",
+        "proc-sem-node-query"
+      ],
+      "reason": "历史行中的 Native staged create 已由 Phase 15 的标准 lithograph()/lithograph_rows() staged execution 替代；Semantic Schema 与版本操作仍按当前 SQL-only 合同使用。",
+      "applicability": "superseded",
+      "replacement": "docs/reference/transactions.md#active-execution"
+    },
+    {
+      "section": "Phase 13 Managed Semantic supplemental inventory",
+      "item": "format4 / embedding cache identity、integrity、policy、read-only/failure",
+      "path": "docs/guide/operations.md",
+      "anchor": "storage-format",
+      "reason": "Phase 15 删除 Lithograph format4 与 Core persistent embedding cache；当前 storage format 为 3，跨 execution result cache 由 OpenAI-compatible Provider 的独立 SQLite DB 拥有。",
+      "applicability": "superseded",
+      "replacement": "docs/reference/openai-compatible-provider.md#persistent-cache"
+    },
+    {
+      "section": "Phase 13 Managed Semantic supplemental inventory",
+      "item": "query Node/Relationship、exact text、Graph View、history、adapter boundary",
+      "path": "docs/reference/procedures/semantic.md",
+      "anchor": "context",
+      "examples": [
+        "proc-sem-node-query",
+        "proc-sem-rel-query",
+        "proc-sem-zero-limit",
+        "proc-graph-view-hidden"
+      ],
+      "verification": {
+        "command": "scripts/sqlite-3534-smoke.sh \"$extension\" \"$provider\"",
+        "reason": "phase13 实际双扩展 probe 验证 exact text、Graph View、历史及两个 SQL adapter 的边界；文档例分别查询 Node/Relationship。"
+      }
+    },
+    {
+      "section": "Phase 13 Managed Semantic supplemental inventory",
+      "item": "Raw Vector/Full-text/version regression、resource evidence、repository gates/docs",
+      "path": "docs/reference/cypher-compatibility.md",
+      "verification": {
+        "command": "scripts/ci.sh",
+        "reason": "统一 gates 包含 Raw Vector/Full-text/version regression、resource/scale probes、文档示例与仓库检查。"
+      }
+    },
+    {
+      "section": "Phase 13 Managed Semantic supplemental inventory",
+      "item": "OpenAICompatible config/auth/request/response/retry/cache/multi-config",
+      "path": "docs/reference/openai-compatible-provider.md",
+      "anchor": "configuration",
+      "verification": {
+        "command": "scripts/openai-compatible-provider-smoke.sh \"$provider\"",
+        "reason": "本地 synthetic HTTP fixture 验证配置/auth、request/response、retry、cache、多配置；无需真实 credential 或外部服务。"
+      }
+    },
+    {
+      "section": "Phase 13 Managed Semantic supplemental inventory",
+      "item": "SQLite 3.45.0 / 3.53.4 dual-extension runtime",
+      "path": "docs/guide/installation.md",
+      "anchor": "sqlite-runtime",
+      "verification": {
+        "command": "scripts/ci.sh",
+        "reason": "脚本分别运行 sqlite-345-smoke.sh 与 sqlite-3534-smoke.sh，并加载主扩展、synthetic/OpenAI Provider。"
+      }
+    },
+    {
+      "section": "Phase 13 Managed Semantic supplemental inventory",
+      "item": "Linux/macOS/Windows x64/arm64 hosted artifact build/load/migration",
+      "path": "docs/guide/installation.md",
+      "anchor": "artifacts",
+      "verification": {
+        "command": "scripts/release-artifact-smoke.sh \"$extension\" \"$database\" \"$provider\"",
+        "reason": "Release Matrix 在 Linux/macOS/Windows x64/arm64 各目标对本机产物 load/init/read/write，并验证当前支持的 migration；历史 format4 不属于当前 migration。"
+      }
+    },
+    {
+      "section": "Phase 15 SQL execution / Provider cache supplemental inventory",
+      "item": "`columns -> row* -> summary` event schema、zero-row、scalar/stream parity",
+      "path": "docs/reference/sql-api.md",
+      "anchor": "rows-execution-stream",
+      "verification": {
+        "command": "python3 -B docs/guide/examples/streaming.py \"$extension\"",
+        "reason": "真实 SQL fixture 验证 columns/row/summary、完整消费与 scalar/stream 结果一致；零行及 event schema 另由 sql-surface-smoke gate 覆盖。"
+      }
+    },
+    {
+      "section": "Phase 15 SQL execution / Provider cache supplemental inventory",
+      "item": "read/write true streaming、cancel/early-close/resource boundary",
+      "path": "docs/reference/transactions.md",
+      "anchor": "stream-lifecycle",
+      "verification": {
+        "command": "scripts/sql-surface-smoke.sh \"$extension\"",
+        "reason": "真实 C SQLite host 验证 rows write/read、interrupt、early-close、result resource failure 与 rollback；Python streaming.py 提供可运行接入示例。"
+      }
+    },
+    {
+      "section": "Phase 15 SQL execution / Provider cache supplemental inventory",
+      "item": "SQL `IN TRANSACTIONS` / external I/O / read-only main",
+      "path": "docs/cypher/transaction-subqueries.md",
+      "anchor": "streaming",
+      "examples": [
+        "csv-batch-return",
+        "csv-batch-malformed",
+        "csv-batch-malformed-state",
+        "proc-sem-node-query"
+      ],
+      "verification": {
+        "command": "scripts/ci.sh",
+        "reason": "两种 SQL execution surface 覆盖独立 batch 与 external I/O，双扩展 phase13 probe 检查只读 main + Provider-owned cache。"
+      }
+    },
+    {
+      "section": "Phase 15 SQL execution / Provider cache supplemental inventory",
+      "item": "normal execution surfaces 复用 SQL explicit transaction、删除 tx-execute",
+      "path": "docs/reference/transactions.md",
+      "anchor": "active-execution",
+      "verification": {
+        "command": "python3 -B docs/guide/examples/sql_transaction.py \"$extension\"",
+        "reason": "标准 scalar/rows 在同一 explicit transaction 共享 staged state，最终唯一 Commit，失败清理；无需 tx-execute。"
+      }
+    },
+    {
+      "section": "Phase 15 SQL execution / Provider cache supplemental inventory",
+      "item": "application Native query ABI removal、Provider SPI preservation",
+      "path": "docs/reference/native-api.md",
+      "anchor": "application-boundary",
+      "verification": {
+        "command": "scripts/ci.sh",
+        "reason": "check-extension-artifact 检查只保留 SQLite entrypoint/Provider SPI，SQL-only C host 示例验证当前 application surface。"
+      }
+    },
+    {
+      "section": "Phase 15 SQL execution / Provider cache supplemental inventory",
+      "item": "Lithograph format3/Core cache removal、OpenAI Provider 独立 cache DB",
+      "path": "docs/reference/openai-compatible-provider.md",
+      "anchor": "persistent-cache",
+      "verification": {
+        "command": "scripts/phase15-provider-cache-smoke.sh \"$provider\"",
+        "reason": "独立 Provider cache DB 验证 cache identity、读写/readonly、损坏/failure、预算；主扩展 current format3 不承载 Core cache。"
+      }
+    },
+    {
+      "section": "Phase 15 SQL execution / Provider cache supplemental inventory",
+      "item": "frozen TCK/CY25 + release/runtime/documentation regression",
+      "path": "docs/reference/cypher-compatibility.md",
+      "verification": {
+        "command": "scripts/ci.sh",
+        "reason": "冻结 TCK/CY25、SQL runtime 与真实扩展、所有文档示例及 generated inventory 是默认 CI；各平台 artifact 另由 Release Matrix 执行。"
+      }
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "examples": [
+    {"id":"provider-development-data","path":"docs/guide/provider-development.md","provider":true,"columns":[],"row_count":0},
+    {"id":"provider-development-create","path":"docs/guide/provider-development.md","provider":true,"setup":["provider-development-data"],"columns":[],"row_count":0},
+    {"id":"provider-development-query","path":"docs/guide/provider-development.md","provider":true,"setup":["provider-development-data","provider-development-create"],"columns":["name"],"rows":[["Hello"]]},
+    {"id":"provider-development-invalid-config","path":"docs/guide/provider-development.md","provider":true,"error":"INVALID_ARGUMENT"},
+    {"id":"provider-development-failure-index","path":"docs/guide/provider-development.md","provider":true,"setup":["provider-development-data"],"columns":[],"row_count":0},
+    {"id":"provider-development-failure-query","path":"docs/guide/provider-development.md","provider":true,"setup":["provider-development-data","provider-development-failure-index"],"error":"IO_ERROR"}
+  ]
+}

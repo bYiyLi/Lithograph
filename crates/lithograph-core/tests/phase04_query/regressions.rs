@@ -129,3 +129,102 @@ fn query_cursor_observes_interrupt_check_at_batch_boundary() {
     assert_eq!(error.kind, QueryErrorKind::Interrupted);
     assert_eq!(error.sqlite_code, Some(rusqlite::ffi::SQLITE_INTERRUPT));
 }
+
+#[test]
+fn doubled_string_delimiters_decode_in_values_and_map_keys() {
+    let connection = fresh_storage();
+    assert_eq!(
+        rows(
+            &connection,
+            r#"RETURN 'it''s' AS single, "say ""yes""" AS double, {'a''b': '中''文'} AS object"#,
+            ExecutionOptions::default(),
+        ),
+        vec![vec![
+            Value::String("it's".to_owned()),
+            Value::String("say \"yes\"".to_owned()),
+            Value::Map(BTreeMap::from([(
+                "a'b".to_owned(),
+                Value::String("中'文".to_owned()),
+            )])),
+        ]]
+    );
+}
+
+#[test]
+fn map_projection_literal_entries_evaluate_property_expressions() {
+    let connection = fresh_storage();
+    assert_eq!(
+        rows(
+            &connection,
+            "WITH {score:10, name:'Ada'} AS record RETURN record{.*, score:record.score+1, label:record.name, nested:{score:record.score}} AS object",
+            ExecutionOptions::default(),
+        ),
+        vec![vec![Value::Map(BTreeMap::from([
+            ("score".to_owned(), Value::Integer(11)),
+            ("name".to_owned(), Value::String("Ada".to_owned())),
+            ("label".to_owned(), Value::String("Ada".to_owned())),
+            (
+                "nested".to_owned(),
+                Value::Map(BTreeMap::from([("score".to_owned(), Value::Integer(10))])),
+            ),
+        ]))]]
+    );
+}
+
+#[test]
+fn regex_operator_parses_before_equality_and_keeps_predicate_semantics() {
+    let connection = fresh_storage();
+    assert_eq!(
+        rows(
+            &connection,
+            "RETURN 'a12' =~ 'a[0-9]+' AS matched, 'a12z' =~ 'a[0-9]+' AS whole, null =~ 'x' AS unknown, 1 = 1 AS equal, 1 <> 2 AS different",
+            ExecutionOptions::default(),
+        ),
+        vec![vec![
+            Value::Boolean(true),
+            Value::Boolean(false),
+            Value::Null,
+            Value::Boolean(true),
+            Value::Boolean(true),
+        ]]
+    );
+    let prepared = prepare(
+        &connection,
+        "RETURN 'text' =~ '[' AS invalid",
+        BTreeMap::new(),
+        ExecutionOptions::default(),
+    )
+    .expect("valid Cypher containing an invalid regex");
+    let mut cursor = QueryCursor::new(prepared);
+    let error = cursor
+        .next_batch(&connection, 1)
+        .expect_err("invalid regex must fail at evaluation");
+    assert_eq!(error.kind, QueryErrorKind::Semantic);
+}
+
+#[test]
+fn count_distinct_requires_a_value_expression_even_with_empty_input() {
+    let connection = fresh_storage();
+    for query in [
+        "UNWIND [1, 1, 2] AS value RETURN count(DISTINCT *)",
+        "UNWIND [] AS value RETURN count(DISTINCT *)",
+        "RETURN count(DISTINCT)",
+    ] {
+        let error = prepare(
+            &connection,
+            query,
+            BTreeMap::new(),
+            ExecutionOptions::default(),
+        )
+        .expect_err("DISTINCT without a value expression must fail during prepare");
+        assert_eq!(error.kind, QueryErrorKind::Semantic, "{query}");
+    }
+    assert_eq!(
+        rows(
+            &connection,
+            "UNWIND [1,1,2] AS value RETURN count(*) AS rows, count(DISTINCT value) AS values",
+            ExecutionOptions::default(),
+        ),
+        vec![vec![Value::Integer(3), Value::Integer(2)]]
+    );
+}

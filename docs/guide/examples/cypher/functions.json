@@ -1,0 +1,2714 @@
+{
+  "examples": [
+    {
+      "id": "fn-abs",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          37
+        ]
+      ]
+    },
+    {
+      "id": "fn-acos",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          0.0
+        ]
+      ]
+    },
+    {
+      "id": "fn-aggregation-duration",
+      "path": "docs/cypher/functions/aggregation.md",
+      "columns": [
+        "total",
+        "mean"
+      ],
+      "rows": [
+        [
+          "PT6H",
+          "PT3H"
+        ]
+      ]
+    },
+    {
+      "id": "fn-aggregation-empty",
+      "path": "docs/cypher/functions/aggregation.md",
+      "columns": [
+        "n",
+        "items",
+        "total",
+        "mean",
+        "low",
+        "high",
+        "median",
+        "sample",
+        "population"
+      ],
+      "rows": [
+        [
+          0,
+          [],
+          0,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null
+        ]
+      ]
+    },
+    {
+      "id": "fn-all",
+      "path": "docs/cypher/functions/predicate.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            true,
+            true,
+            null,
+            false
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-all-predicate-error",
+      "path": "docs/cypher/functions/predicate.md",
+      "error": "TYPE_ERROR"
+    },
+    {
+      "id": "fn-allreduce",
+      "path": "docs/cypher/functions/predicate.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            true,
+            false,
+            true,
+            null,
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-any",
+      "path": "docs/cypher/functions/predicate.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            true,
+            false,
+            null,
+            true
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-asin",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          0.0
+        ]
+      ]
+    },
+    {
+      "id": "fn-atan",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          0.0
+        ]
+      ]
+    },
+    {
+      "id": "fn-atan2",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "fn-avg",
+      "path": "docs/cypher/functions/aggregation.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          6.0
+        ]
+      ]
+    },
+    {
+      "id": "fn-btrim",
+      "path": "docs/cypher/functions/string.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            "报告",
+            "图",
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-cardinality",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "fields",
+        "entries"
+      ],
+      "rows": [
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    {
+      "id": "fn-cardinality-type-error",
+      "path": "docs/cypher/functions/scalar.md",
+      "error": "TYPE_ERROR"
+    },
+    {
+      "id": "fn-ceil",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          -2.0
+        ]
+      ]
+    },
+    {
+      "id": "fn-ceiling",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          3.0
+        ]
+      ]
+    },
+    {
+      "id": "fn-char_length",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "length"
+      ],
+      "rows": [
+        [
+          4
+        ]
+      ]
+    },
+    {
+      "id": "fn-character_length",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "length"
+      ],
+      "rows": [
+        [
+          2
+        ]
+      ]
+    },
+    {
+      "id": "fn-coalesce",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "name"
+      ],
+      "rows": [
+        [
+          "未命名"
+        ]
+      ]
+    },
+    {
+      "id": "fn-coll-distinct",
+      "path": "docs/cypher/functions/list.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            [
+              2,
+              1,
+              null
+            ],
+            [],
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-coll-flatten",
+      "path": "docs/cypher/functions/list.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            [
+              1,
+              2,
+              [
+                3
+              ],
+              null
+            ],
+            [
+              1,
+              2,
+              3
+            ],
+            [
+              [
+                1
+              ]
+            ]
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-coll-flatten-depth-error",
+      "path": "docs/cypher/functions/list.md",
+      "error": "TYPE_ERROR"
+    },
+    {
+      "id": "fn-coll-indexof",
+      "path": "docs/cypher/functions/list.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            1,
+            -1,
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-coll-insert",
+      "path": "docs/cypher/functions/list.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            [
+              1,
+              2,
+              3
+            ],
+            [
+              null
+            ],
+            [
+              1,
+              [
+                2
+              ]
+            ]
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-coll-insert-index-error",
+      "path": "docs/cypher/functions/list.md",
+      "error": "TYPE_ERROR"
+    },
+    {
+      "id": "fn-coll-max",
+      "path": "docs/cypher/functions/list.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            8,
+            null,
+            null,
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-coll-min",
+      "path": "docs/cypher/functions/list.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            1,
+            null,
+            null,
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-coll-remove",
+      "path": "docs/cypher/functions/list.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            [
+              1,
+              2,
+              3
+            ],
+            [],
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-coll-remove-index-error",
+      "path": "docs/cypher/functions/list.md",
+      "error": "TYPE_ERROR"
+    },
+    {
+      "id": "fn-coll-sort",
+      "path": "docs/cypher/functions/list.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            [
+              1,
+              2,
+              3,
+              null
+            ],
+            [
+              3,
+              2,
+              1
+            ],
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-collect",
+      "path": "docs/cypher/functions/aggregation.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            3,
+            9,
+            9
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-collect_list",
+      "path": "docs/cypher/functions/aggregation.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            2,
+            4
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-cos",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          1.0
+        ]
+      ]
+    },
+    {
+      "id": "fn-cosh",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          1.0
+        ]
+      ]
+    },
+    {
+      "id": "fn-cot",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "fn-coth",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "fn-count",
+      "path": "docs/cypher/functions/aggregation.md",
+      "columns": [
+        "total",
+        "present",
+        "unique"
+      ],
+      "rows": [
+        [
+          4,
+          3,
+          2
+        ]
+      ]
+    },
+    {
+      "id": "fn-date",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "iso",
+        "parsed",
+        "weekDate"
+      ],
+      "rows": [
+        [
+          "2026-10-15",
+          "2026-10-15",
+          "2026-10-15"
+        ]
+      ]
+    },
+    {
+      "id": "fn-date-realtime",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "available"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "fn-date-statement",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "stable"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "fn-date-transaction",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "stable"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "fn-date-truncate",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "value"
+      ],
+      "rows": [
+        [
+          "2026-10-03"
+        ]
+      ]
+    },
+    {
+      "id": "fn-datetime",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "iso",
+        "parsed"
+      ],
+      "rows": [
+        [
+          "2026-10-15T12:34:56+02:00",
+          "2026-10-15T12:34:00+02:00"
+        ]
+      ]
+    },
+    {
+      "id": "fn-datetime-fromepoch",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "value"
+      ],
+      "rows": [
+        [
+          "1970-01-01T00:00:00.5Z"
+        ]
+      ]
+    },
+    {
+      "id": "fn-datetime-fromepochmillis",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "value"
+      ],
+      "rows": [
+        [
+          "1970-01-01T00:00:01.5Z"
+        ]
+      ]
+    },
+    {
+      "id": "fn-datetime-realtime",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "available"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "fn-datetime-statement",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "stable"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "fn-datetime-transaction",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "stable"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "fn-datetime-truncate",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "value"
+      ],
+      "rows": [
+        [
+          "2026-10-15T00:00:00+02:00"
+        ]
+      ]
+    },
+    {
+      "id": "fn-db-namefromelementid",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "database"
+      ],
+      "rows": [
+        [
+          "main"
+        ]
+      ]
+    },
+    {
+      "id": "fn-degrees",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          180.0
+        ]
+      ]
+    },
+    {
+      "id": "fn-duration",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "value",
+        "parsed"
+      ],
+      "rows": [
+        [
+          "P1M2DT3H",
+          "PT2H30M"
+        ]
+      ]
+    },
+    {
+      "id": "fn-duration-between",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "value"
+      ],
+      "rows": [
+        [
+          "P1M1D"
+        ]
+      ]
+    },
+    {
+      "id": "fn-duration-indays",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "value"
+      ],
+      "rows": [
+        [
+          "P14D"
+        ]
+      ]
+    },
+    {
+      "id": "fn-duration-inmonths",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "value"
+      ],
+      "rows": [
+        [
+          "P2M"
+        ]
+      ]
+    },
+    {
+      "id": "fn-duration-inseconds",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "value"
+      ],
+      "rows": [
+        [
+          "PT1M30.5S"
+        ]
+      ]
+    },
+    {
+      "id": "fn-duration_between",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "value"
+      ],
+      "rows": [
+        [
+          "P1M1D"
+        ]
+      ]
+    },
+    {
+      "id": "fn-e",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "fn-elementid",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "id"
+      ],
+      "rows": [
+        [
+          "n:1"
+        ]
+      ]
+    },
+    {
+      "id": "fn-endnode",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "name"
+      ],
+      "rows": [
+        [
+          "Lin"
+        ]
+      ]
+    },
+    {
+      "id": "fn-exists",
+      "path": "docs/cypher/functions/predicate.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            true,
+            false
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-exists-argument-error",
+      "path": "docs/cypher/functions/predicate.md",
+      "error": "SEMANTIC_ERROR"
+    },
+    {
+      "id": "fn-exists-null-endpoint",
+      "path": "docs/cypher/functions/predicate.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          false
+        ]
+      ]
+    },
+    {
+      "id": "fn-exp",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          1.0
+        ]
+      ]
+    },
+    {
+      "id": "fn-file",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "source"
+      ],
+      "rows": [
+        [
+          null
+        ]
+      ]
+    },
+    {
+      "id": "fn-floor",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          -3.0
+        ]
+      ]
+    },
+    {
+      "id": "fn-format",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "iso",
+        "display"
+      ],
+      "rows": [
+        [
+          "2026-10-15",
+          "15/10/2026 12:34"
+        ]
+      ]
+    },
+    {
+      "id": "fn-haversin",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          0.0
+        ]
+      ]
+    },
+    {
+      "id": "fn-head",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "first",
+        "empty"
+      ],
+      "rows": [
+        [
+          null,
+          null
+        ]
+      ]
+    },
+    {
+      "id": "fn-id",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "id"
+      ],
+      "rows": [
+        [
+          1
+        ]
+      ]
+    },
+    {
+      "id": "fn-isempty",
+      "path": "docs/cypher/functions/predicate.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            true,
+            true,
+            true,
+            false,
+            false,
+            false,
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-isempty-input-error",
+      "path": "docs/cypher/functions/predicate.md",
+      "error": "TYPE_ERROR"
+    },
+    {
+      "id": "fn-isnan",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "fn-keys",
+      "path": "docs/cypher/functions/list.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            [
+              "a",
+              "z"
+            ],
+            [],
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-labels",
+      "path": "docs/cypher/functions/list.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            "Person",
+            "Reader"
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-last",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "last"
+      ],
+      "rows": [
+        [
+          3
+        ]
+      ]
+    },
+    {
+      "id": "fn-left",
+      "path": "docs/cypher/functions/string.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            "图谱",
+            "图",
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-left-null-length-error",
+      "path": "docs/cypher/functions/string.md",
+      "error": "TYPE_ERROR"
+    },
+    {
+      "id": "fn-length",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "hops"
+      ],
+      "rows": [
+        [
+          1
+        ]
+      ]
+    },
+    {
+      "id": "fn-linenumber",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "line"
+      ],
+      "rows": [
+        [
+          null
+        ]
+      ]
+    },
+    {
+      "id": "fn-list-reverse",
+      "path": "docs/cypher/functions/list.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            [
+              [
+                2,
+                3
+              ],
+              null,
+              1
+            ],
+            [],
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-ln",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          0.0
+        ]
+      ]
+    },
+    {
+      "id": "fn-local_datetime",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "value"
+      ],
+      "rows": [
+        [
+          "2026-10-15T12:34:56"
+        ]
+      ]
+    },
+    {
+      "id": "fn-local_time",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "value"
+      ],
+      "rows": [
+        [
+          "12:34:56"
+        ]
+      ]
+    },
+    {
+      "id": "fn-localdatetime",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "iso",
+        "parsed"
+      ],
+      "rows": [
+        [
+          "2026-10-15T12:34:56",
+          "2026-10-15T12:34:00"
+        ]
+      ]
+    },
+    {
+      "id": "fn-localdatetime-realtime",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "available"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "fn-localdatetime-statement",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "stable"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "fn-localdatetime-transaction",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "stable"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "fn-localdatetime-truncate",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "value"
+      ],
+      "rows": [
+        [
+          "2026-10-15T00:00:00"
+        ]
+      ]
+    },
+    {
+      "id": "fn-localtime",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "iso",
+        "parsed"
+      ],
+      "rows": [
+        [
+          "12:34:56.125",
+          "12:34:00"
+        ]
+      ]
+    },
+    {
+      "id": "fn-localtime-realtime",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "available"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "fn-localtime-statement",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "stable"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "fn-localtime-transaction",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "stable"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "fn-localtime-truncate",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "value"
+      ],
+      "rows": [
+        [
+          "12:34:00"
+        ]
+      ]
+    },
+    {
+      "id": "fn-log",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          0.0
+        ]
+      ]
+    },
+    {
+      "id": "fn-log10",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          3.0
+        ]
+      ]
+    },
+    {
+      "id": "fn-lower",
+      "path": "docs/cypher/functions/string.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            "abcé",
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-ltrim",
+      "path": "docs/cypher/functions/string.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            "图_.",
+            "图  ",
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-mathematical-domain",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "a",
+        "b",
+        "c"
+      ],
+      "rows": [
+        [
+          true,
+          true,
+          true
+        ]
+      ]
+    },
+    {
+      "id": "fn-mathematical-null",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "a",
+        "b",
+        "c",
+        "d"
+      ],
+      "rows": [
+        [
+          null,
+          null,
+          null,
+          null
+        ]
+      ]
+    },
+    {
+      "id": "fn-max",
+      "path": "docs/cypher/functions/aggregation.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          8
+        ]
+      ]
+    },
+    {
+      "id": "fn-min",
+      "path": "docs/cypher/functions/aggregation.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          2
+        ]
+      ]
+    },
+    {
+      "id": "fn-nodes",
+      "path": "docs/cypher/functions/list.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            "甲",
+            "乙"
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-none",
+      "path": "docs/cypher/functions/predicate.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            true,
+            true,
+            null,
+            false
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-normalize",
+      "path": "docs/cypher/functions/string.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            "é",
+            "A",
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-nullif",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "equal",
+        "unknown"
+      ],
+      "rows": [
+        [
+          null,
+          10
+        ]
+      ]
+    },
+    {
+      "id": "fn-path_length",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "hops"
+      ],
+      "rows": [
+        [
+          1
+        ]
+      ]
+    },
+    {
+      "id": "fn-percentile_cont",
+      "path": "docs/cypher/functions/aggregation.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          25.0
+        ]
+      ]
+    },
+    {
+      "id": "fn-percentile_disc",
+      "path": "docs/cypher/functions/aggregation.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          20
+        ]
+      ]
+    },
+    {
+      "id": "fn-percentilecont",
+      "path": "docs/cypher/functions/aggregation.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          7.5
+        ]
+      ]
+    },
+    {
+      "id": "fn-percentiledisc",
+      "path": "docs/cypher/functions/aggregation.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          0
+        ]
+      ]
+    },
+    {
+      "id": "fn-pi",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "fn-point",
+      "path": "docs/cypher/functions/spatial.md",
+      "columns": [
+        "crs",
+        "srid"
+      ],
+      "rows": [
+        [
+          "wgs-84",
+          9157
+        ]
+      ]
+    },
+    {
+      "id": "fn-point-distance",
+      "path": "docs/cypher/functions/spatial.md",
+      "columns": [
+        "distance"
+      ],
+      "rows": [
+        [
+          5.0
+        ]
+      ]
+    },
+    {
+      "id": "fn-point-withinbbox",
+      "path": "docs/cypher/functions/spatial.md",
+      "columns": [
+        "inside"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "fn-properties",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "properties"
+      ],
+      "rows": [
+        [
+          {
+            "name": "Ada",
+            "score": 2
+          }
+        ]
+      ]
+    },
+    {
+      "id": "fn-radians",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          0.0
+        ]
+      ]
+    },
+    {
+      "id": "fn-rand",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "fn-randomuuid",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "length"
+      ],
+      "rows": [
+        [
+          36
+        ]
+      ]
+    },
+    {
+      "id": "fn-range",
+      "path": "docs/cypher/functions/list.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            [
+              1,
+              3,
+              5
+            ],
+            [
+              3,
+              2,
+              1
+            ],
+            [],
+            [
+              2
+            ]
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-range-zero-step-error",
+      "path": "docs/cypher/functions/list.md",
+      "error": "TYPE_ERROR"
+    },
+    {
+      "id": "fn-reduce",
+      "path": "docs/cypher/functions/list.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            6,
+            7,
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-regex-pattern-error",
+      "path": "docs/cypher/functions/string.md",
+      "error": "SEMANTIC_ERROR"
+    },
+    {
+      "id": "fn-relationships",
+      "path": "docs/cypher/functions/list.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            1
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-replace",
+      "path": "docs/cypher/functions/string.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            "b-b-a",
+            "abc",
+            "a"
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-replace-limit-error",
+      "path": "docs/cypher/functions/string.md",
+      "error": "TYPE_ERROR"
+    },
+    {
+      "id": "fn-right",
+      "path": "docs/cypher/functions/string.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            "谱😀",
+            "图",
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-round",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          12.34
+        ]
+      ]
+    },
+    {
+      "id": "fn-round-modes",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "a",
+        "b",
+        "c",
+        "d"
+      ],
+      "rows": [
+        [
+          -1.0,
+          -1.6,
+          2.0,
+          1.3
+        ]
+      ]
+    },
+    {
+      "id": "fn-rtrim",
+      "path": "docs/cypher/functions/string.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            "._图",
+            "  图",
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-scalar-null",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "missing",
+        "empty",
+        "element",
+        "invalid"
+      ],
+      "rows": [
+        [
+          null,
+          0,
+          null,
+          null
+        ]
+      ]
+    },
+    {
+      "id": "fn-sign",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          -1
+        ]
+      ]
+    },
+    {
+      "id": "fn-sin",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          1.0
+        ]
+      ]
+    },
+    {
+      "id": "fn-single",
+      "path": "docs/cypher/functions/predicate.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            true,
+            false,
+            null,
+            false
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-single-list-error",
+      "path": "docs/cypher/functions/predicate.md",
+      "error": "SEMANTIC_ERROR"
+    },
+    {
+      "id": "fn-sinh",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          0.0
+        ]
+      ]
+    },
+    {
+      "id": "fn-size",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "characters",
+        "entries"
+      ],
+      "rows": [
+        [
+          2,
+          3
+        ]
+      ]
+    },
+    {
+      "id": "fn-spatial-missing-coordinate",
+      "path": "docs/cypher/functions/spatial.md",
+      "error": "SEMANTIC_ERROR"
+    },
+    {
+      "id": "fn-spatial-null-crs",
+      "path": "docs/cypher/functions/spatial.md",
+      "columns": [
+        "missing",
+        "mixedCRS"
+      ],
+      "rows": [
+        [
+          null,
+          null
+        ]
+      ]
+    },
+    {
+      "id": "fn-split",
+      "path": "docs/cypher/functions/string.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            [
+              "a",
+              "b",
+              "c",
+              ""
+            ],
+            [
+              "图",
+              "😀"
+            ],
+            [
+              "text"
+            ]
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-split-invalid-element-error",
+      "path": "docs/cypher/functions/string.md",
+      "error": "TYPE_ERROR"
+    },
+    {
+      "id": "fn-sqrt",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          9.0
+        ]
+      ]
+    },
+    {
+      "id": "fn-startnode",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "name"
+      ],
+      "rows": [
+        [
+          "Ada"
+        ]
+      ]
+    },
+    {
+      "id": "fn-stdev",
+      "path": "docs/cypher/functions/aggregation.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "fn-stdev_pop",
+      "path": "docs/cypher/functions/aggregation.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          0.0
+        ]
+      ]
+    },
+    {
+      "id": "fn-stdev_samp",
+      "path": "docs/cypher/functions/aggregation.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          0.0
+        ]
+      ]
+    },
+    {
+      "id": "fn-stdevp",
+      "path": "docs/cypher/functions/aggregation.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          1.0
+        ]
+      ]
+    },
+    {
+      "id": "fn-string-indexof",
+      "path": "docs/cypher/functions/string.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            2,
+            -1,
+            0
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-string-join",
+      "path": "docs/cypher/functions/string.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            "甲/乙",
+            "",
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-string-regexreplace",
+      "path": "docs/cypher/functions/string.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          "id=[12];id=[7]"
+        ]
+      ]
+    },
+    {
+      "id": "fn-string-reverse",
+      "path": "docs/cypher/functions/string.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            "谱图😀",
+            "",
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-substring",
+      "path": "docs/cypher/functions/string.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            "乙丙",
+            "",
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-substring-negative-error",
+      "path": "docs/cypher/functions/string.md",
+      "error": "TYPE_ERROR"
+    },
+    {
+      "id": "fn-sum",
+      "path": "docs/cypher/functions/aggregation.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          13
+        ]
+      ]
+    },
+    {
+      "id": "fn-tail",
+      "path": "docs/cypher/functions/list.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            [
+              null,
+              3
+            ],
+            [],
+            [],
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-tan",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          0.0
+        ]
+      ]
+    },
+    {
+      "id": "fn-tanh",
+      "path": "docs/cypher/functions/mathematical.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          0.0
+        ]
+      ]
+    },
+    {
+      "id": "fn-temporal-invalid-date",
+      "path": "docs/cypher/functions/temporal.md",
+      "error": "TYPE_ERROR"
+    },
+    {
+      "id": "fn-temporal-invalid-map",
+      "path": "docs/cypher/functions/temporal.md",
+      "error": "SEMANTIC_ERROR"
+    },
+    {
+      "id": "fn-temporal-null",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "missingDate",
+        "missingDuration",
+        "explicitNull"
+      ],
+      "rows": [
+        [
+          null,
+          null,
+          null
+        ]
+      ]
+    },
+    {
+      "id": "fn-time",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "iso",
+        "parsed"
+      ],
+      "rows": [
+        [
+          "12:34:56+02:00",
+          "12:34:00+02:00"
+        ]
+      ]
+    },
+    {
+      "id": "fn-time-realtime",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "available"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "fn-time-statement",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "stable"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "fn-time-transaction",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "stable"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "fn-time-truncate",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "value"
+      ],
+      "rows": [
+        [
+          "12:00:00+02:00"
+        ]
+      ]
+    },
+    {
+      "id": "fn-timestamp",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "sameInstant"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "fn-toboolean",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "yes",
+        "no",
+        "invalid"
+      ],
+      "rows": [
+        [
+          true,
+          false,
+          null
+        ]
+      ]
+    },
+    {
+      "id": "fn-toboolean-type-error",
+      "path": "docs/cypher/functions/scalar.md",
+      "error": "TYPE_ERROR"
+    },
+    {
+      "id": "fn-tobooleanlist",
+      "path": "docs/cypher/functions/list.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            true,
+            false,
+            true,
+            false,
+            null,
+            null,
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-tobooleanlist-input-error",
+      "path": "docs/cypher/functions/list.md",
+      "error": "TYPE_ERROR"
+    },
+    {
+      "id": "fn-tobooleanornull",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "invalid"
+      ],
+      "rows": [
+        [
+          null
+        ]
+      ]
+    },
+    {
+      "id": "fn-tofloat",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "number",
+        "invalid"
+      ],
+      "rows": [
+        [
+          2.5,
+          null
+        ]
+      ]
+    },
+    {
+      "id": "fn-tofloatlist",
+      "path": "docs/cypher/functions/list.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            [
+              1.0,
+              2.5,
+              null,
+              null,
+              null
+            ],
+            [
+              1.0,
+              2.0
+            ]
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-tofloatornull",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "invalid"
+      ],
+      "rows": [
+        [
+          null
+        ]
+      ]
+    },
+    {
+      "id": "fn-tointeger",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "number",
+        "flag"
+      ],
+      "rows": [
+        [
+          -2,
+          1
+        ]
+      ]
+    },
+    {
+      "id": "fn-tointegerlist",
+      "path": "docs/cypher/functions/list.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            [
+              2,
+              -2,
+              4,
+              1,
+              null,
+              null
+            ],
+            [
+              1,
+              -1
+            ]
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-tointegerornull",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "invalid"
+      ],
+      "rows": [
+        [
+          null
+        ]
+      ]
+    },
+    {
+      "id": "fn-tolower",
+      "path": "docs/cypher/functions/string.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            "mixed",
+            "",
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-tostring",
+      "path": "docs/cypher/functions/string.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            "12",
+            "true",
+            "2026-10-01",
+            "550e8400-e29b-41d4-a716-446655440000",
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-tostring-container-error",
+      "path": "docs/cypher/functions/string.md",
+      "error": "TYPE_ERROR"
+    },
+    {
+      "id": "fn-tostringlist",
+      "path": "docs/cypher/functions/list.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            "1",
+            "true",
+            "图",
+            null,
+            null,
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-tostringornull",
+      "path": "docs/cypher/functions/string.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            "3",
+            null,
+            null,
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-toupper",
+      "path": "docs/cypher/functions/string.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            "ABCSS",
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-trim",
+      "path": "docs/cypher/functions/string.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            "图",
+            "图_.",
+            "._图"
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-type",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "type"
+      ],
+      "rows": [
+        [
+          "KNOWS"
+        ]
+      ]
+    },
+    {
+      "id": "fn-upper",
+      "path": "docs/cypher/functions/string.md",
+      "columns": [
+        "x"
+      ],
+      "rows": [
+        [
+          [
+            "ABCÉ",
+            "",
+            null
+          ]
+        ]
+      ]
+    },
+    {
+      "id": "fn-uuid-bits",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "most",
+        "least"
+      ],
+      "rows": [
+        [
+          1,
+          2
+        ]
+      ]
+    },
+    {
+      "id": "fn-uuid-leastsignificantbits",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "bits"
+      ],
+      "rows": [
+        [
+          2
+        ]
+      ]
+    },
+    {
+      "id": "fn-uuid-mostsignificantbits",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "bits"
+      ],
+      "rows": [
+        [
+          1
+        ]
+      ]
+    },
+    {
+      "id": "fn-uuid-random",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "type"
+      ],
+      "rows": [
+        [
+          "UUID NOT NULL"
+        ]
+      ]
+    },
+    {
+      "id": "fn-uuid-string",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "same"
+      ],
+      "rows": [
+        [
+          true
+        ]
+      ]
+    },
+    {
+      "id": "fn-valuetype",
+      "path": "docs/cypher/functions/scalar.md",
+      "columns": [
+        "type",
+        "empty",
+        "nil"
+      ],
+      "rows": [
+        [
+          "LIST<INTEGER> NOT NULL",
+          "LIST<NOTHING> NOT NULL",
+          "NULL"
+        ]
+      ]
+    },
+    {
+      "id": "fn-vector",
+      "path": "docs/cypher/functions/vector.md",
+      "columns": [
+        "fromString",
+        "fromList"
+      ],
+      "rows": [
+        [
+          3,
+          2
+        ]
+      ]
+    },
+    {
+      "id": "fn-vector-integer64-exact",
+      "path": "docs/cypher/functions/vector.md",
+      "columns": [
+        "exact",
+        "maxExact"
+      ],
+      "rows": [
+        [
+          true,
+          true
+        ]
+      ]
+    },
+    {
+      "id": "fn-vector-null",
+      "path": "docs/cypher/functions/vector.md",
+      "columns": [
+        "missing",
+        "noDimension"
+      ],
+      "rows": [
+        [
+          null,
+          null
+        ]
+      ]
+    },
+    {
+      "id": "fn-vector-similarity-cosine",
+      "path": "docs/cypher/functions/vector.md",
+      "columns": [
+        "similarity"
+      ],
+      "rows": [
+        [
+          0.5
+        ]
+      ]
+    },
+    {
+      "id": "fn-vector-similarity-euclidean",
+      "path": "docs/cypher/functions/vector.md",
+      "columns": [
+        "similarity"
+      ],
+      "rows": [
+        [
+          0.5
+        ]
+      ]
+    },
+    {
+      "id": "fn-vector-unknown-metric",
+      "path": "docs/cypher/functions/vector.md",
+      "error": "SEMANTIC_ERROR"
+    },
+    {
+      "id": "fn-vector-zero-cosine",
+      "path": "docs/cypher/functions/vector.md",
+      "error": "TYPE_ERROR"
+    },
+    {
+      "id": "fn-vector_dimension_count",
+      "path": "docs/cypher/functions/vector.md",
+      "columns": [
+        "dimension"
+      ],
+      "rows": [
+        [
+          3
+        ]
+      ]
+    },
+    {
+      "id": "fn-vector_distance",
+      "path": "docs/cypher/functions/vector.md",
+      "columns": [
+        "distance",
+        "negativeDot"
+      ],
+      "rows": [
+        [
+          5.0,
+          -11.0
+        ]
+      ]
+    },
+    {
+      "id": "fn-vector_norm",
+      "path": "docs/cypher/functions/vector.md",
+      "columns": [
+        "euclidean",
+        "manhattan"
+      ],
+      "rows": [
+        [
+          5.0,
+          7.0
+        ]
+      ]
+    },
+    {
+      "id": "fn-zoned_datetime",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "value"
+      ],
+      "rows": [
+        [
+          "2026-10-15T12:34:56Z"
+        ]
+      ]
+    },
+    {
+      "id": "fn-zoned_time",
+      "path": "docs/cypher/functions/temporal.md",
+      "columns": [
+        "value"
+      ],
+      "rows": [
+        [
+          "12:34:56Z"
+        ]
+      ]
+    }
+  ]
+}

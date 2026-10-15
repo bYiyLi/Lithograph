@@ -381,7 +381,10 @@ fn fulltext_query_supports_profile_query_syntax_and_multi_target_schema() {
             vec!["Lisa Danielsson", "Nils Johansson", "Nils-Erik Karlsson"],
         ),
         ("+nils +kernel", vec!["Nils-Erik Karlsson"]),
+        ("+nils", vec!["Nils Johansson", "Nils-Erik Karlsson"]),
         ("nils -kernel", vec!["Nils Johansson"]),
+        ("-nils", vec![]),
+        ("-nils -kernel", vec![]),
     ] {
         let cypher = format!(
             "CALL db.index.fulltext.queryNodes('people_text', '{query_string}') YIELD node RETURN node.name ORDER BY node.name"

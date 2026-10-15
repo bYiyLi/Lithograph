@@ -112,6 +112,38 @@ if [ -n "$extension" ]; then
   python3 scripts/check-extension-artifact.py "$openai_provider" --provider
   scripts/sql-surface-smoke.sh "$extension"
   scripts/phase15-provider-cache-smoke.sh "$openai_provider"
+
+  # The language examples come from Markdown, with assertions and setup references
+  # in sidecars. Synthetic embedding exercises the real dual-extension boundary
+  # without contacting a service or consuming credentials.
+  case "$(uname -s)" in
+    Darwin) docs_provider="$target_dir/phase10/sqlite-3.53.4/phase13_synthetic_embedding_provider.dylib" ;;
+    Linux) docs_provider="$target_dir/phase10/sqlite-3.53.4/phase13_synthetic_embedding_provider.so" ;;
+  esac
+  python3 -B docs/guide/examples/check_docs.py
+  python3 -B docs/guide/examples/verify_cypher.py --self-test
+  python3 -B docs/guide/examples/generate_reference.py --extension "$extension" \
+    --sqlite3 "$LITHOGRAPH_SQLITE3" --check
+  python3 -B docs/guide/examples/verify_cypher.py "$extension" \
+    --sqlite3 "$LITHOGRAPH_SQLITE3" --provider "$docs_provider"
+  python3 -B docs/guide/examples/verify.py "$extension" --sqlite3 "$LITHOGRAPH_SQLITE3"
+  python3 -B docs/guide/examples/python_quickstart.py "$extension"
+  python3 -B docs/guide/examples/version_workflow.py "$extension"
+  python3 -B docs/guide/examples/sql_transaction.py "$extension"
+  python3 -B docs/guide/examples/streaming.py "$extension"
+
+  docs_source="$target_dir/phase10/sqlite-3.53.4/sqlite-autoconf-3530400"
+  docs_output="$target_dir/developer-docs/native-transaction"
+  mkdir -p "$(dirname -- "$docs_output")"
+  ${CC:-cc} -std=c11 -Wall -Wextra -Werror -I"$docs_source" \
+    -c docs/guide/examples/native_transaction.c -o "$docs_output.o"
+  ${CC:-cc} -std=c11 -w -DSQLITE_THREADSAFE=1 -DSQLITE_ENABLE_FTS5 \
+    -I"$docs_source" -c "$docs_source/sqlite3.c" -o "$docs_output.sqlite3.o"
+  docs_loader_lib=""
+  if [ "$(uname -s)" = "Linux" ]; then docs_loader_lib="-ldl"; fi
+  ${CC:-cc} "$docs_output.o" "$docs_output.sqlite3.o" \
+    $docs_loader_lib -pthread -lm -o "$docs_output"
+  "$docs_output" "$extension"
 fi
 
 cargo run --locked --quiet -p lithograph-test-support --bin lithograph-compat -- self-check

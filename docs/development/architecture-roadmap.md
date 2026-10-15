@@ -4,6 +4,8 @@
 
 ## 1. Critical Path
 
+[Phase 16](phases/16-safe-execution-option.md) 在共享 execution core 上增加安全约束；[Phase 17](phases/17-developer-documentation-release.md) 建设完整用户手册、示例和覆盖门禁并验收 v0.3.1 发布。当前证据由对应 Phase 维护，原 Phase 00–15 的历史完成状态不变。
+
 ```text
 Phase 00 Engineering Foundation
         |
@@ -55,6 +57,12 @@ Phase 14 SQL Explicit Transaction Adapter (done)
         |
         v
 Phase 15 SQL Execution / True Streaming / Provider Cache (done)
+        |
+        v
+Phase 16 Read-only / No External I/O (done)
+        |
+        v
+Phase 17 Developer Documentation / v0.3.1 Release (in_progress)
 ```
 
 Phase 00–15 均已完成开发验收。Phase 15 的 EX15-01–19 全部闭合：15.1 host feasibility probe 确认 same-connection SAVEPOINT / repeated inner transaction 可行并收敛 `xClose` cleanup-failure contract；本地 correctness/resource/quality/CI/docs review 已通过；revision `b0d5a3da9c5c0266218e01c51d6d34a1be0a6b9d` 的 repository CI `35586275713` 与六目标 Release Matrix `35586275736` 全部成功。Phase 13/14 的 Provider/format4/Native/SQL tx adapter 记录继续作为历史实现证据，当前产品合同以 Phase 15 收敛后的 SQL-only / format3 / Provider-owned cache 设计为准。具体证据见 [Phase 15 计划](phases/15-sql-execution-provider-cache.md)。
@@ -72,6 +80,8 @@ Phase 14 已进入 v0.2.1 正式发布基线。实现 revision `2f617f13e007ce71
 Phase 15 的目标由 [Interfaces](../design/interfaces.md)、[Explicit Transaction](../design/storage.md#native-explicit-transaction)、[Vector](../design/vector.md) 与 [Runtime](../design/runtime.md#large-scale-invariants) 共同提供输入：Application execution 只保留 SQLite SQL；`lithograph_rows()` 成为 read/write/external-I/O/transaction-owning query 的真正 pull-based execution stream；normal execution surface 直接加入 active explicit transaction；Native query ABI 与 `tx_execute` 删除；Lithograph-owned embedding cache/format4 删除，OpenAI-compatible Provider 自己使用独立 SQLite cache DB。它不回开 Cypher 语言 Profile，也不修改 KG OS。
 
 Phase 15 已进入 v0.3.0 正式发布基线。实现修复 revision `b0d5a3da9c5c0266218e01c51d6d34a1be0a6b9d` 的 repository CI `35586275713` 与六目标 Release Matrix `35586275736` 均通过。
+
+Phase 16 的安全执行选项已完成 2026-10-16 的完整本地验收：Core、scalar/rows/explicit transaction、synthetic Provider、quality 与 canonical CI 均通过。当前 v0.3.1 文档与发布进度见 [Phase 17](phases/17-developer-documentation-release.md)。
 
 ## 2. 为什么 Version Storage 必须早于 Cypher Engine
 

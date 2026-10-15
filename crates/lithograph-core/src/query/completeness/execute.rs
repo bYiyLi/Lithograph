@@ -185,7 +185,7 @@ fn projection_output_columns(
 }
 
 fn projection_is_distinct(body: &AstNode) -> bool {
-    body.descendants().any(|node| {
+    body.children.iter().any(|node| {
         matches!(
             node.kind,
             AstKind::SetQuantifier(crate::cypher::SetQuantifierKind::Distinct)
@@ -783,7 +783,8 @@ impl ReadExecutor<'_, '_> {
             projected = distinct_projected(projected, columns, &self.snapshot)?;
         }
         if let Some(order) = body
-            .descendants()
+            .children
+            .iter()
             .find(|node| node.kind == AstKind::OrderBy)
         {
             self.sort_projected(&mut projected, order)?;

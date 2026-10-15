@@ -203,7 +203,8 @@ impl Analyzer<'_> {
     }
 
     fn projection_binding(&self, item: &AstNode, input: &Scope) -> (Option<String>, BindingKind) {
-        let alias = find_descendant(item, AstKind::ProjectionAlias)
+        let alias = item
+            .surface_projection_alias()
             .and_then(|node| node.text.as_deref())
             .map(unescape_identifier);
         if let Some(variable) = simple_projection_variable(item) {
@@ -855,7 +856,7 @@ impl Analyzer<'_> {
         }
         let mut imported = Scope::new();
         for item in projection_items(body) {
-            if find_descendant(item, AstKind::ProjectionAlias).is_some() {
+            if item.surface_projection_alias().is_some() {
                 return Err(
                     self.semantic_error(item.span, "importing WITH cannot alias an outer variable")
                 );
@@ -894,7 +895,7 @@ impl Analyzer<'_> {
                 let Some(name) = name.filter(|name| self.global_scope.contains_key(name)) else {
                     continue;
                 };
-                let direct = find_descendant(item, AstKind::ProjectionAlias).is_none()
+                let direct = item.surface_projection_alias().is_none()
                     && simple_projection_variable(item)
                         .map(unescape_identifier)
                         .is_some_and(|variable| variable == name);

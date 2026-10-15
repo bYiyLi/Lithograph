@@ -181,7 +181,7 @@ Outer SQL 自己仍会影响**消费**：例如 `LIMIT 1` 在 `columns` 后关�
 
 如果 host SQLite 因 authorizer、connection failure 或其它 SQLite-level failure 拒绝正常的 `ROLLBACK TO` / `RELEASE` cleanup，Lithograph 必须 fail closed：`ROLLBACK TO` 失败后不得继续 `RELEASE` 该 SAVEPOINT，因为最外层 SAVEPOINT 的 `RELEASE` 可能把本应撤销的变化提交；Engine 改为尝试整个 SQLite `ROLLBACK` 以清除未决 write 与 SAVEPOINT。该 recovery 在 caller-owned outer transaction 内也可能终止整个 outer transaction；这是无法完成 invocation-local cleanup 时优先保持 canonical storage 原子性的故障语义。只要进入 full-rollback fallback，当前 connection 就进入 cleanup-failure quarantine；在 scalar/`xNext` 等拥有可传播 error channel 的路径上本次 invocation 同时返回 `INTERNAL_ERROR`，在 stock SQLite 丢弃返回码的 `xClose` 路径上则由下一次 Lithograph entrypoint 报告同一 quarantine。若整个 `ROLLBACK` 也失败，connection 仍保持 quarantine，caller 必须关闭并丢弃，不能继续依赖其 transaction state。
 
-`SQLITE_NOMEM` 是这个 cleanup-failure 分支的已验证宿主特例：如果错误来自 scalar callback 内部的 FTS5 tokenizer 构造，SQLite 会在该 callback 剩余期间保持 malloc-failed 状态，使 `ROLLBACK TO`、`RELEASE` 和 full `ROLLBACK` 都继续返回 `SQLITE_NOMEM`；外层 `sqlite3_step` / `sqlite3_exec` 返回后才可能再次执行 rollback。SQL execution surface 仍保留真实 `SQLITE_NOMEM` primary code；当 tokenizer probe 在 canonical Schema 持久化之前失败时，不得发布 Commit/Branch 变化。但由于 callback 内无法恢复 invocation-local transaction boundary，该 connection 属于上段定义的 cleanup-failure quarantine，caller 必须关闭并丢弃，不能把“外层返回后手动 rollback 可以成功”当成 Lithograph invocation 已满足 cleanup 合同。
+`SQLITE_NOMEM` 可能触发这个 cleanup-failure 分支：如果 SQLite 在 callback 内已经进入 malloc-failed 状态，`ROLLBACK TO`、`RELEASE` 和 full `ROLLBACK` 可能继续返回 `SQLITE_NOMEM`，直到外层 `sqlite3_step` / `sqlite3_exec` 返回。此时 callback 内无法恢复 invocation-local transaction boundary，connection 必须进入上段定义的 cleanup-failure quarantine；caller 必须关闭并丢弃，不能把“外层返回后手动 rollback 可以成功”当成 invocation 已满足 cleanup 合同。相反，native tokenizer constructor 仅返回 `SQLITE_NOMEM` 并不必然设置 SQLite 的 malloc-failed 状态；若 Engine 先完成正常 rollback/cleanup，就不隔离健康连接。两种情形均保留真实 `SQLITE_NOMEM` primary code 和 SQLite canonical error text，不为 NOMEM 分配自定义错误消息；tokenizer 验证在 canonical Schema 持久化前失败时不得发布 Commit/Branch 变化。
 
 多个 mutating `lithograph()` invocation 出现在同一个 raw SQL statement 时，语义明确为多个独立 SAVEPOINT/graph operations：在 SQLite autocommit mode 下，前一个成功 invocation 可以在后一个 invocation 失败前已经 durable；Lithograph 不承诺把整个宿主 SQL statement 合成一个 graph transaction。caller-owned SQLite `BEGIN ... COMMIT` 只能把多个已经形成的 Lithograph Commit 合并到同一个 durability boundary，不会折叠版本历史。调用方若需要“多个独立 Cypher execution 共同形成一个 Lithograph Commit”，必须使用[Explicit Transaction](storage.md#native-explicit-transaction)。推荐的普通 raw SQL write 形式仍是一个 statement 一个 `lithograph()` invocation。
 
@@ -241,6 +241,7 @@ Lithograph 不导出 application-facing Cypher execution / validation / transact
   "branch": "main",
   "author": "alice@example.com",
   "message": "update graph",
+  "readOnlyNoExternalIO": true,
   "graphView": {
     "requireAllLabels": ["tenant_acme"],
     "excludeAnyLabels": ["internal"]
@@ -254,6 +255,9 @@ Lithograph 不导出 application-facing Cypher execution / validation / transact
 - `at` 选择只读 Snapshot，接受 `commit/<id>`、`branch/<name>` 或 `tag/<name>`；Branch / Tag 在 execution 开始时先解析并 pin 到一个 immutable Commit，使用 `at` 的 query 不允许修改；
 - `author` 和 `message` 是该 execution 内所有新 Commit 的 metadata 来源；省略时存 `null`。Version procedure 不定义第二套 author/message 来源；
 - `branch` 与 `at` 互斥；
+- `readOnlyNoExternalIO` 是可选 Boolean，省略或 `false` 保持既有执行语义；`true` 为本次 `lithograph()` / `lithograph_rows()` execution 同时施加只读与禁止外部 I/O 约束。非 Boolean（包括 `null`）返回 `INVALID_ARGUMENT`。该选项可与 `branch`、`at`、`graphView` 及 active SQL explicit transaction 中的 query-local options 组合；它不改变所选 Snapshot 或 transaction 的含义；
+- 该约束在 Core 对完整、已解析并通过 semantic validation 的 Cypher AST 做 prepare 时判定，覆盖所有嵌套子查询和条件/组合分支，不依赖原始 query text、参数值、实际结果行数或 runtime 分支是否会执行。Graph/Schema/Index/Version/connection checkout/maintenance mutation、`CALL ... IN TRANSACTIONS`、`LOAD CSV`（无论 URI 来自字面量还是参数）以及 Managed Semantic query/rebuild/create 都在执行前返回 `INVALID_ARGUMENT`；注册 Procedure 仅允许已分类为无外部 I/O 的只读 operation，Full-text query Procedure 也拒绝，因为它可以调用宿主注册的 tokenizer。`EXPLAIN` / `PROFILE` 不豁免；
+- 安全模式允许普通 graph/history/Schema `SHOW`、已分类的只读 Version Procedure 与 Raw Vector `SEARCH`。它不禁止读取当前 SQLite database、SQLite 自己的 TEMP/spill/derived-state 工作，也不约束同一 connection 上由调用方直接发出的其它 SQL、`lithograph_init()` 或单独调用的 transaction lifecycle API；能自行构造 options 或直接调用其它 SQL 的主体仍拥有相应宿主权限。要把它用于不可信 Cypher，上层必须强制设置此选项并控制 SQL execution surface；
 - `graphView` 是 query-local Graph View specification；省略或 `{}` 表示完整 Snapshot graph。它不持久化、不命名、不进入 Commit/Layer/Schema hash，也不改变 connection checkout；
 - `graphView.requireAllLabels` 是 Node 必须同时拥有的 Label 集合；省略或空数组表示没有正向 Label 限制；
 - `graphView.excludeAnyLabels` 是 Node 不能拥有的 Label 集合；命中任意一个即不可见；省略或空数组表示没有排除 Label；

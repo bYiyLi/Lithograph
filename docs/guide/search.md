@@ -1,6 +1,12 @@
 # Search 与数据导入
 
-适用正式 v0.3.0；Managed Semantic 从 v0.2.0 起可用。以下检索 SQL 在独立空库、已加载扩展的 connection 中依次运行。**Raw Vector** 路径仍由应用提供向量及其维度、坐标类型和模型来源；**Managed Semantic** 才通过独立 Embedding Provider extension 生成 derived Vector。
+[产品手册](README.md) · [Cypher 语言手册](../cypher/index.md) · [接口参考](../reference/README.md)
+
+本文适用 **v0.3.1**（`CY25-2026.08`，storage format `3`）。
+
+Managed Semantic 从 v0.2.0 起可用。以下检索 SQL 在独立空库、已加载扩展的 connection 中依次运行。**Raw Vector** 路径仍由应用提供向量及其维度、坐标类型和模型来源；**Managed Semantic** 才通过独立 Embedding Provider extension 生成 derived Vector。
+
+<a id="fulltext"></a>
 
 ## 准备文档与全文索引
 
@@ -28,18 +34,9 @@ SELECT lithograph(
 
 全文查询是检索表达式，不是 Cypher 文本；不要拼接成另一条 Cypher。options 可包含 `skip`、`limit`、`analyzer`。
 
-v0.1.1 的 `fulltext.analyzer` 是 **SQLite FTS5 tokenizer specification**，默认 `unicode61`。Lithograph 不再把 `standard-no-stop-words` / `english` 当特殊别名；Porter stemming 直接写成 `porter unicode61`。FTS5 自带参数也原样声明，例如：
+Tokenizer 的默认值、FTS5 specification、query-time analyzer 及检索表达式见 [Full-text Procedure Reference](../reference/procedures/fulltext.md)。使用宿主外部 tokenizer 时，必须在每个真正执行查询的 SQLite connection 上注册；Index definition 保存 specification，不携带本机 tokenizer 实现。新定义会在当前 connection 上验证 tokenizer；历史 SHOW 只读定义，真正查询或冷重建仍需要历史 tokenizer 可用。
 
-```cypher
-CREATE FULLTEXT INDEX doc_text FOR (d:Doc) ON EACH [d.title]
-OPTIONS {indexConfig:{
-  `fulltext.analyzer`: "unicode61 remove_diacritics 0 tokenchars '-_'"
-}}
-```
-
-外部 tokenizer 由宿主 SQLite extension 注册，不由 Lithograph 安装。必须在**使用该 Index 的每个实际 SQLite connection** 上先加载/注册对应 tokenizer；definition 只保存 specification 字符串，不把 native 实现写进数据库。一个 connection 注册成功不会让连接池中的其它 connection 自动可用。DDL 创建/修改 definition 时会在当前 connection 用真实 FTS5 constructor 验证；历史 `SHOW` 不要求插件当前存在，但真正查询/冷重建需要该历史 specification 当前可构造。
-
-query-time `analyzer` 也是同样的 FTS5 specification，只改变本次查询文本的 tokenizer，不重写已索引文档或 IndexDefinition。例如 `{analyzer:'porter unicode61'}`。短语、布尔表达式、Property 限定与 prefix 仍由 FTS5 MATCH 解释，不要预先自行把查询拆成词集合。更多边界见 [Procedure Reference](../reference/procedures.md) 与 [Limits](../reference/limits.md)。
+<a id="vector-search"></a>
 
 ## 向量索引与 SEARCH
 
@@ -83,23 +80,9 @@ HNSW 是近似检索访问路径，缺少可用缓存时可以使用 exact scan 
 
 本节从 v0.2.0 起可用。Managed Semantic 不改变上面的 Raw Vector / `SEARCH`：它为 String source Property 增加一条数据库托管 embedding 的并列路径。
 
-当前仓库提供独立的 `lithograph-openai-compatible` SQLite extension。源码构建：
-
-```sh
-cargo build --locked --release -p lithograph-extension
-cargo build --locked --release -p lithograph-openai-compatible
-```
-
-同一个**实际执行 Semantic 操作的 SQLite connection**必须同时加载 Lithograph 和所需 Provider。以下以 macOS Cargo 文件名为例；Linux/Windows 使用对应 shared-library 后缀：
+首先按 [配置 Embedding Provider](embedding-providers.md) 在实际执行检索的 connection 上加载双扩展、配置可信 endpoint 和认证，然后创建示例 Semantic Index。以下调用需要可用的 Provider 和网络服务，不计入无需外部服务的 SQL 教程验收；离线集成验收使用 [Provider 开发指南](provider-development.md) 中的 synthetic Provider。
 
 ```text
-.load ./target/release/liblithograph.dylib sqlite3_lithograph_init
-.load ./target/release/liblithograph_openai_compatible.dylib sqlite3_lithographopenaicompatible_init
-```
-
-初始化后建立文本数据与 Semantic Index：
-
-```sql
 SELECT lithograph_init();
 SELECT lithograph(
   'CREATE (:Doc {id:''a'', content:''knowledge graph''}),
@@ -107,39 +90,20 @@ SELECT lithograph(
 );
 SELECT lithograph(
   'CALL db.index.semantic.createNodeIndex(
-     ''doc_semantic'',
-     [''Doc''],
-     ''content'',
-     {
-       provider:''openai-compatible'',
-       providerConfig:{
-         base_url:''https://api.openai.com/v1'',
-         api_key_env:''OPENAI_API_KEY'',
-         model:''text-embedding-3-small'',
-         encoding_format:''float'',
-         timeout_ms:30000,
-         max_retries:2,
-         batch_size:32,
-         cache:{
-           enabled:true,
-           path:''./openai-embedding-cache.db'',
-           max_bytes:1073741824
-         }
-       },
-       dimensions:1536,
-       similarity:''cosine''
-     }
-   )'
+     ''doc_semantic'', [''Doc''], ''content'',
+     {provider:''openai-compatible'',
+      providerConfig:{base_url:''https://api.openai.com/v1'',
+                      api_key_env:''OPENAI_API_KEY'',
+                      model:''text-embedding-3-small''},
+      dimensions:1536, similarity:''cosine''})'
 );
 ```
 
-`providerConfig` 属于 versioned Schema。直接写 `api_key` 或 secret custom header 会按原值进入 history / SHOW / Diff / Patch / backup；不希望保存 credential 时使用 `api_key_env`，数据库只保存环境变量名。
+`providerConfig` 是 versioned Schema；使用 `api_key_env` 等间接凭据，避免把 secret 明文写入历史。完整配置、默认值、网络和缓存边界由 [OpenAI-compatible Provider Reference](../reference/openai-compatible-provider.md) 维护。
 
-`openai-compatible` 请求固定发往 `<base_url>/embeddings`。Provider 不自动跟随 3xx redirect，也不读取 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 等环境 proxy；需要经过兼容网关或代理时，把实际可访问的最终 endpoint 显式写入 `base_url`。这样实际网络 destination 与 versioned Schema / cache identity 保持一致。
+以下为同一服务配置下的 SQL 查询模板；需先完成上面的服务依赖准备：
 
-文本查询：
-
-```sql
+```text
 SELECT lithograph(
   'CALL db.index.semantic.queryNodes(
      ''doc_semantic'', $query, {skip:0, limit:10}
@@ -152,13 +116,11 @@ SELECT lithograph(
 
 source 必须是实际 String；missing、`null` 与其它类型不参与索引。String 按精确 UTF-8 bytes 发送给 Provider，不 trim、lowercase、拼接或截断。Graph View 在 provider input 与 top-k 前生效，历史查询使用目标 Commit 的历史 Semantic definition。
 
-Lithograph Core 不拥有 persistent text→Vector cache。它只在**同一次 execution**内对相同 embedding-space / exact text 做去重，并可把大 work set spill 到 TEMP/disk。跨 execution / connection / process 的缓存由具体 Provider 自己决定。上例中 OpenAI-compatible Provider 的 `providerConfig.cache` 使用独立 filesystem SQLite database；`enabled=false` 或省略 cache 时不触碰该文件。
+同一次 execution 内，重复的 exact text 可按 embedding-space 去重；跨 execution 的缓存由 Provider 自行实现。启用 Provider cache 的流程见 [Provider 使用指南](embedding-providers.md)，其文件独立于 graph repository，不参与 graph Commit、backup、integrity 或 GC。
 
-Provider cache 与 Lithograph `main` database、Commit/Schema/history、integrity/GC 相互隔离。cache key 包含有效 endpoint/model/request/header/auth 语义与 exact text；timeout/retry/batch/cache policy 等纯 operational 参数不改变 embedding identity。secret/header value 只以 digest 参与 identity，cache DB 不保存 raw input text 或 credential。
+`rebuild` 是可选维护入口，不是正常搜索的前置步骤。以下为需要实际 Provider 的 SQL 模板：
 
-`rebuild` 是可选维护入口，不是正常搜索的前置步骤：
-
-```sql
+```text
 SELECT lithograph(
   'CALL db.index.semantic.rebuild(''doc_semantic'', ''branch/main'')
    YIELD name, commit, indexedEntities, embeddedTexts
@@ -168,44 +130,26 @@ SELECT lithograph(
 
 `rebuild` 只负责目标 committed Snapshot 的当前-connection TEMP Semantic/HNSW materialization：不创建 graph Commit、不移动 ref，返回中的 `commit` 是实际 pin 的 target Commit。它不报告或维护 Provider cache。普通 Semantic query 可通过 `lithograph()` 与 `lithograph_rows()` 执行，并在 active explicit transaction 中读取当前 staged source/membership/definition。实际 query/rebuild 每次都要求目标 Provider 当前可用并通过 validation。
 
+<a id="historical-search"></a>
+
 ## 历史检索和子图检索
 
 与普通查询相同，通过第三个参数 `options.at` 选择历史 Schema / 数据，通过 `options.graphView` 选择可见子图。历史上尚未创建的索引不能仅因为当前 Branch 有同名索引而使用。Graph View 在检索的可见结果与 top-k 边界内生效，不是结果返回后过滤。
 
-全文和向量可以在普通 Cypher 中组合过滤、子查询和投影；应用自己定义融合分数与排序逻辑。v0.2.0–v0.2.1 不额外提供名为 `hybridSearch` 的专用 API，也不预定义 RAG 工作流。
+全文和向量可以在普通 Cypher 中组合过滤、子查询和投影；应用自己定义融合分数与排序逻辑。没有额外的 `hybridSearch` Procedure；组合方式和最终排序由应用明确表达。
+
+<a id="csv-import"></a>
 
 ## 导入 CSV
 
-先准备本地 UTF-8 文件 `people.csv`：
+CSV、参数批量写入和 transaction batch 的完整操作流程已归入 [数据导入](import.md)。本节保留原路径供已有链接定位。LOAD CSV 语言参考见 [LOAD CSV](../cypher/load-csv.md)，batch 语义见 [Transaction Subqueries](../cypher/transaction-subqueries.md)。
 
-```csv
-id,name
-alice,Alice
-bob,Bob
-```
+<a id="reproducible-search"></a>
 
-以下是传入 `lithograph()` 的 Cypher 文本。`$source` 绑定应用确认过的完整 `file:///.../people.csv` URI，也支持 `http://` / `https://`；不要把示意省略号当真实路径：
+## 为搜索建立可重复的验证
 
-```cypher
-LOAD CSV WITH HEADERS FROM $source AS row
-MERGE (p:ImportedPerson {id:row.id})
-SET p.name = row.name
-RETURN count(p) AS imported
-```
+Raw Vector 教程的向量由应用给定，`[1,0]` 与 `[0,1]` 的教学数据可直接核对最近结果。实际数据应固定模型、坐标类型、维度和过滤条件，再比较预期的业务结果；ANN 与 exact fallback 不保证在任意数据上返回相同 top-k。
 
-结果应为 `2`。导入列是文本，数值使用 `toInteger()` / `toFloat()` 等显式转换。普通导入在一次查询中执行，失败回滚这次图写入；`lithograph()` 与 `lithograph_rows()` 都可以执行 `LOAD CSV`。
+Managed Semantic 的结果还受 Provider 模型和服务实现影响。需要可重复的集成测试时使用固定的 synthetic Provider，不以线上服务某一次的 score 作为永久断言。执行失败时先检查目标 Commit 的 Index definition、当前连接 Provider/tokenizer 和参数类型，再检查服务错误。
 
-超大导入需要独立 batch transaction 时，在 SQLite autocommit mode 使用普通 SQL execution surface：
-
-```cypher
-LOAD CSV WITH HEADERS FROM $source AS row
-CALL (row) {
-  MERGE (p:ImportedPerson {id:row.id})
-  SET p.name = row.name
-} IN TRANSACTIONS OF 1000 ROWS
-FINISH
-```
-
-每个成功 mutating batch 形成一个 Commit。后续 batch 失败不回滚前面已经提交的 batch，重试前必须检查业务导入进度。该形式可以通过 `lithograph()` 或 `lithograph_rows()` 执行，但不能放在 caller-owned SQLite transaction 或 active Lithograph explicit transaction 内。
-
-LOAD CSV 使用宿主进程的文件和网络权限，不注入凭据。上层应用必须限制来源、大小、超时与网络访问；不要把不可信 Cypher 当作没有外部 I/O 能力的表达式。更多边界见 [事务](transactions.md) 与 [部署安全](operations.md)。
+若宿主对输入启用 `readOnlyNoExternalIO:true`，Raw Vector SEARCH 仍允许；Full-text query Procedure 与 Managed Semantic 操作会在执行前拒绝。完整限制见 [安全执行](safe-execution.md)。

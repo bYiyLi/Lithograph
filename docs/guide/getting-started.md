@@ -1,6 +1,12 @@
 # 快速入门：创建图并查看历史
 
-适用 v0.3.0 正式发布基线。目标：创建两个节点和一条关系，参数化查询、修改数据，并查看修改前的状态。使用安装章节确认可加载的扩展，打开新的演示数据库后执行 `.load`。不要在已有业务库直接运行本教程。
+[产品手册](README.md) · [Cypher 语言手册](../cypher/index.md) · [接口参考](../reference/README.md)
+
+本文适用 **v0.3.1**（`CY25-2026.08`，storage format `3`）。
+
+目标：创建两个节点和一条关系，参数化查询、修改数据，并查看修改前的状态。使用安装章节确认可加载的扩展，打开新的演示数据库后执行 `.load`。不要在已有业务库直接运行本教程。
+
+<a id="initialize"></a>
 
 ## 初始化
 
@@ -9,6 +15,8 @@ SELECT lithograph_init();
 ```
 
 数据库现在有空图的 Root Commit 和 `main` Branch。
+
+<a id="create-graph"></a>
 
 ## 创建节点和关系
 
@@ -27,6 +35,8 @@ SELECT lithograph(
 
 SQL 字符串中的单引号需要写成两个单引号；JSON 参数可以减少嵌套转义。应用中还应使用 SQL 参数绑定，见 [应用集成](integration.md)。
 
+<a id="read-relationships"></a>
+
 ## 查询关系
 
 ```sql
@@ -38,6 +48,8 @@ FROM lithograph_rows(
 ```
 
 得到三个 event：`ordinal=0,event='columns'` 的 `data` 是列名数组；随后 `event='row'` 的 `data` 为 `["Alice","Acme",2026]`；最后是 `event='summary'`。读取不会创建 Commit。
+
+<a id="name-and-change-state"></a>
 
 ## 为当前状态命名，再修改
 
@@ -54,6 +66,8 @@ SELECT lithograph(
 ```
 
 第二个结果的 `rows` 为 `[["Alicia"]]`，并返回另一个 Commit。Tag 不随这次写入前进。
+
+<a id="read-history"></a>
 
 ## 对比当前与历史
 
@@ -74,6 +88,8 @@ SELECT lithograph(
 
 当前查询返回 `Alicia`，历史查询仍返回 `Alice`。`at` 指定的图只读。`log` 包含初始化 Root 和两次图写入的 Commit；创建 Tag 不产生 Commit。
 
+<a id="branch-from-history"></a>
+
 ## 从历史分出新 Branch
 
 ```sql
@@ -92,6 +108,8 @@ SELECT lithograph('MATCH (p:Person) RETURN p.name AS name');
 ```
 
 `experiment` 中是 `Ally`；最后不带 options 的查询仍在 `main`，返回 `Alicia`。`options.branch` 只影响本次执行，不改变 connection checkout。
+
+<a id="verify-and-cleanup"></a>
 
 ## 确认结果与清理
 

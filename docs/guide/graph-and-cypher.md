@@ -1,6 +1,12 @@
 # Graph 与 Cypher
 
-适用 v0.3.0。以下 SQL 示例在独立空库、已加载扩展的 connection 中依次运行。
+[产品手册](README.md) · [Cypher 语言手册](../cypher/index.md) · [接口参考](../reference/README.md)
+
+本文适用 **v0.3.1**（`CY25-2026.08`，storage format `3`）。
+
+以下 SQL 示例在独立空库、已加载扩展的 connection 中依次运行。
+
+<a id="graph-model"></a>
 
 ## 数据模型
 
@@ -17,6 +23,8 @@ SELECT lithograph(
 ```
 
 `elementId()` 返回 `n:<id>` / `r:<id>` 字符串，在同一数据库不同 Branch 和历史状态中保持身份一致。它不是业务主键，也不是跨数据库全局 ID；跨数据库引用还需要 `databaseId`。不要根据 ID 连续性推断记录数。
+
+<a id="match-and-project"></a>
 
 ## MATCH、过滤与投影
 
@@ -41,6 +49,8 @@ SELECT lithograph(
 ```
 
 分别返回 Bob、Alice 到 Bob 的关系和路径长度 `1`。按需投影字段比总是返回完整 Node/Path 更适合较大结果。没有 `ORDER BY` 时，不依赖偶然返回顺序；排序列相同时，用业务唯一键提供稳定 tie-breaker。
+
+<a id="aggregate-and-write"></a>
 
 ## 聚合、批量输入和修改
 
@@ -70,6 +80,8 @@ SELECT lithograph(
 
 `SET property = null` 删除 Property，读取缺失 Property 返回 `null`。`MERGE` 按模式匹配，不替代 Schema 中的唯一性/存在性约束；并发应用应显式定义业务键，见 [Schema](schema-and-indexes.md)。一条含 `UNWIND` 的普通写查询只形成一个 Commit，而不是每个对象一个。
 
+<a id="delete"></a>
+
 ## 删除
 
 ```sql
@@ -88,10 +100,12 @@ SELECT lithograph('MATCH (p:Person) RETURN p.id AS id ORDER BY id');
 
 删除会生成新 Commit，不抹掉已有历史。需要恢复旧图时使用版本 API，不直接编辑内部表。
 
+<a id="sql-and-cypher"></a>
+
 ## Cypher 与宿主 SQL 的分工
 
 SQL 负责加载、调用接口、事务和解析 JSON；Cypher 负责图查询、图写入、Schema、检索和 procedures。一次 `lithograph()` 输入是一个 Cypher query，不是用分号拼接的脚本。
 
 `lithograph_validate()` 可检查静态合法性，但不能证明给定参数、当前数据、权限或约束一定允许执行。`EXPLAIN` 只查看计划；`PROFILE` **真的执行**查询，包含写入时会改变图。
 
-完整语言范围与内置函数见 [Compatibility](../reference/cypher-compatibility.md)、[Functions](../reference/functions.md)。复杂类型与参数保真见 [Values](../reference/values.md)。
+完整语法和语义从 [Cypher 语言手册](../cypher/index.md) 开始；复杂路径见 [Quantified Path](../cypher/quantified-paths.md) 与 [Path Selection](../cypher/path-selection.md)，函数按 [分类索引](../reference/functions.md) 查询。兼容范围见 [Compatibility](../reference/cypher-compatibility.md)。复杂类型与参数保真见 [Values](../reference/values.md)。

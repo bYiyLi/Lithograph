@@ -7,7 +7,7 @@ use super::ast::{
 use super::error::{FrontendError, FrontendErrorKind, Span};
 use super::parser::parse;
 use super::semantic_projection::{
-    find_descendant, has_star_projection, projection_items, simple_projection_variable,
+    has_star_projection, projection_items, simple_projection_variable,
 };
 use super::types::infer_expression;
 
@@ -527,7 +527,7 @@ impl Analyzer<'_> {
         for return_clause in returns {
             for item in projection_items(return_clause) {
                 if has_star_projection(item)
-                    || find_descendant(item, AstKind::ProjectionAlias).is_some()
+                    || item.surface_projection_alias().is_some()
                     || simple_projection_variable(item).is_some()
                 {
                     continue;

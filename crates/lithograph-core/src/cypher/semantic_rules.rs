@@ -394,7 +394,7 @@ impl Analyzer<'_> {
         self.validate_types(item)?;
         self.validate_aggregation_expression(item, grouping_keys, grouping_expressions)?;
         if require_alias
-            && find_descendant(item, AstKind::ProjectionAlias).is_none()
+            && item.surface_projection_alias().is_none()
             && simple_projection_variable(item).is_none()
             && !has_star_projection(item)
         {
@@ -412,7 +412,7 @@ impl Analyzer<'_> {
         input: &Scope,
         output: &Scope,
     ) -> Result<(), FrontendError> {
-        let distinct = body.descendants().any(|node| {
+        let distinct = body.children.iter().any(|node| {
             matches!(
                 node.kind,
                 AstKind::SetQuantifier(super::ast::SetQuantifierKind::Distinct)
@@ -425,7 +425,8 @@ impl Analyzer<'_> {
             .filter_map(projection_expression)
             .collect::<Vec<_>>();
         for order in body
-            .descendants()
+            .children
+            .iter()
             .filter(|node| node.kind == AstKind::OrderBy)
         {
             if distinct {
@@ -469,7 +470,8 @@ impl Analyzer<'_> {
             .map(|name| format!("{}:{name};", name.len()))
             .collect::<BTreeSet<_>>();
         for order in body
-            .descendants()
+            .children
+            .iter()
             .filter(|node| node.kind == AstKind::OrderBy)
         {
             for aggregate in order.descendants().filter(|node| is_aggregate_call(node)) {
@@ -503,7 +505,8 @@ impl Analyzer<'_> {
 
     fn reject_order_aggregation(&self, body: &AstNode) -> Result<(), FrontendError> {
         if let Some(aggregate) = body
-            .descendants()
+            .children
+            .iter()
             .find(|node| node.kind == AstKind::OrderBy)
             .and_then(|order| order.descendants().find(|node| is_aggregate_call(node)))
         {
@@ -562,7 +565,8 @@ impl Analyzer<'_> {
             .filter_map(|expression| self.simple_expression_grouping_key(expression))
             .collect::<BTreeSet<_>>();
         for item in items.iter().filter(|item| !contains_aggregate(item)) {
-            let alias = find_descendant(item, AstKind::ProjectionAlias)
+            let alias = item
+                .surface_projection_alias()
                 .and_then(|node| node.text.as_deref())
                 .map(unescape_identifier);
             if alias.is_some_and(|alias| {
@@ -625,7 +629,8 @@ impl Analyzer<'_> {
         let exact_key = grouping_expressions
             .iter()
             .any(|key| same_expression_syntax(key, expression));
-        let alias_key = find_descendant(item, AstKind::ProjectionAlias)
+        let alias_key = item
+            .surface_projection_alias()
             .and_then(|node| node.text.as_deref())
             .map(unescape_identifier)
             .is_some_and(|alias| {
@@ -655,7 +660,8 @@ impl Analyzer<'_> {
 
     fn validate_skip_limit(&self, body: &AstNode) -> Result<(), FrontendError> {
         for node in body
-            .descendants()
+            .children
+            .iter()
             .filter(|node| matches!(node.kind, AstKind::Skip | AstKind::Limit))
         {
             let expression = node
@@ -700,6 +706,18 @@ impl Analyzer<'_> {
         grouping_expressions: &[&AstNode],
     ) -> Result<(), FrontendError> {
         for aggregate in item.descendants().filter(|node| is_aggregate_call(node)) {
+            if function_name(aggregate).as_deref() == Some("count")
+                && aggregate
+                    .children
+                    .iter()
+                    .any(|child| matches!(child.kind, AstKind::SetQuantifier(_)))
+                && super::types::immediate_expressions(aggregate).is_empty()
+            {
+                return Err(self.semantic_error(
+                    aggregate.span,
+                    "count(DISTINCT ...) requires a value expression",
+                ));
+            }
             if aggregate.children.iter().any(contains_aggregate) {
                 return Err(
                     self.semantic_error(aggregate.span, "aggregating functions cannot be nested")

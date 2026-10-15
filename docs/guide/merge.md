@@ -1,6 +1,12 @@
 # Merge Session：逐步解决冲突后再提交
 
-适用 v0.3.0。目标：从 source Branch 合并到 target Branch，允许跨连接、重启和多轮人工/程序审查，不生成中间 Commit。
+[产品手册](README.md) · [Cypher 语言手册](../cypher/index.md) · [接口参考](../reference/README.md)
+
+本文适用 **v0.3.1**（`CY25-2026.08`，storage format `3`）。
+
+目标：从 source Branch 合并到 target Branch，允许跨连接、重启和多轮人工/程序审查，不生成中间 Commit。
+
+<a id="lifecycle"></a>
 
 ## 从 start 到 finalize
 
@@ -12,6 +18,8 @@ start → get / conflicts → resolve（可多次）→ candidate query → fina
 `ours` 是目标 Branch 的 pinned head，`theirs` 是 source 解析后的 Commit，不是“时间上较新/较旧”。Session 一开始就固定输入；source 后续写入不会自动加入本次合并。**start 即使返回 fast_forward 也不移动 Branch。**
 
 本页 Python 片段使用 [version_workflow.py](examples/version_workflow.py) 中的 `query`、`one`、`open_graph` helper 和已打开的 `db`；完整文件包含 Alice→Alicia / Ally 的分支冲突、断开重连和所有断言，可直接执行。
+
+<a id="start"></a>
 
 ## 1. 固定目标，建立 Session
 
@@ -33,6 +41,8 @@ revision = state["revision"]
 | `conflicted` | 有未解决冲突 | 不可以，先 resolve |
 | `ready` | 分叉合并结果无未解决冲突 | 可以 |
 
+<a id="conflicts"></a>
+
 ## 2. 分页查看冲突
 
 ```python
@@ -43,6 +53,8 @@ page = query(db, "CALL lithograph.merge.conflicts($session,100)",
 每行包含 `conflictId,slot,base,ours,theirs,resolution`，以及 `session,revision,cursor`。使用最后一行非空 cursor 获取下一页：`merge.conflicts($session,100,$cursor)`。
 
 cursor 绑定 Session 的 revision。任何有效 resolution 更新后，应按新 revision 重新分页；旧 cursor 返回 `MERGE_SESSION_CHANGED`。冲突不仅包括同一 Property 的不同值，也包括删除与修改、Relationship 端点依赖、合并后的 Constraint 违反。
+
+<a id="resolve"></a>
 
 ## 3. 提交一批选择
 
@@ -59,6 +71,8 @@ revision = state["revision"]
 
 每次 resolve 后重新查看 status/unresolved。处理一个冲突可能暴露新的约束冲突，因此不能仅以“已经遍历过最初所有 conflictId”为完成标准。
 
+<a id="candidate"></a>
+
 ## 4. 在 exact revision 上验证候选图
 
 ```python
@@ -69,6 +83,8 @@ candidate = query(db, "MATCH (p:Person) RETURN p.id,p.name ORDER BY p.id",
 只有 unresolved 为 `0` 才可读取 candidate。这里可执行只读 Cypher / Search / Schema introspection，不能写入、调用版本 mutation 或混入 `branch` / `at` / `author` / `message`。
 
 `candidate.summary.commit` 为 `null`，因为候选图不是已提交版本。`summary.mergeSession` 指明 id/revision。应用自己的验证规则在这里运行，Lithograph 不替应用决定业务冲突。
+
+<a id="finalize"></a>
 
 ## 5. 提交或放弃
 
@@ -82,6 +98,8 @@ finalize 不再传 `options.branch`，目标已绑定 Session。它要求 revisi
 
 放弃时调用 `merge.abort($session,$revision)`；不创建 Commit、不移动 Branch。不要为了“退出冲突模式” reset 目标分支。
 
+<a id="recovery"></a>
+
 ## 恢复与错误处理
 
 Session 持久化，可在重启后用 `merge.list(100)` 发现，再 `merge.get($session)` 恢复。list 是运行时清单，不保证跨多页集合不变；需要最新完整列表时从第一页重新开始。Session 不自动 TTL 删除，应用应显式 finalize 或 abort。
@@ -90,4 +108,4 @@ Session 持久化，可在重启后用 `merge.list(100)` 发现，再 `merge.get
 
 大量冲突不需要一次放进客户端内存。分批读取、分批 resolve、每批使用返回的 revision；Session 在等待期间不长期占用 writer。最终 Commit Data 需要 finalize 成功后另行 set，合并不会推测或合并业务 JSON 注释。
 
-接口列与参数见 [Procedure Reference](../reference/procedures.md)，并发边界见 [事务](transactions.md)。
+Session/conflict/resolution 的字段见 [Versioning Reference](../reference/versioning.md)，调用参数和状态转换见 [Merge Procedures](../reference/procedures/merge.md)，并发边界见 [事务](transactions.md)。

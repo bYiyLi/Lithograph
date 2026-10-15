@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use lithograph_fts5::{
     Fts5Error, dual_tokenizer_spec, ensure_dual_tokenizer, override_query_tokenizer,
+    validate_tokenizer,
 };
 use rusqlite::{Connection, OptionalExtension as _, params_from_iter};
 
@@ -745,25 +746,14 @@ fn probe_fulltext_specification(
     index: &IndexDefinition,
     analyzer: &str,
 ) -> QueryResult<()> {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"LITHOGRAPH_FTS5_SCHEMA_PROBE_V1");
-    hasher.update(index.name.as_bytes());
-    hasher.update(analyzer.as_bytes());
-    let digest = hasher.finalize().to_hex().to_string();
-    let table = format!("_lithograph_fts_probe_{}", &digest[..20]);
-    let create = format!(
-        "CREATE VIRTUAL TABLE temp.{table} USING fts5(value, tokenize={})",
-        sql_text_literal(analyzer)
-    );
-    connection.execute_batch(&create).map_err(|error| {
-        map_fulltext_sqlite_error(
+    validate_tokenizer(connection, analyzer).map_err(|error| {
+        map_fts5_provider_error(
             &index.name,
             "schema analyzer construction",
             QueryErrorKind::Schema,
             error,
         )
-    })?;
-    drop_fulltext_table(connection, &table, &index.name, "schema analyzer probe")
+    })
 }
 
 fn ensure_fulltext_cache(
@@ -985,19 +975,6 @@ fn reset_fulltext_table(
         })
 }
 
-fn drop_fulltext_table(
-    connection: &Connection,
-    table: &str,
-    index_name: &str,
-    stage: &str,
-) -> QueryResult<()> {
-    connection
-        .execute_batch(&format!("DROP TABLE IF EXISTS temp.{table}"))
-        .map_err(|error| {
-            map_fulltext_sqlite_error(index_name, stage, QueryErrorKind::Internal, error)
-        })
-}
-
 fn sql_text_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
@@ -1037,7 +1014,7 @@ fn fulltext_provider_error(
     fallback: QueryErrorKind,
     sqlite_code: i32,
 ) -> QueryError {
-    let kind = match sqlite_code {
+    let kind = match sqlite_code & 0xff {
         rusqlite::ffi::SQLITE_INTERRUPT => QueryErrorKind::Interrupted,
         rusqlite::ffi::SQLITE_BUSY | rusqlite::ffi::SQLITE_LOCKED => QueryErrorKind::Busy,
         rusqlite::ffi::SQLITE_IOERR
@@ -1189,13 +1166,6 @@ fn translate_lucene_flat_boolean_query(query: &str) -> String {
     let Some(clauses) = clauses else {
         return query.to_owned();
     };
-    if clauses.len() <= 1 {
-        return clauses
-            .into_iter()
-            .next()
-            .map(|(_, clause)| clause)
-            .unwrap_or_default();
-    }
     render_lucene_flat_clauses(&clauses)
 }
 

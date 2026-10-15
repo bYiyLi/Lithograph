@@ -61,6 +61,23 @@ impl From<rusqlite::Error> for Fts5Error {
     }
 }
 
+/// Constructs and releases a tokenizer on the actual SQLite connection without
+/// creating schema objects. In particular, this is safe to call while SQLite is
+/// stepping an outer virtual-table statement that prevents TEMP table drops.
+pub fn validate_tokenizer(connection: &Connection, specification: &str) -> Result<(), Fts5Error> {
+    let arguments = parse_specification(specification)
+        .map_err(|code| Fts5Error::new(code, "invalid FTS5 tokenizer specification"))?;
+    let api = fts5_api(connection)?;
+    // SAFETY: `api` belongs to this live connection and constructor arguments
+    // remain owned by this scope for the complete synchronous callback.
+    let tokenizer = unsafe { create_child(api, &arguments) }
+        .map_err(|code| Fts5Error::new(code, "failed to construct FTS5 tokenizer"))?;
+    // SAFETY: the successful constructor transferred exactly one instance to
+    // this scope. It has not been installed in a table or shared with a guard.
+    unsafe { delete_child(tokenizer) };
+    Ok(())
+}
+
 /// Installs Lithograph's private dual-tokenizer adapter on this SQLite
 /// connection. A host registration using the reserved name is never replaced.
 pub fn ensure_dual_tokenizer(connection: &Connection) -> Result<(), Fts5Error> {
@@ -488,9 +505,6 @@ fn parse_specification(specification: &str) -> Result<Vec<String>, c_int> {
         };
         arguments.push(argument);
         offset = next;
-        if offset < bytes.len() && bytes[offset] != b' ' {
-            return Err(ffi::SQLITE_ERROR);
-        }
     }
     if arguments.is_empty() {
         Err(ffi::SQLITE_ERROR)
@@ -560,6 +574,16 @@ mod tests {
             parse_specification("tok 'it''s' 中文"),
             Ok(vec!["tok".to_owned(), "it's".to_owned(), "中文".to_owned()])
         );
+        assert_eq!(
+            parse_specification("unicode61'tokenchars' '-_'remove_diacritics'0'"),
+            Ok(vec![
+                "unicode61".to_owned(),
+                "tokenchars".to_owned(),
+                "-_".to_owned(),
+                "remove_diacritics".to_owned(),
+                "0".to_owned(),
+            ])
+        );
         assert!(parse_specification("token-with-dash").is_err());
         assert!(parse_specification("tok\targ").is_err());
         assert!(parse_specification("'unterminated").is_err());
@@ -572,6 +596,48 @@ mod tests {
             dual_tokenizer_spec("unicode61 tokenchars '-_'", "porter unicode61", "cache one"),
             "lithograph_dual_v1 'unicode61 tokenchars ''-_''' 'porter unicode61' 'cache one'"
         );
+    }
+
+    #[test]
+    fn tokenizer_validation_matches_native_ddl_without_schema_objects() {
+        let connection = Connection::open_in_memory().expect("open SQLite");
+        for specification in [
+            "unicode61",
+            "porter unicode61",
+            "unicode61 tokenchars '-_'",
+            "unicode61 tokenchars '-_'remove_diacritics 0",
+            "'unicode61'tokenchars '-_' remove_diacritics 0",
+            "unicode61'tokenchars' '-_'remove_diacritics'0'",
+            "unicode61 remove_diacritics 0",
+            "unicode61 remove_diacritics invalid",
+            "missing_tokenizer",
+            "token-with-dash",
+            "'unterminated",
+            "unicode61\targ",
+        ] {
+            let validation = validate_tokenizer(&connection, specification);
+            let objects: i64 = connection
+                .query_row("SELECT count(*) FROM temp.sqlite_schema", [], |row| {
+                    row.get(0)
+                })
+                .expect("inspect temporary schema");
+            assert_eq!(objects, 0, "validation created schema: {specification}");
+            let ddl = format!(
+                "CREATE VIRTUAL TABLE temp.oracle USING fts5(value, tokenize='{}')",
+                specification.replace('\'', "''")
+            );
+            let oracle = connection.execute_batch(&ddl);
+            assert_eq!(
+                validation.is_ok(),
+                oracle.is_ok(),
+                "constructor differs from native FTS5: {specification}"
+            );
+            if oracle.is_ok() {
+                connection
+                    .execute_batch("DROP TABLE temp.oracle")
+                    .expect("remove native oracle");
+            }
+        }
     }
 
     #[test]

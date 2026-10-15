@@ -566,8 +566,12 @@ fn with_constraint_uniqueness_state(
          DELETE FROM temp._lithograph_constraint_validation_seen;",
     )?;
     let result = validate();
+    // A rows execution runs inside an active SQLite virtual-table statement.
+    // DROP would require a TEMP schema lock that this statement itself holds.
+    // Keep the fixed connection-local scratch table and clear its contents;
+    // both successful and failed validations must start the next check empty.
     let cleanup =
-        connection.execute_batch("DROP TABLE temp._lithograph_constraint_validation_seen");
+        connection.execute_batch("DELETE FROM temp._lithograph_constraint_validation_seen");
     match result {
         Ok(()) => {
             cleanup?;
