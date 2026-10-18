@@ -53,7 +53,7 @@ v0.3.3 修复静态名称的反引号语义和长表达式取消，增加宿主�
 
 ## 项目状态
 
-Phase 19 的实现、完整本机质量与实现提交六平台验收已经完成；v0.3.3 的版本提交与正式制品仍须独立验收，提交、远端 CI、六平台与正式发布按 [Phase 19 发布交付记录](https://github.com/bYiyLi/Lithograph/blob/main/docs/development/phases/19-query-correctness-resources.md#v033-release-delivery) 分别记录实际结果。版本变化见 [发布说明](https://github.com/bYiyLi/Lithograph/blob/v0.3.3/docs/releases/v0.3.3.md)，历史 Release Notes 保留对应版本事实。
+v0.3.3 已正式发布；tag CI、六平台 Matrix、正式下载资产审计与 macOS arm64 制品回验均已通过，精确源码、tag 与交付证据按 [Phase 19 发布交付记录](https://github.com/bYiyLi/Lithograph/blob/main/docs/development/phases/19-query-correctness-resources.md#v033-release-delivery) 分别记录实际结果。版本变化见 [发布说明](https://github.com/bYiyLi/Lithograph/blob/v0.3.3/docs/releases/v0.3.3.md)，历史 Release Notes 保留对应版本事实。
 
 ## 许可
 

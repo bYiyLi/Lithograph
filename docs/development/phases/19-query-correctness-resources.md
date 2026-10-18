@@ -1,6 +1,6 @@
 # Phase 19：查询正确性、取消与执行内存限额
 
-**状态：`done`（本轮 review 修复、开发复验与远端六平台验收完成；v0.3.3 发布准备中）**
+**状态：`done`（本轮 review 修复、开发复验与远端六平台验收完成；v0.3.3 正式发布与制品回验完成）**
 
 ## 目标、依赖与设计输入
 
@@ -205,8 +205,44 @@ cancel case 包含 **128 MiB** 合成参数输入；宿主已有输入和 SQLite
 
 ## v0.3.3 发布交付记录
 
-用户于 2026-10-18 授权发布新版本。本轮将 workspace 与内部精确版本依赖同步为 **0.3.3**，保持 storage format 3、Commit identity 和 Provider SPI V1；旧 v0.3.2 及 Phase 18 的发布记录不变。
+**v0.3.3 已正式发布，六平台与正式下载制品回验已完成。** 用户于 2026-10-18 授权发布新版本。本轮 workspace 与内部精确版本依赖同步为 **0.3.3**，保持 storage format 3、Commit identity 和 Provider SPI V1；旧 v0.3.2 及 Phase 18 的发布记录不变。CHANGELOG、[v0.3.3 Release Notes](../../releases/v0.3.3.md)、README、安装路径与同版 Guide / Cypher / Reference 已同步。
 
-发布准备包含 CHANGELOG、[v0.3.3 Release Notes](../../releases/v0.3.3.md)、README、安装路径与同版 Guide / Cypher / Reference。实现提交的已有 green 仅作开发基线；版本提交的精确 SHA 必须先通过 CI 与六平台 Matrix，再创建 annotated tag，等待 tag CI / Matrix 与 publish job 成功，随后下载正式资产核对 checksum、成员、版本和架构，并在本机 macOS arm64 实际回验。此处当前仅记录准备状态，尚未创建 v0.3.3 tag 或发布资产；后续结果按真实动作回填。Loreweft 升级接入不在本次发布范围。
+### 版本提交、tag 与远端验收
 
-版本准备本机检查使用 `target/release-033/`：`--locked --offline` metadata 确认 6/6 workspace packages 均为 0.3.3，外部 dependency/lock entries 未变；release build **51.08 s、exit 0**，真实加载版本为 0.3.3、Profile 与 format 范围不变；SQLite 3.51.0 的 Phase 19 C 八组 **8/8** 和 Python 固定预算百万行/取消/生命周期检查均 exit 0，运行时 inventory **172 signatures / 38 Procedures** 与文档一致；131 份 Markdown 的链接、锚点、coverage 与 `git diff --check` 通过。版本提交及后续远端结果仍按各自精确 SHA 记录。
+版本提交为 [`b259f8c6a341b775ef90baf0efd6d2fb11a83fb7`](https://github.com/bYiyLi/Lithograph/commit/b259f8c6a341b775ef90baf0efd6d2fb11a83fb7)，已推送至 `origin/main`；annotated tag `v0.3.3` 的 object 为 `a13c210110342986a008d2b96458519198ac5a78`，peeled commit 与版本提交一致，两项远端 ref 均已核对。
+
+初始准备采用 pretag/tag 两轮验证；用户随后明确要求直接打 tag、仅运行 tag 一轮发布验收。已按该指示取消重复的 main CI `39139925757` / Matrix `39139925751`，两者均为 `completed / cancelled`，不计作通过；此前仅回填文档的 `06bf88a` CI 已成功，其仍运行的重复 Matrix `39139488520` 也停止。本次发布使用下述 tag 的真实 green，不把实现提交的历史结果或取消的 main 结果冒充版本验收。
+
+[tag CI `39140439168`](https://github.com/bYiyLi/Lithograph/actions/runs/39140439168) 为 `completed / success`，**4/4 jobs 成功**；实际日志确认 Core lib **282/282**、Extension **20/20**（独立 invocation）、line coverage **88.13%**。该精确 tag/SHA 的 [Release Matrix `39140439134`](https://github.com/bYiyLi/Lithograph/actions/runs/39140439134) 同为 `completed / success`，前置 storage fixture、六平台和 publish 共 **8/8 jobs 成功**。六平台均完成 release build、版本/权限回归、真实 load / ABI / runtime / interoperability、打包与上传：
+
+| 平台 | 实际结果 | 直接证据 |
+| --- | --- | --- |
+| linux-x64 | `completed / success` | [job `117713824846`](https://github.com/bYiyLi/Lithograph/actions/runs/39140439134/job/117713824846) |
+| linux-arm64 | `completed / success` | [job `117713825007`](https://github.com/bYiyLi/Lithograph/actions/runs/39140439134/job/117713825007) |
+| macos-x64 | `completed / success` | [job `117713824896`](https://github.com/bYiyLi/Lithograph/actions/runs/39140439134/job/117713824896) |
+| macos-arm64 | `completed / success` | [job `117713824894`](https://github.com/bYiyLi/Lithograph/actions/runs/39140439134/job/117713824894) |
+| windows-x64 | `completed / success` | [job `117713824825`](https://github.com/bYiyLi/Lithograph/actions/runs/39140439134/job/117713824825) |
+| windows-arm64 | `completed / success` | [job `117713824838`](https://github.com/bYiyLi/Lithograph/actions/runs/39140439134/job/117713824838) |
+
+[publish job](https://github.com/bYiyLi/Lithograph/actions/runs/39140439134/job/117719180190) 已实际核对同一 tag/SHA 的 push CI 成功，然后生成校验和、上传并公开 Release；不是手工绕过发布门禁。[v0.3.3 Release](https://github.com/bYiyLi/Lithograph/releases/tag/v0.3.3) 的 `publishedAt=2026-10-18T15:51:32Z`（北京时间 2026-10-18 **23:51:32**），`isDraft=false`、`isPrerelease=false`，并已确认为 Latest 稳定版。正式资产为六平台包与 `SHA256SUMS`，共 **7 项**；Release body 与 immutable tag 的 Release Notes 一致。原始 JSON 与完成日志位于本机 `target/release-033/`。
+
+### 正式下载资产与运行回验
+
+`published-assets-audit.json` 为 success：**6 packages / 12 binaries** 的原始 SHA-256 与 [正式 SHA256SUMS](https://github.com/bYiyLi/Lithograph/releases/download/v0.3.3/SHA256SUMS) 一致，校验文件本身 SHA-256 为 `7bf46b3828627743b5222e354e78b82dfb4f275d0f42d412f30f01707387c1b6`。每包恰有 VERSION、主 extension、OpenAI-compatible Provider、README 与两份许可证六个成员，VERSION 均为 0.3.3；ELF/Mach-O/PE 的 x64/arm64 machine 与目标匹配。README/许可证与 immutable tag blobs 一致；Windows 文本只在内容比较时规范化 CRLF，资产校验始终使用原始字节。
+
+实际下载的 macOS arm64 包 SHA-256 为 `ba8fd08bd84d3516c9c2e6e8168f507b83de6b8cb6eea2c66cff65760b1ce997`；Engine 为 `00e9c450cfd8eb223d7fec6cc73039d22164f04acefd74455d42242e2202e80f`，Provider 为 `c6599de0b4058f1235ae23c6ddbe3cdd9bf18797e19dd617bd4afd03c4f3e99f`。后续运行全部使用这两份正式下载库，没有用本机候选包替代。
+
+`published-validation/runtime-validation.json` 确认 **13/13 checks exit 0**、`assertionSourcesMatchTag=true` 且双库验证前后 SHA 不变：
+
+- 完整 `release-artifact-smoke` 通过真实 load / ABI / SQL / transaction / storage / migration、访问控制、Provider SPI / 双扩展与 cache probes；SQLite **3.45.0 / 3.51.0 / 3.53.4** 均完成适用检查。
+- 三套 SQLite 的 Phase 19 C names / memory / rollback / batches / stream / spill / lifecycle / cancel 各 **8/8**，共 **24/24**；15 次真实取消均 code 9，发出 interrupt 后最大退出延迟 **0.231 ms**。
+- Python 在固定 **256 MiB** 预算下逐行消费 **1,000,000** 个 Map/String rows，同规模 scalar collector 按预算拒绝；options、参数、cursor 隔离、rollback 与取消均通过。scalar / rows 取消日志精度均为 **0.0001 s**，不推断更高精度。
+- 同一下载 Engine 的文档回归通过 **528 Cypher examples × 2 surfaces = 1056 次执行**、**138 SQL statements**、运行时 inventory **172 signatures / 38 Procedures**；5 个 Python 应用、C host 的 warning-as-error 编译和运行均 exit 0。
+
+Semantic 文档使用合成 Provider fixture；真实发行 Provider 的初始化/缓存行为由前述双扩展 probes 验证，不把第三方远程服务模板计作已执行。下载后本机动态回验只针对 macOS arm64；其它平台的真实 load/ABI/runtime/interop 验收由成功的 hosted tag Matrix 提供。预算与第三方不可抢占调用、transaction inner batch 的既有边界不因正式发布而改变，见上文及 Release Notes。
+
+### 本机准备与文档回填边界
+
+版本准备使用 `target/release-033/`：`--locked --offline` metadata 确认 6/6 workspace packages 均为 0.3.3，外部 dependency/lock entries 未变；release build **51.08 s、exit 0**，真实版本为 0.3.3；SQLite 3.51.0 的 Phase 19 C **8/8**、Python 百万行/取消/生命周期及 inventory 通过。本机候选包静态审计另为 candidate scope，不替代上述正式下载结果。
+
+最终回填仅修改发布状态与验收记录，重新读取并检查 131 份 Markdown 的 local links / anchors / coverage、`git diff --check` 与最终 diff；按用户避免重复完整 CI 的要求，文档提交使用 `[skip ci]`，不复用 tag green 宣称该文档 SHA 另跑过完整构建。tag 始终指向上述版本提交。Loreweft 升级依赖和显式传入 `memoryLimitBytes` 的接入仍不在本次发布范围。
