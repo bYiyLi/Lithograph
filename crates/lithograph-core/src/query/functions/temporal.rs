@@ -5,13 +5,21 @@ use crate::cypher::{
     ZonedDateTimeValue,
 };
 
-use super::super::expression::BinaryOp;
+use super::super::expression::{BinaryOp, clone_map_controlled};
 use super::super::{QueryError, QueryErrorKind, QueryResult};
+use crate::query::resources::ExecutionControl;
+
+#[path = "temporal_controlled.rs"]
+mod controlled;
+#[path = "temporal_pattern.rs"]
+pub(super) mod controlled_pattern;
 use super::format_components::{
     format_era, format_localized_offset, format_quarter, format_weekday, format_year,
     iso_week_parts, month_name, period_of_day, year_of_era, zone_id, zone_name,
 };
 use super::{contains_null, require_arity};
+pub(super) use controlled::evaluate_with_memory;
+use controlled::format_value;
 
 const NANOS_PER_SECOND: i128 = 1_000_000_000;
 const NANOS_PER_DAY: i128 = 86_400 * NANOS_PER_SECOND;
@@ -19,11 +27,11 @@ const NANOS_PER_DAY: i128 = 86_400 * NANOS_PER_SECOND;
 pub(super) fn evaluate(name: &str, values: &[Value]) -> Option<QueryResult<Value>> {
     let result = match name {
         "format" => format_value(values),
-        "date.truncate" => truncate(values, TemporalFamily::Date),
-        "localtime.truncate" => truncate(values, TemporalFamily::LocalTime),
-        "time.truncate" => truncate(values, TemporalFamily::Time),
-        "localdatetime.truncate" => truncate(values, TemporalFamily::LocalDateTime),
-        "datetime.truncate" => truncate(values, TemporalFamily::ZonedDateTime),
+        "date.truncate" => truncate(values, TemporalFamily::Date, None),
+        "localtime.truncate" => truncate(values, TemporalFamily::LocalTime, None),
+        "time.truncate" => truncate(values, TemporalFamily::Time, None),
+        "localdatetime.truncate" => truncate(values, TemporalFamily::LocalDateTime, None),
+        "datetime.truncate" => truncate(values, TemporalFamily::ZonedDateTime, None),
         "datetime.fromepoch" => datetime_from_epoch(values),
         "datetime.fromepochmillis" => datetime_from_epoch_millis(values),
         "duration.between" | "duration_between" => duration_difference(values, Difference::Logical),
@@ -328,7 +336,11 @@ enum TemporalFamily {
     ZonedDateTime,
 }
 
-fn truncate(values: &[Value], family: TemporalFamily) -> QueryResult<Value> {
+fn truncate(
+    values: &[Value],
+    family: TemporalFamily,
+    control: Option<&ExecutionControl<'_>>,
+) -> QueryResult<Value> {
     require_arity(values, 1, 3)?;
     if contains_null(values) {
         return Ok(Value::Null);
@@ -343,7 +355,7 @@ fn truncate(values: &[Value], family: TemporalFamily) -> QueryResult<Value> {
     let truncated = truncate_value(&input, family, unit)?;
     match values.get(2) {
         None => Ok(truncated),
-        Some(Value::Map(fields)) => apply_truncate_fields(truncated, family, unit, fields),
+        Some(Value::Map(fields)) => apply_truncate_fields(truncated, family, unit, fields, control),
         Some(_) => temporal_type_error("truncate fields must be Map"),
     }
 }
@@ -476,9 +488,10 @@ fn apply_truncate_fields(
     family: TemporalFamily,
     unit: &str,
     fields: &BTreeMap<String, Value>,
+    control: Option<&ExecutionControl<'_>>,
 ) -> QueryResult<Value> {
     validate_truncate_fields(family, unit, fields)?;
-    let mut constructor_fields = fields.clone();
+    let mut constructor_fields = clone_map_controlled(fields, control)?;
     preserve_truncated_fraction(&truncated, unit, &mut constructor_fields)?;
     let (name, base_key) = match family {
         TemporalFamily::Date => ("date", "date"),
@@ -513,7 +526,7 @@ fn preserve_truncated_fraction(
         Value::ZonedDateTime(value) => value.local_components()?.1,
         _ => return Ok(()),
     } % NANOS_PER_SECOND as u64;
-    match unit.to_ascii_lowercase().as_str() {
+    match canonical_truncate_unit(unit).unwrap_or_default() {
         "millisecond" => {
             fields.insert(
                 "millisecond".to_owned(),
@@ -603,7 +616,7 @@ enum TruncateFieldFamily {
 }
 
 fn truncate_rank(name: &str) -> Option<u8> {
-    match name.to_ascii_lowercase().as_str() {
+    match canonical_truncate_unit(name)? {
         "millennium" => Some(0),
         "century" => Some(1),
         "decade" => Some(2),
@@ -619,6 +632,28 @@ fn truncate_rank(name: &str) -> Option<u8> {
         "nanosecond" => Some(14),
         _ => None,
     }
+}
+
+fn canonical_truncate_unit(unit: &str) -> Option<&'static str> {
+    [
+        "millennium",
+        "century",
+        "decade",
+        "year",
+        "weekyear",
+        "quarter",
+        "month",
+        "week",
+        "day",
+        "hour",
+        "minute",
+        "second",
+        "millisecond",
+        "microsecond",
+        "nanosecond",
+    ]
+    .into_iter()
+    .find(|candidate| unit.eq_ignore_ascii_case(candidate))
 }
 
 fn truncate_field(name: &str) -> Option<(TruncateFieldFamily, u8)> {
@@ -654,8 +689,7 @@ fn adjust_relative_date_fields(
     let Some(days) = days else {
         return Ok(());
     };
-    let unit = unit.to_ascii_lowercase();
-    match unit.as_str() {
+    match canonical_truncate_unit(unit).unwrap_or_default() {
         "week" => adjust_day_of_week(truncated, days, fields),
         "quarter" => adjust_day_of_quarter(truncated, days, fields),
         _ => Ok(()),
@@ -761,7 +795,7 @@ fn truncate_date(value: &DateValue, unit: &str) -> QueryResult<DateValue> {
 
 fn truncate_date_days(days: i64, unit: &str) -> QueryResult<i64> {
     let (year, month, _) = crate::cypher::civil_from_days(days);
-    match unit.to_ascii_lowercase().as_str() {
+    match canonical_truncate_unit(unit).unwrap_or_default() {
         "millennium" => date_days(year.div_euclid(1000) * 1000, 1, 1),
         "century" => date_days(year.div_euclid(100) * 100, 1, 1),
         "decade" => date_days(year.div_euclid(10) * 10, 1, 1),
@@ -801,7 +835,7 @@ fn truncate_time(value: &TimeValue, unit: &str) -> QueryResult<TimeValue> {
 }
 
 fn truncate_time_nanos(value: u64, unit: &str) -> QueryResult<u64> {
-    let quantum = match unit.to_ascii_lowercase().as_str() {
+    let quantum = match canonical_truncate_unit(unit).unwrap_or_default() {
         "day" => NANOS_PER_DAY,
         "hour" => 3_600 * NANOS_PER_SECOND,
         "minute" => 60 * NANOS_PER_SECOND,
@@ -834,7 +868,7 @@ fn truncate_zoned_datetime(
 }
 
 fn truncate_datetime_parts(days: i64, time: u64, unit: &str) -> QueryResult<(i64, u64)> {
-    match unit.to_ascii_lowercase().as_str() {
+    match canonical_truncate_unit(unit).unwrap_or_default() {
         "millennium" | "century" | "decade" | "year" | "weekyear" | "quarter" | "month"
         | "week" | "day" => Ok((truncate_date_days(days, unit)?, 0)),
         _ => Ok((days, truncate_time_nanos(time, unit)?)),
@@ -1070,39 +1104,6 @@ fn whole_months_between(from: TemporalPoint, to: TemporalPoint) -> QueryResult<i
         months += 1;
     }
     Ok(months)
-}
-
-fn format_value(values: &[Value]) -> QueryResult<Value> {
-    require_arity(values, 1, 2)?;
-    if contains_null(values) {
-        return Ok(Value::Null);
-    }
-    let pattern = match values.get(1) {
-        None => None,
-        Some(Value::String(pattern)) => Some(pattern.as_str()),
-        Some(_) => return temporal_type_error("format pattern must be String"),
-    };
-    let output = match (&values[0], pattern) {
-        (Value::Date(value), None) => value.as_str().to_owned(),
-        (Value::LocalTime(value), None) => value.as_str().to_owned(),
-        (Value::Time(value), None) => value.as_str().to_owned(),
-        (Value::LocalDateTime(value), None) => value.as_str().to_owned(),
-        (Value::ZonedDateTime(value), None)
-            if value.zone() == "Z"
-                || value.zone().starts_with('+')
-                || value.zone().starts_with('-') =>
-        {
-            value.value().to_owned()
-        }
-        (Value::ZonedDateTime(value), None) => format!("{}[{}]", value.value(), value.zone()),
-        (Value::Duration(value), None) => value.as_str().to_owned(),
-        (Value::Duration(value), Some(pattern)) => {
-            super::duration_format::format_duration(value, pattern)?
-        }
-        (value, Some(pattern)) => format_instant(value, pattern)?,
-        _ => return temporal_type_error("format input must be a temporal value"),
-    };
-    Ok(Value::String(output))
 }
 
 #[derive(Clone, Copy)]
@@ -1393,3 +1394,7 @@ pub(super) fn invalid_pattern_component(character: char) -> QueryError {
 fn temporal_type_error<T>(message: &str) -> QueryResult<T> {
     Err(QueryError::new(QueryErrorKind::Type, message))
 }
+
+#[cfg(test)]
+#[path = "temporal_format_tests.rs"]
+mod controlled_format_tests;

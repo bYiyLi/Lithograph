@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use rusqlite::Connection;
 
-use super::expression::{BindingRow, BindingValue, compile_expression};
+use super::expression::compile_expression;
 use super::graph::ResolvedGraphView;
 use super::options::{ExecutionOptions, GraphViewSelector, writable_branch};
 use super::{
@@ -21,9 +21,8 @@ mod version;
 
 use effects::ProgramEffects;
 pub(crate) use execute::execute_version_program;
-use validation::{
-    has_graph_expression, query_body_has_public_result, validate_static_property_accesses,
-};
+pub(crate) use validation::has_graph_expression;
+use validation::{query_body_has_public_result, validate_static_property_accesses};
 pub(crate) use version::{retry_version_busy, suppress_version_summary_commit};
 
 #[derive(Debug, Clone)]
@@ -53,14 +52,7 @@ pub(crate) struct ProgramWriteOptions {
     pub(crate) message: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct TransactionProgramOptions {
-    pub(crate) access: super::access::AccessPolicy,
-    pub(crate) graph_view: GraphViewSelector,
-    pub(crate) branch: String,
-    pub(crate) author: Option<String>,
-    pub(crate) message: Option<String>,
-}
+pub(crate) type TransactionProgramOptions = ProgramWriteOptions;
 
 pub(super) struct ComposedQueryParts<'a> {
     pub(super) first: &'a AstNode,
@@ -118,6 +110,27 @@ pub(super) fn required_query_body<'a>(
         .ok_or_else(|| QueryError::semantic(message))
 }
 
+pub(crate) fn call_subquery(clause: &AstNode) -> Option<&AstNode> {
+    clause
+        .children
+        .iter()
+        .find(|node| node.kind == AstKind::Subquery(crate::cypher::SubqueryKind::Call))
+}
+
+pub(crate) fn subquery_scope(subquery: &AstNode) -> Option<&AstNode> {
+    subquery
+        .children
+        .iter()
+        .find(|node| node.kind == AstKind::SubqueryScope)
+}
+
+pub(crate) fn decoded_descendant_name(node: &AstNode, kind: AstKind) -> Option<String> {
+    node.descendants()
+        .find(|child| child.kind == kind)
+        .and_then(|child| child.text.as_deref())
+        .map(crate::cypher::unescape_identifier)
+}
+
 pub(super) fn explicit_imports(scope: Option<&AstNode>, outer: &[String]) -> Vec<String> {
     let Some(scope) = scope else {
         return Vec::new();
@@ -134,18 +147,6 @@ pub(super) fn explicit_imports(scope: Option<&AstNode>, outer: &[String]) -> Vec
             .filter_map(|node| node.text.clone())
             .collect()
     }
-}
-
-pub(super) fn project_bindings(row: &BindingRow, names: &[String]) -> BindingRow {
-    let mut projected = BindingRow::default();
-    for name in names {
-        projected.insert(
-            name.clone(),
-            row.values.get(name).cloned().unwrap_or(BindingValue::Null),
-        );
-    }
-    projected.load_csv_context.clone_from(&row.load_csv_context);
-    projected
 }
 
 pub(crate) fn requires_program(root: &AstNode) -> bool {
@@ -278,7 +279,7 @@ pub(crate) fn prepare_program(
         .then(|| program_write_options(connection, options))
         .transpose()?;
     let transaction_options = transaction_owning
-        .then(|| transaction_program_options(connection, options))
+        .then(|| program_write_options(connection, options))
         .transpose()?;
     let logical_operators = logical_operators(&ast.root);
     let physical_operators = logical_operators
@@ -304,19 +305,6 @@ pub(crate) fn prepare_program(
         },
         write_options,
         transaction_options,
-    })
-}
-
-fn transaction_program_options(
-    connection: &Connection,
-    options: &ExecutionOptions,
-) -> QueryResult<TransactionProgramOptions> {
-    Ok(TransactionProgramOptions {
-        access: options.access.clone(),
-        graph_view: options.graph_view.clone(),
-        branch: writable_branch(connection, options)?,
-        author: options.author.clone(),
-        message: options.message.clone(),
     })
 }
 
@@ -707,12 +695,7 @@ fn append_call_columns(
     clause: &AstNode,
     source: &str,
 ) -> QueryResult<()> {
-    if let Some(subquery) = clause.children.iter().find(|node| {
-        matches!(
-            node.kind,
-            AstKind::Subquery(crate::cypher::SubqueryKind::Call)
-        )
-    }) {
+    if let Some(subquery) = call_subquery(clause) {
         let body = subquery
             .children
             .iter()
@@ -1142,17 +1125,9 @@ fn append_program_match_operators(clause: &AstNode, operators: &mut Vec<LogicalO
         .descendants()
         .find(|node| node.kind == AstKind::Search)
     {
-        let variable = search
-            .descendants()
-            .find(|node| node.kind == AstKind::Variable)
-            .and_then(|node| node.text.as_deref())
-            .map(crate::cypher::unescape_identifier)
+        let variable = decoded_descendant_name(search, AstKind::Variable)
             .unwrap_or_else(|| "_search".to_owned());
-        let index = search
-            .descendants()
-            .find(|node| node.kind == AstKind::IndexName)
-            .and_then(|node| node.text.as_deref())
-            .map(crate::cypher::unescape_identifier)
+        let index = decoded_descendant_name(search, AstKind::IndexName)
             .unwrap_or_else(|| "_vector_index".to_owned());
         operators.push(LogicalOperator::IndexSeek {
             variable,
@@ -1175,7 +1150,8 @@ fn append_program_match_operators(clause: &AstNode, operators: &mut Vec<LogicalO
         if let Some(label) = start
             .descendants()
             .find(|node| node.kind == AstKind::LabelName)
-            .and_then(|node| node.text.clone())
+            .and_then(|node| node.text.as_deref())
+            .map(crate::cypher::unescape_identifier)
         {
             operators.push(LogicalOperator::LabelScan { variable, label });
         } else {
@@ -1239,7 +1215,7 @@ pub(crate) fn projection_requires_global_input(clause: &AstNode) -> bool {
             .any(|node| matches!(node.kind, AstKind::OrderBy | AstKind::Skip | AstKind::Limit))
 }
 
-fn projection_has_aggregate(clause: &AstNode) -> bool {
+pub(crate) fn projection_has_aggregate(clause: &AstNode) -> bool {
     clause.descendants().any(|node| {
         node.kind == AstKind::GroupBy
             || (node.kind == AstKind::FunctionName
@@ -1340,23 +1316,25 @@ pub(crate) fn execute_prepared_read_with_summary_commit(
     params: &BTreeMap<String, Value>,
     mode: ExecutionMode,
     metrics: &mut QueryMetrics,
-    is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<(Vec<Vec<Value>>, Option<crate::storage::HashId>)> {
+    control: &super::resources::ExecutionControl<'_>,
+) -> QueryResult<(
+    Vec<Vec<Value>>,
+    Option<crate::storage::HashId>,
+    super::resources::MemoryReservation,
+)> {
     if program.writes {
         return Err(QueryError::internal(
             "mutating Phase 06 program reached the read executor",
         ));
     }
     if mode == ExecutionMode::Explain {
-        return Ok((vec![vec![Value::String(program.physical.explain())]], None));
+        return Ok((
+            vec![vec![Value::String(program.physical.explain())]],
+            None,
+            control.reserve(0)?,
+        ));
     }
     execute::execute_read_snapshot_with_version_summary(
-        connection,
-        program,
-        snapshot,
-        graph_view,
-        params,
-        metrics,
-        is_interrupted,
+        connection, program, snapshot, graph_view, params, metrics, control,
     )
 }

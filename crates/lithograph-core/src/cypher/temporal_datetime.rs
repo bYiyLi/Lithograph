@@ -33,6 +33,10 @@ impl LocalDateTimeValue {
         &self.text
     }
 
+    pub(crate) fn accounted_heap_bytes(&self) -> usize {
+        self.text.capacity()
+    }
+
     pub(crate) fn comparison_key(&self) -> (i64, u64) {
         (self.days, self.nanoseconds)
     }
@@ -89,6 +93,10 @@ impl ZonedDateTimeValue {
 
     pub fn zone(&self) -> &str {
         &self.zone
+    }
+
+    pub(crate) fn accounted_heap_bytes(&self) -> usize {
+        self.value.capacity() + self.zone.capacity()
     }
 
     pub(crate) fn comparison_key(&self) -> (i128, i32, &str) {

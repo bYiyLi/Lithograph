@@ -48,7 +48,7 @@ pub fn load_snapshot_state(
     })?;
     let mut properties = BTreeMap::new();
     snapshot.visit_properties(|owner, owner_id, key, value| {
-        properties.insert((owner, owner_id, key), value.clone());
+        properties.insert((owner, owner_id, key), value);
         Ok(())
     })?;
     Ok(SnapshotState {
@@ -61,10 +61,20 @@ pub fn load_snapshot_state(
 }
 
 pub fn layer_between(before: &SnapshotState, after: &SnapshotState) -> StorageResult<LayerBuilder> {
+    layer_between_checked(before, after, &|| Ok(()))
+}
+
+pub(crate) fn layer_between_checked(
+    before: &SnapshotState,
+    after: &SnapshotState,
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<LayerBuilder> {
+    check()?;
     let mut layer = LayerBuilder::default();
-    append_node_label_delta(&mut layer, before, after)?;
-    append_relationship_delta(&mut layer, before, after)?;
-    append_property_delta(&mut layer, before, after)?;
+    append_node_label_delta(&mut layer, before, after, check)?;
+    append_relationship_delta(&mut layer, before, after, check)?;
+    append_property_delta(&mut layer, before, after, check)?;
+    check()?;
     Ok(layer)
 }
 
@@ -250,18 +260,63 @@ fn append_node_label_delta(
     layer: &mut LayerBuilder,
     before: &SnapshotState,
     after: &SnapshotState,
+    check: &dyn Fn() -> StorageResult<()>,
 ) -> StorageResult<()> {
-    for node in before.nodes.difference(&after.nodes) {
-        layer.remove_node(*node)?;
+    visit_set_changes(&before.nodes, &after.nodes, check, |node, added| {
+        if added {
+            layer.add_node(*node)
+        } else {
+            layer.remove_node(*node)
+        }
+    })?;
+    visit_set_changes(
+        &before.labels,
+        &after.labels,
+        check,
+        |(node, label), added| {
+            if added {
+                layer.add_label(*node, *label)
+            } else {
+                layer.remove_label(*node, *label)
+            }
+        },
+    )
+}
+
+fn visit_set_changes<T: Ord>(
+    before: &BTreeSet<T>,
+    after: &BTreeSet<T>,
+    check: &dyn Fn() -> StorageResult<()>,
+    mut visitor: impl FnMut(&T, bool) -> StorageResult<()>,
+) -> StorageResult<()> {
+    let mut before = before.iter().peekable();
+    let mut after = after.iter().peekable();
+    // Check equal slots too: std::collections::Difference::next can otherwise
+    // scan an arbitrarily large unchanged prefix without yielding an element.
+    while let (Some(left), Some(right)) = (before.peek().copied(), after.peek().copied()) {
+        check()?;
+        match left.cmp(right) {
+            std::cmp::Ordering::Less => {
+                visitor(left, false)?;
+                before.next();
+            }
+            std::cmp::Ordering::Greater => {
+                visitor(right, true)?;
+                after.next();
+            }
+            std::cmp::Ordering::Equal => {
+                before.next();
+                after.next();
+            }
+        }
     }
-    for node in after.nodes.difference(&before.nodes) {
-        layer.add_node(*node)?;
+    for value in before {
+        check()?;
+        visitor(value, false)?;
     }
-    for (node, label) in before.labels.difference(&after.labels) {
-        layer.remove_label(*node, *label)?;
-    }
-    for (node, label) in after.labels.difference(&before.labels) {
-        layer.add_label(*node, *label)?;
+    for value in after {
+        check()?;
+        visitor(value, true)?;
     }
     Ok(())
 }
@@ -270,8 +325,10 @@ fn append_relationship_delta(
     layer: &mut LayerBuilder,
     before: &SnapshotState,
     after: &SnapshotState,
+    check: &dyn Fn() -> StorageResult<()>,
 ) -> StorageResult<()> {
     for (id, relationship) in &before.relationships {
+        check()?;
         match after.relationships.get(id) {
             None => layer.remove_relationship(*relationship)?,
             Some(after_relationship) if after_relationship != relationship => {
@@ -283,6 +340,7 @@ fn append_relationship_delta(
         }
     }
     for (id, relationship) in &after.relationships {
+        check()?;
         if !before.relationships.contains_key(id) {
             layer.add_relationship(*relationship)?;
         }
@@ -294,24 +352,47 @@ fn append_property_delta(
     layer: &mut LayerBuilder,
     before: &SnapshotState,
     after: &SnapshotState,
+    check: &dyn Fn() -> StorageResult<()>,
 ) -> StorageResult<()> {
     for (slot, before_value) in &before.properties {
+        check()?;
         match after.properties.get(slot) {
             None => layer.remove_property(slot.0, slot.1, slot.2)?,
-            Some(after_value)
-                if after_value.canonical_bytes()? != before_value.canonical_bytes()? =>
-            {
-                layer.set_property(slot.0, slot.1, slot.2, after_value.clone())?;
+            Some(after_value) if property_changed_checked(before_value, after_value, check)? => {
+                layer.set_property(
+                    slot.0,
+                    slot.1,
+                    slot.2,
+                    super::super::clone_property_value_checked(after_value, check)?,
+                )?;
             }
             Some(_) => {}
         }
     }
     for (slot, value) in &after.properties {
+        check()?;
         if !before.properties.contains_key(slot) {
-            layer.set_property(slot.0, slot.1, slot.2, value.clone())?;
+            layer.set_property(
+                slot.0,
+                slot.1,
+                slot.2,
+                super::super::clone_property_value_checked(value, check)?,
+            )?;
         }
     }
     Ok(())
+}
+
+fn property_changed_checked(
+    before: &PropertyValue,
+    after: &PropertyValue,
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<bool> {
+    let before = before.canonical_bytes_checked(check)?;
+    let after = after.canonical_bytes_checked(check)?;
+    Ok(!super::super::encoding::equal_bytes_checked(
+        &before, &after, check,
+    )?)
 }
 
 pub fn capture_allocation_state(connection: &Connection) -> StorageResult<AllocationState> {
@@ -376,4 +457,130 @@ fn restore_dictionary(
         statement.execute(params![id, name])?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    fn empty_state() -> SnapshotState {
+        SnapshotState {
+            nodes: BTreeSet::new(),
+            labels: BTreeSet::new(),
+            relationships: BTreeMap::new(),
+            properties: BTreeMap::new(),
+            schema: SchemaState::default(),
+        }
+    }
+
+    #[test]
+    fn checked_layer_diff_preserves_canonical_slot_order_and_signed_zero_changes() {
+        let mut before = empty_state();
+        before.nodes.extend([1, 2]);
+        before.labels.insert((1, 1));
+        let removed = RelationshipRecord {
+            id: 1,
+            source: 1,
+            target: 2,
+            type_id: 1,
+        };
+        before.relationships.insert(removed.id, removed);
+        before.properties.insert(
+            (OwnerKind::Node, 1, 1),
+            PropertyValue::String("old".to_owned()),
+        );
+        before
+            .properties
+            .insert((OwnerKind::Node, 2, 1), PropertyValue::Float(-0.0));
+        let mut after = empty_state();
+        after.nodes.extend([2, 3]);
+        after.labels.insert((3, 1));
+        let added = RelationshipRecord {
+            id: 2,
+            source: 2,
+            target: 3,
+            type_id: 1,
+        };
+        after.relationships.insert(added.id, added);
+        after
+            .properties
+            .insert((OwnerKind::Node, 2, 1), PropertyValue::Float(0.0));
+        after.properties.insert(
+            (OwnerKind::Node, 3, 1),
+            PropertyValue::List(vec![PropertyValue::Integer(3)]),
+        );
+        let mut expected = LayerBuilder::default();
+        expected.remove_node(1).unwrap();
+        expected.add_node(3).unwrap();
+        expected.remove_label(1, 1).unwrap();
+        expected.add_label(3, 1).unwrap();
+        expected.remove_relationship(removed).unwrap();
+        expected.add_relationship(added).unwrap();
+        expected.remove_property(OwnerKind::Node, 1, 1).unwrap();
+        expected
+            .set_property(OwnerKind::Node, 2, 1, PropertyValue::Float(0.0))
+            .unwrap();
+        expected
+            .set_property(
+                OwnerKind::Node,
+                3,
+                1,
+                PropertyValue::List(vec![PropertyValue::Integer(3)]),
+            )
+            .unwrap();
+        let actual = layer_between_checked(&before, &after, &|| Ok(())).unwrap();
+        assert_eq!(
+            actual.canonical_lce1().unwrap(),
+            expected.canonical_lce1().unwrap()
+        );
+    }
+
+    #[test]
+    fn unchanged_set_prefix_still_observes_diff_cancellation() {
+        let mut before = empty_state();
+        before.nodes.extend(1..10_000);
+        let checks = Cell::new(0);
+        let error = layer_between_checked(&before, &before, &|| {
+            checks.set(checks.get() + 1);
+            if checks.get() == 257 {
+                Err(StorageError::not_found("cancel unchanged prefix"))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+        assert!(matches!(error, StorageError::NotFound(_)));
+        assert_eq!(checks.get(), 257);
+    }
+
+    #[test]
+    fn large_property_comparison_and_added_value_copy_observe_cancellation() {
+        for compare_existing in [false, true] {
+            let mut before = empty_state();
+            let mut after = empty_state();
+            if compare_existing {
+                before.properties.insert(
+                    (OwnerKind::Node, 1, 1),
+                    PropertyValue::List(vec![PropertyValue::Integer(1); 2_000]),
+                );
+            }
+            after.properties.insert(
+                (OwnerKind::Node, 1, 1),
+                PropertyValue::List(vec![PropertyValue::Integer(2); 2_000]),
+            );
+            let checks = Cell::new(0);
+            let result = layer_between_checked(&before, &after, &|| {
+                checks.set(checks.get() + 1);
+                if checks.get() == 257 {
+                    Err(StorageError::not_found("cancel property diff"))
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(matches!(result, Err(StorageError::NotFound(_))));
+            assert_eq!(checks.get(), 257);
+        }
+    }
 }

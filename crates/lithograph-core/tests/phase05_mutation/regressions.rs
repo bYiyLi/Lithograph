@@ -606,3 +606,123 @@ fn distinct_order_by_cannot_reintroduce_a_removed_variable_after_write() {
         ]
     );
 }
+
+fn deleted_value_options() -> [ExecutionOptions; 2] {
+    [
+        ExecutionOptions::default(),
+        ExecutionOptions::parse(&serde_json::json!({ "memoryLimitBytes": 67108864 }))
+            .expect("explicit execution memory budget"),
+    ]
+}
+
+#[test]
+fn deleted_relationship_keeps_bound_type_metadata_with_or_without_memory_budget() {
+    for options in deleted_value_options() {
+        for query in [
+            "MATCH ()-[r:T]->() DELETE r RETURN type(r)",
+            "MATCH ()-[r:T]->() WITH r AS removed DELETE removed RETURN tYpE(removed) AS relType",
+        ] {
+            let connection = fresh_storage();
+            execute(
+                &connection,
+                "CREATE ()-[:T {num:7}]->() FINISH",
+                ExecutionOptions::default(),
+            )
+            .expect("seed typed Relationship");
+            let (rows, summary) = execute(&connection, query, options.clone())
+                .expect("type reads the deleted Relationship's bound metadata");
+            assert_eq!(rows, vec![vec![Value::String("T".to_owned())]]);
+            assert_eq!(summary.counters.relationships_deleted, 1);
+            assert_eq!(
+                read_rows(&connection, "MATCH ()-[r:T]->() RETURN count(r)"),
+                vec![vec![Value::Integer(0)]]
+            );
+        }
+    }
+}
+
+#[test]
+fn deleted_relationship_property_read_still_errors_and_rolls_back() {
+    for options in deleted_value_options() {
+        let connection = fresh_storage();
+        execute(
+            &connection,
+            "CREATE ()-[:T {num:7}]->() FINISH",
+            ExecutionOptions::default(),
+        )
+        .expect("seed Relationship property");
+        let before = branch_head(&connection, "main").expect("head before failed DELETE");
+        let error = execute(
+            &connection,
+            "MATCH ()-[r:T]->() DELETE r RETURN r.num",
+            options,
+        )
+        .expect_err("a deleted Relationship property remains inaccessible");
+        assert_eq!(error.kind, QueryErrorKind::Semantic);
+        assert_eq!(
+            branch_head(&connection, "main").expect("head after failed DELETE"),
+            before
+        );
+        assert_eq!(
+            read_rows(&connection, "MATCH ()-[r:T]->() RETURN r.num"),
+            vec![vec![Value::Integer(7)]]
+        );
+    }
+}
+
+#[test]
+fn deleted_nodes_and_relationship_keep_bound_element_ids() {
+    for options in deleted_value_options() {
+        let connection = fresh_storage();
+        let expected = execute(
+            &connection,
+            "CREATE (a)-[r:T]->(b) RETURN elementId(a), elementId(r), elementId(b)",
+            ExecutionOptions::default(),
+        )
+        .expect("seed graph elements and capture their identities")
+        .0;
+        let (rows, summary) = execute(
+            &connection,
+            "MATCH (a)-[r:T]->(b) DELETE r, a, b RETURN elementId(a), elementId(r), elementId(b)",
+            options,
+        )
+        .expect("elementId reads deleted elements' bound identities");
+        assert_eq!(rows, expected);
+        assert_eq!(summary.counters.nodes_deleted, 2);
+        assert_eq!(summary.counters.relationships_deleted, 1);
+        assert_eq!(
+            read_rows(&connection, "MATCH (n) RETURN count(n)"),
+            vec![vec![Value::Integer(0)]]
+        );
+    }
+}
+
+#[test]
+fn path_element_id_keeps_type_error_after_delete_and_rolls_back() {
+    for options in deleted_value_options() {
+        let connection = fresh_storage();
+        execute(
+            &connection,
+            "CREATE ()-[:T {num:7}]->() FINISH",
+            ExecutionOptions::default(),
+        )
+        .expect("seed bound Path");
+        let before = branch_head(&connection, "main").expect("head before Path type errors");
+        for query in [
+            "MATCH p=(a)-[r:T]->(b) RETURN elementId(p)",
+            "MATCH p=(a)-[r:T]->(b) DELETE r RETURN elementId(p)",
+        ] {
+            let error = execute(&connection, query, options.clone())
+                .expect_err("elementId requires Node or Relationship, including after DELETE");
+            assert_eq!(error.kind, QueryErrorKind::Type, "{query}");
+            assert_eq!(
+                branch_head(&connection, "main").expect("head after Path type error"),
+                before
+            );
+            assert_eq!(
+                read_rows(&connection, "MATCH ()-[r:T]->() RETURN r.num"),
+                vec![vec![Value::Integer(7)]]
+            );
+        }
+    }
+}

@@ -1,14 +1,17 @@
+use crate::query::resources::{
+    ExecutionControl, MemoryReservation, checked_add, checked_mul, map_entry_bytes,
+};
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 
 use rusqlite::{params, types::Value as SqlValue};
 
-use crate::cypher::{CypherComparison, Value, cypher_compare, cypher_equals};
+use crate::cypher::{CypherComparison, Value, cypher_compare};
 use crate::storage::{self, ScanPage, Snapshot, StandardIndexKind};
 
-use super::super::super::mutation::property_from_value;
+use super::super::super::mutation::property_from_value_controlled;
 use super::super::super::{QueryError, QueryResult};
-use super::super::equality::property_equality_key;
 use super::{StandardIndexPredicate, StandardIndexSeek};
 
 mod range;
@@ -119,12 +122,59 @@ pub(super) fn range_order_key(value: &Value) -> Option<RangeOrderKey> {
     }
 }
 
+struct IndexScan<'a, 'connection, 'control> {
+    snapshot: &'a Snapshot<'connection>,
+    control: &'a ExecutionControl<'control>,
+    memory: RefCell<MemoryReservation>,
+}
+
+impl<'a, 'connection, 'control> IndexScan<'a, 'connection, 'control> {
+    fn new(
+        snapshot: &'a Snapshot<'connection>,
+        seek: &StandardIndexSeek,
+        control: &'a ExecutionControl<'control>,
+    ) -> QueryResult<Self> {
+        control.check()?;
+        let mut bytes = checked_add(16_384, checked_mul(seek.index_name.len() as u64, 16)?)?;
+        for (_, predicate) in &seek.predicates {
+            bytes = checked_add(
+                bytes,
+                checked_mul(super::constant::predicate_bytes(predicate, control)?, 16)?,
+            )?;
+        }
+        Ok(Self {
+            snapshot,
+            control,
+            memory: RefCell::new(control.reserve(bytes)?),
+        })
+    }
+
+    fn insert(&self, values: &mut BTreeSet<i64>, value: i64) -> QueryResult<()> {
+        self.control.work(1)?;
+        if !values.contains(&value) {
+            self.memory.borrow_mut().grow(map_entry_bytes::<i64>()?)?;
+            values.insert(value);
+        }
+        Ok(())
+    }
+}
+
+impl<'connection> std::ops::Deref for IndexScan<'_, 'connection, '_> {
+    type Target = Snapshot<'connection>;
+    fn deref(&self) -> &Self::Target {
+        self.snapshot
+    }
+}
+
 pub(crate) fn scan_node_index_page(
     snapshot: &Snapshot<'_>,
     seek: &StandardIndexSeek,
     cursor: Option<&StandardIndexCursor>,
     limit: usize,
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<StandardIndexPage> {
+    let scan = IndexScan::new(snapshot, seek, control)?;
+    let snapshot = &scan;
     if seek.kind == StandardIndexKind::Lookup {
         return Err(QueryError::internal(
             "node lookup Index seeks must use the canonical label access path",
@@ -139,7 +189,10 @@ pub(crate) fn scan_relationship_index_page(
     relationship_type_id: Option<i64>,
     cursor: Option<&StandardIndexCursor>,
     limit: usize,
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<StandardIndexPage> {
+    let scan = IndexScan::new(snapshot, seek, control)?;
+    let snapshot = &scan;
     if seek.kind == StandardIndexKind::Lookup {
         let Some(type_id) = relationship_type_id else {
             return Ok(StandardIndexPage {
@@ -160,7 +213,7 @@ pub(crate) fn scan_relationship_index_page(
 }
 
 fn scan_property_index_page(
-    snapshot: &Snapshot<'_>,
+    snapshot: &IndexScan<'_, '_, '_>,
     seek: &StandardIndexSeek,
     owner_kind: i64,
     cursor: Option<&StandardIndexCursor>,
@@ -218,22 +271,42 @@ fn owner_scan_page(page: ScanPage<i64>) -> StandardIndexPage {
 }
 
 fn ensure_planned_index_cache(
-    snapshot: &Snapshot<'_>,
+    snapshot: &IndexScan<'_, '_, '_>,
     seek: &StandardIndexSeek,
 ) -> QueryResult<storage::IndexDefinition> {
-    let schema = snapshot.schema_state()?;
+    let execution = crate::query::version::VersionExecution::new(
+        snapshot.connection_for_query(),
+        snapshot.control,
+    );
+    let loaded = if snapshot.query_schema_state().is_none() {
+        Some(execution.load_schema(snapshot.commit())?)
+    } else {
+        None
+    };
+    let schema = snapshot
+        .query_schema_state()
+        .or_else(|| loaded.as_ref().map(|loaded| &loaded.schema))
+        .ok_or_else(|| QueryError::internal("Index scan is missing Schema"))?;
     let index = schema.indexes.get(&seek.index_name).ok_or_else(|| {
         QueryError::internal(format!(
             "planned Index {} is not present in the active Schema",
             seek.index_name
         ))
     })?;
-    ensure_index_cache(snapshot, index)?;
+    snapshot
+        .memory
+        .borrow_mut()
+        .grow(super::persistent::definition_workspace(
+            index,
+            snapshot.control,
+        )?)?;
+    ensure_index_cache(snapshot, index, snapshot.control)?;
+    snapshot.control.check()?;
     Ok(index.clone())
 }
 
 fn scan_relationship_lookup_after(
-    snapshot: &Snapshot<'_>,
+    snapshot: &IndexScan<'_, '_, '_>,
     seek: &StandardIndexSeek,
     type_id: i64,
     after: i64,
@@ -266,7 +339,7 @@ fn scan_relationship_lookup_after(
 }
 
 fn scan_property_index_after(
-    snapshot: &Snapshot<'_>,
+    snapshot: &IndexScan<'_, '_, '_>,
     seek: &StandardIndexSeek,
     owner_kind: i64,
     after: i64,
@@ -305,7 +378,7 @@ fn scan_property_index_after(
         )?;
         matched = Some(match matched {
             None => candidates,
-            Some(previous) => previous.intersection(&candidates).copied().collect(),
+            Some(previous) => intersect_candidates(snapshot, &previous, &candidates)?,
         });
         if matched.as_ref().is_some_and(BTreeSet::is_empty) {
             break;
@@ -324,8 +397,20 @@ fn scan_property_index_after(
     Ok(ScanPage { items, next_after })
 }
 
+fn intersect_candidates(
+    snapshot: &IndexScan<'_, '_, '_>,
+    left: &BTreeSet<i64>,
+    right: &BTreeSet<i64>,
+) -> QueryResult<BTreeSet<i64>> {
+    let mut output = BTreeSet::new();
+    for owner in left.intersection(right) {
+        snapshot.insert(&mut output, *owner)?;
+    }
+    Ok(output)
+}
+
 fn prefetch_index_properties(
-    snapshot: &Snapshot<'_>,
+    snapshot: &IndexScan<'_, '_, '_>,
     index: &storage::IndexDefinition,
     owner_kind: i64,
     owner_ids: &[i64],
@@ -355,7 +440,7 @@ fn prefetch_index_properties(
 }
 
 fn scan_predicate_candidates(
-    snapshot: &Snapshot<'_>,
+    snapshot: &IndexScan<'_, '_, '_>,
     index_name: &str,
     owner_kind: i64,
     ordinal: usize,
@@ -380,9 +465,11 @@ fn scan_predicate_candidates(
         StandardIndexPredicate::In(values) => {
             let mut result = BTreeSet::new();
             for value in values {
-                result.extend(scan_exact_candidates(
-                    snapshot, index_name, owner_kind, ordinal, value, after,
-                )?);
+                for owner in
+                    scan_exact_candidates(snapshot, index_name, owner_kind, ordinal, value, after)?
+                {
+                    snapshot.insert(&mut result, owner)?;
+                }
             }
             Ok(result)
         }
@@ -437,7 +524,7 @@ fn scan_predicate_candidates(
 }
 
 fn scan_range_predicate_candidates(
-    snapshot: &Snapshot<'_>,
+    snapshot: &IndexScan<'_, '_, '_>,
     index_name: &str,
     owner_kind: i64,
     ordinal: usize,
@@ -451,9 +538,11 @@ fn scan_range_predicate_candidates(
         StandardIndexPredicate::In(values) => {
             let mut result = BTreeSet::new();
             for value in values {
-                result.extend(scan_exact_candidates(
-                    snapshot, index_name, owner_kind, ordinal, value, after,
-                )?);
+                for owner in
+                    scan_exact_candidates(snapshot, index_name, owner_kind, ordinal, value, after)?
+                {
+                    snapshot.insert(&mut result, owner)?;
+                }
             }
             result
         }
@@ -507,18 +596,21 @@ fn numeric_range_value(value: &Value) -> Option<SqlValue> {
 }
 
 fn scan_owner_id_candidates(
-    snapshot: &Snapshot<'_>,
+    snapshot: &IndexScan<'_, '_, '_>,
     sql: &str,
     parameters: &[&dyn rusqlite::ToSql],
 ) -> QueryResult<BTreeSet<i64>> {
     let mut statement = snapshot.connection_for_query().prepare(sql)?;
-    let rows = statement.query_map(parameters, |row| row.get(0))?;
-    rows.collect::<Result<BTreeSet<i64>, _>>()
-        .map_err(Into::into)
+    let mut rows = statement.query(parameters)?;
+    let mut values = BTreeSet::new();
+    while let Some(row) = rows.next()? {
+        snapshot.insert(&mut values, row.get(0)?)?;
+    }
+    Ok(values)
 }
 
 fn scan_scalar_range_candidates(
-    base: (&Snapshot<'_>, &str, i64, i64, i64),
+    base: (&IndexScan<'_, '_, '_>, &str, i64, i64, i64),
     family: i64,
     column: &str,
     operator: &str,
@@ -547,7 +639,7 @@ fn scan_scalar_range_candidates(
 }
 
 fn scan_range_order_candidates(
-    snapshot: &Snapshot<'_>,
+    snapshot: &IndexScan<'_, '_, '_>,
     index_name: &str,
     owner_kind: i64,
     ordinal: usize,
@@ -606,7 +698,7 @@ fn scan_range_order_candidates(
 }
 
 fn scan_range_prefix_candidates(
-    snapshot: &Snapshot<'_>,
+    snapshot: &IndexScan<'_, '_, '_>,
     index_name: &str,
     owner_kind: i64,
     ordinal: usize,
@@ -651,7 +743,7 @@ fn prefix_upper_bound(prefix: &str) -> Option<String> {
 }
 
 fn scan_all_property_candidates(
-    snapshot: &Snapshot<'_>,
+    snapshot: &IndexScan<'_, '_, '_>,
     index_name: &str,
     owner_kind: i64,
     ordinal: usize,
@@ -673,17 +765,19 @@ fn scan_all_property_candidates(
 }
 
 fn scan_exact_candidates(
-    snapshot: &Snapshot<'_>,
+    snapshot: &IndexScan<'_, '_, '_>,
     index_name: &str,
     owner_kind: i64,
     ordinal: usize,
     value: &Value,
     after: i64,
 ) -> QueryResult<BTreeSet<i64>> {
-    let Some(property) = property_from_value(value.clone())? else {
+    let owned =
+        crate::query::expression::clone_value_unreserved_controlled(value, Some(snapshot.control))?;
+    let Some(property) = property_from_value_controlled(owned, snapshot.control)? else {
         return Ok(BTreeSet::new());
     };
-    let Some(key) = property_equality_key(&property)? else {
+    let Some(key) = super::persistent::equality_key(&property, snapshot.control)? else {
         return Ok(BTreeSet::new());
     };
     scan_owner_id_candidates(
@@ -703,7 +797,7 @@ fn scan_exact_candidates(
 }
 
 fn scan_text_candidates(
-    snapshot: &Snapshot<'_>,
+    snapshot: &IndexScan<'_, '_, '_>,
     index_name: &str,
     owner_kind: i64,
     ordinal: usize,
@@ -732,7 +826,7 @@ fn scan_text_candidates(
 }
 
 fn scan_point_bbox_candidates(
-    snapshot: &Snapshot<'_>,
+    snapshot: &IndexScan<'_, '_, '_>,
     index_name: &str,
     owner_kind: i64,
     ordinal: usize,
@@ -789,7 +883,7 @@ fn scan_point_bbox_candidates(
 }
 
 fn scan_point_distance_candidates(
-    snapshot: &Snapshot<'_>,
+    snapshot: &IndexScan<'_, '_, '_>,
     index_name: &str,
     owner_kind: i64,
     ordinal: usize,
@@ -868,29 +962,49 @@ fn optional_real(value: Option<f64>) -> SqlValue {
 }
 
 fn scan_value_predicate_candidates(
-    snapshot: &Snapshot<'_>,
+    snapshot: &IndexScan<'_, '_, '_>,
     sql: &str,
     parameters: impl rusqlite::Params,
     predicate: &StandardIndexPredicate,
 ) -> QueryResult<BTreeSet<i64>> {
     let mut statement = snapshot.connection_for_query().prepare(sql)?;
-    let rows = statement.query_map(parameters, |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
-    })?;
+    let mut rows = statement.query(parameters)?;
     let mut result = BTreeSet::new();
-    for row in rows {
-        let (owner_id, bytes) = row?;
-        let value = storage::PropertyValue::from_canonical_bytes(&bytes)?;
-        let value = super::super::super::graph::property_value(value)?;
-        if predicate_matches(&value, predicate)? {
-            result.insert(owner_id);
+    while let Some(row) = rows.next()? {
+        snapshot.control.work(1)?;
+        let bytes = row.get_ref(1)?.as_blob().map_err(rusqlite::Error::from)?;
+        if encoded_predicate_matches(snapshot, bytes, predicate)? {
+            snapshot.insert(&mut result, row.get(0)?)?;
         }
+        snapshot.control.check()?;
     }
     Ok(result)
 }
 
+fn encoded_predicate_matches(
+    snapshot: &IndexScan<'_, '_, '_>,
+    bytes: &[u8],
+    predicate: &StandardIndexPredicate,
+) -> QueryResult<bool> {
+    // Tagged canonical records bound the number of decoded containers as well
+    // as owned payload bytes. Keep their growth slack before decoding.
+    let _decode = snapshot
+        .control
+        .reserve(checked_add(checked_mul(bytes.len() as u64, 256)?, 4096)?)?;
+    let check = || {
+        snapshot
+            .control
+            .check()
+            .map_err(QueryError::into_storage_error)
+    };
+    let property = storage::PropertyValue::from_canonical_bytes_checked(bytes, &check)?;
+    let (value, _value_memory) =
+        crate::query::graph::borrowed_property_with_control(&property, snapshot.control)?;
+    predicate_matches(&value, predicate, snapshot.control)
+}
+
 fn scan_filtered_candidates(
-    snapshot: &Snapshot<'_>,
+    snapshot: &IndexScan<'_, '_, '_>,
     index_name: &str,
     owner_kind: i64,
     ordinal: usize,
@@ -914,27 +1028,45 @@ fn scan_filtered_candidates(
     )
 }
 
-fn predicate_matches(value: &Value, predicate: &StandardIndexPredicate) -> QueryResult<bool> {
+fn predicate_matches(
+    value: &Value,
+    predicate: &StandardIndexPredicate,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<bool> {
     match predicate {
         StandardIndexPredicate::Lookup => Ok(true),
         StandardIndexPredicate::Equal(_) | StandardIndexPredicate::In(_) => {
-            equality_predicate_matches(value, predicate)
+            equality_predicate_matches(value, predicate, control)
         }
         StandardIndexPredicate::Less(_, _) | StandardIndexPredicate::Greater(_, _) => {
-            order_predicate_matches(value, predicate)
+            order_predicate_matches(value, predicate, control)
         }
         StandardIndexPredicate::Bounds { lower, upper } => {
             let lower_matches = match lower {
                 Some((expected, inclusive)) => order_predicate_matches(
                     value,
-                    &StandardIndexPredicate::Greater(expected.clone(), *inclusive),
+                    &StandardIndexPredicate::Greater(
+                        crate::query::expression::clone_value_unreserved_controlled(
+                            expected,
+                            Some(control),
+                        )?,
+                        *inclusive,
+                    ),
+                    control,
                 )?,
                 None => true,
             };
             let upper_matches = match upper {
                 Some((expected, inclusive)) => order_predicate_matches(
                     value,
-                    &StandardIndexPredicate::Less(expected.clone(), *inclusive),
+                    &StandardIndexPredicate::Less(
+                        crate::query::expression::clone_value_unreserved_controlled(
+                            expected,
+                            Some(control),
+                        )?,
+                        *inclusive,
+                    ),
+                    control,
                 )?,
                 None => true,
             };
@@ -943,7 +1075,7 @@ fn predicate_matches(value: &Value, predicate: &StandardIndexPredicate) -> Query
         StandardIndexPredicate::IsNotNull => Ok(!matches!(value, Value::Null)),
         StandardIndexPredicate::StartsWith(_)
         | StandardIndexPredicate::EndsWith(_)
-        | StandardIndexPredicate::Contains(_) => text_predicate_matches(value, predicate),
+        | StandardIndexPredicate::Contains(_) => text_predicate_matches(value, predicate, control),
         StandardIndexPredicate::WithinBBox { .. } | StandardIndexPredicate::Distance { .. } => {
             spatial_predicate_matches(value, predicate)
         }
@@ -953,14 +1085,21 @@ fn predicate_matches(value: &Value, predicate: &StandardIndexPredicate) -> Query
 fn equality_predicate_matches(
     value: &Value,
     predicate: &StandardIndexPredicate,
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<bool> {
     match predicate {
-        StandardIndexPredicate::Equal(expected) => {
-            Ok(cypher_equals(value, expected)?.unwrap_or(false))
-        }
+        StandardIndexPredicate::Equal(expected) => Ok(
+            crate::query::expression::cypher_equals_controlled(value, expected, Some(control))?
+                .unwrap_or(false),
+        ),
         StandardIndexPredicate::In(expected) => {
             for candidate in expected {
-                if cypher_equals(value, candidate)? == Some(true) {
+                if crate::query::expression::cypher_equals_controlled(
+                    value,
+                    candidate,
+                    Some(control),
+                )? == Some(true)
+                {
                     return Ok(true);
                 }
             }
@@ -972,7 +1111,11 @@ fn equality_predicate_matches(
     }
 }
 
-fn order_predicate_matches(value: &Value, predicate: &StandardIndexPredicate) -> QueryResult<bool> {
+fn order_predicate_matches(
+    value: &Value,
+    predicate: &StandardIndexPredicate,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<bool> {
     let (expected, desired, inclusive) = match predicate {
         StandardIndexPredicate::Less(expected, inclusive) => (expected, Ordering::Less, *inclusive),
         StandardIndexPredicate::Greater(expected, inclusive) => {
@@ -984,23 +1127,59 @@ fn order_predicate_matches(value: &Value, predicate: &StandardIndexPredicate) ->
             ));
         }
     };
-    ordering_matches(cypher_compare(value, expected)?, desired, inclusive)
+    ordering_matches(
+        crate::query::expression::cypher_compare_controlled(value, expected, Some(control))?,
+        desired,
+        inclusive,
+    )
 }
 
-fn text_predicate_matches(value: &Value, predicate: &StandardIndexPredicate) -> QueryResult<bool> {
+fn text_predicate_matches(
+    value: &Value,
+    predicate: &StandardIndexPredicate,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<bool> {
     let Value::String(actual) = value else {
         return Ok(false);
     };
-    Ok(match predicate {
-        StandardIndexPredicate::StartsWith(expected) => actual.starts_with(expected),
-        StandardIndexPredicate::EndsWith(expected) => actual.ends_with(expected),
-        StandardIndexPredicate::Contains(expected) => actual.contains(expected),
-        _ => {
-            return Err(QueryError::internal(
-                "text predicate helper received a non-text predicate",
-            ));
+    match predicate {
+        StandardIndexPredicate::StartsWith(expected) => {
+            text_edge_matches(actual, expected, false, control)
         }
-    })
+        StandardIndexPredicate::EndsWith(expected) => {
+            text_edge_matches(actual, expected, true, control)
+        }
+        StandardIndexPredicate::Contains(expected) => {
+            crate::query::functions::find_text_controlled(actual, expected, 0, Some(control))
+                .map(|found| found.is_some())
+        }
+        _ => Err(QueryError::internal(
+            "text predicate helper received a non-text predicate",
+        )),
+    }
+}
+
+fn text_edge_matches(
+    actual: &str,
+    expected: &str,
+    suffix: bool,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<bool> {
+    let Some(remaining) = actual.len().checked_sub(expected.len()) else {
+        return Ok(false);
+    };
+    let start = if suffix { remaining } else { 0 };
+    let actual = &actual.as_bytes()[start..start + expected.len()];
+    for (actual, expected) in actual
+        .chunks(64 * 1024)
+        .zip(expected.as_bytes().chunks(64 * 1024))
+    {
+        control.check()?;
+        if actual != expected {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn spatial_predicate_matches(

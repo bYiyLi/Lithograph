@@ -354,6 +354,8 @@ active transaction 内每个成功 execution 的结果合同仍由 [Interfaces](
 
 因此 caller-owned SQLite transaction 只提供 **durability atomicity**，不等价于 [Explicit Transaction](#native-explicit-transaction) 的 version atomicity。一个 outer SQLite transaction 可以整体回滚 Commit A/B/C，但只要最终 SQLite COMMIT 成功，历史中仍保留 A -> B -> C；需要一个逻辑版本节点时必须使用 Lithograph SQL explicit transaction，而不是事后隐式 squash。
 
+取消 mutating execution 时，SQLite write interruption 可能整体 abort caller-owned transaction，包含宿主先前尚未提交的业务写入；恢复与实际 autocommit 确认遵循 [Runtime](runtime.md#sqlite-interrupt-recovery)，不承诺仅回滚 invocation SAVEPOINT。
+
 <a id="stale-branch-head"></a>
 
 ### Stale Branch Head

@@ -23,7 +23,13 @@ pub(super) fn execute_load_csv_tail(
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<RowSet> {
     let spill_connection = open_spill_connection()?;
-    let mut current = SpilledBindings::from_rows(&spill_connection, input.columns, &input.rows)?;
+    let mut current = SpilledBindings::from_rows_with_resources(
+        &spill_connection,
+        input.columns,
+        &input.rows,
+        context.control.resources().clone(),
+        &context.control,
+    )?;
     let mut csv_guards = Vec::new();
     for clause in single.children.iter().skip(start) {
         let AstKind::Clause(kind) = clause.kind else {
@@ -33,6 +39,7 @@ pub(super) fn execute_load_csv_tail(
         if kind == ClauseKind::Finish {
             current.spill.abort(&spill_connection)?;
             return Ok(RowSet {
+                memory: None,
                 columns: Vec::new(),
                 rows: Vec::new(),
             });
@@ -49,8 +56,13 @@ pub(super) fn execute_load_csv_tail(
             is_interrupted,
         )?;
     }
-    let (columns, rows) = current.into_rows(&spill_connection)?;
-    Ok(RowSet { columns, rows })
+    let (columns, rows, memory) =
+        current.into_rows_reserved(&spill_connection, &context.control)?;
+    Ok(RowSet {
+        memory: Some(memory),
+        columns,
+        rows,
+    })
 }
 
 #[allow(
@@ -151,21 +163,26 @@ fn expand_load_csv(
         &current.columns,
         &program.source,
     )?;
-    current.transform_batches(spill_connection, columns, |_, rows, output| {
-        for input_row in rows {
-            expand_load_csv_input(
-                context,
-                &snapshot,
-                &spec,
-                input_row,
-                spill_connection,
-                output,
-                csv_guards,
-                is_interrupted,
-            )?;
-        }
-        Ok(())
-    })
+    current.transform_batches(
+        spill_connection,
+        columns,
+        &context.control,
+        |_, rows, output| {
+            for input_row in rows {
+                expand_load_csv_input(
+                    context,
+                    &snapshot,
+                    &spec,
+                    input_row,
+                    spill_connection,
+                    output,
+                    csv_guards,
+                    is_interrupted,
+                )?;
+            }
+            Ok(())
+        },
+    )
 }
 
 #[allow(
@@ -182,22 +199,27 @@ fn expand_load_csv_input(
     csv_guards: &mut Vec<tempfile::TempPath>,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<()> {
+    check_interrupted(is_interrupted)?;
+    let mut source_memory = context.control.reserve(0)?;
     let (source, delimiter) = evaluate_csv_source(spec, |value| {
-        expression::evaluate_with_access(
+        let evaluated = expression::evaluate_with_access_control(
             value,
             snapshot,
             &input_row,
             context.params,
             &context.access.read.query,
-        )
+            &context.control,
+        )?;
+        source_memory.merge(evaluated.reservation)?;
+        Ok(evaluated.value)
     })?;
     let guard = stream_csv_binding_rows(
         spec,
         &input_row,
         &source,
         delimiter,
-        is_interrupted,
-        |row| output.push(spill_connection, &row),
+        &context.control,
+        |row, _row_memory| output.push(spill_connection, &row, &context.control),
     )?;
     csv_guards.extend(guard);
     Ok(())
@@ -218,6 +240,7 @@ fn execute_create_spill(
         clause,
         current,
         spill_connection,
+        is_interrupted,
         |context, rows, state| {
             execute_create_clause_batch(context, &pattern, rows, state, is_interrupted)
         },
@@ -239,6 +262,7 @@ fn execute_set_spill(
         clause,
         current,
         spill_connection,
+        is_interrupted,
         |context, rows, state| {
             execute_set_clause_batch(context, &items, rows, state, is_interrupted)
         },
@@ -260,6 +284,7 @@ fn execute_remove_spill(
         clause,
         current,
         spill_connection,
+        is_interrupted,
         |context, rows, state| {
             execute_remove_clause_batch(context, &items, rows, state, is_interrupted)
         },
@@ -272,6 +297,7 @@ fn execute_stateful_write_spill(
     clause: &AstNode,
     current: SpilledBindings,
     spill_connection: &Connection,
+    is_interrupted: &dyn Fn() -> bool,
     mut mutate: impl FnMut(
         &mut MutationContext<'_, '_>,
         Vec<BindingRow>,
@@ -279,15 +305,18 @@ fn execute_stateful_write_spill(
     ) -> QueryResult<Vec<BindingRow>>,
 ) -> QueryResult<SpilledBindings> {
     let mut state = begin_mutation_clause(context)?;
+    let resources = context.control.resources().clone();
+    let control = ExecutionControl::new(&resources, is_interrupted);
     let columns = crate::query::completeness::infer_clause_columns(
         clause,
         &current.columns,
         &program.source,
     )?;
-    let result = current.transform_batches(spill_connection, columns, |_, rows, output| {
-        let rows = mutate(context, rows, &mut state)?;
-        output.push_all(spill_connection, &rows)
-    })?;
+    let result =
+        current.transform_batches(spill_connection, columns, &control, |_, rows, output| {
+            let rows = mutate(context, rows, &mut state)?;
+            output.push_all(spill_connection, &rows, &control)
+        })?;
     finish_mutation_clause(context, &state)?;
     Ok(result)
 }
@@ -303,35 +332,52 @@ fn execute_delete_spill(
     let expressions = lower_delete_expressions(clause)?;
     let variables = delete_target_variables(&expressions);
     let state = begin_mutation_clause(context)?;
-    let mut targets = BindingSpill::create(spill_connection)?;
-    current
-        .spill
-        .for_each_batch(spill_connection, BINDING_SPILL_BATCH_ROWS, |rows| {
-            let (_, rows) = evaluate_delete_targets(context, &expressions, &rows, &state)?;
+    let resources = context.control.resources().clone();
+    let control = ExecutionControl::new(&resources, is_interrupted);
+    let mut targets =
+        BindingSpill::create_with_resources(spill_connection, context.control.resources().clone())?;
+    current.spill.for_each_batch(
+        spill_connection,
+        BINDING_SPILL_BATCH_ROWS,
+        &control,
+        |rows| {
+            let (_, rows, _rows_memory) =
+                evaluate_delete_targets(context, &expressions, &rows, &state)?;
             delete::validate_delete_values(&rows, &variables)?;
-            targets.push_all(spill_connection, &rows)
-        })?;
-    targets.for_each_batch(spill_connection, BINDING_SPILL_BATCH_ROWS, |rows| {
-        delete::apply_delete_relationships(
-            context,
-            &rows,
-            &variables,
-            &state.clause_input,
-            &state.graph_view,
-            is_interrupted,
-        )
-    })?;
-    targets.for_each_batch(spill_connection, BINDING_SPILL_BATCH_ROWS, |rows| {
-        delete::apply_delete_nodes(
-            context,
-            &rows,
-            &variables,
-            detach,
-            &state.clause_input,
-            &state.graph_view,
-            is_interrupted,
-        )
-    })?;
+            targets.push_all(spill_connection, &rows, &control)
+        },
+    )?;
+    targets.for_each_batch(
+        spill_connection,
+        BINDING_SPILL_BATCH_ROWS,
+        &control,
+        |rows| {
+            delete::apply_delete_relationships(
+                context,
+                &rows,
+                &variables,
+                &state.clause_input,
+                &state.graph_view,
+                is_interrupted,
+            )
+        },
+    )?;
+    targets.for_each_batch(
+        spill_connection,
+        BINDING_SPILL_BATCH_ROWS,
+        &control,
+        |rows| {
+            delete::apply_delete_nodes(
+                context,
+                &rows,
+                &variables,
+                detach,
+                &state.clause_input,
+                &state.graph_view,
+                is_interrupted,
+            )
+        },
+    )?;
     targets.abort(spill_connection)?;
     Ok(current)
 }
@@ -351,6 +397,7 @@ fn execute_merge_spill(
         clause,
         current,
         spill_connection,
+        is_interrupted,
         |context, rows, state| {
             execute_merge_clause_batch(context, &merge, rows, state, is_interrupted)
         },
@@ -374,17 +421,28 @@ fn execute_other_spilled_clause(
     if matches!(kind, ClauseKind::With | ClauseKind::Return)
         && projection_requires_global_input(clause)
     {
-        let (columns, rows) = current.into_rows(spill_connection)?;
+        let (columns, rows, memory) =
+            current.into_rows_reserved(spill_connection, &context.control)?;
         let result = execute_single_clause(
             context,
             program,
             clause,
             kind,
-            RowSet { columns, rows },
+            RowSet {
+                memory: Some(memory),
+                columns,
+                rows,
+            },
             metrics,
             is_interrupted,
         )?;
-        return SpilledBindings::from_rows(spill_connection, result.columns, &result.rows);
+        return SpilledBindings::from_rows_with_resources(
+            spill_connection,
+            result.columns,
+            &result.rows,
+            context.control.resources().clone(),
+            &context.control,
+        );
     }
 
     let columns = crate::query::completeness::infer_clause_columns(
@@ -392,19 +450,27 @@ fn execute_other_spilled_clause(
         &current.columns,
         &program.source,
     )?;
-    current.transform_batches(spill_connection, columns, |input_columns, rows, output| {
-        let result = execute_single_clause(
-            context,
-            program,
-            clause,
-            kind,
-            RowSet {
-                columns: input_columns.to_vec(),
-                rows,
-            },
-            metrics,
-            is_interrupted,
-        )?;
-        output.push_all(spill_connection, &result.rows)
-    })
+    let resources = context.control.resources().clone();
+    let control = ExecutionControl::new(&resources, is_interrupted);
+    current.transform_batches(
+        spill_connection,
+        columns,
+        &control,
+        |input_columns, rows, output| {
+            let result = execute_single_clause(
+                context,
+                program,
+                clause,
+                kind,
+                RowSet {
+                    memory: None,
+                    columns: input_columns.to_vec(),
+                    rows,
+                },
+                metrics,
+                is_interrupted,
+            )?;
+            output.push_all(spill_connection, &result.rows, &control)
+        },
+    )
 }

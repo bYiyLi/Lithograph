@@ -79,6 +79,27 @@ fn temp_fulltext_table_count(connection: &Connection) -> i64 {
         .expect("count derived FTS tables")
 }
 
+fn fulltext_cache_inserted_rows(connection: &Connection) -> i64 {
+    let table: Option<String> = connection
+        .query_row(
+            "SELECT name FROM temp.sqlite_schema WHERE type='table' AND name GLOB '_lithograph_fts_*' AND sql LIKE 'CREATE VIRTUAL TABLE%' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .expect("inspect FTS cache construction");
+    let Some(table) = table else {
+        return 0;
+    };
+    connection
+        .query_row(
+            &format!("SELECT count(*) FROM temp.{table}_docsize"),
+            [],
+            |row| row.get(0),
+        )
+        .expect("count fully inserted FTS documents")
+}
+
 fn fulltext_analyzer_from_show(connection: &Connection, index_name: &str) -> String {
     let (rows, _) = execute(
         connection,
@@ -572,16 +593,23 @@ fn interrupted_fulltext_cache_build_is_not_reused_and_recovers_on_retry() {
     )
     .expect("prepare interrupted query");
     let mut cursor = QueryCursor::new(prepared);
-    let calls = Cell::new(0_u32);
+    let inserted_before_interrupt = Cell::new(0_i64);
     let interrupt = || {
-        let next = calls.get() + 1;
-        calls.set(next);
-        next > 20
+        if inserted_before_interrupt.get() >= 8 {
+            return true;
+        }
+        let inserted = fulltext_cache_inserted_rows(&connection);
+        inserted_before_interrupt.set(inserted);
+        inserted >= 8
     };
     let error = cursor
         .next_batch_with_interrupt(&connection, 32, &interrupt)
         .expect_err("cache build should be interrupted");
     assert_eq!(error.kind, QueryErrorKind::Interrupted);
+    assert!(
+        (8..64).contains(&inserted_before_interrupt.get()),
+        "interrupt must occur after partial FTS population, before the build is complete"
+    );
     let root_count: i64 = connection
         .query_row(
             "SELECT count(*) FROM temp.sqlite_schema WHERE type='table' AND name GLOB '_lithograph_fts_*' AND sql LIKE 'CREATE VIRTUAL TABLE%'",

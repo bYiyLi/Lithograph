@@ -15,7 +15,7 @@ enum StaticPropertyBase {
     Unknown,
 }
 
-pub(super) fn has_graph_expression(node: &AstNode, expression_context: bool) -> bool {
+pub(crate) fn has_graph_expression(node: &AstNode, expression_context: bool) -> bool {
     if expression_context && node.kind == AstKind::Pattern {
         return true;
     }

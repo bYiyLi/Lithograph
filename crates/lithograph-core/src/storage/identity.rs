@@ -209,3 +209,46 @@ fn name_for_id(connection: &Connection, table: &str, id: i64) -> StorageResult<O
         .optional()
         .map_err(StorageError::from)
 }
+
+pub(crate) fn with_label_name<T, E: From<StorageError>>(
+    connection: &Connection,
+    id: LabelId,
+    visitor: impl FnOnce(Option<&str>) -> Result<T, E>,
+) -> Result<T, E> {
+    with_name_for_id(connection, "_lithograph_labels", id, visitor)
+}
+
+pub(crate) fn with_relationship_type_name<T, E: From<StorageError>>(
+    connection: &Connection,
+    id: RelationshipTypeId,
+    visitor: impl FnOnce(Option<&str>) -> Result<T, E>,
+) -> Result<T, E> {
+    with_name_for_id(connection, "_lithograph_rel_types", id, visitor)
+}
+
+pub(crate) fn with_property_key_name<T, E: From<StorageError>>(
+    connection: &Connection,
+    id: PropertyKeyId,
+    visitor: impl FnOnce(Option<&str>) -> Result<T, E>,
+) -> Result<T, E> {
+    with_name_for_id(connection, "_lithograph_prop_keys", id, visitor)
+}
+
+fn with_name_for_id<T, E: From<StorageError>>(
+    connection: &Connection,
+    table: &str,
+    id: i64,
+    visitor: impl FnOnce(Option<&str>) -> Result<T, E>,
+) -> Result<T, E> {
+    let select = format!("SELECT name FROM main.{table} WHERE id = ?1");
+    let mut statement = connection.prepare(&select).map_err(StorageError::from)?;
+    let mut rows = statement.query([id]).map_err(StorageError::from)?;
+    let Some(row) = rows.next().map_err(StorageError::from)? else {
+        return visitor(None);
+    };
+    let name = row.get_ref(0).map_err(StorageError::from)?;
+    let name = name
+        .as_str()
+        .map_err(|_| StorageError::corrupt("dictionary name is not valid SQLite text"))?;
+    visitor(Some(name))
+}

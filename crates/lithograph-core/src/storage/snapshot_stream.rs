@@ -13,8 +13,8 @@ impl Snapshot<'_> {
         &self,
         mut visitor: impl FnMut(NodeId) -> StorageResult<()>,
     ) -> StorageResult<()> {
-        let Some(checkpoint) = self.checkpoint else {
-            for (node_id, op) in &self.overlay.nodes {
+        let Some(checkpoint) = self.state.checkpoint else {
+            for (node_id, op) in &self.state.overlay.nodes {
                 if *op == DeltaOp::Add {
                     visitor(*node_id)?;
                 }
@@ -25,7 +25,7 @@ impl Snapshot<'_> {
             "SELECT node_id FROM main._lithograph_cp_nodes WHERE commit_id = ?1 ORDER BY node_id",
         )?;
         let mut rows = statement.query([checkpoint.as_bytes().as_slice()])?;
-        let mut overlay = self.overlay.nodes.iter().peekable();
+        let mut overlay = self.state.overlay.nodes.iter().peekable();
         while let Some(row) = rows.next()? {
             merge_node_before(row.get(0)?, &mut overlay, &mut visitor)?;
         }
@@ -35,26 +35,40 @@ impl Snapshot<'_> {
     /// Streams visible Relationships in RelationshipId order.
     pub fn visit_relationships(
         &self,
+        visitor: impl FnMut(RelationshipRecord) -> StorageResult<()>,
+    ) -> StorageResult<()> {
+        self.visit_relationships_checked(&|| Ok(()), visitor)
+    }
+
+    pub(crate) fn visit_relationships_checked(
+        &self,
+        check: &dyn Fn() -> StorageResult<()>,
         mut visitor: impl FnMut(RelationshipRecord) -> StorageResult<()>,
     ) -> StorageResult<()> {
-        let Some(checkpoint) = self.checkpoint else {
-            return drain_relationships(self.overlay.relationships.iter(), &mut visitor);
+        check()?;
+        let Some(checkpoint) = self.state.checkpoint else {
+            return drain_relationships(
+                self.state.overlay.relationships.iter(),
+                check,
+                &mut visitor,
+            );
         };
         let mut statement = self.connection.prepare(
             "SELECT relationship_id, source_id, type_id, target_id FROM main._lithograph_cp_relationships WHERE commit_id = ?1 ORDER BY relationship_id",
         )?;
         let mut rows = statement.query([checkpoint.as_bytes().as_slice()])?;
-        let mut overlay = self.overlay.relationships.iter().peekable();
+        let mut overlay = self.state.overlay.relationships.iter().peekable();
         while let Some(row) = rows.next()? {
+            check()?;
             let record = RelationshipRecord {
                 id: row.get(0)?,
                 source: row.get(1)?,
                 type_id: row.get(2)?,
                 target: row.get(3)?,
             };
-            merge_relationship_before(record, &mut overlay, &mut visitor)?;
+            merge_relationship_before(record, &mut overlay, check, &mut visitor)?;
         }
-        drain_relationships(overlay, &mut visitor)
+        drain_relationships(overlay, check, &mut visitor)
     }
 }
 
@@ -98,9 +112,11 @@ fn drain_nodes(
 fn merge_relationship_before(
     base: RelationshipRecord,
     overlay: &mut RelationshipOverlayIter<'_>,
+    check: &dyn Fn() -> StorageResult<()>,
     visitor: &mut impl FnMut(RelationshipRecord) -> StorageResult<()>,
 ) -> StorageResult<()> {
     while let Some((relationship_id, delta)) = overlay.peek() {
+        check()?;
         let relationship_id = **relationship_id;
         if relationship_id > base.id {
             break;
@@ -119,9 +135,11 @@ fn merge_relationship_before(
 
 fn drain_relationships<'a>(
     overlay: impl IntoIterator<Item = (&'a i64, &'a RelationshipDelta)>,
+    check: &dyn Fn() -> StorageResult<()>,
     visitor: &mut impl FnMut(RelationshipRecord) -> StorageResult<()>,
 ) -> StorageResult<()> {
     for (_, delta) in overlay {
+        check()?;
         if delta.op == DeltaOp::Add {
             visitor(delta.record)?;
         }

@@ -1,34 +1,46 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use rusqlite::Connection;
+use super::{VersionExecution as Connection, VersionRows, VersionState, VersionValue};
+use crate::query::resources::{
+    MemoryReservation, allocation_bytes, checked_add, checked_mul, encoded_json_bytes_controlled,
+    map_entry_bytes, value_bytes_controlled,
+};
 
 use crate::cypher::Value;
 use crate::storage::{
-    self, CommitMetadata, HashId, IndexDefinition, OwnerKind, PropertyValue, RelationshipRecord,
-    SchemaState, Snapshot,
+    self, HashId, IndexDefinition, OwnerKind, PropertyValue, RelationshipRecord, SchemaState,
+    Snapshot,
 };
 
-use super::canonical::{
-    same_index_definition, same_optional_value, same_property_value, same_value,
-};
+use super::canonical::{same_optional_value_controlled, same_value_controlled};
 use super::{
-    ProcedureRow, commit_value, ensure_target_branch_head, map_target_branch_error, now_micros,
+    ProcedureRow, commit_value, ensure_target_branch_head, map_target_branch_error,
     resolve_descriptor_at, row, target_branch,
 };
-use crate::query::mutation::property_from_value;
+use crate::query::mutation::property_from_value_controlled;
 use crate::query::options::ExecutionOptions;
 use crate::query::{QueryError, QueryErrorKind, QueryResult};
+
+#[path = "patch_resources.rs"]
+mod resources;
+pub(super) use resources::same_property_value_controlled;
+use resources::*;
 
 pub(super) fn diff(
     connection: &Connection,
     args: Vec<Value>,
     options: &ExecutionOptions,
-) -> QueryResult<Vec<ProcedureRow>> {
+) -> QueryResult<VersionRows> {
     let before_commit = resolve_descriptor_at(connection, &args, 0, "before")?;
     let after_commit = resolve_descriptor_at(connection, &args, 1, "after")?;
     let patch = diff_commits(connection, before_commit, after_commit)?;
     super::access::check_patch_read(&patch, &options.access.read.query)?;
-    Ok(vec![row([("patch", patch)])])
+    let (patch, mut memory) = patch.into_parts();
+    memory.grow(row_allocation_bytes(1)?)?;
+    Ok(VersionRows {
+        value: vec![row([("patch", patch)])],
+        memory,
+    })
 }
 
 pub(super) fn apply(
@@ -36,16 +48,16 @@ pub(super) fn apply(
     args: Vec<Value>,
     options: &ExecutionOptions,
     pinned_head: HashId,
-) -> QueryResult<Vec<ProcedureRow>> {
+) -> QueryResult<VersionRows> {
     let patch = args
         .first()
         .ok_or_else(|| QueryError::invalid_argument("missing patch"))?;
     let branch = target_branch(connection, options)?;
     ensure_target_branch_head(connection, &branch, pinned_head)?;
-    let mut state = storage::load_snapshot_state(connection, pinned_head)?;
+    let mut state = connection.load_state(pinned_head)?;
     apply_patch_to_state(connection, &mut state, patch)?;
-    let base = storage::load_snapshot_state(connection, pinned_head)?;
-    let layer = storage::layer_between(&base, &state)?;
+    let base = connection.load_state(pinned_head)?;
+    let layer = connection.layer_between(&base, &state)?;
     validate_patch_access(
         connection,
         pinned_head,
@@ -56,23 +68,38 @@ pub(super) fn apply(
         &options.access,
     )?;
     validate_candidate(connection, pinned_head, &layer, &state.schema)?;
-    let schema_hash = state.schema.persist(connection)?;
-    let metadata = CommitMetadata {
-        author: options.author.clone(),
-        message: options.message.clone(),
-        committed_at: now_micros()?,
+    let commit = commit_patch_candidate(connection, &branch, pinned_head, &state, &layer, options)?;
+    let memory = connection.reserve(checked_add(row_allocation_bytes(1)?, 80)?)?;
+    Ok(VersionRows {
+        value: vec![row([("commit", commit_value(commit))])],
+        memory,
+    })
+}
+
+fn commit_patch_candidate(
+    connection: &Connection,
+    branch: &str,
+    pinned_head: HashId,
+    state: &storage::SnapshotState,
+    layer: &storage::LayerBuilder,
+    options: &ExecutionOptions,
+) -> QueryResult<HashId> {
+    let check = || {
+        connection
+            .control()
+            .check()
+            .map_err(super::execution::storage_error)
     };
-    let commit = storage::commit_layer_with_schema(
-        connection,
-        &branch,
-        pinned_head,
-        None,
-        &layer,
-        schema_hash,
-        &metadata,
-    )
-    .map_err(|error| map_target_branch_error(error, &branch))?;
-    Ok(vec![row([("commit", commit_value(commit))])])
+    let _write_memory = connection.reserve(checked_mul(
+        storage::snapshot_state_memory_bytes(state, &check)?,
+        8,
+    )?)?;
+    let schema_blob = state.schema.canonical_blob_checked(&check)?;
+    let schema_hash = storage::persist_schema_blob(connection, &schema_blob)?;
+    let metadata = super::operations::copy_commit_metadata(connection, options)?;
+    connection
+        .commit_layer_with_schema(branch, pinned_head, None, layer, schema_hash, &metadata)
+        .map_err(|error| map_target_branch_error(error, branch))
 }
 
 fn validate_patch_access(
@@ -85,93 +112,109 @@ fn validate_patch_access(
     access: &crate::query::AccessPolicy,
 ) -> QueryResult<()> {
     if !access.write.properties.is_empty() {
-        let after = Snapshot::resolve_with_layer(connection, pinned_head, layer)?;
+        let after = connection.with_layer_snapshot(pinned_head, layer, &state.schema)?;
         super::access::check_patch_write(patch, &after, access)?;
     }
     super::access::check_layer(connection, pinned_head, layer, &state.schema, access)?;
-    super::access::check_schema_validation(&base.schema, &state.schema, access)
+    super::access::check_schema_validation(connection, &base.schema, &state.schema, access)
 }
 
 pub(crate) fn diff_commits(
     connection: &Connection,
     before_commit: HashId,
     after_commit: HashId,
-) -> QueryResult<Value> {
+) -> QueryResult<VersionValue> {
     let operations =
         if storage::is_first_parent_descendant(connection, before_commit, after_commit)? {
             diff_first_parent_commits(connection, before_commit, after_commit)?
         } else {
-            let before = storage::load_snapshot_state(connection, before_commit)?;
-            let after = storage::load_snapshot_state(connection, after_commit)?;
+            let before = connection.load_state(before_commit)?;
+            let after = connection.load_state(after_commit)?;
             diff_states(connection, &before, &after)?
         };
-    let database_id: String = connection
-        .query_row(
-            "SELECT database_id FROM main._lithograph_meta WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(QueryError::from)?;
-    Ok(Value::Map(BTreeMap::from([
-        ("format".to_owned(), Value::Integer(1)),
-        ("databaseId".to_owned(), Value::String(database_id)),
-        ("from".to_owned(), commit_value(before_commit)),
-        ("to".to_owned(), commit_value(after_commit)),
-        ("operations".to_owned(), Value::List(operations)),
-    ])))
+    patch_envelope(connection, before_commit, after_commit, operations)
 }
 
 fn diff_first_parent_commits(
     connection: &Connection,
     before_commit: HashId,
     after_commit: HashId,
-) -> QueryResult<Vec<Value>> {
-    let layer = storage::layer_between_commits(connection, before_commit, after_commit)?;
-    let before_snapshot = Snapshot::resolve(connection, before_commit)?;
-    let mut operations = Vec::new();
+) -> QueryResult<PatchOperations> {
+    let layer = connection.layer_between_commits(before_commit, after_commit)?;
+    let before_snapshot = connection.snapshot(before_commit)?;
+    let mut operations = PatchOperations::new(connection)?;
 
-    for (node_id, added) in layer.node_changes() {
-        append_node_operation(&mut operations, node_id, added);
-    }
-    for (node_id, label_id, added) in layer.label_changes() {
-        append_label_operation(connection, &mut operations, node_id, label_id, added)?;
-    }
-    for (relationship, added) in layer.relationship_changes() {
-        append_relationship_operation(connection, &mut operations, relationship, added)?;
-    }
-    for (owner, owner_id, key_id, next) in layer.property_changes() {
-        let previous = before_snapshot.property(owner, owner_id, key_id)?;
-        append_property_operation(
-            connection,
-            &mut operations,
-            (owner, owner_id, key_id),
-            previous.as_ref(),
-            next,
-        )?;
-    }
+    append_layer_operations(connection, &layer, &before_snapshot, &mut operations)?;
 
-    let before_schema = SchemaState::load(connection, before_commit)?;
-    let after_schema = SchemaState::load(connection, after_commit)?;
-    append_schema_operations(&before_schema, &after_schema, &mut operations)?;
-    operations.sort_by_key(canonical_operation_key);
-    Ok(operations)
+    let before_schema = connection.load_schema(before_commit)?;
+    let after_schema = connection.load_schema(after_commit)?;
+    append_schema_operations(connection, &before_schema, &after_schema, &mut operations)?;
+    finish_operations(connection, operations)
 }
 
-pub(crate) fn diff_states(
+fn append_layer_operations(
+    connection: &Connection,
+    layer: &storage::LayerBuilder,
+    before_snapshot: &Snapshot<'_>,
+    operations: &mut PatchOperations,
+) -> QueryResult<()> {
+    for (node_id, added) in layer.node_changes() {
+        append_node_operation(connection, operations, node_id, added)?;
+    }
+    for (node_id, label_id, added) in layer.label_changes() {
+        append_label_operation(connection, operations, node_id, label_id, added)?;
+    }
+    for (relationship, added) in layer.relationship_changes() {
+        append_relationship_operation(connection, operations, relationship, added)?;
+    }
+    for (owner, owner_id, key_id, next) in layer.property_changes() {
+        before_snapshot.with_property(owner, owner_id, key_id, |previous| {
+            append_property_operation(
+                connection,
+                operations,
+                (owner, owner_id, key_id),
+                previous,
+                next,
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+fn diff_states(
     connection: &Connection,
     before: &storage::SnapshotState,
     after: &storage::SnapshotState,
-) -> QueryResult<Vec<Value>> {
-    let mut operations = Vec::new();
+) -> QueryResult<PatchOperations> {
+    let mut operations = PatchOperations::new(connection)?;
     append_node_and_label_operations(connection, before, after, &mut operations)?;
     append_relationship_operations(connection, before, after, &mut operations)?;
     append_property_operations(connection, before, after, &mut operations)?;
-    append_schema_operations(&before.schema, &after.schema, &mut operations)?;
-    operations.sort_by_key(canonical_operation_key);
+    append_schema_operations(connection, &before.schema, &after.schema, &mut operations)?;
+    finish_operations(connection, operations)
+}
+
+fn finish_operations(
+    connection: &Connection,
+    mut operations: PatchOperations,
+) -> QueryResult<PatchOperations> {
+    connection.control().check()?;
+    operations.sort_unstable_by(|left, right| {
+        canonical_operation_key(left).cmp(&canonical_operation_key(right))
+    });
+    connection.control().check()?;
     Ok(operations)
 }
 
-fn append_node_operation(operations: &mut Vec<Value>, node_id: i64, added: bool) {
+fn append_node_operation(
+    connection: &Connection,
+    operations: &mut PatchOperations,
+    node_id: i64,
+    added: bool,
+) -> QueryResult<()> {
+    connection.checkpoint()?;
+    operations.reserve_operation(5, 128)?;
     let (op, before, after) = if added {
         ("AddNode", Value::Null, Value::Boolean(true))
     } else {
@@ -186,19 +229,23 @@ fn append_node_operation(operations: &mut Vec<Value>, node_id: i64, added: bool)
             ("after", after),
         ],
     ));
+    Ok(())
 }
 
 fn append_label_operation(
     connection: &Connection,
-    operations: &mut Vec<Value>,
+    operations: &mut PatchOperations,
     node_id: i64,
     label_id: i64,
     added: bool,
 ) -> QueryResult<()> {
-    let label = label_name(connection, label_id)?;
+    connection.checkpoint()?;
+    let (label, memory) = label_name(connection, label_id)?;
+    operations.memory.merge(memory)?;
+    operations.reserve_operation(6, checked_add(label.len() as u64, 128)?)?;
     operations.push(operation(
         if added { "AddLabel" } else { "RemoveLabel" },
-        format!("node/{node_id}/label/{label}"),
+        slot_text(connection, &format!("node/{node_id}/label/"), &label)?,
         [
             ("elementId", Value::String(format!("n:{node_id}"))),
             ("label", Value::String(label)),
@@ -211,11 +258,19 @@ fn append_label_operation(
 
 fn append_relationship_operation(
     connection: &Connection,
-    operations: &mut Vec<Value>,
+    operations: &mut PatchOperations,
     relationship: RelationshipRecord,
     added: bool,
 ) -> QueryResult<()> {
-    let value = relationship_value(connection, relationship)?;
+    connection.checkpoint()?;
+    operations.reserve_operation(5, 160)?;
+    let (value, memory) = relationship_value(connection, relationship)?;
+    operations.memory.merge(memory)?;
+    let (before, after) = if added {
+        (Value::Null, value)
+    } else {
+        (value, Value::Null)
+    };
     operations.push(operation(
         if added {
             "AddRelationship"
@@ -225,8 +280,8 @@ fn append_relationship_operation(
         format!("relationship/{}", relationship.id),
         [
             ("elementId", Value::String(format!("r:{}", relationship.id))),
-            ("before", if added { Value::Null } else { value.clone() }),
-            ("after", if added { value } else { Value::Null }),
+            ("before", before),
+            ("after", after),
         ],
     ));
     Ok(())
@@ -234,50 +289,58 @@ fn append_relationship_operation(
 
 fn append_property_operation(
     connection: &Connection,
-    operations: &mut Vec<Value>,
+    operations: &mut PatchOperations,
     slot: (OwnerKind, i64, i64),
     before: Option<&PropertyValue>,
     after: Option<&PropertyValue>,
 ) -> QueryResult<()> {
-    let key = storage::property_key_name(connection, slot.2)?.ok_or_else(|| {
-        QueryError::new(
-            QueryErrorKind::Storage,
-            format!("PropertyKeyId {} is missing", slot.2),
-        )
-    })?;
-    let owner = match slot.0 {
-        OwnerKind::Node => format!("node/{}", slot.1),
-        OwnerKind::Relationship => format!("relationship/{}", slot.1),
-    };
-    let mut extra = BTreeMap::from([
-        ("owner".to_owned(), Value::String(owner.clone())),
-        ("key".to_owned(), Value::String(key.clone())),
-        ("before".to_owned(), property_state(before)?),
-        ("after".to_owned(), property_state(after)?),
-    ]);
-    operations.push(operation_map(
-        if after.is_some() {
-            "SetProperty"
-        } else {
-            "RemoveProperty"
-        },
-        format!("{owner}/property/{key}"),
-        &mut extra,
-    ));
-    Ok(())
+    connection.checkpoint()?;
+    storage::with_property_key_name(connection, slot.2, |key| {
+        let key = key.ok_or_else(|| {
+            QueryError::new(
+                QueryErrorKind::Storage,
+                format!("PropertyKeyId {} is missing", slot.2),
+            )
+        })?;
+        operations.reserve_operation(6, checked_add(checked_mul(key.len() as u64, 2)?, 192)?)?;
+        let owner = match slot.0 {
+            OwnerKind::Node => format!("node/{}", slot.1),
+            OwnerKind::Relationship => format!("relationship/{}", slot.1),
+        };
+        let (before, before_memory) = property_state(connection, before)?;
+        let (after_value, after_memory) = property_state(connection, after)?;
+        operations.memory.merge(before_memory)?;
+        operations.memory.merge(after_memory)?;
+        let mut extra = BTreeMap::from([
+            ("owner".to_owned(), Value::String(owner.clone())),
+            ("key".to_owned(), Value::String(copy_text(connection, key)?)),
+            ("before".to_owned(), before),
+            ("after".to_owned(), after_value),
+        ]);
+        operations.push(operation_map(
+            if after.is_some() {
+                "SetProperty"
+            } else {
+                "RemoveProperty"
+            },
+            slot_text(connection, &format!("{owner}/property/"), key)?,
+            &mut extra,
+        ));
+        Ok::<_, QueryError>(())
+    })
 }
 
 fn append_node_and_label_operations(
     connection: &Connection,
     before: &storage::SnapshotState,
     after: &storage::SnapshotState,
-    operations: &mut Vec<Value>,
+    operations: &mut PatchOperations,
 ) -> QueryResult<()> {
     for node in before.nodes.difference(&after.nodes) {
-        append_node_operation(operations, *node, false);
+        append_node_operation(connection, operations, *node, false)?;
     }
     for node in after.nodes.difference(&before.nodes) {
-        append_node_operation(operations, *node, true);
+        append_node_operation(connection, operations, *node, true)?;
     }
     for (node, label) in before.labels.difference(&after.labels) {
         append_label_operation(connection, operations, *node, *label, false)?;
@@ -292,7 +355,7 @@ fn append_relationship_operations(
     connection: &Connection,
     before: &storage::SnapshotState,
     after: &storage::SnapshotState,
-    operations: &mut Vec<Value>,
+    operations: &mut PatchOperations,
 ) -> QueryResult<()> {
     for (id, relationship) in &before.relationships {
         if !after.relationships.contains_key(id) {
@@ -318,25 +381,28 @@ fn append_property_operations(
     connection: &Connection,
     before: &storage::SnapshotState,
     after: &storage::SnapshotState,
-    operations: &mut Vec<Value>,
+    operations: &mut PatchOperations,
 ) -> QueryResult<()> {
-    let mut property_slots = BTreeSet::new();
-    property_slots.extend(before.properties.keys().copied());
-    property_slots.extend(after.properties.keys().copied());
-    for slot in property_slots {
-        let previous = before.properties.get(&slot);
-        let next = after.properties.get(&slot);
-        if same_property_value(previous, next)? {
+    for slot in before.properties.keys().chain(
+        after
+            .properties
+            .keys()
+            .filter(|slot| !before.properties.contains_key(slot)),
+    ) {
+        connection.checkpoint()?;
+        let previous = before.properties.get(slot);
+        let next = after.properties.get(slot);
+        if same_property_value_controlled(connection, previous, next)? {
             continue;
         }
-        append_property_operation(connection, operations, slot, previous, next)?;
+        append_property_operation(connection, operations, *slot, previous, next)?;
     }
     Ok(())
 }
 
 pub(crate) fn apply_patch_to_state(
     connection: &Connection,
-    state: &mut storage::SnapshotState,
+    state: &mut VersionState,
     patch: &Value,
 ) -> QueryResult<()> {
     let map = require_map(patch, "patch")?;
@@ -364,16 +430,24 @@ pub(crate) fn apply_patch_to_state(
             ));
         }
     };
-    validate_unique_operation_slots(operations)?;
+    validate_unique_operation_slots(connection, operations)?;
     for value in operations {
         apply_operation(connection, state, value)?;
     }
     Ok(())
 }
 
-fn validate_unique_operation_slots(operations: &[Value]) -> QueryResult<()> {
+fn validate_unique_operation_slots(
+    connection: &Connection,
+    operations: &[Value],
+) -> QueryResult<()> {
+    let _memory = connection.reserve(checked_mul(
+        operations.len() as u64,
+        map_entry_bytes::<&str>()?,
+    )?)?;
     let mut slots = BTreeSet::new();
     for value in operations {
+        connection.checkpoint()?;
         let operation = require_map(value, "patch operation")?;
         let slot = require_string(operation.get("slot"), "operation.slot")?;
         if !slots.insert(slot) {
@@ -387,10 +461,12 @@ fn validate_unique_operation_slots(operations: &[Value]) -> QueryResult<()> {
 
 fn apply_operation(
     connection: &Connection,
-    state: &mut storage::SnapshotState,
+    state: &mut VersionState,
     value: &Value,
 ) -> QueryResult<()> {
+    connection.checkpoint()?;
     let operation = require_map(value, "patch operation")?;
+    reserve_patch_growth(connection, state, value)?;
     let op = require_string(operation.get("op"), "operation.op")?;
     match op {
         "AddNode" | "DeleteNode" => apply_node_operation(connection, state, operation, op)?,
@@ -401,8 +477,10 @@ fn apply_operation(
         "SetProperty" | "RemoveProperty" => {
             apply_property_operation(connection, state, operation, op)?
         }
-        "SetSchema" => apply_schema_operation(state, operation)?,
-        "CreateIndex" | "DropIndex" | "SetIndex" => apply_index_operation(state, operation, op)?,
+        "SetSchema" => apply_schema_operation(connection, state, operation)?,
+        "CreateIndex" | "DropIndex" | "SetIndex" => {
+            apply_index_operation(connection, state, operation, op)?
+        }
         _ => {
             return Err(QueryError::invalid_argument(format!(
                 "unknown patch operation {op}"
@@ -414,7 +492,7 @@ fn apply_operation(
 
 fn apply_node_operation(
     connection: &Connection,
-    state: &mut storage::SnapshotState,
+    state: &mut VersionState,
     operation: &BTreeMap<String, Value>,
     op: &str,
 ) -> QueryResult<()> {
@@ -449,13 +527,16 @@ fn apply_node_operation(
 
 fn apply_label_operation(
     connection: &Connection,
-    state: &mut storage::SnapshotState,
+    state: &mut VersionState,
     operation: &BTreeMap<String, Value>,
     op: &str,
 ) -> QueryResult<()> {
     let id = node_id(operation)?;
     let label = require_string(operation.get("label"), "operation.label")?;
-    require_operation_slot(operation, &format!("node/{id}/label/{label}"))?;
+    require_operation_slot(
+        operation,
+        &slot_text(connection, &format!("node/{id}/label/"), label)?,
+    )?;
     let expected_before = Value::Boolean(op == "RemoveLabel");
     let expected_after = Value::Boolean(op == "AddLabel");
     if operation.get("before") != Some(&expected_before)
@@ -486,7 +567,7 @@ fn apply_label_operation(
 
 fn apply_relationship_operation(
     connection: &Connection,
-    state: &mut storage::SnapshotState,
+    state: &mut VersionState,
     operation: &BTreeMap<String, Value>,
     op: &str,
 ) -> QueryResult<()> {
@@ -500,7 +581,7 @@ fn apply_relationship_operation(
 
 fn apply_add_relationship(
     connection: &Connection,
-    state: &mut storage::SnapshotState,
+    state: &mut VersionState,
     operation: &BTreeMap<String, Value>,
     id: i64,
 ) -> QueryResult<()> {
@@ -536,7 +617,7 @@ fn validate_allocated_relationship_identity(
 
 fn apply_delete_relationship(
     connection: &Connection,
-    state: &mut storage::SnapshotState,
+    state: &mut VersionState,
     operation: &BTreeMap<String, Value>,
     id: i64,
 ) -> QueryResult<()> {
@@ -554,37 +635,40 @@ fn apply_delete_relationship(
 }
 
 fn apply_schema_operation(
-    state: &mut storage::SnapshotState,
+    connection: &Connection,
+    state: &mut VersionState,
     operation: &BTreeMap<String, Value>,
 ) -> QueryResult<()> {
     require_operation_slot(operation, "schema")?;
-    let current = schema_core_value(&state.schema)?;
-    if !same_optional_value(operation.get("before"), Some(&current)) {
+    let (current, _current_memory) = schema_core_value(connection, &state.schema)?;
+    if !same_optional_value_controlled(connection, operation.get("before"), Some(&current))? {
         return before_mismatch(operation);
     }
     let after = operation
         .get("after")
         .ok_or_else(|| QueryError::invalid_argument("SetSchema is missing after"))?;
-    apply_schema_core(&mut state.schema, after)
+    apply_schema_core(connection, &mut state.schema, after)
 }
 
 fn apply_index_operation(
-    state: &mut storage::SnapshotState,
+    connection: &Connection,
+    state: &mut VersionState,
     operation: &BTreeMap<String, Value>,
     op: &str,
 ) -> QueryResult<()> {
-    let name = index_name_from_slot(operation)?;
+    let name = index_name_from_slot(connection, operation)?;
     if op == "CreateIndex" {
-        return create_index_from_patch(state, operation, name);
+        return create_index_from_patch(connection, state, operation, name);
     }
     if op == "SetIndex" {
-        return set_index_from_patch(state, operation, name);
+        return set_index_from_patch(connection, state, operation, name);
     }
-    drop_index_from_patch(state, operation, &name)
+    drop_index_from_patch(connection, state, operation, &name)
 }
 
 fn create_index_from_patch(
-    state: &mut storage::SnapshotState,
+    connection: &Connection,
+    state: &mut VersionState,
     operation: &BTreeMap<String, Value>,
     name: String,
 ) -> QueryResult<()> {
@@ -596,7 +680,7 @@ fn create_index_from_patch(
     if state.schema.indexes.contains_key(&name) {
         return before_mismatch(operation);
     }
-    let definition = index_definition(operation.get("after"))?;
+    let definition = index_definition(connection, operation.get("after"))?;
     if definition.name != name {
         return Err(QueryError::invalid_argument(
             "CreateIndex slot/name mismatch",
@@ -607,18 +691,19 @@ fn create_index_from_patch(
 }
 
 fn drop_index_from_patch(
-    state: &mut storage::SnapshotState,
+    connection: &Connection,
+    state: &mut VersionState,
     operation: &BTreeMap<String, Value>,
     name: &str,
 ) -> QueryResult<()> {
-    let expected = index_definition(operation.get("before"))?;
+    let expected = index_definition(connection, operation.get("before"))?;
     if expected.name != name {
         return Err(QueryError::invalid_argument("DropIndex slot/name mismatch"));
     }
     if operation.get("after") != Some(&Value::Null) {
         return Err(QueryError::invalid_argument("DropIndex after must be null"));
     }
-    if !same_index_definition(state.schema.indexes.get(name), Some(&expected))? {
+    if !same_index_controlled(connection, state.schema.indexes.get(name), Some(&expected))? {
         return before_mismatch(operation);
     }
     state.schema.indexes.remove(name);
@@ -626,16 +711,17 @@ fn drop_index_from_patch(
 }
 
 fn set_index_from_patch(
-    state: &mut storage::SnapshotState,
+    connection: &Connection,
+    state: &mut VersionState,
     operation: &BTreeMap<String, Value>,
     name: String,
 ) -> QueryResult<()> {
-    let expected = index_definition(operation.get("before"))?;
-    let replacement = index_definition(operation.get("after"))?;
+    let expected = index_definition(connection, operation.get("before"))?;
+    let replacement = index_definition(connection, operation.get("after"))?;
     if expected.name != name || replacement.name != name {
         return Err(QueryError::invalid_argument("SetIndex slot/name mismatch"));
     }
-    if !same_index_definition(state.schema.indexes.get(&name), Some(&expected))? {
+    if !same_index_controlled(connection, state.schema.indexes.get(&name), Some(&expected))? {
         return before_mismatch(operation);
     }
     state.schema.indexes.insert(name, replacement);
@@ -644,14 +730,14 @@ fn set_index_from_patch(
 
 fn apply_property_operation(
     connection: &Connection,
-    state: &mut storage::SnapshotState,
+    state: &mut VersionState,
     operation: &BTreeMap<String, Value>,
     op: &str,
 ) -> QueryResult<()> {
     let target = property_patch_target(connection, operation)?;
-    validate_property_before(state, operation, &target)?;
+    validate_property_before(connection, state, operation, &target)?;
     if op == "RemoveProperty" {
-        if operation.get("after") != Some(&property_state(None)?) {
+        if operation.get("after") != Some(&property_state(connection, None)?.0) {
             return Err(QueryError::invalid_argument(
                 "RemoveProperty after must be absent",
             ));
@@ -663,6 +749,7 @@ fn apply_property_operation(
 }
 
 fn validate_property_before(
+    connection: &Connection,
     state: &storage::SnapshotState,
     operation: &BTreeMap<String, Value>,
     target: &PropertyPatchTarget,
@@ -672,7 +759,8 @@ fn validate_property_before(
             .properties
             .get(&(target.owner_kind, target.owner_id, key_id))
     });
-    if !same_optional_value(operation.get("before"), Some(&property_state(actual)?)) {
+    let (actual, _memory) = property_state(connection, actual)?;
+    if !same_optional_value_controlled(connection, operation.get("before"), Some(&actual))? {
         return before_mismatch(operation);
     }
     Ok(())
@@ -680,12 +768,12 @@ fn validate_property_before(
 
 fn set_property_target(
     connection: &Connection,
-    state: &mut storage::SnapshotState,
+    state: &mut VersionState,
     operation: &BTreeMap<String, Value>,
     target: &PropertyPatchTarget,
 ) -> QueryResult<()> {
     let key_id = storage::intern_property_key(connection, &target.key)?;
-    let value = patch_property_value(operation)?;
+    let value = patch_property_value(connection, operation)?;
     state
         .properties
         .insert((target.owner_kind, target.owner_id, key_id), value);
@@ -705,8 +793,14 @@ fn property_patch_target(
 ) -> QueryResult<PropertyPatchTarget> {
     let owner = require_string(operation.get("owner"), "operation.owner")?;
     let (owner_kind, owner_id) = parse_owner(owner)?;
-    let key = require_string(operation.get("key"), "operation.key")?.to_owned();
-    require_operation_slot(operation, &format!("{owner}/property/{key}"))?;
+    let key = copy_text(
+        connection,
+        require_string(operation.get("key"), "operation.key")?,
+    )?;
+    require_operation_slot(
+        operation,
+        &slot_text(connection, &format!("{owner}/property/"), &key)?,
+    )?;
     let existing_key = storage::find_property_key(connection, &key)?;
     Ok(PropertyPatchTarget {
         owner_kind,
@@ -716,7 +810,7 @@ fn property_patch_target(
     })
 }
 
-fn remove_property_target(state: &mut storage::SnapshotState, target: &PropertyPatchTarget) {
+fn remove_property_target(state: &mut VersionState, target: &PropertyPatchTarget) {
     if let Some(key_id) = target.existing_key {
         state
             .properties
@@ -724,7 +818,10 @@ fn remove_property_target(state: &mut storage::SnapshotState, target: &PropertyP
     }
 }
 
-fn patch_property_value(operation: &BTreeMap<String, Value>) -> QueryResult<PropertyValue> {
+fn patch_property_value(
+    connection: &Connection,
+    operation: &BTreeMap<String, Value>,
+) -> QueryResult<PropertyValue> {
     let after = require_map(
         operation
             .get("after")
@@ -738,9 +835,12 @@ fn patch_property_value(operation: &BTreeMap<String, Value>) -> QueryResult<Prop
     }
     let value = after
         .get("value")
-        .cloned()
         .ok_or_else(|| QueryError::invalid_argument("SetProperty after is missing value"))?;
-    let value = property_from_value(value)?
+    let value = crate::query::expression::clone_value_unreserved_controlled(
+        value,
+        Some(connection.control()),
+    )?;
+    let value = property_from_value_controlled(value, connection.control())?
         .ok_or_else(|| QueryError::invalid_argument("SetProperty cannot store null"))?;
     Ok(value)
 }
@@ -751,145 +851,77 @@ pub(crate) fn validate_candidate(
     layer: &storage::LayerBuilder,
     schema: &SchemaState,
 ) -> QueryResult<()> {
-    let snapshot = Snapshot::resolve_with_layer(connection, base_commit, layer)?;
-    snapshot.validate_graph_invariants()?;
-    crate::query::schema::validate_snapshot(connection, schema, &snapshot)?;
-    let previous = SchemaState::load(connection, base_commit)?;
-    crate::query::semantic_index::validate_fulltext_transition(connection, &previous, schema)?;
-    crate::query::managed_semantic::validate_transition(connection, &previous, schema)
+    let snapshot = connection.with_layer_snapshot(base_commit, layer, schema)?;
+    snapshot.validate_graph_invariants_checked(&super::execution::storage_check(
+        connection.control(),
+    ))?;
+    crate::query::schema::validate_schema_transition_controlled(
+        connection,
+        &SchemaState::default(),
+        schema,
+        &snapshot,
+        connection.control(),
+    )?;
+    let previous = connection.load_schema(base_commit)?;
+    crate::query::semantic_index::validate_fulltext_transition_controlled(
+        connection,
+        &previous,
+        schema,
+        &|| connection.control().check().is_err(),
+    )?;
+    crate::query::managed_semantic::validate_transition_controlled(
+        connection,
+        &previous,
+        schema,
+        &|| connection.control().check().is_err(),
+    )
 }
 
 fn append_schema_operations(
+    connection: &Connection,
     before: &SchemaState,
     after: &SchemaState,
-    operations: &mut Vec<Value>,
+    operations: &mut PatchOperations,
 ) -> QueryResult<()> {
-    if !same_value(&schema_core_value(before)?, &schema_core_value(after)?) {
+    let (left_core, left_memory) = schema_core_value(connection, before)?;
+    let (right_core, right_memory) = schema_core_value(connection, after)?;
+    if !same_value_controlled(connection, &left_core, &right_core)? {
+        operations.reserve_operation(4, 64)?;
+        operations.memory.merge(left_memory)?;
+        operations.memory.merge(right_memory)?;
         operations.push(operation(
             "SetSchema",
             "schema".to_owned(),
-            [
-                ("before", schema_core_value(before)?),
-                ("after", schema_core_value(after)?),
-            ],
+            [("before", left_core), ("after", right_core)],
         ));
     }
-    let mut names = BTreeSet::new();
-    names.extend(before.indexes.keys().cloned());
-    names.extend(after.indexes.keys().cloned());
-    for name in names {
-        let left = before.indexes.get(&name);
-        let right = after.indexes.get(&name);
-        if same_index_definition(left, right)? {
-            continue;
-        }
-        match (left, right) {
-            (Some(left), Some(right)) => operations.push(operation(
-                "SetIndex",
-                format!("index/{name}"),
-                [
-                    ("before", index_value(left)?),
-                    ("after", index_value(right)?),
-                ],
-            )),
-            (Some(left), None) => operations.push(operation(
-                "DropIndex",
-                format!("index/{name}"),
-                [("before", index_value(left)?), ("after", Value::Null)],
-            )),
-            (None, Some(right)) => operations.push(operation(
-                "CreateIndex",
-                format!("index/{name}"),
-                [("before", Value::Null), ("after", index_value(right)?)],
-            )),
-            (None, None) => {}
-        }
+    for name in before.indexes.keys().chain(
+        after
+            .indexes
+            .keys()
+            .filter(|name| !before.indexes.contains_key(*name)),
+    ) {
+        append_index_operation(
+            connection,
+            operations,
+            name,
+            before.indexes.get(name),
+            after.indexes.get(name),
+        )?;
     }
     Ok(())
 }
 
-fn schema_core_value(schema: &SchemaState) -> QueryResult<Value> {
-    let value = serde_json::json!({
-        "graph_nodes": schema.graph_nodes,
-        "graph_relationships": schema.graph_relationships,
-        "constraints": schema.constraints,
-    });
-    super::json_to_value(value)
-}
-
-fn apply_schema_core(schema: &mut SchemaState, value: &Value) -> QueryResult<()> {
-    let json = super::value_to_json(value)?;
-    #[derive(serde::Deserialize)]
-    struct Core {
-        graph_nodes: BTreeMap<String, storage::GraphNodeType>,
-        graph_relationships: BTreeMap<String, storage::GraphRelationshipType>,
-        constraints: BTreeMap<String, storage::ConstraintDefinition>,
-    }
-    let core: Core = serde_json::from_value(json).map_err(|error| {
-        QueryError::invalid_argument(format!("invalid SetSchema payload: {error}"))
-    })?;
-    schema.graph_nodes = core.graph_nodes;
-    schema.graph_relationships = core.graph_relationships;
-    schema.constraints = core.constraints;
-    Ok(())
-}
-
-fn index_value(index: &IndexDefinition) -> QueryResult<Value> {
-    super::json_to_value(serde_json::to_value(index).map_err(|error| {
-        QueryError::internal(format!("failed to serialize Index definition: {error}"))
-    })?)
-}
-
-fn index_definition(value: Option<&Value>) -> QueryResult<IndexDefinition> {
-    let value = value
-        .ok_or_else(|| QueryError::invalid_argument("Index operation is missing definition"))?;
-    serde_json::from_value(super::value_to_json(value)?)
-        .map_err(|error| QueryError::invalid_argument(format!("invalid Index definition: {error}")))
-}
-
-fn index_name_from_slot(operation: &BTreeMap<String, Value>) -> QueryResult<String> {
+fn index_name_from_slot(
+    connection: &Connection,
+    operation: &BTreeMap<String, Value>,
+) -> QueryResult<String> {
     let slot = require_string(operation.get("slot"), "operation.slot")?;
-    slot.strip_prefix("index/")
+    let name = slot
+        .strip_prefix("index/")
         .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| QueryError::invalid_argument("invalid Index operation slot"))
-}
-
-fn property_state(value: Option<&PropertyValue>) -> QueryResult<Value> {
-    match value {
-        None => Ok(Value::Map(BTreeMap::from([(
-            "present".to_owned(),
-            Value::Boolean(false),
-        )]))),
-        Some(value) => Ok(Value::Map(BTreeMap::from([
-            ("present".to_owned(), Value::Boolean(true)),
-            (
-                "value".to_owned(),
-                crate::query::graph::property_value(value.clone())?,
-            ),
-        ]))),
-    }
-}
-
-fn relationship_value(connection: &Connection, record: RelationshipRecord) -> QueryResult<Value> {
-    let relationship_type = storage::relationship_type_name(connection, record.type_id)?
-        .ok_or_else(|| {
-            QueryError::new(
-                QueryErrorKind::Storage,
-                "Relationship type dictionary entry is missing",
-            )
-        })?;
-    Ok(Value::Map(BTreeMap::from([
-        ("type".to_owned(), Value::String(relationship_type)),
-        (
-            "source".to_owned(),
-            Value::String(format!("n:{}", record.source)),
-        ),
-        (
-            "target".to_owned(),
-            Value::String(format!("n:{}", record.target)),
-        ),
-    ])))
+        .ok_or_else(|| QueryError::invalid_argument("invalid Index operation slot"))?;
+    copy_text(connection, name)
 }
 
 fn relationship_record(
@@ -963,15 +995,6 @@ fn parse_owner(value: &str) -> QueryResult<(OwnerKind, i64)> {
     Err(QueryError::invalid_argument("invalid property owner"))
 }
 
-fn label_name(connection: &Connection, label: i64) -> QueryResult<String> {
-    storage::label_name(connection, label)?.ok_or_else(|| {
-        QueryError::new(
-            QueryErrorKind::Storage,
-            format!("LabelId {label} is missing"),
-        )
-    })
-}
-
 fn operation<const N: usize>(op: &str, slot: String, extra: [(&str, Value); N]) -> Value {
     let mut map = BTreeMap::from([
         ("op".to_owned(), Value::String(op.to_owned())),
@@ -991,19 +1014,19 @@ fn operation_map(op: &str, slot: String, extra: &mut BTreeMap<String, Value>) ->
     Value::Map(std::mem::take(extra))
 }
 
-fn canonical_operation_key(value: &Value) -> (String, u8, String) {
+fn canonical_operation_key(value: &Value) -> (&str, u8, &str) {
     let Value::Map(map) = value else {
-        return (String::new(), 0, String::new());
+        return ("", 0, "");
     };
     let slot = match map.get("slot") {
-        Some(Value::String(value)) => value.clone(),
-        _ => String::new(),
+        Some(Value::String(value)) => value.as_str(),
+        _ => "",
     };
     let op = match map.get("op") {
-        Some(Value::String(value)) => value.clone(),
-        _ => String::new(),
+        Some(Value::String(value)) => value.as_str(),
+        _ => "",
     };
-    let order = match op.as_str() {
+    let order = match op {
         "DropIndex" => 0,
         "CreateIndex" => 1,
         _ => 0,
@@ -1075,4 +1098,46 @@ fn before_mismatch<T>(operation: &BTreeMap<String, Value>) -> QueryResult<T> {
     Err(QueryError::invalid_argument(format!(
         "patch before-condition failed for {slot}"
     )))
+}
+
+fn append_index_operation(
+    connection: &Connection,
+    operations: &mut PatchOperations,
+    name: &str,
+    left: Option<&IndexDefinition>,
+    right: Option<&IndexDefinition>,
+) -> QueryResult<()> {
+    connection.checkpoint()?;
+    if same_index_controlled(connection, left, right)? {
+        return Ok(());
+    }
+    operations.reserve_operation(4, checked_add(name.len() as u64, 64)?)?;
+    let (op, left, right) = match (left, right) {
+        (Some(left), Some(right)) => ("SetIndex", Some(left), Some(right)),
+        (Some(left), None) => ("DropIndex", Some(left), None),
+        (None, Some(right)) => ("CreateIndex", None, Some(right)),
+        (None, None) => return Ok(()),
+    };
+    let before_value = match left {
+        Some(value) => {
+            let (value, memory) = index_value(connection, value)?;
+            operations.memory.merge(memory)?;
+            value
+        }
+        None => Value::Null,
+    };
+    let after_value = match right {
+        Some(value) => {
+            let (value, memory) = index_value(connection, value)?;
+            operations.memory.merge(memory)?;
+            value
+        }
+        None => Value::Null,
+    };
+    operations.push(operation(
+        op,
+        slot_text(connection, "index/", name)?,
+        [("before", before_value), ("after", after_value)],
+    ));
+    Ok(())
 }

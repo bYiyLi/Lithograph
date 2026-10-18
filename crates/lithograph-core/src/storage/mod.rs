@@ -12,6 +12,7 @@ mod integrity_history;
 mod layer;
 mod layer_read;
 mod property;
+mod read_memory;
 mod schema;
 mod schema_state;
 #[cfg(feature = "test-support")]
@@ -19,8 +20,11 @@ mod search_test_support;
 mod snapshot;
 mod snapshot_labels;
 mod snapshot_lineage;
+mod snapshot_overlay;
 mod snapshot_properties;
+mod snapshot_read;
 mod snapshot_scan;
+mod snapshot_staged;
 mod snapshot_stats;
 mod snapshot_stream;
 mod value;
@@ -35,6 +39,7 @@ use std::fmt;
 use rusqlite::Error as SqliteError;
 
 pub use checkpoint::{create_checkpoint, delete_checkpoint};
+pub(crate) use commit::{CommitRead, commit_layer_observed, commit_layer_with_schema_observed};
 pub use commit::{
     branch_head, commit_exists, commit_layer, commit_layer_with_schema, commit_schema,
     create_branch,
@@ -47,12 +52,15 @@ pub use identity::{
 };
 #[cfg(feature = "test-support")]
 pub use identity::{allocate_node_id_range, allocate_relationship_id_range};
+pub(crate) use identity::{with_label_name, with_property_key_name, with_relationship_type_name};
 pub use integrity::{IntegrityIssue, integrity_check, structural_integrity_issues};
 pub use layer::{LayerBuilder, LayerDeltaCounts, RelationshipRecord};
+pub(crate) use read_memory::property_value_bytes as property_value_memory_bytes;
 pub use schema::{
     create_format2_schema, create_format3_schema, create_storage_schema, initialize_root,
     load_schema_blob, persist_schema_blob, root_commit, schema_hash_for_commit,
 };
+pub(crate) use schema_state::schema_state_memory_bytes;
 pub use schema_state::{
     ConstraintDefinition, ConstraintDefinitionKind, GraphNodeType, GraphRelationshipType,
     IndexConfiguration, IndexDefinition, IndexTarget, PropertyRule, PropertyType, SchemaSlotChange,
@@ -65,9 +73,11 @@ pub use search_test_support::{
 };
 pub(crate) use snapshot::ResolvedSnapshotState;
 pub use snapshot::Snapshot;
+pub(crate) use snapshot_read::SnapshotReadObserver;
+pub(crate) use snapshot_read::clone_value_checked as clone_property_value_checked;
 pub(crate) use snapshot_scan::{AdjacencyCursor, AdjacencyScanPage};
 pub use value::{PointValue, PropertyValue, VectorCoordinateType, VectorValue, ZonedDateTimeValue};
-pub(crate) use version::touched_layer_between_commits;
+pub(crate) use version::layer_between_checked;
 pub use version::{
     AllocationState, CommitRecord, GcCounters, MergeSessionRecord, NamedRef, SnapshotState,
     active_branch, best_common_ancestors, capture_allocation_state, clear_commit_data,
@@ -80,6 +90,8 @@ pub use version::{
     resolve_version_descriptor, restore_allocation_state, reverse_topological_log,
     set_active_branch, set_commit_data, update_merge_resolutions, validate_ref_name,
 };
+pub(crate) use version::{layer_between_commits_observed, touched_layer_between_commits_observed};
+pub(crate) use version::{load_snapshot_state_observed, snapshot_state_memory_bytes};
 
 /// Current immutable storage format.
 pub const STORAGE_FORMAT: i64 = 3;

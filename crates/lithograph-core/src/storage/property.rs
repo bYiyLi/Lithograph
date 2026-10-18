@@ -12,7 +12,16 @@ pub(crate) struct PropertyColumns {
 }
 
 impl PropertyColumns {
+    #[cfg(feature = "test-support")]
     pub(crate) fn from_value(value: &PropertyValue) -> StorageResult<Self> {
+        Self::from_value_checked(value, &|| Ok(()))
+    }
+
+    pub(crate) fn from_value_checked(
+        value: &PropertyValue,
+        check: &dyn Fn() -> StorageResult<()>,
+    ) -> StorageResult<Self> {
+        check()?;
         let mut columns = Self::empty(value.type_tag());
         match value {
             PropertyValue::Boolean(value) => columns.int_value = Some(i64::from(*value)),
@@ -23,7 +32,9 @@ impl PropertyColumns {
                 columns.real_value = (!value.is_nan()).then_some(*value);
                 columns.aux_value = Some(canonical_float_bits(*value).to_vec());
             }
-            PropertyValue::String(value) => columns.text_value = Some(value.clone()),
+            PropertyValue::String(value) => {
+                columns.text_value = Some(copy_text_checked(value, check)?)
+            }
             PropertyValue::LocalTime(value) => {
                 columns.int_value = Some(checked_u64(*value, "LocalTime nanoseconds")?);
             }
@@ -42,7 +53,10 @@ impl PropertyColumns {
                 columns.int_value = Some(value.epoch_seconds);
                 let mut aux = Vec::with_capacity(4 + value.zone_id.len());
                 aux.extend_from_slice(&value.nanoseconds.to_le_bytes());
-                aux.extend_from_slice(value.zone_id.as_bytes());
+                for chunk in value.zone_id.as_bytes().chunks(64 * 1024) {
+                    check()?;
+                    aux.extend_from_slice(chunk);
+                }
                 columns.aux_value = Some(aux);
             }
             PropertyValue::List(_)
@@ -50,29 +64,37 @@ impl PropertyColumns {
             | PropertyValue::Point(_)
             | PropertyValue::Vector(_)
             | PropertyValue::Uuid(_) => {
-                columns.blob_value = Some(value.canonical_bytes()?);
+                columns.blob_value = Some(value.canonical_bytes_checked(check)?);
             }
         }
+        check()?;
         Ok(columns)
     }
 
-    pub(crate) fn to_value(&self) -> StorageResult<PropertyValue> {
+    pub(crate) fn to_value_checked(
+        &self,
+        check: &dyn Fn() -> StorageResult<()>,
+    ) -> StorageResult<PropertyValue> {
+        check()?;
         self.validate_columns()?;
         match self.type_tag {
             1 => self.boolean_value(),
             2 => Ok(PropertyValue::Integer(self.required_int()?)),
             3 => self.float_value(),
-            4 => Ok(PropertyValue::String(self.required_text()?.to_owned())),
-            5 => self.complex_value(5),
+            4 => Ok(PropertyValue::String(copy_text_checked(
+                self.required_text()?,
+                check,
+            )?)),
+            5 => self.complex_value(5, check),
             6 => Ok(PropertyValue::Date(self.required_int()?)),
             7 => Ok(PropertyValue::LocalTime(self.required_int()? as u64)),
             8 => self.time_value(),
             9 => self.local_datetime_value(),
-            10 => self.zoned_datetime_value(),
-            11 => self.complex_value(11),
-            12 => self.complex_value(12),
-            13 => self.complex_value(13),
-            14 => self.complex_value(14),
+            10 => self.zoned_datetime_value(check),
+            11 => self.complex_value(11, check),
+            12 => self.complex_value(12, check),
+            13 => self.complex_value(13, check),
+            14 => self.complex_value(14, check),
             tag => Err(StorageError::corrupt(format!(
                 "property contains unknown type tag {tag}"
             ))),
@@ -219,7 +241,10 @@ impl PropertyColumns {
         })
     }
 
-    fn zoned_datetime_value(&self) -> StorageResult<PropertyValue> {
+    fn zoned_datetime_value(
+        &self,
+        check: &dyn Fn() -> StorageResult<()>,
+    ) -> StorageResult<PropertyValue> {
         let aux = self.required_aux()?;
         if aux.len() < 4 {
             return Err(StorageError::corrupt(
@@ -232,16 +257,20 @@ impl PropertyColumns {
         Ok(PropertyValue::ZonedDateTime(ZonedDateTimeValue {
             epoch_seconds: self.required_int()?,
             nanoseconds: nanos,
-            zone_id: zone_id.to_owned(),
+            zone_id: copy_text_checked(zone_id, check)?,
         }))
     }
 
-    fn complex_value(&self, expected_tag: i64) -> StorageResult<PropertyValue> {
+    fn complex_value(
+        &self,
+        expected_tag: i64,
+        check: &dyn Fn() -> StorageResult<()>,
+    ) -> StorageResult<PropertyValue> {
         let blob = self
             .blob_value
             .as_deref()
             .ok_or_else(|| StorageError::corrupt("property is missing canonical blob payload"))?;
-        let value = PropertyValue::from_canonical_bytes(blob)?;
+        let value = PropertyValue::from_canonical_bytes_checked(blob, check)?;
         if value.type_tag() != expected_tag {
             return Err(StorageError::corrupt(
                 "property canonical blob type does not match type tag",
@@ -249,6 +278,25 @@ impl PropertyColumns {
         }
         Ok(value)
     }
+}
+
+pub(super) fn copy_text_checked(
+    value: &str,
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<String> {
+    check()?;
+    let mut output = String::with_capacity(value.len());
+    let mut start = 0;
+    while start < value.len() {
+        check()?;
+        let mut end = (start + 64 * 1024).min(value.len());
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        output.push_str(&value[start..end]);
+        start = end;
+    }
+    Ok(output)
 }
 
 fn canonical_float_bits(value: f64) -> [u8; 8] {
@@ -272,4 +320,28 @@ fn fixed<const N: usize>(bytes: &[u8], name: &str) -> StorageResult<[u8; N]> {
     bytes
         .try_into()
         .map_err(|_| StorageError::corrupt(format!("{name} must contain exactly {N} bytes")))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    #[test]
+    fn property_column_text_copy_observes_cancellation_between_chunks() {
+        let value = PropertyValue::String("人物🦀".repeat(25_000));
+        let checks = Cell::new(0);
+        let error = PropertyColumns::from_value_checked(&value, &|| {
+            checks.set(checks.get() + 1);
+            if checks.get() == 4 {
+                Err(StorageError::not_found("cancel column copy"))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+        assert!(matches!(error, StorageError::NotFound(_)));
+        assert_eq!(checks.get(), 4);
+    }
 }

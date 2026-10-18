@@ -13,7 +13,13 @@ pub(super) fn execute_load_csv_tail(
     input: RowSet,
 ) -> QueryResult<RowSet> {
     let spill_connection = open_spill_connection()?;
-    let mut current = SpilledBindings::from_rows(&spill_connection, input.columns, &input.rows)?;
+    let mut current = SpilledBindings::from_rows_with_resources(
+        &spill_connection,
+        input.columns,
+        &input.rows,
+        executor.control.resources().clone(),
+        executor.control,
+    )?;
     let mut csv_guards = Vec::new();
     for clause in single.children.iter().skip(start) {
         let AstKind::Clause(kind) = clause.kind else {
@@ -25,6 +31,7 @@ pub(super) fn execute_load_csv_tail(
             return Ok(RowSet {
                 columns: Vec::new(),
                 rows: Vec::new(),
+                memory: None,
             });
         }
         let next = if kind == ClauseKind::LoadCsv {
@@ -40,9 +47,14 @@ pub(super) fn execute_load_csv_tail(
         };
         current = next;
     }
-    let (columns, rows) = current.into_rows(&spill_connection)?;
+    let (columns, rows, memory) =
+        current.into_rows_reserved(&spill_connection, executor.control)?;
     drop(csv_guards);
-    Ok(RowSet { columns, rows })
+    Ok(RowSet {
+        columns,
+        rows,
+        memory: Some(memory),
+    })
 }
 
 fn expand_load_csv(
@@ -58,19 +70,24 @@ fn expand_load_csv(
         &current.columns,
         executor.source,
     )?;
-    current.transform_batches(spill_connection, columns, |_, rows, output| {
-        for input_row in rows {
-            expand_load_csv_input(
-                executor,
-                &spec,
-                input_row,
-                spill_connection,
-                output,
-                csv_guards,
-            )?;
-        }
-        Ok(())
-    })
+    current.transform_batches(
+        spill_connection,
+        columns,
+        executor.control,
+        |_, rows, output| {
+            for input_row in rows {
+                expand_load_csv_input(
+                    executor,
+                    &spec,
+                    input_row,
+                    spill_connection,
+                    output,
+                    csv_guards,
+                )?;
+            }
+            Ok(())
+        },
+    )
 }
 
 fn expand_load_csv_input(
@@ -88,8 +105,8 @@ fn expand_load_csv_input(
         &input_row,
         &source,
         delimiter,
-        executor.is_interrupted,
-        |row| output.push(spill_connection, &row),
+        executor.control,
+        |row, _memory| output.push(spill_connection, &row, executor.control),
     )?;
     csv_guards.extend(guard);
     Ok(())
@@ -105,9 +122,24 @@ fn execute_spilled_clause(
     if matches!(kind, ClauseKind::With | ClauseKind::Return)
         && projection_requires_global_input(clause)
     {
-        let (columns, rows) = current.into_rows(spill_connection)?;
-        let result = executor.execute_single_clause(clause, kind, RowSet { columns, rows })?;
-        return SpilledBindings::from_rows(spill_connection, result.columns, &result.rows);
+        let (columns, rows, memory) =
+            current.into_rows_reserved(spill_connection, executor.control)?;
+        let result = executor.execute_single_clause(
+            clause,
+            kind,
+            RowSet {
+                columns,
+                rows,
+                memory: Some(memory),
+            },
+        )?;
+        return SpilledBindings::from_rows_with_resources(
+            spill_connection,
+            result.columns,
+            &result.rows,
+            executor.control.resources().clone(),
+            executor.control,
+        );
     }
 
     let columns = crate::query::completeness::infer_clause_columns(
@@ -115,15 +147,21 @@ fn execute_spilled_clause(
         &current.columns,
         executor.source,
     )?;
-    current.transform_batches(spill_connection, columns, |input_columns, rows, output| {
-        let result = executor.execute_single_clause(
-            clause,
-            kind,
-            RowSet {
-                columns: input_columns.to_vec(),
-                rows,
-            },
-        )?;
-        output.push_all(spill_connection, &result.rows)
-    })
+    current.transform_batches(
+        spill_connection,
+        columns,
+        executor.control,
+        |input_columns, rows, output| {
+            let result = executor.execute_single_clause(
+                clause,
+                kind,
+                RowSet {
+                    columns: input_columns.to_vec(),
+                    rows,
+                    memory: None,
+                },
+            )?;
+            output.push_all(spill_connection, &result.rows, executor.control)
+        },
+    )
 }

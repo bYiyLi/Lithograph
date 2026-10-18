@@ -10,8 +10,8 @@ use crate::cypher::{
 use crate::storage::{self, HashId, Snapshot};
 
 use super::completeness::execute::{
-    ConditionalBranchQuery, RowSet, conditional_branch_query, execute_read_clause, rows_for_next,
-    select_conditional_branch,
+    ConditionalBranchQuery, RowSet, conditional_branch_query, execute_read_clause,
+    merge_union_rows, rows_for_next, select_conditional_branch,
 };
 use super::completeness::{
     PreparedProgram, TransactionProgramOptions, composed_query_parts, executable_query,
@@ -27,6 +27,7 @@ use super::mutation::{
     execute_program_suffix_transaction, execute_spilled_outer_write_transaction,
     execute_transaction_batch,
 };
+use super::resources::{ExecutionControl, MemoryReservation, QueryResources};
 use super::spill::{BindingSpill, open_spill_connection};
 use super::{
     QueryCounters, QueryError, QueryErrorKind, QueryMetrics, QueryResult, check_interrupted,
@@ -47,6 +48,7 @@ struct TransactionRuntime<'a> {
     options: &'a TransactionProgramOptions,
     params: &'a BTreeMap<String, Value>,
     metrics: &'a mut QueryMetrics,
+    resources: &'a QueryResources,
     is_interrupted: &'a dyn Fn() -> bool,
     commit: HashId,
     counters: QueryCounters,
@@ -66,6 +68,7 @@ impl TransactionRuntime<'_> {
             message: self.options.message.as_deref(),
             params: self.params,
             metrics: &mut *self.metrics,
+            resources: self.resources,
             is_interrupted: self.is_interrupted,
         }
     }
@@ -103,8 +106,10 @@ struct CsvTransactionPipeline<'a> {
 
 struct CsvBatchState {
     pending_rows: Vec<BindingRow>,
+    pending_memory: Option<MemoryReservation>,
     pending_columns: Vec<String>,
     transaction_rows: Vec<BindingRow>,
+    transaction_memory: Option<MemoryReservation>,
     transaction_columns: Vec<String>,
     source_guards: Vec<tempfile::TempPath>,
     broken: bool,
@@ -116,6 +121,7 @@ pub(crate) fn execute_transaction_program(
     initial_commit: HashId,
     params: &BTreeMap<String, Value>,
     metrics: &mut QueryMetrics,
+    resources: &QueryResources,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<TransactionProgramOutcome> {
     if !connection.is_autocommit() {
@@ -132,13 +138,18 @@ pub(crate) fn execute_transaction_program(
         options,
         params,
         metrics,
+        resources,
         is_interrupted,
         commit: initial_commit,
         counters: QueryCounters::default(),
         next_batch_id: 1,
     };
     let result = execute_transaction_query(&mut runtime, &program.root, RowSet::seed())?;
-    let snapshot = Snapshot::resolve(connection, runtime.commit)?;
+    let snapshot = crate::query::graph::resolve_snapshot_with_control(
+        connection,
+        runtime.commit,
+        &ExecutionControl::new(runtime.resources, runtime.is_interrupted),
+    )?;
     let rows = if program.public_result {
         super::completeness::execute::validate_executed_columns(&program.columns, &result.columns)?;
         super::mutation::materialize_binding_rows_to_spill(
@@ -147,6 +158,7 @@ pub(crate) fn execute_transaction_program(
             result.rows,
             is_interrupted,
             &runtime.options.access.read.query,
+            &ExecutionControl::new(runtime.resources, runtime.is_interrupted),
         )?
     } else {
         None
@@ -180,7 +192,14 @@ fn execute_transaction_composed(
     input: RowSet,
 ) -> QueryResult<RowSet> {
     let parts = composed_query_parts(query)?;
-    let mut result = execute_transaction_operand(runtime, parts.first, clone_row_set(&input))?;
+    let mut result = execute_transaction_operand(
+        runtime,
+        parts.first,
+        input.try_clone(&ExecutionControl::new(
+            runtime.resources,
+            runtime.is_interrupted,
+        ))?,
+    )?;
     let mut previous = parts.first;
     for (connector, operand) in parts.rest {
         if connector != crate::cypher::QueryConnector::Next {
@@ -216,13 +235,6 @@ fn execute_transaction_operand(
     }
 }
 
-fn clone_row_set(input: &RowSet) -> RowSet {
-    RowSet {
-        columns: input.columns.clone(),
-        rows: input.rows.clone(),
-    }
-}
-
 fn execute_transaction_conditional(
     runtime: &mut TransactionRuntime<'_>,
     query: &AstNode,
@@ -242,6 +254,7 @@ fn execute_transaction_conditional(
             continue;
         };
         let branch_input = RowSet {
+            memory: None,
             columns: row.order.clone(),
             rows: vec![row],
         };
@@ -254,14 +267,13 @@ fn execute_transaction_conditional(
             }
         };
         output = Some(match output {
-            Some(mut current) => {
+            Some(current) => {
                 if current.columns != result.columns {
                     return Err(QueryError::internal(
                         "conditional transaction branches produced different columns",
                     ));
                 }
-                current.rows.extend(result.rows);
-                current
+                merge_union_rows(current, result)?
             }
             None => result,
         });
@@ -270,6 +282,7 @@ fn execute_transaction_conditional(
         return Ok(output);
     }
     Ok(RowSet {
+        memory: None,
         columns: infer_columns(query, &input_columns, &runtime.program.source)?,
         rows: Vec::new(),
     })
@@ -321,7 +334,11 @@ fn execute_read_clause_at_commit(
     clause: &AstNode,
     input: RowSet,
 ) -> QueryResult<RowSet> {
-    let snapshot = Snapshot::resolve(runtime.connection, runtime.commit)?;
+    let snapshot = crate::query::graph::resolve_snapshot_with_control(
+        runtime.connection,
+        runtime.commit,
+        &ExecutionControl::new(runtime.resources, runtime.is_interrupted),
+    )?;
     let graph_view = ResolvedGraphView::resolve(runtime.connection, &runtime.options.graph_view)?
         .with_query_access(runtime.options.access.read.query.clone());
     execute_read_clause(
@@ -334,6 +351,7 @@ fn execute_read_clause_at_commit(
         input,
         runtime.metrics,
         runtime.is_interrupted,
+        &ExecutionControl::new(runtime.resources, runtime.is_interrupted),
     )
 }
 
@@ -479,6 +497,7 @@ fn execute_transaction_call_controlled(
     if input.rows.is_empty() {
         return Ok(TransactionCallResult {
             rows: RowSet {
+                memory: None,
                 columns,
                 rows: Vec::new(),
             },
@@ -499,7 +518,12 @@ fn execute_transaction_batches(
     input: RowSet,
     batch_size: usize,
 ) -> QueryResult<TransactionCallResult> {
-    let mut output = Vec::new();
+    let mut output = RowSet {
+        columns: columns.clone(),
+        rows: Vec::new(),
+        memory: Some(runtime.resources.reserve(0)?),
+    };
+    let _input_memory = input.memory;
     let input_columns = input.columns;
     let all_rows = input.rows;
     let mut start = 0;
@@ -507,24 +531,26 @@ fn execute_transaction_batches(
     while start < all_rows.len() {
         check_interrupted(runtime.is_interrupted)?;
         let end = start.saturating_add(batch_size).min(all_rows.len());
-        let batch_rows = all_rows[start..end].to_vec();
+        let batch_rows = &all_rows[start..end];
         let transaction_id = next_transaction_id(runtime);
-        let batch = RowSet {
-            columns: input_columns.clone(),
-            rows: batch_rows.clone(),
-        };
+        let batch = RowSet::try_clone_rows(
+            &input_columns,
+            batch_rows,
+            &ExecutionControl::new(runtime.resources, runtime.is_interrupted),
+        )?;
         match execute_batch_with_retry(runtime, subquery, batch, &spec, &transaction_id)? {
             Ok(successful) => {
-                append_successful_batch(runtime, &spec, &transaction_id, successful, &mut output)
+                append_successful_batch(runtime, &spec, &transaction_id, successful, &mut output)?
             }
             Err(failure) => {
                 if append_failed_batch(
                     &spec,
                     failure,
-                    &batch_rows,
+                    batch_rows,
                     &all_rows[end..],
                     &columns,
                     &mut output,
+                    &ExecutionControl::new(runtime.resources, runtime.is_interrupted),
                 )? {
                     broke = true;
                     break;
@@ -534,10 +560,7 @@ fn execute_transaction_batches(
         start = end;
     }
     Ok(TransactionCallResult {
-        rows: RowSet {
-            columns,
-            rows: output,
-        },
+        rows: output,
         broke,
     })
 }
@@ -547,17 +570,65 @@ fn append_successful_batch(
     spec: &TransactionSpec,
     transaction_id: &str,
     mut successful: TransactionBatchOutcome,
-    output: &mut Vec<BindingRow>,
-) {
+    output: &mut RowSet,
+) -> QueryResult<()> {
     runtime.commit = successful.commit;
     add_mutation_counters(&mut runtime.counters, &successful.counters);
+    let control = ExecutionControl::new(runtime.resources, runtime.is_interrupted);
     if let Some(alias) = &spec.status_alias {
-        let status = transaction_status(true, true, Some(transaction_id), None);
-        for row in &mut successful.rows.rows {
-            row.insert(alias.clone(), BindingValue::Scalar(status.clone()));
-        }
+        add_batch_status(
+            &mut successful.rows,
+            alias,
+            transaction_status(true, true, Some(transaction_id), None),
+            &control,
+        )?;
     }
-    output.extend(successful.rows.rows);
+    append_accounted_rows(output, successful.rows, &control)
+}
+
+fn add_batch_status(
+    rows: &mut RowSet,
+    alias: &str,
+    status: Value,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<()> {
+    rows.track(control)?;
+    let per_row = super::resources::checked_add(
+        alias.len() as u64 + 256,
+        super::resources::value_bytes(&status)?,
+    )?;
+    rows.memory
+        .as_mut()
+        .ok_or_else(|| QueryError::internal("batch rows missing memory reservation"))?
+        .grow(super::resources::checked_mul(
+            rows.rows.len() as u64,
+            per_row,
+        )?)?;
+    for row in &mut rows.rows {
+        control.work(1)?;
+        let value = expression::clone_value_unreserved_controlled(&status, Some(control))?;
+        row.insert(alias.to_owned(), BindingValue::Scalar(value));
+    }
+    rows.track(control)
+}
+
+fn append_accounted_rows(
+    output: &mut RowSet,
+    mut input: RowSet,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<()> {
+    input.track(control)?;
+    let input_memory = input
+        .memory
+        .take()
+        .ok_or_else(|| QueryError::internal("batch rows missing memory reservation"))?;
+    match output.memory.as_mut() {
+        Some(memory) => memory.merge(input_memory)?,
+        None => output.memory = Some(input_memory),
+    }
+    output.rows.reserve_exact(input.rows.len());
+    output.rows.extend(input.rows);
+    output.track(control)
 }
 
 fn append_failed_batch(
@@ -566,13 +637,14 @@ fn append_failed_batch(
     batch_rows: &[BindingRow],
     remaining_rows: &[BindingRow],
     columns: &[String],
-    output: &mut Vec<BindingRow>,
+    output: &mut RowSet,
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<bool> {
     let effective = effective_error_mode(spec);
     if effective == TransactionErrorKind::Fail {
         return Err(failure.error);
     }
-    output.extend(failed_rows(
+    let failed = failed_rows(
         batch_rows,
         columns,
         spec.status_alias.as_deref(),
@@ -582,16 +654,20 @@ fn append_failed_batch(
             Some(&failure.transaction_id),
             Some(&failure.error.message),
         ),
-    ));
+        control,
+    )?;
+    append_accounted_rows(output, failed, control)?;
     if effective != TransactionErrorKind::Break {
         return Ok(false);
     }
-    output.extend(failed_rows(
+    let unstarted = failed_rows(
         remaining_rows,
         columns,
         spec.status_alias.as_deref(),
         transaction_status(false, false, None, None),
-    ));
+        control,
+    )?;
+    append_accounted_rows(output, unstarted, control)?;
     Ok(true)
 }
 
@@ -668,13 +744,27 @@ fn evaluate_at_commit(
     expression: &expression::Expr,
     row: &BindingRow,
 ) -> QueryResult<Value> {
-    let snapshot = Snapshot::resolve(runtime.connection, runtime.commit)?;
-    expression::evaluate_with_access(
+    evaluate_at_commit_with_memory(runtime, expression, row).map(|evaluated| evaluated.value)
+}
+
+fn evaluate_at_commit_with_memory(
+    runtime: &TransactionRuntime<'_>,
+    expression: &expression::Expr,
+    row: &BindingRow,
+) -> QueryResult<expression::EvaluatedValue> {
+    let control = ExecutionControl::new(runtime.resources, runtime.is_interrupted);
+    let snapshot = crate::query::graph::resolve_snapshot_with_control(
+        runtime.connection,
+        runtime.commit,
+        &control,
+    )?;
+    expression::evaluate_with_access_control(
         expression,
         &snapshot,
         row,
         runtime.params,
         &runtime.options.access.read.query,
+        &control,
     )
 }
 
@@ -693,18 +783,21 @@ fn execute_batch_with_retry(
         check_interrupted(runtime.is_interrupted)?;
         let base_commit = storage::branch_head(runtime.connection, &runtime.options.branch)?;
         runtime.commit = base_commit;
+        let input = batch.try_clone(&ExecutionControl::new(
+            runtime.resources,
+            runtime.is_interrupted,
+        ))?;
         let mut transaction = runtime.mutation_context(base_commit);
-        let result = execute_transaction_batch(
-            &mut transaction,
-            subquery,
-            RowSet {
-                columns: batch.columns.clone(),
-                rows: batch.rows.clone(),
-            },
-        );
+        let result = execute_transaction_batch(&mut transaction, subquery, input);
         match result {
             Ok(outcome) => return Ok(Ok(outcome)),
             Err(error) => {
+                if matches!(
+                    error.kind,
+                    QueryErrorKind::Interrupted | QueryErrorKind::Resource
+                ) {
+                    return Err(error);
+                }
                 let should_retry = spec.error == TransactionErrorKind::Retry
                     && is_transient(&error)
                     && (attempt == 0
@@ -815,22 +908,30 @@ fn failed_rows(
     columns: &[String],
     status_alias: Option<&str>,
     status: Value,
-) -> Vec<BindingRow> {
-    inputs
-        .iter()
-        .map(|input| {
-            let mut row = input.clone();
-            for column in columns {
-                if !row.values.contains_key(column) {
-                    row.insert(column.clone(), BindingValue::Null);
-                }
+    control: &ExecutionControl<'_>,
+) -> QueryResult<RowSet> {
+    let mut output = RowSet::try_clone_rows(columns, inputs, control)?;
+    let per_row = columns.iter().try_fold(0, |bytes, column| {
+        super::resources::checked_add(bytes, column.len() as u64 + 256)
+    })?;
+    output
+        .memory
+        .as_mut()
+        .ok_or_else(|| QueryError::internal("failed rows missing memory reservation"))?
+        .grow(super::resources::checked_mul(inputs.len() as u64, per_row)?)?;
+    for row in &mut output.rows {
+        control.work(1)?;
+        for column in columns {
+            if !row.values.contains_key(column) {
+                row.insert(column.clone(), BindingValue::Null);
             }
-            if let Some(alias) = status_alias {
-                row.insert(alias.to_owned(), BindingValue::Scalar(status.clone()));
-            }
-            row
-        })
-        .collect()
+        }
+    }
+    if let Some(alias) = status_alias {
+        add_batch_status(&mut output, alias, status, control)?;
+    }
+    output.track(control)?;
+    Ok(output)
 }
 
 fn add_mutation_counters(target: &mut QueryCounters, counters: &MutationCounters) {
@@ -896,6 +997,7 @@ fn stream_csv_batches(
         pipeline.single,
         pipeline.transaction_index + 1,
         RowSet {
+            memory: state.transaction_memory,
             columns: state.transaction_columns,
             rows: state.transaction_rows,
         },
@@ -917,12 +1019,29 @@ fn initial_csv_batch_state(
     )?;
     Ok(CsvBatchState {
         pending_rows: Vec::new(),
+        pending_memory: Some(runtime.resources.reserve(0)?),
         pending_columns,
         transaction_rows: Vec::new(),
+        transaction_memory: Some(runtime.resources.reserve(0)?),
         transaction_columns,
         source_guards: Vec::new(),
         broken: false,
     })
+}
+
+fn transaction_csv_source(
+    runtime: &TransactionRuntime<'_>,
+    csv: &CompiledLoadCsv,
+    outer: &BindingRow,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<(String, char, MemoryReservation)> {
+    let mut memory = control.reserve(0)?;
+    let (source, delimiter) = evaluate_csv_source(csv, |expression| {
+        let evaluated = evaluate_at_commit_with_memory(runtime, expression, outer)?;
+        memory.merge(evaluated.reservation)?;
+        Ok(evaluated.value)
+    })?;
+    Ok((source, delimiter, memory))
 }
 
 fn stream_csv_outer(
@@ -931,23 +1050,24 @@ fn stream_csv_outer(
     outer: &BindingRow,
     state: &mut CsvBatchState,
 ) -> QueryResult<()> {
-    let (source, delimiter) = evaluate_csv_source(&pipeline.csv, |expression| {
-        evaluate_at_commit(runtime, expression, outer)
-    })?;
-    let is_interrupted = runtime.is_interrupted;
+    let resources = runtime.resources.clone();
+    let control = ExecutionControl::new(&resources, runtime.is_interrupted);
+    let (source, delimiter, _source_memory) =
+        transaction_csv_source(runtime, &pipeline.csv, outer, &control)?;
     let guard = stream_csv_binding_rows(
         &pipeline.csv,
         outer,
         &source,
         delimiter,
-        is_interrupted,
-        |row| {
+        &control,
+        |row, row_memory| {
             let prefix = execute_read_range(
                 runtime,
                 pipeline.single,
                 pipeline.csv_index + 1,
                 pipeline.transaction_index,
                 RowSet {
+                    memory: Some(row_memory),
                     columns: row.order.clone(),
                     rows: vec![row],
                 },
@@ -977,7 +1097,8 @@ fn materialize_global_csv_prefix(
     state: &mut CsvBatchState,
 ) -> QueryResult<()> {
     let spill_connection = open_spill_connection()?;
-    let mut spill = BindingSpill::create(&spill_connection)?;
+    let mut spill =
+        BindingSpill::create_with_resources(&spill_connection, runtime.resources.clone())?;
     for outer in outers {
         spill_global_csv_outer(
             runtime,
@@ -988,7 +1109,8 @@ fn materialize_global_csv_prefix(
             state,
         )?;
     }
-    let rows = spill.collect(&spill_connection)?;
+    let control = ExecutionControl::new(runtime.resources, runtime.is_interrupted);
+    let (rows, rows_memory) = spill.collect_reserved(&spill_connection, &control)?;
     spill.abort(&spill_connection)?;
     let prefix = execute_read_range(
         runtime,
@@ -996,6 +1118,7 @@ fn materialize_global_csv_prefix(
         pipeline.csv_index + 1,
         pipeline.transaction_index,
         RowSet {
+            memory: Some(rows_memory),
             columns: state.pending_columns.clone(),
             rows,
         },
@@ -1011,16 +1134,17 @@ fn spill_global_csv_outer(
     spill: &mut BindingSpill,
     state: &mut CsvBatchState,
 ) -> QueryResult<()> {
-    let (source, delimiter) = evaluate_csv_source(&pipeline.csv, |expression| {
-        evaluate_at_commit(runtime, expression, outer)
-    })?;
+    let resources = runtime.resources.clone();
+    let control = ExecutionControl::new(&resources, runtime.is_interrupted);
+    let (source, delimiter, _source_memory) =
+        transaction_csv_source(runtime, &pipeline.csv, outer, &control)?;
     let guard = stream_csv_binding_rows(
         &pipeline.csv,
         outer,
         &source,
         delimiter,
-        runtime.is_interrupted,
-        |row| spill.push(spill_connection, &row),
+        &control,
+        |row, _row_memory| spill.push(spill_connection, &row, &control),
     )?;
     state.source_guards.extend(guard);
     Ok(())
@@ -1032,26 +1156,57 @@ fn append_csv_prefix(
     state: &mut CsvBatchState,
     prefix: RowSet,
 ) -> QueryResult<()> {
-    state.pending_columns = prefix.columns;
+    state.pending_columns = prefix.columns.clone();
+    let control = ExecutionControl::new(runtime.resources, runtime.is_interrupted);
     if state.broken {
-        state.transaction_rows.extend(failed_rows(
+        let failed = failed_rows(
             &prefix.rows,
             &state.transaction_columns,
             pipeline.spec.status_alias.as_deref(),
             transaction_status(false, false, None, None),
-        ));
-        return Ok(());
+            &control,
+        )?;
+        return append_row_buffer(
+            &mut state.transaction_rows,
+            &mut state.transaction_memory,
+            failed,
+            &control,
+        );
     }
-    state.pending_rows.extend(prefix.rows);
+    append_row_buffer(
+        &mut state.pending_rows,
+        &mut state.pending_memory,
+        prefix,
+        &control,
+    )?;
     state.broken = flush_complete_csv_batches(
         runtime,
         pipeline.transaction_clause,
         &pipeline.spec,
         &state.pending_columns,
         &mut state.pending_rows,
+        &mut state.pending_memory,
         &mut state.transaction_columns,
         &mut state.transaction_rows,
+        &mut state.transaction_memory,
     )?;
+    Ok(())
+}
+
+fn append_row_buffer(
+    target: &mut Vec<BindingRow>,
+    memory: &mut Option<MemoryReservation>,
+    rows: RowSet,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<()> {
+    let mut output = RowSet {
+        columns: Vec::new(),
+        rows: std::mem::take(target),
+        memory: memory.take(),
+    };
+    append_accounted_rows(&mut output, rows, control)?;
+    *target = output.rows;
+    *memory = output.memory;
     Ok(())
 }
 
@@ -1067,13 +1222,18 @@ fn finish_pending_csv_batch(
         runtime,
         pipeline.transaction_clause,
         RowSet {
+            memory: state.pending_memory.take(),
             columns: std::mem::take(&mut state.pending_columns),
             rows: std::mem::take(&mut state.pending_rows),
         },
     )?;
-    state.transaction_columns = result.rows.columns;
-    state.transaction_rows.extend(result.rows.rows);
-    Ok(())
+    state.transaction_columns = result.rows.columns.clone();
+    append_row_buffer(
+        &mut state.transaction_rows,
+        &mut state.transaction_memory,
+        result.rows,
+        &ExecutionControl::new(runtime.resources, runtime.is_interrupted),
+    )
 }
 
 fn execute_read_range(
@@ -1110,35 +1270,70 @@ fn flush_complete_csv_batches(
     spec: &TransactionSpec,
     pending_columns: &[String],
     pending_rows: &mut Vec<BindingRow>,
+    pending_memory: &mut Option<MemoryReservation>,
     transaction_columns: &mut Vec<String>,
     transaction_rows: &mut Vec<BindingRow>,
+    transaction_memory: &mut Option<MemoryReservation>,
 ) -> QueryResult<bool> {
     while let Some(first) = pending_rows.first() {
         let batch_size = resolve_batch_size(runtime, spec, first)?;
         if pending_rows.len() < batch_size {
             break;
         }
-        let batch_rows = pending_rows.drain(..batch_size).collect::<Vec<_>>();
-        let result = execute_transaction_call_controlled(
-            runtime,
-            transaction_clause,
-            RowSet {
-                columns: pending_columns.to_vec(),
-                rows: batch_rows,
-            },
+        let control = ExecutionControl::new(runtime.resources, runtime.is_interrupted);
+        let batch = drain_accounted_batch(
+            pending_columns,
+            pending_rows,
+            pending_memory,
+            batch_size,
+            &control,
         )?;
-        *transaction_columns = result.rows.columns;
-        transaction_rows.extend(result.rows.rows);
+        let result = execute_transaction_call_controlled(runtime, transaction_clause, batch)?;
+        *transaction_columns = result.rows.columns.clone();
+        append_row_buffer(transaction_rows, transaction_memory, result.rows, &control)?;
         if result.broke {
-            transaction_rows.extend(failed_rows(
+            let failed = failed_rows(
                 pending_rows,
                 transaction_columns,
                 spec.status_alias.as_deref(),
                 transaction_status(false, false, None, None),
-            ));
-            pending_rows.clear();
+                &control,
+            )?;
+            append_row_buffer(transaction_rows, transaction_memory, failed, &control)?;
+            *pending_rows = Vec::new();
+            *pending_memory = Some(control.reserve(0)?);
             return Ok(true);
         }
     }
     Ok(false)
 }
+
+fn drain_accounted_batch(
+    columns: &[String],
+    pending: &mut Vec<BindingRow>,
+    memory: &mut Option<MemoryReservation>,
+    count: usize,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<RowSet> {
+    let bytes = pending[..count].iter().try_fold(0, |bytes, row| {
+        super::resources::checked_add(
+            bytes,
+            expression::binding_row_bytes_controlled(row, Some(control))?,
+        )
+    })?;
+    let pending_memory = memory
+        .as_mut()
+        .ok_or_else(|| QueryError::internal("pending CSV batch missing reservation"))?;
+    // Draining retains the source Vec capacity while allocating a destination.
+    pending_memory.grow(super::resources::allocation_bytes::<BindingRow>(count)?)?;
+    let batch_memory = pending_memory.split(bytes)?;
+    let rows = pending.drain(..count).collect::<Vec<_>>();
+    Ok(RowSet {
+        columns: columns.to_vec(),
+        rows,
+        memory: Some(batch_memory),
+    })
+}
+
+#[cfg(test)]
+mod tests;

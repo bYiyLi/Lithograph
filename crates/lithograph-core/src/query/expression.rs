@@ -1357,7 +1357,10 @@ fn binary_operator(text: &str) -> QueryResult<BinaryOp> {
     }
 }
 
+mod binding_copy;
+mod binding_match;
 mod comparison;
+mod controlled;
 mod evaluate;
 mod lazy;
 mod operators;
@@ -1365,10 +1368,30 @@ mod properties;
 mod scoped;
 mod transform;
 
-pub(crate) use evaluate::{
-    binding_from_value, binding_value_with_access, count_contributes_with_access,
-    evaluate_with_access, evaluate_with_aliases_and_access, is_count, predicate, value_to_string,
+pub(crate) use controlled::value_bytes_with_control;
+pub(crate) use controlled::{clone_map_controlled, clone_string_controlled};
+pub(crate) use controlled::{
+    clone_node_unreserved_controlled, clone_relationship_unreserved_controlled,
+    clone_value_unreserved_controlled,
 };
-pub(crate) use lazy::evaluate_lazy_expression;
-pub(crate) use scoped::evaluate_scoped_expression;
+pub(crate) use evaluate::{EvaluatedValue, binding_value_with_memory};
+pub(crate) use evaluate::{binding_from_value_controlled, is_count, predicate, value_to_string};
+pub(crate) use evaluate::{
+    count_contributes_with_access_control, evaluate_with_access_control,
+    evaluate_with_aliases_and_access_control,
+};
+pub(crate) use lazy::evaluate_lazy_expression_with_memory;
+pub(crate) use operators::{
+    cypher_compare_controlled, cypher_equals_controlled, cypher_order_compare_controlled,
+};
+pub(crate) use scoped::evaluate_scoped_expression_with_memory;
+
+mod binding_memory;
+pub(crate) use binding_copy::{
+    clone_binding_row_unreserved_controlled, clone_binding_value_unreserved_controlled,
+    clone_load_csv_context_controlled,
+};
+pub(crate) use binding_memory::{
+    binding_row_bytes, binding_row_bytes_controlled, binding_value_bytes,
+};
 pub(crate) use transform::transform_expression;

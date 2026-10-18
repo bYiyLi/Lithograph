@@ -1,12 +1,5 @@
 use super::*;
 
-pub(super) fn require_session(
-    connection: &Connection,
-    id: &str,
-) -> QueryResult<MergeSessionRecord> {
-    storage::load_merge_session(connection, id)?.ok_or_else(|| session_not_found(id))
-}
-
 pub(super) fn ensure_revision(session: &MergeSessionRecord, expected: i64) -> QueryResult<()> {
     if session.revision == expected {
         Ok(())
@@ -203,6 +196,7 @@ pub(super) fn commit_identity(commit: HashId) -> String {
     format!("commit/{}", commit.to_hex())
 }
 
+#[cfg(test)]
 pub(super) fn logical_state_identity(slots: &BTreeMap<String, Value>) -> QueryResult<String> {
     let payload = cypher::encode_json(&Value::Map(slots.clone()));
     let bytes = serde_json::to_vec(&payload).map_err(|error| {
@@ -211,6 +205,7 @@ pub(super) fn logical_state_identity(slots: &BTreeMap<String, Value>) -> QueryRe
     Ok(format!("state/{}", blake3::hash(&bytes).to_hex()))
 }
 
+#[cfg(test)]
 pub(super) fn conflict_id(
     base_identity: &str,
     ours_identity: &str,
@@ -233,6 +228,7 @@ pub(super) fn conflict_id(
     HashId::from_bytes(*blake3::hash(&bytes).as_bytes())
 }
 
+#[cfg(test)]
 fn optional_hash_value(value: Option<&Value>) -> Value {
     Value::Map(BTreeMap::from([
         ("present".to_owned(), Value::Boolean(value.is_some())),

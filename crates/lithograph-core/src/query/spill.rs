@@ -3,13 +3,21 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 
 use crate::cypher::{self, Value};
 use crate::storage::RelationshipRecord;
 
 use super::expression::{BindingRow, BindingValue, LoadCsvContext};
+use super::resources::{
+    ExecutionControl, MemoryReservation, QueryResources, allocation_bytes, checked_add,
+    checked_mul, owned_row_bytes_controlled, row_bytes_controlled,
+};
 use super::{QueryError, QueryErrorKind, QueryResult};
+
+mod codec;
+pub(super) use codec::distinct_row_key;
+use codec::{decode_binding_row, decode_row, encode_binding_row, encode_row};
 
 const SORT_RUN_ROWS: usize = 1_024;
 static NEXT_SPILL_ID: AtomicU64 = AtomicU64::new(1);
@@ -29,23 +37,41 @@ pub(super) struct SpillOutput {
 
 #[derive(Debug)]
 pub(super) struct RowSpill {
+    resources: QueryResources,
     table: String,
     sequence: i64,
 }
 
 impl RowSpill {
-    pub(super) fn create(connection: &Connection) -> QueryResult<Self> {
+    pub(super) fn create_with_resources(
+        connection: &Connection,
+        resources: QueryResources,
+    ) -> QueryResult<Self> {
         let table = spill_table("rows");
         create_output_table(connection, &table, false)?;
-        Ok(Self { table, sequence: 0 })
+        Ok(Self {
+            resources,
+            table,
+            sequence: 0,
+        })
     }
 
-    pub(super) fn push(&mut self, connection: &Connection, row: &[Value]) -> QueryResult<()> {
+    pub(super) fn push(
+        &mut self,
+        connection: &Connection,
+        row: &[Value],
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<()> {
+        control.check()?;
         let sql = format!(
             "INSERT INTO temp.{}(seq,row_json) VALUES(?1,?2)",
             self.table
         );
-        connection.execute(&sql, params![self.sequence, encode_row(row)?])?;
+        let _encoding = self
+            .resources
+            .reserve(serialization_bytes(row_bytes_controlled(row, control)?)?)?;
+        connection.execute(&sql, params![self.sequence, encode_row(row, control)?])?;
+        control.check()?;
         self.sequence = self.sequence.saturating_add(1);
         Ok(())
     }
@@ -54,9 +80,11 @@ impl RowSpill {
         &mut self,
         connection: &Connection,
         rows: &[Vec<Value>],
+        control: &ExecutionControl<'_>,
     ) -> QueryResult<()> {
         for row in rows {
-            self.push(connection, row)?;
+            control.work(1)?;
+            self.push(connection, row, control)?;
         }
         Ok(())
     }
@@ -72,6 +100,7 @@ impl RowSpill {
 
 #[derive(Debug)]
 pub(super) struct BindingSpill {
+    resources: QueryResources,
     table: String,
     sequence: i64,
 }
@@ -85,14 +114,16 @@ pub(super) struct SpilledBindings {
 }
 
 impl SpilledBindings {
-    pub(super) fn from_rows(
+    pub(super) fn from_rows_with_resources(
         connection: &Connection,
         columns: Vec<String>,
         rows: &[BindingRow],
+        resources: QueryResources,
+        control: &ExecutionControl<'_>,
     ) -> QueryResult<Self> {
         Ok(Self {
             columns,
-            spill: BindingSpill::from_rows(connection, rows)?,
+            spill: BindingSpill::from_rows_with_resources(connection, rows, resources, control)?,
         })
     }
 
@@ -104,24 +135,38 @@ impl SpilledBindings {
         self,
         connection: &Connection,
         columns: Vec<String>,
+        control: &ExecutionControl<'_>,
         mut transform: impl FnMut(&[String], Vec<BindingRow>, &mut BindingSpill) -> QueryResult<()>,
     ) -> QueryResult<Self> {
-        let mut output = BindingSpill::create(connection)?;
-        self.spill
-            .for_each_batch(connection, BINDING_SPILL_BATCH_ROWS, |rows| {
-                transform(&self.columns, rows, &mut output)
-            })?;
-        self.spill.abort(connection)?;
+        let mut output =
+            BindingSpill::create_with_resources(connection, self.spill.resources.clone())?;
+        let result =
+            self.spill
+                .for_each_batch(connection, BINDING_SPILL_BATCH_ROWS, control, |rows| {
+                    transform(&self.columns, rows, &mut output)
+                });
+        if let Err(error) = result {
+            let _ = self.spill.abort(connection);
+            let _ = output.abort(connection);
+            return Err(error);
+        }
+        if let Err(error) = self.spill.abort(connection) {
+            let _ = output.abort(connection);
+            return Err(error);
+        }
         Ok(Self::with_spill(columns, output))
     }
 
-    pub(super) fn into_rows(
+    pub(super) fn into_rows_reserved(
         self,
         connection: &Connection,
-    ) -> QueryResult<(Vec<String>, Vec<BindingRow>)> {
-        let rows = self.spill.collect(connection)?;
-        self.spill.abort(connection)?;
-        Ok((self.columns, rows))
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<(Vec<String>, Vec<BindingRow>, MemoryReservation)> {
+        let result = self.spill.collect_reserved(connection, control);
+        let cleanup = self.spill.abort(connection);
+        let (rows, memory) = result?;
+        cleanup?;
+        Ok((self.columns, rows, memory))
     }
 }
 
@@ -130,27 +175,55 @@ impl BindingSpill {
         usize::try_from(self.sequence).unwrap_or(usize::MAX)
     }
 
-    pub(super) fn create(connection: &Connection) -> QueryResult<Self> {
+    pub(super) fn create_with_resources(
+        connection: &Connection,
+        resources: QueryResources,
+    ) -> QueryResult<Self> {
         let table = spill_table("bindings");
         connection.execute_batch(&format!(
             "CREATE TEMP TABLE temp.{table}(seq INTEGER PRIMARY KEY,row_json TEXT NOT NULL)"
         ))?;
-        Ok(Self { table, sequence: 0 })
+        Ok(Self {
+            resources,
+            table,
+            sequence: 0,
+        })
     }
 
-    pub(super) fn push(&mut self, connection: &Connection, row: &BindingRow) -> QueryResult<()> {
+    pub(super) fn push(
+        &mut self,
+        connection: &Connection,
+        row: &BindingRow,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<()> {
+        control.check()?;
         let sql = format!(
             "INSERT INTO temp.{}(seq,row_json) VALUES(?1,?2)",
             self.table
         );
-        connection.execute(&sql, params![self.sequence, encode_binding_row(row)?])?;
+        let _encoding = self.resources.reserve(serialization_bytes(
+            super::expression::binding_row_bytes_controlled(row, Some(control))?,
+        )?)?;
+        connection.execute(
+            &sql,
+            params![self.sequence, encode_binding_row(row, control)?],
+        )?;
+        control.check()?;
         self.sequence = self.sequence.saturating_add(1);
         Ok(())
     }
 
-    pub(super) fn from_rows(connection: &Connection, rows: &[BindingRow]) -> QueryResult<Self> {
-        let mut spill = Self::create(connection)?;
-        spill.push_all(connection, rows)?;
+    pub(super) fn from_rows_with_resources(
+        connection: &Connection,
+        rows: &[BindingRow],
+        resources: QueryResources,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<Self> {
+        let mut spill = Self::create_with_resources(connection, resources)?;
+        if let Err(error) = spill.push_all(connection, rows, control) {
+            let _ = spill.abort(connection);
+            return Err(error);
+        }
         Ok(spill)
     }
 
@@ -158,9 +231,11 @@ impl BindingSpill {
         &mut self,
         connection: &Connection,
         rows: &[BindingRow],
+        control: &ExecutionControl<'_>,
     ) -> QueryResult<()> {
         for row in rows {
-            self.push(connection, row)?;
+            control.work(1)?;
+            self.push(connection, row, control)?;
         }
         Ok(())
     }
@@ -169,25 +244,32 @@ impl BindingSpill {
         &self,
         connection: &Connection,
         limit: usize,
+        control: &ExecutionControl<'_>,
         mut apply: impl FnMut(Vec<BindingRow>) -> QueryResult<()>,
     ) -> QueryResult<()> {
         let mut after = -1;
         loop {
-            let batch = self.read_batch(connection, after, limit)?;
+            let (batch, _memory) = self.read_batch_reserved(connection, after, limit, control)?;
             if batch.is_empty() {
                 return Ok(());
             }
             after = batch.last().map_or(after, |(sequence, _)| *sequence);
+            // Iterator collection may reuse the tuple buffer, but correctness
+            // must also cover implementations that allocate a second Vec.
+            let _projection = self
+                .resources
+                .reserve(allocation_bytes::<BindingRow>(batch.len())?)?;
             apply(batch.into_iter().map(|(_, row)| row).collect())?;
         }
     }
 
-    pub(super) fn read_batch(
+    pub(super) fn read_batch_reserved(
         &self,
         connection: &Connection,
         after: i64,
         limit: usize,
-    ) -> QueryResult<Vec<(i64, BindingRow)>> {
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<(Vec<(i64, BindingRow)>, MemoryReservation)> {
         let limit = i64::try_from(limit)
             .map_err(|_| QueryError::internal("binding spill batch size exceeds INTEGER64"))?;
         let sql = format!(
@@ -195,21 +277,40 @@ impl BindingSpill {
             self.table
         );
         let mut statement = connection.prepare(&sql)?;
-        let rows = statement.query_map(params![after, limit], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-        })?;
-        rows.map(|row| {
-            let (seq, encoded) = row?;
-            Ok((seq, decode_binding_row(&encoded)?))
-        })
-        .collect()
+        let mut rows = statement.query(params![after, limit])?;
+        let mut memory = self.resources.reserve(0)?;
+        let mut output = Vec::new();
+        while let Some(row) = rows.next()? {
+            control.work(1)?;
+            let seq = row.get::<_, i64>(0)?;
+            let (decoded, decoded_memory) =
+                decode_binding_record(row, 1, &self.resources, control)?;
+            reserve_vec_slot(&mut output, &mut memory)?;
+            memory.merge(decoded_memory)?;
+            output.push((seq, decoded));
+        }
+        Ok((output, memory))
     }
 
-    pub(super) fn collect(&self, connection: &Connection) -> QueryResult<Vec<BindingRow>> {
+    pub(super) fn collect_reserved(
+        &self,
+        connection: &Connection,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<(Vec<BindingRow>, MemoryReservation)> {
         let sql = format!("SELECT row_json FROM temp.{} ORDER BY seq", self.table);
         let mut statement = connection.prepare(&sql)?;
-        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-        rows.map(|row| decode_binding_row(&row?)).collect()
+        let mut rows = statement.query([])?;
+        let mut memory = self.resources.reserve(0)?;
+        let mut output = Vec::new();
+        while let Some(row) = rows.next()? {
+            control.work(1)?;
+            let (decoded, decoded_memory) =
+                decode_binding_record(row, 0, &self.resources, control)?;
+            reserve_vec_slot(&mut output, &mut memory)?;
+            memory.merge(decoded_memory)?;
+            output.push(decoded);
+        }
+        Ok((output, memory))
     }
 
     pub(super) fn abort(&self, connection: &Connection) -> QueryResult<()> {
@@ -219,20 +320,38 @@ impl BindingSpill {
 
 #[derive(Debug)]
 pub(super) struct DistinctSpill {
+    resources: QueryResources,
     table: String,
     sequence: i64,
 }
 
 impl DistinctSpill {
-    pub(super) fn create(connection: &Connection) -> QueryResult<Self> {
+    pub(super) fn create_with_resources(
+        connection: &Connection,
+        resources: QueryResources,
+    ) -> QueryResult<Self> {
         let table = spill_table("distinct");
         create_output_table(connection, &table, true)?;
-        Ok(Self { table, sequence: 0 })
+        Ok(Self {
+            resources,
+            table,
+            sequence: 0,
+        })
     }
 
-    pub(super) fn push(&mut self, connection: &Connection, row: &[Value]) -> QueryResult<()> {
-        let key = distinct_row_key(row)?;
-        let encoded = encode_row(row)?;
+    pub(super) fn push(
+        &mut self,
+        connection: &Connection,
+        row: &[Value],
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<()> {
+        // Both key and row JSON are live during the SQLite bind.
+        let _encoding = self.resources.reserve(checked_mul(
+            serialization_bytes(row_bytes_controlled(row, control)?)?,
+            2,
+        )?)?;
+        let key = distinct_row_key(row, Some(control))?;
+        let encoded = encode_row(row, control)?;
         let sql = format!(
             "INSERT OR IGNORE INTO temp.{}(seq,row_key,row_json) VALUES(?1,?2,?3)",
             self.table
@@ -240,6 +359,7 @@ impl DistinctSpill {
         if connection.execute(&sql, params![self.sequence, key, encoded])? == 1 {
             self.sequence += 1;
         }
+        control.check()?;
         Ok(())
     }
 
@@ -258,6 +378,7 @@ impl DistinctSpill {
 
 #[derive(Debug)]
 pub(super) struct SortSpill {
+    resources: QueryResources,
     runs: String,
     output: String,
     seen: Option<String>,
@@ -265,14 +386,19 @@ pub(super) struct SortSpill {
     chunk: Vec<SortRecord>,
     ordinal: u64,
     run: i64,
+    chunk_memory: MemoryReservation,
+    scratch_memory: MemoryReservation,
 }
 
 impl SortSpill {
-    pub(super) fn create(
+    pub(super) fn create_with_resources(
         connection: &Connection,
         distinct: bool,
         directions: Vec<bool>,
+        resources: QueryResources,
     ) -> QueryResult<Self> {
+        let chunk_memory = resources.reserve(0)?;
+        let scratch_memory = resources.reserve(0)?;
         let runs = spill_table("runs");
         let output = spill_table("sorted");
         create_runs_table(connection, &runs)?;
@@ -289,11 +415,14 @@ impl SortSpill {
             }
         };
         Ok(Self {
+            resources,
+            chunk_memory,
+            scratch_memory,
             runs,
             output,
             seen,
             directions,
-            chunk: Vec::with_capacity(SORT_RUN_ROWS),
+            chunk: Vec::new(),
             ordinal: 0,
             run: 0,
         })
@@ -304,18 +433,53 @@ impl SortSpill {
         connection: &Connection,
         row: Vec<Value>,
         keys: Vec<Value>,
+        control: &ExecutionControl<'_>,
     ) -> QueryResult<()> {
-        if !accept_sort_row(connection, self.seen.as_deref(), &row)? {
+        let bytes = sort_payload_bytes(&row, &keys, control)?;
+        let memory = match self.resources.reserve(bytes) {
+            Ok(memory) => memory,
+            Err(error) if !self.chunk.is_empty() => {
+                self.flush(connection, control)?;
+                self.resources.reserve(bytes).map_err(|_| error)?
+            }
+            Err(error) => return Err(error),
+        };
+        let empty = self.resources.reserve(0)?;
+        self.push_reserved(connection, row, keys, memory, empty, control)
+    }
+
+    pub(super) fn push_reserved(
+        &mut self,
+        connection: &Connection,
+        row: Vec<Value>,
+        keys: Vec<Value>,
+        mut row_memory: MemoryReservation,
+        key_memory: MemoryReservation,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<()> {
+        row_memory.merge(key_memory)?;
+        let bytes = sort_payload_bytes(&row, &keys, control)?;
+        row_memory.resize(bytes)?;
+        let memory = row_memory;
+        if let Err(error) = self.reserve_record_storage(bytes) {
+            if self.chunk.is_empty() {
+                return Err(error);
+            }
+            self.flush(connection, control)?;
+            self.reserve_record_storage(bytes)?;
+        }
+        if !accept_sort_row(connection, self.seen.as_deref(), &row, control)? {
             return Ok(());
         }
         self.chunk.push(SortRecord {
+            _memory: memory,
             row,
             keys,
             ordinal: self.ordinal,
         });
         self.ordinal = self.ordinal.saturating_add(1);
-        if self.chunk.len() == SORT_RUN_ROWS {
-            self.flush(connection)?;
+        if self.chunk.len() == SORT_RUN_ROWS || self.needs_producer_headroom(bytes)? {
+            self.flush(connection, control)?;
         }
         Ok(())
     }
@@ -323,14 +487,18 @@ impl SortSpill {
     pub(super) fn finish(
         &mut self,
         connection: &Connection,
-        is_interrupted: &dyn Fn() -> bool,
+        control: &ExecutionControl<'_>,
     ) -> QueryResult<usize> {
         if !self.chunk.is_empty() {
-            self.flush(connection)?;
+            self.flush(connection, control)?;
+        } else {
+            self.chunk = Vec::new();
+            self.chunk_memory.resize(0)?;
+            self.scratch_memory.resize(0)?;
         }
         merge_sort_runs(
             connection,
-            is_interrupted,
+            control,
             &self.runs,
             &self.output,
             self.run,
@@ -370,14 +538,54 @@ impl SortSpill {
         }
     }
 
-    fn flush(&mut self, connection: &Connection) -> QueryResult<()> {
+    fn needs_producer_headroom(&self, bytes: u64) -> QueryResult<bool> {
+        let Some(limit) = self.resources.limit() else {
+            return Ok(false);
+        };
+        // The producer materializes the next binding, projections and aliases
+        // before push can react to pressure. Keep a conservative row working
+        // allowance free now, while this run still has scratch for flushing.
+        Ok(checked_add(self.resources.used(), serialization_bytes(bytes)?)? > limit)
+    }
+
+    fn reserve_record_storage(&mut self, bytes: u64) -> QueryResult<()> {
+        // One shared scratch allowance is sufficient: only the current record
+        // is encoded at a time, while row JSON and key JSON coexist.
+        let scratch = checked_mul(serialization_bytes(bytes)?, 2)?;
+        if scratch > self.scratch_memory.bytes() {
+            self.scratch_memory.resize(scratch)?;
+        }
+        if self.chunk.len() == self.chunk.capacity() {
+            let additional = self
+                .chunk
+                .capacity()
+                .max(1)
+                .min(SORT_RUN_ROWS - self.chunk.len());
+            self.chunk_memory
+                .grow(allocation_bytes::<SortRecord>(additional)?)?;
+            self.chunk.try_reserve_exact(additional).map_err(|_| {
+                super::resources::memory_error("unable to allocate sort run buffer")
+            })?;
+        }
+        Ok(())
+    }
+
+    fn flush(
+        &mut self,
+        connection: &Connection,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<()> {
         flush_sort_run(
             connection,
             &self.runs,
             self.run,
             &mut self.chunk,
             &self.directions,
+            control,
         )?;
+        self.chunk = Vec::new();
+        self.chunk_memory.resize(0)?;
+        self.scratch_memory.resize(0)?;
         self.run += 1;
         Ok(())
     }
@@ -388,6 +596,7 @@ struct SortRecord {
     row: Vec<Value>,
     keys: Vec<Value>,
     ordinal: u64,
+    _memory: MemoryReservation,
 }
 
 #[derive(Debug)]
@@ -395,8 +604,21 @@ struct RunHead {
     run: i64,
     seq: i64,
     row_json: String,
+    key_json: String,
     keys: Vec<Value>,
     ordinal: u64,
+    _memory: MemoryReservation,
+}
+
+fn sort_payload_bytes(
+    row: &Vec<Value>,
+    keys: &Vec<Value>,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<u64> {
+    checked_add(
+        owned_row_bytes_controlled(row, control)?,
+        owned_row_bytes_controlled(keys, control)?,
+    )
 }
 
 fn spill_table(kind: &str) -> String {
@@ -439,8 +661,11 @@ fn accept_sort_row(
     connection: &Connection,
     seen: Option<&str>,
     row: &[Value],
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<bool> {
-    seen.map_or(Ok(true), |table| insert_seen(connection, table, row))
+    seen.map_or(Ok(true), |table| {
+        insert_seen(connection, table, row, control)
+    })
 }
 
 fn drop_optional_temp_table(connection: &Connection, table: Option<&str>) -> QueryResult<()> {
@@ -459,329 +684,139 @@ pub(super) fn drop_temp_table(connection: &Connection, table: &str) -> QueryResu
     Ok(())
 }
 
-fn encode_row(row: &[Value]) -> QueryResult<String> {
-    let values = row.iter().map(cypher::encode_json).collect::<Vec<_>>();
-    serde_json::to_string(&values)
-        .map_err(|error| QueryError::internal(format!("failed to encode spill row: {error}")))
+// Includes the transient JSON DOM, escaped output and String growth. These are
+// conservative working-memory allowances, rather than a serialized-size quota.
+fn serialization_bytes(bytes: u64) -> QueryResult<u64> {
+    checked_add(checked_mul(bytes, 16)?, 1024)
 }
 
-fn encode_binding_row(row: &BindingRow) -> QueryResult<String> {
-    use serde_json::{Map, Value as JsonValue, json};
-
-    let values = row
-        .values
-        .iter()
-        .map(|(name, value)| Ok((name.clone(), encode_binding_value(value)?)))
-        .collect::<QueryResult<Map<String, JsonValue>>>()?;
-    let load_csv_context = row.load_csv_context.as_ref().map(|context| {
-        json!({
-            "file": context.file,
-            "line": context.line,
-        })
-    });
-    serde_json::to_string(&json!({
-        "values": values,
-        "usedRelationships": row.used_relationships,
-        "order": row.order,
-        "loadCsvContext": load_csv_context,
-    }))
-    .map_err(|error| QueryError::internal(format!("failed to encode binding spill row: {error}")))
-}
-
-fn encode_binding_value(value: &BindingValue) -> QueryResult<serde_json::Value> {
-    use serde_json::json;
-
-    Ok(match value {
-        BindingValue::Node(id) => json!({"kind":"node","id":id}),
-        BindingValue::Relationship(record) => {
-            json!({"kind":"relationship","record":relationship_json(*record)})
-        }
-        BindingValue::Path {
-            nodes,
-            relationships,
-        } => json!({
-            "kind":"path",
-            "nodes":nodes,
-            "relationships":relationships.iter().copied().map(relationship_json).collect::<Vec<_>>(),
-        }),
-        BindingValue::Scalar(value) => json!({"kind":"scalar","value":cypher::encode_json(value)}),
-        BindingValue::Null => json!({"kind":"null"}),
-    })
-}
-
-fn relationship_json(record: RelationshipRecord) -> serde_json::Value {
-    serde_json::json!([record.id, record.source, record.type_id, record.target])
-}
-
-fn decode_binding_row(text: &str) -> QueryResult<BindingRow> {
-    let value: serde_json::Value = serde_json::from_str(text).map_err(|error| {
-        QueryError::internal(format!("failed to decode binding spill row: {error}"))
-    })?;
-    let object = value
-        .as_object()
-        .ok_or_else(|| QueryError::internal("binding spill row is not a JSON object"))?;
-    let values = object
-        .get("values")
-        .and_then(serde_json::Value::as_object)
-        .ok_or_else(|| QueryError::internal("binding spill row has no values object"))?
-        .iter()
-        .map(|(name, value)| Ok((name.clone(), decode_binding_value(value)?)))
-        .collect::<QueryResult<BTreeMap<_, _>>>()?;
-    let used_relationships = json_i64_array(object.get("usedRelationships"), "usedRelationships")?
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-    let order = object
-        .get("order")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| QueryError::internal("binding spill row has no order array"))?
-        .iter()
-        .map(|value| {
-            value
-                .as_str()
-                .map(ToOwned::to_owned)
-                .ok_or_else(|| QueryError::internal("binding spill order entry is not a String"))
-        })
-        .collect::<QueryResult<Vec<_>>>()?;
-    let load_csv_context = decode_load_csv_context(object.get("loadCsvContext"))?;
-    Ok(BindingRow {
-        values,
-        used_relationships,
-        order,
-        load_csv_context,
-    })
-}
-
-fn decode_load_csv_context(
-    value: Option<&serde_json::Value>,
-) -> QueryResult<Option<LoadCsvContext>> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    if value.is_null() {
-        return Ok(None);
-    }
-    let object = value
-        .as_object()
-        .ok_or_else(|| QueryError::internal("binding spill LOAD CSV context is not an object"))?;
-    let file = match object.get("file") {
-        Some(value) if value.is_null() => None,
-        Some(value) => Some(
-            value
-                .as_str()
-                .ok_or_else(|| {
-                    QueryError::internal("binding spill LOAD CSV context file is not a String")
-                })?
-                .to_owned(),
-        ),
-        None => {
-            return Err(QueryError::internal(
-                "binding spill LOAD CSV context has no file",
-            ));
-        }
-    };
-    let line = match object.get("line") {
-        Some(value) if value.is_null() => None,
-        Some(value) => Some(value.as_i64().ok_or_else(|| {
-            QueryError::internal("binding spill LOAD CSV context line is not INTEGER64")
-        })?),
-        None => {
-            return Err(QueryError::internal(
-                "binding spill LOAD CSV context has no line",
-            ));
-        }
-    };
-    Ok(Some(LoadCsvContext { file, line }))
-}
-
-fn decode_binding_value(value: &serde_json::Value) -> QueryResult<BindingValue> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| QueryError::internal("binding spill value is not a JSON object"))?;
-    let kind = object
-        .get("kind")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| QueryError::internal("binding spill value has no kind"))?;
-    match kind {
-        "node" => Ok(BindingValue::Node(json_i64(object.get("id"), "node id")?)),
-        "relationship" => Ok(BindingValue::Relationship(decode_relationship_json(
-            object.get("record"),
-        )?)),
-        "path" => Ok(BindingValue::Path {
-            nodes: json_i64_array(object.get("nodes"), "path nodes")?,
-            relationships: object
-                .get("relationships")
-                .and_then(serde_json::Value::as_array)
-                .ok_or_else(|| QueryError::internal("binding spill path has no relationships"))?
-                .iter()
-                .map(|value| decode_relationship_json(Some(value)))
-                .collect::<QueryResult<Vec<_>>>()?,
-        }),
-        "scalar" => object
-            .get("value")
-            .ok_or_else(|| QueryError::internal("binding spill scalar has no value"))
-            .and_then(|value| cypher::decode_json(value).map_err(Into::into))
-            .map(BindingValue::Scalar),
-        "null" => Ok(BindingValue::Null),
-        other => Err(QueryError::internal(format!(
-            "binding spill value has unknown kind {other:?}"
-        ))),
-    }
-}
-
-fn decode_relationship_json(value: Option<&serde_json::Value>) -> QueryResult<RelationshipRecord> {
-    let values = value
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| QueryError::internal("binding spill relationship is not an array"))?;
-    if values.len() != 4 {
-        return Err(QueryError::internal(
-            "binding spill relationship does not have four fields",
-        ));
-    }
-    Ok(RelationshipRecord {
-        id: json_i64(values.first(), "relationship id")?,
-        source: json_i64(values.get(1), "relationship source")?,
-        type_id: json_i64(values.get(2), "relationship type")?,
-        target: json_i64(values.get(3), "relationship target")?,
-    })
-}
-
-fn json_i64(value: Option<&serde_json::Value>, role: &str) -> QueryResult<i64> {
-    value
-        .and_then(serde_json::Value::as_i64)
-        .ok_or_else(|| QueryError::internal(format!("binding spill {role} is not INTEGER64")))
-}
-
-fn json_i64_array(value: Option<&serde_json::Value>, role: &str) -> QueryResult<Vec<i64>> {
-    value
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| QueryError::internal(format!("binding spill {role} is not an array")))?
-        .iter()
-        .map(|value| json_i64(Some(value), role))
-        .collect()
-}
-
-fn decode_row(text: &str) -> QueryResult<Vec<Value>> {
-    let value: serde_json::Value = serde_json::from_str(text)
-        .map_err(|error| QueryError::internal(format!("failed to decode spill row: {error}")))?;
-    let array = value
-        .as_array()
-        .ok_or_else(|| QueryError::internal("spill row is not a JSON array"))?;
-    array
-        .iter()
-        .map(cypher::decode_json)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(Into::into)
-}
-
-pub(super) fn distinct_row_key(row: &[Value]) -> QueryResult<String> {
-    let key = row
-        .iter()
-        .map(distinct_value_key)
-        .collect::<QueryResult<Vec<_>>>()?;
-    serde_json::to_string(&key)
-        .map_err(|error| QueryError::internal(format!("failed to encode DISTINCT key: {error}")))
-}
-
-fn distinct_value_key(value: &Value) -> QueryResult<serde_json::Value> {
-    use serde_json::json;
-
-    match value {
-        Value::Null => Ok(json!(["null"])),
-        Value::Boolean(value) => Ok(json!(["boolean", value])),
-        Value::Integer(value) => Ok(json!(["number", format!("i:{value}")])),
-        Value::Float(value) => Ok(json!(["number", float_distinct_key(*value)])),
-        Value::String(value) => Ok(json!(["string", value])),
-        Value::List(values) => Ok(json!([
-            "list",
-            values
-                .iter()
-                .map(distinct_value_key)
-                .collect::<QueryResult<Vec<_>>>()?
-        ])),
-        Value::Map(values) => {
-            let entries = values
-                .iter()
-                .map(|(key, value)| Ok((key, distinct_value_key(value)?)))
-                .collect::<QueryResult<Vec<_>>>()?;
-            Ok(json!(["map", entries]))
-        }
-        Value::Node(value) => Ok(json!(["node", value.element_id])),
-        Value::Relationship(value) => Ok(json!(["relationship", value.element_id])),
-        Value::Path(value) => Ok(json!([
-            "path",
-            value
-                .nodes
-                .iter()
-                .map(|node| node.element_id.as_str())
-                .collect::<Vec<_>>(),
-            value
-                .relationships
-                .iter()
-                .map(|relationship| relationship.element_id.as_str())
-                .collect::<Vec<_>>()
-        ])),
-        _ => Ok(json!([
-            "value",
-            canonicalize_json_numbers(cypher::encode_json(value))
-        ])),
-    }
-}
-
-fn float_distinct_key(value: f64) -> String {
-    if value.is_nan() {
-        return "nan".to_owned();
-    }
-    if value.is_finite() && value.fract() == 0.0 {
-        const I64_UPPER_EXCLUSIVE: f64 = 9_223_372_036_854_775_808.0;
-        const I64_LOWER_INCLUSIVE: f64 = -9_223_372_036_854_775_808.0;
-        if (I64_LOWER_INCLUSIVE..I64_UPPER_EXCLUSIVE).contains(&value) {
-            return format!("i:{}", value as i64);
+fn decoding_bytes(encoded: &str, control: &ExecutionControl<'_>) -> QueryResult<u64> {
+    // Scan borrowed SQLite text before constructing either DOM. Count logical
+    // tokens separately from text bytes: compact numeric arrays expand heavily,
+    // while one large String does not need a per-byte Value allowance.
+    let mut tokens = 0_u64;
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut atom = false;
+    for byte in encoded.bytes() {
+        control.work(1)?;
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+            }
+        } else {
+            match byte {
+                b'"' => {
+                    tokens = checked_add(tokens, 1)?;
+                    quoted = true;
+                    atom = false;
+                }
+                b'[' | b'{' => {
+                    tokens = checked_add(tokens, 1)?;
+                    atom = false;
+                }
+                b']' | b'}' | b',' | b':' => {
+                    atom = false;
+                }
+                byte if byte.is_ascii_whitespace() => {
+                    atom = false;
+                }
+                _ if !atom => {
+                    tokens = checked_add(tokens, 1)?;
+                    atom = true;
+                }
+                _ => {}
+            }
         }
     }
-    format!("f:{:016x}", value.to_bits())
+    decoding_capacity_bytes(tokens, encoded.len())
 }
 
-fn canonicalize_json_numbers(value: serde_json::Value) -> serde_json::Value {
-    use serde_json::{Value as JsonValue, json};
+fn decoding_capacity_bytes(tokens: u64, bytes: usize) -> QueryResult<u64> {
+    // Per-token allowance covers both Value representations, copied map keys,
+    // BTree nodes and growth slack; four times raw bytes covers text copies.
+    checked_add(
+        checked_add(checked_mul(tokens, 512)?, checked_mul(bytes as u64, 4)?)?,
+        1024,
+    )
+}
 
-    match value {
-        JsonValue::Number(number) => number.as_f64().map_or(
-            JsonValue::Number(number),
-            |value| json!({"$number": float_distinct_key(value)}),
-        ),
-        JsonValue::Array(values) => {
-            JsonValue::Array(values.into_iter().map(canonicalize_json_numbers).collect())
-        }
-        JsonValue::Object(values) => JsonValue::Object(
-            values
-                .into_iter()
-                .map(|(key, value)| (key, canonicalize_json_numbers(value)))
-                .collect(),
-        ),
-        value => value,
+fn binding_row_bytes(row: &BindingRow, control: &ExecutionControl<'_>) -> QueryResult<u64> {
+    super::expression::binding_row_bytes_controlled(row, Some(control))
+}
+
+fn sqlite_text<'a>(row: &'a rusqlite::Row<'_>, index: usize) -> QueryResult<&'a str> {
+    row.get_ref(index)?
+        .as_str()
+        .map_err(|error| QueryError::internal(format!("spill column is not TEXT: {error}")))
+}
+
+fn decode_binding_record(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+    resources: &QueryResources,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<(BindingRow, MemoryReservation)> {
+    let encoded = sqlite_text(row, index)?;
+    let mut memory = resources.reserve(decoding_bytes(encoded, control)?)?;
+    let decoded = decode_binding_row(encoded, control)?;
+    memory.resize(binding_row_bytes(&decoded, control)?)?;
+    Ok((decoded, memory))
+}
+
+fn reserve_vec_slot<T>(values: &mut Vec<T>, memory: &mut MemoryReservation) -> QueryResult<()> {
+    if values.len() == values.capacity() {
+        let desired = values
+            .capacity()
+            .max(2)
+            .checked_mul(2)
+            .ok_or_else(|| super::resources::memory_error("spill buffer capacity overflow"))?;
+        memory.grow(allocation_bytes::<T>(desired - values.capacity())?)?;
+        values
+            .try_reserve_exact(desired - values.len())
+            .map_err(|_| super::resources::memory_error("unable to allocate spill read buffer"))?;
     }
+    Ok(())
 }
 
-fn insert_seen(connection: &Connection, table: &str, row: &[Value]) -> QueryResult<bool> {
-    let key = distinct_row_key(row)?;
+fn insert_seen(
+    connection: &Connection,
+    table: &str,
+    row: &[Value],
+    control: &ExecutionControl<'_>,
+) -> QueryResult<bool> {
+    let key = distinct_row_key(row, Some(control))?;
     let sql = format!("INSERT OR IGNORE INTO temp.{table}(row_key) VALUES(?1)");
     Ok(connection.execute(&sql, [key])? == 1)
 }
 
-pub(super) fn read_output_row(
+pub(super) fn read_output_row_with_resources(
     connection: &Connection,
     table: &str,
     after: i64,
-) -> QueryResult<Option<(i64, Vec<Value>)>> {
+    control: &ExecutionControl<'_>,
+) -> QueryResult<Option<(i64, Vec<Value>, MemoryReservation)>> {
+    let resources = control.resources();
+    control.check()?;
     let sql = format!("SELECT seq,row_json FROM temp.{table} WHERE seq > ?1 ORDER BY seq LIMIT 1");
-    let value = connection
-        .query_row(&sql, [after], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-        })
-        .optional()?;
-    value
-        .map(|(seq, row)| decode_row(&row).map(|row| (seq, row)))
-        .transpose()
+    let mut statement = connection.prepare(&sql)?;
+    let mut rows = statement.query([after])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    let seq = row.get::<_, i64>(0)?;
+    let encoded = row
+        .get_ref(1)?
+        .as_str()
+        .map_err(|error| QueryError::internal(format!("spill row is not TEXT: {error}")))?;
+    let mut memory = resources.reserve(decoding_bytes(encoded, control)?)?;
+    let decoded = decode_row(encoded, control)?;
+    memory.resize(owned_row_bytes_controlled(&decoded, control)?)?;
+    Ok(Some((seq, decoded, memory)))
 }
 
 fn flush_sort_run(
@@ -790,22 +825,27 @@ fn flush_sort_run(
     run: i64,
     chunk: &mut Vec<SortRecord>,
     directions: &[bool],
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<()> {
     for record in chunk.iter() {
+        control.work(1)?;
         for key in &record.keys {
-            let _ = cypher::cypher_order_compare(key, key)?;
+            let _ = super::expression::cypher_order_compare_controlled(key, key, Some(control))?;
         }
     }
     let failure = RefCell::new(None);
-    chunk.sort_by(
-        |left, right| match compare_sort_records(left, right, directions) {
+    chunk.sort_unstable_by(|left, right| {
+        if failure.borrow().is_some() {
+            return Ordering::Equal;
+        }
+        match compare_sort_records(left, right, directions, control) {
             Ok(ordering) => ordering,
             Err(error) => {
                 *failure.borrow_mut() = Some(error);
                 Ordering::Equal
             }
-        },
-    );
+        }
+    });
     if let Some(error) = failure.into_inner() {
         return Err(error);
     }
@@ -813,6 +853,7 @@ fn flush_sort_run(
         "INSERT INTO temp.{table}(run,seq,row_json,key_json,ordinal) VALUES(?1,?2,?3,?4,?5)"
     );
     for (seq, record) in chunk.iter().enumerate() {
+        control.check()?;
         let ordinal = i64::try_from(record.ordinal).map_err(|_| {
             QueryError::new(QueryErrorKind::Resource, "sort ordinal exceeds INTEGER64")
         })?;
@@ -821,8 +862,8 @@ fn flush_sort_run(
             params![
                 run,
                 seq as i64,
-                encode_row(&record.row)?,
-                encode_row(&record.keys)?,
+                encode_row(&record.row, control)?,
+                encode_row(&record.keys, control)?,
                 ordinal
             ],
         )?;
@@ -835,8 +876,9 @@ fn compare_sort_records(
     left: &SortRecord,
     right: &SortRecord,
     directions: &[bool],
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<Ordering> {
-    let ordering = compare_sort_keys(&left.keys, &right.keys, directions)?;
+    let ordering = compare_sort_keys(&left.keys, &right.keys, directions, control)?;
     Ok(if ordering == Ordering::Equal {
         left.ordinal.cmp(&right.ordinal)
     } else {
@@ -848,9 +890,11 @@ fn compare_sort_keys(
     left: &[Value],
     right: &[Value],
     directions: &[bool],
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<Ordering> {
     for (index, (left, right)) in left.iter().zip(right).enumerate() {
-        let mut ordering = cypher::cypher_order_compare(left, right)?;
+        let mut ordering =
+            super::expression::cypher_order_compare_controlled(left, right, Some(control))?;
         if directions.get(index).copied().unwrap_or(false) {
             ordering = ordering.reverse();
         }
@@ -863,27 +907,110 @@ fn compare_sort_keys(
 
 fn merge_sort_runs(
     connection: &Connection,
-    is_interrupted: &dyn Fn() -> bool,
+    control: &ExecutionControl<'_>,
     runs: &str,
     output: &str,
     run_count: i64,
     directions: &[bool],
 ) -> QueryResult<usize> {
-    let mut heads = (0..run_count)
-        .map(|run| load_run_head(connection, runs, run, 0))
-        .collect::<QueryResult<Vec<_>>>()?;
-    let insert = format!("INSERT INTO temp.{output}(seq,row_json) VALUES(?1,?2)");
-    let mut output_seq = 0_i64;
-    while let Some(index) = least_head_index(&heads, directions)? {
-        if is_interrupted() {
-            return Err(QueryError::interrupted());
+    // Byte-triggered runs can be numerous. Pairwise passes keep only two heads
+    // live, so flushing sooner never turns into an unbounded merge allocation.
+    let scratch = spill_table("merge");
+    create_runs_table(connection, &scratch)?;
+    let context = MergeContext {
+        connection,
+        control,
+        directions,
+    };
+    let result = (|| {
+        let mut source = runs;
+        let mut target = scratch.as_str();
+        let mut count = run_count;
+        while count > 2 {
+            connection.execute_batch(&format!("DELETE FROM temp.{target}"))?;
+            let mut next_run = 0;
+            let mut first = 0;
+            while first < count {
+                merge_run_pair(
+                    &context,
+                    source,
+                    first,
+                    (first + 2).min(count),
+                    target,
+                    Some(next_run),
+                )?;
+                first += 2;
+                next_run += 1;
+            }
+            std::mem::swap(&mut source, &mut target);
+            count = next_run;
         }
+        merge_run_pair(&context, source, 0, count, output, None)
+    })();
+    let cleanup = drop_temp_table(connection, &scratch);
+    match result {
+        Err(error) => Err(error),
+        Ok(count) => {
+            cleanup?;
+            Ok(count)
+        }
+    }
+}
+
+struct MergeContext<'a> {
+    connection: &'a Connection,
+    control: &'a ExecutionControl<'a>,
+    directions: &'a [bool],
+}
+
+fn merge_run_pair(
+    context: &MergeContext<'_>,
+    runs: &str,
+    first: i64,
+    end: i64,
+    output: &str,
+    output_run: Option<i64>,
+) -> QueryResult<usize> {
+    let connection = context.connection;
+    let control = context.control;
+    let directions = context.directions;
+    let mut heads = [None, None];
+    for (index, run) in (first..end).enumerate() {
+        control.check()?;
+        heads[index] = load_run_head(connection, runs, run, 0, control)?;
+    }
+    let insert = if output_run.is_some() {
+        format!(
+            "INSERT INTO temp.{output}(run,seq,row_json,key_json,ordinal) VALUES(?1,?2,?3,?4,?5)"
+        )
+    } else {
+        format!("INSERT INTO temp.{output}(seq,row_json) VALUES(?1,?2)")
+    };
+    let mut output_seq = 0_i64;
+    while let Some(index) = least_head_index(&heads, directions, control)? {
+        control.check()?;
         let head = heads[index]
             .take()
             .ok_or_else(|| QueryError::internal("selected empty sort run head"))?;
-        connection.execute(&insert, params![output_seq, head.row_json])?;
+        if let Some(run) = output_run {
+            connection.execute(
+                &insert,
+                params![
+                    run,
+                    output_seq,
+                    head.row_json,
+                    head.key_json,
+                    head.ordinal as i64
+                ],
+            )?;
+        } else {
+            connection.execute(&insert, params![output_seq, head.row_json])?;
+        }
         output_seq += 1;
-        heads[index] = load_run_head(connection, runs, head.run, head.seq + 1)?;
+        let run = head.run;
+        let seq = head.seq + 1;
+        drop(head);
+        heads[index] = load_run_head(connection, runs, run, seq, control)?;
     }
     usize::try_from(output_seq).map_err(|_| {
         QueryError::new(
@@ -893,7 +1020,11 @@ fn merge_sort_runs(
     })
 }
 
-fn least_head_index(heads: &[Option<RunHead>], directions: &[bool]) -> QueryResult<Option<usize>> {
+fn least_head_index(
+    heads: &[Option<RunHead>],
+    directions: &[bool],
+    control: &ExecutionControl<'_>,
+) -> QueryResult<Option<usize>> {
     let mut best = None;
     for (index, candidate) in heads.iter().enumerate() {
         let Some(candidate) = candidate else {
@@ -906,7 +1037,7 @@ fn least_head_index(heads: &[Option<RunHead>], directions: &[bool]) -> QueryResu
         let current = heads[best_index]
             .as_ref()
             .ok_or_else(|| QueryError::internal("selected empty sort run head"))?;
-        let ordering = compare_sort_keys(&candidate.keys, &current.keys, directions)?;
+        let ordering = compare_sort_keys(&candidate.keys, &current.keys, directions, control)?;
         if ordering == Ordering::Less
             || (ordering == Ordering::Equal && candidate.ordinal < current.ordinal)
         {
@@ -921,67 +1052,59 @@ fn load_run_head(
     table: &str,
     run: i64,
     seq: i64,
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<Option<RunHead>> {
     let sql = format!("SELECT row_json,key_json,ordinal FROM temp.{table} WHERE run=?1 AND seq=?2");
-    let value = connection
-        .query_row(&sql, params![run, seq], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
-        })
-        .optional()?;
-    let Some((row_json, key_json, ordinal)) = value else {
+    let mut statement = connection.prepare(&sql)?;
+    let mut rows = statement.query(params![run, seq])?;
+    let Some(row) = rows.next()? else {
         return Ok(None);
     };
-    let ordinal = u64::try_from(ordinal)
+    decode_run_head(row, run, seq, control).map(Some)
+}
+
+fn decode_run_head(
+    row: &rusqlite::Row<'_>,
+    run: i64,
+    seq: i64,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<RunHead> {
+    let resources = control.resources();
+    let row_json = sqlite_text(row, 0)?;
+    let key_json = sqlite_text(row, 1)?;
+    let ordinal = u64::try_from(row.get::<_, i64>(2)?)
         .map_err(|_| QueryError::internal("negative sort ordinal in TEMP run"))?;
-    Ok(Some(RunHead {
+    let bytes = checked_add(row_json.len() as u64, key_json.len() as u64)?;
+    let mut memory = resources.reserve(checked_add(bytes, decoding_bytes(key_json, control)?)?)?;
+    let keys = decode_row(key_json, control)?;
+    let row_json = super::expression::clone_string_controlled(row_json, Some(control))?;
+    let key_json = super::expression::clone_string_controlled(key_json, Some(control))?;
+    memory.resize(run_head_bytes(&row_json, &key_json, &keys, control)?)?;
+    Ok(RunHead {
+        _memory: memory,
         run,
         seq,
         row_json,
-        keys: decode_row(&key_json)?,
+        key_json,
+        keys,
         ordinal,
-    }))
+    })
+}
+
+fn run_head_bytes(
+    row: &String,
+    key: &String,
+    keys: &Vec<Value>,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<u64> {
+    checked_add(
+        checked_add(row.capacity() as u64, key.capacity() as u64)?,
+        owned_row_bytes_controlled(keys, control)?,
+    )
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod tests;
 
-    #[test]
-    fn binding_spill_uses_file_backed_temp_pages() {
-        let connection = open_spill_connection().expect("spill connection");
-        let temp_store = connection
-            .query_row("PRAGMA temp_store", [], |row| row.get::<_, i64>(0))
-            .expect("temp_store");
-        assert_eq!(temp_store, 1, "spill connection must force FILE temp store");
-
-        let mut spill = BindingSpill::create(&connection).expect("binding spill");
-        let payload = "x".repeat(1024);
-        for ordinal in 0..4096_i64 {
-            let mut row = BindingRow::default();
-            row.insert(
-                "payload".to_owned(),
-                BindingValue::Scalar(Value::String(format!("{ordinal}:{payload}"))),
-            );
-            spill.push(&connection, &row).expect("spill row");
-        }
-
-        let pages = connection
-            .query_row("PRAGMA temp.page_count", [], |row| row.get::<_, i64>(0))
-            .expect("temp page count");
-        let page_size = connection
-            .query_row("PRAGMA temp.page_size", [], |row| row.get::<_, i64>(0))
-            .expect("temp page size");
-        let pages = u64::try_from(pages).expect("non-negative temp page count");
-        let page_size = u64::try_from(page_size).expect("non-negative temp page size");
-        let temp_bytes = pages.saturating_mul(page_size);
-        eprintln!("phase15 TEMP spill logical bytes: {temp_bytes}");
-        assert!(
-            temp_bytes >= 4 * 1024 * 1024,
-            "spill did not allocate the expected file-backed TEMP pages: {temp_bytes}"
-        );
-    }
-}
+#[cfg(test)]
+mod cancellation_tests;

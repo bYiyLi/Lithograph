@@ -23,6 +23,10 @@ impl DateValue {
         &self.text
     }
 
+    pub(crate) fn accounted_heap_bytes(&self) -> usize {
+        self.text.capacity()
+    }
+
     pub(crate) fn days(&self) -> i64 {
         self.days
     }
@@ -56,6 +60,10 @@ impl LocalTimeValue {
         &self.text
     }
 
+    pub(crate) fn accounted_heap_bytes(&self) -> usize {
+        self.text.capacity()
+    }
+
     pub(crate) fn nanoseconds(&self) -> u64 {
         self.nanoseconds
     }
@@ -77,6 +85,13 @@ pub struct TimeValue {
 
 impl TimeValue {
     pub fn parse(text: &str) -> Result<Self, ValueError> {
+        // HH:MM:SS with at most nine fractional digits and a ±HH:MM:SS
+        // offset is at most 27 bytes. Reject before scanning or copying input.
+        if text.len() > 27 {
+            return Err(ValueError::new(
+                "Zoned Time exceeds the supported text length",
+            ));
+        }
         let (local, offset_text) = split_time_offset(text)?;
         let (local_nanoseconds, local_text) = parse_local_time(local)?;
         let offset_seconds = parse_offset(offset_text)?;
@@ -89,6 +104,10 @@ impl TimeValue {
 
     pub fn as_str(&self) -> &str {
         &self.text
+    }
+
+    pub(crate) fn accounted_heap_bytes(&self) -> usize {
+        self.text.capacity()
     }
 
     pub(crate) fn instant_key(&self) -> i128 {
@@ -132,7 +151,15 @@ pub struct DurationValue {
 
 impl DurationValue {
     pub fn parse(text: &str) -> Result<Self, ValueError> {
-        let (months, days, seconds, nanoseconds) = parse_duration(text)?;
+        Self::parse_with_checkpoint(text, |_| Ok(()))
+    }
+
+    pub(crate) fn parse_with_checkpoint<E: From<ValueError>>(
+        text: &str,
+        mut checkpoint: impl FnMut(usize) -> Result<(), E>,
+    ) -> Result<Self, E> {
+        let (months, days, seconds, nanoseconds) = parse_duration(text, &mut checkpoint)?;
+        checkpoint(0)?;
         Ok(Self {
             text: super::temporal_format::format_duration(months, days, seconds, nanoseconds),
             months,
@@ -144,6 +171,10 @@ impl DurationValue {
 
     pub fn as_str(&self) -> &str {
         &self.text
+    }
+
+    pub(crate) fn accounted_heap_bytes(&self) -> usize {
+        self.text.capacity()
     }
 
     pub(crate) fn from_components(months: i64, days: i64, seconds: i64, nanoseconds: i64) -> Self {
@@ -317,6 +348,11 @@ fn split_time_offset(text: &str) -> Result<(&str, &str), ValueError> {
 }
 
 fn parse_offset(text: &str) -> Result<i32, ValueError> {
+    // All supported forms are ASCII and no longer than ±HH:MM:SS. This
+    // also makes the compact-form byte slices below valid UTF-8 boundaries.
+    if text.len() > 9 || !text.is_ascii() {
+        return Err(invalid_offset_form());
+    }
     if text == "Z" {
         return Ok(0);
     }
@@ -330,23 +366,19 @@ fn parse_offset(text: &str) -> Result<i32, ValueError> {
         }
     };
     let (hour, minute, second) = if digits.contains(':') {
-        let parts = digits.split(':').collect::<Vec<_>>();
-        match parts.as_slice() {
-            [hour, minute] => (
+        let mut parts = digits.split(':');
+        match (parts.next(), parts.next(), parts.next(), parts.next()) {
+            (Some(hour), Some(minute), None, None) => (
                 parse_two_digits(hour, "Offset hour")?,
                 parse_two_digits(minute, "Offset minute")?,
                 0,
             ),
-            [hour, minute, second] => (
+            (Some(hour), Some(minute), Some(second), None) => (
                 parse_two_digits(hour, "Offset hour")?,
                 parse_two_digits(minute, "Offset minute")?,
                 parse_two_digits(second, "Offset second")?,
             ),
-            _ => {
-                return Err(ValueError::new(
-                    "Time zone offset must use ±HH, ±HHMM, ±HHMMSS, ±HH:MM, or ±HH:MM:SS",
-                ));
-            }
+            _ => return Err(invalid_offset_form()),
         }
     } else if digits.len() == 2 {
         (parse_two_digits(digits, "Offset hour")?, 0, 0)
@@ -363,9 +395,7 @@ fn parse_offset(text: &str) -> Result<i32, ValueError> {
             parse_two_digits(&digits[4..], "Offset second")?,
         )
     } else {
-        return Err(ValueError::new(
-            "Time zone offset must use ±HH, ±HHMM, ±HHMMSS, ±HH:MM, or ±HH:MM:SS",
-        ));
+        return Err(invalid_offset_form());
     };
     if hour > 18 || minute > 59 || second > 59 || (hour == 18 && (minute != 0 || second != 0)) {
         return Err(ValueError::new(
@@ -373,6 +403,10 @@ fn parse_offset(text: &str) -> Result<i32, ValueError> {
         ));
     }
     Ok(sign * (hour as i32 * 3_600 + minute as i32 * 60 + second as i32))
+}
+
+fn invalid_offset_form() -> ValueError {
+    ValueError::new("Time zone offset must use ±HH, ±HHMM, ±HHMMSS, ±HH:MM, or ±HH:MM:SS")
 }
 
 pub(crate) fn format_offset(offset_seconds: i32) -> String {
@@ -456,16 +490,17 @@ pub(super) fn validate_zone_id(zone: &str) -> Result<Option<i32>, ValueError> {
     Ok(None)
 }
 
-fn parse_duration(text: &str) -> Result<(i64, i64, i64, i64), ValueError> {
+fn parse_duration<E: From<ValueError>>(
+    text: &str,
+    checkpoint: &mut impl FnMut(usize) -> Result<(), E>,
+) -> Result<(i64, i64, i64, i64), E> {
     let body = text
         .strip_prefix('P')
         .ok_or_else(|| ValueError::new("Duration must start with P"))?;
     if body.is_empty() {
-        return Err(ValueError::new(
-            "Duration must contain at least one component",
-        ));
+        return Err(ValueError::new("Duration must contain at least one component").into());
     }
-    if let Some(value) = parse_extended_duration(body)? {
+    if let Some(value) = parse_extended_duration(body, checkpoint)? {
         return Ok(value.components());
     }
     let mut months = 0.0_f64;
@@ -480,9 +515,10 @@ fn parse_duration(text: &str) -> Result<(i64, i64, i64, i64), ValueError> {
     let mut last_date_order = None;
     let mut last_time_order = None;
     while index < bytes.len() {
+        checkpoint(1)?;
         if bytes[index] == b'T' {
             if in_time || start != index {
-                return Err(ValueError::new("Duration T separator is misplaced"));
+                return Err(ValueError::new("Duration T separator is misplaced").into());
             }
             in_time = true;
             index += 1;
@@ -491,9 +527,9 @@ fn parse_duration(text: &str) -> Result<(i64, i64, i64, i64), ValueError> {
         }
         if bytes[index].is_ascii_alphabetic() {
             if start == index {
-                return Err(ValueError::new(
-                    "Duration component is missing a numeric value",
-                ));
+                return Err(
+                    ValueError::new("Duration component is missing a numeric value").into(),
+                );
             }
             let number = &body[start..index];
             let unit = bytes[index] as char;
@@ -508,10 +544,19 @@ fn parse_duration(text: &str) -> Result<(i64, i64, i64, i64), ValueError> {
             if last_order.is_some_and(|previous| order <= previous) {
                 return Err(ValueError::new(
                     "Duration components must appear once each in canonical unit order",
-                ));
+                )
+                .into());
             }
             *last_order = Some(order);
-            apply_duration_component(number, unit, in_time, &mut months, &mut days, &mut seconds)?;
+            apply_duration_component(
+                number,
+                unit,
+                in_time,
+                &mut months,
+                &mut days,
+                &mut seconds,
+                checkpoint,
+            )?;
             components += 1;
             if in_time {
                 time_components += 1;
@@ -521,47 +566,100 @@ fn parse_duration(text: &str) -> Result<(i64, i64, i64, i64), ValueError> {
             continue;
         }
         if !(bytes[index].is_ascii_digit() || matches!(bytes[index], b'+' | b'-' | b'.')) {
-            return Err(ValueError::new("Duration contains an invalid character"));
+            return Err(ValueError::new("Duration contains an invalid character").into());
         }
         index += 1;
     }
     if start != bytes.len() || components == 0 || (in_time && time_components == 0) {
-        return Err(ValueError::new("Duration has an incomplete component"));
+        return Err(ValueError::new("Duration has an incomplete component").into());
     }
-    DurationValue::from_decimal_groups(months, days, seconds).map(|value| value.components())
+    DurationValue::from_decimal_groups(months, days, seconds)
+        .map(|value| value.components())
+        .map_err(Into::into)
 }
 
-fn parse_extended_duration(body: &str) -> Result<Option<DurationValue>, ValueError> {
-    let Some((date, time)) = body.split_once('T') else {
+fn parse_extended_duration<E: From<ValueError>>(
+    body: &str,
+    checkpoint: &mut impl FnMut(usize) -> Result<(), E>,
+) -> Result<Option<DurationValue>, E> {
+    let mut separator = None;
+    for (index, byte) in body.bytes().enumerate() {
+        checkpoint(1)?;
+        if byte == b'T' {
+            separator = Some(index);
+            break;
+        }
+    }
+    let Some(separator) = separator else {
         return Ok(None);
     };
-    let date = date.split('-').collect::<Vec<_>>();
-    let time = time.split(':').collect::<Vec<_>>();
-    if date.len() != 3
-        || time.len() != 3
-        || date.iter().chain(time.iter()).any(|value| value.is_empty())
-    {
+    let Some(date) = duration_fields(&body[..separator], b'-', checkpoint)? else {
         return Ok(None);
-    }
-    if date[..2]
-        .iter()
-        .chain(time[..2].iter())
-        .any(|value| !value.bytes().all(|byte| byte.is_ascii_digit()))
-    {
+    };
+    let Some(time) = duration_fields(&body[separator + 1..], b':', checkpoint)? else {
         return Ok(None);
+    };
+    for value in date[..2].iter().chain(time[..2].iter()) {
+        if !duration_digits(value, checkpoint)? {
+            return Ok(None);
+        }
     }
-    let years = parse_duration_number(date[0])?;
-    let months = parse_duration_number(date[1])?;
-    let days = parse_duration_number(date[2])?;
-    let hours = parse_duration_number(time[0])?;
-    let minutes = parse_duration_number(time[1])?;
-    let seconds = parse_duration_number(time[2])?;
+    let years = parse_duration_number(date[0], checkpoint)?;
+    let months = parse_duration_number(date[1], checkpoint)?;
+    let days = parse_duration_number(date[2], checkpoint)?;
+    let hours = parse_duration_number(time[0], checkpoint)?;
+    let minutes = parse_duration_number(time[1], checkpoint)?;
+    let seconds = parse_duration_number(time[2], checkpoint)?;
     DurationValue::from_decimal_groups(
         years * 12.0 + months,
         days,
         hours * 3_600.0 + minutes * 60.0 + seconds,
     )
     .map(Some)
+    .map_err(Into::into)
+}
+
+fn duration_fields<'a, E>(
+    text: &'a str,
+    separator: u8,
+    checkpoint: &mut impl FnMut(usize) -> Result<(), E>,
+) -> Result<Option<[&'a str; 3]>, E> {
+    let mut fields = [""; 3];
+    let mut field = 0;
+    let mut start = 0;
+    for (index, byte) in text.bytes().enumerate() {
+        checkpoint(1)?;
+        if byte == separator {
+            if field == 2 {
+                return Ok(None);
+            }
+            fields[field] = &text[start..index];
+            field += 1;
+            start = index + 1;
+        }
+    }
+    if field != 2 {
+        return Ok(None);
+    }
+    fields[2] = &text[start..];
+    Ok(if fields.iter().any(|value| value.is_empty()) {
+        None
+    } else {
+        Some(fields)
+    })
+}
+
+fn duration_digits<E>(
+    text: &str,
+    checkpoint: &mut impl FnMut(usize) -> Result<(), E>,
+) -> Result<bool, E> {
+    for byte in text.bytes() {
+        checkpoint(1)?;
+        if !byte.is_ascii_digit() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn duration_component_order(unit: char, in_time: bool) -> Option<u8> {
@@ -577,16 +675,17 @@ fn duration_component_order(unit: char, in_time: bool) -> Option<u8> {
     }
 }
 
-fn apply_duration_component(
+fn apply_duration_component<E: From<ValueError>>(
     number: &str,
     unit: char,
     in_time: bool,
     months: &mut f64,
     days: &mut f64,
     seconds: &mut f64,
-) -> Result<(), ValueError> {
-    let value = parse_duration_number(number)?;
-    match (in_time, unit) {
+    checkpoint: &mut impl FnMut(usize) -> Result<(), E>,
+) -> Result<(), E> {
+    let value = parse_duration_number(number, checkpoint)?;
+    let result = match (in_time, unit) {
         (false, 'Y') => add_duration_component(months, value * 12.0),
         (false, 'M') => add_duration_component(months, value),
         (false, 'W') => add_duration_component(days, value * 7.0),
@@ -597,32 +696,41 @@ fn apply_duration_component(
         _ => Err(ValueError::new(
             "Duration component uses an invalid unit or position",
         )),
-    }
+    };
+    result.map_err(Into::into)
 }
 
-fn parse_duration_number(text: &str) -> Result<f64, ValueError> {
+fn parse_duration_number<E: From<ValueError>>(
+    text: &str,
+    checkpoint: &mut impl FnMut(usize) -> Result<(), E>,
+) -> Result<f64, E> {
+    checkpoint(0)?;
     let unsigned = text.strip_prefix(['+', '-']).unwrap_or(text);
     let mut parts = unsigned.split('.');
     let whole = parts.next().unwrap_or_default();
     let fraction = parts.next();
+    checkpoint(0)?;
+    let invalid_fraction = match fraction {
+        Some(value) => value.is_empty() || value.len() > 9 || !duration_digits(value, checkpoint)?,
+        None => false,
+    };
     if whole.is_empty()
-        || !whole.bytes().all(|byte| byte.is_ascii_digit())
-        || fraction.is_some_and(|value| {
-            value.is_empty() || value.len() > 9 || !value.bytes().all(|byte| byte.is_ascii_digit())
-        })
+        || !duration_digits(whole, checkpoint)?
+        || invalid_fraction
         || parts.next().is_some()
     {
         return Err(ValueError::new(
             "Duration component must be a decimal number with at most nine fractional digits",
-        ));
+        )
+        .into());
     }
+    checkpoint(0)?;
     let value = text
         .parse::<f64>()
         .map_err(|_| ValueError::new("Duration component is outside the supported range"))?;
+    checkpoint(0)?;
     if !value.is_finite() {
-        return Err(ValueError::new(
-            "Duration component is outside the supported range",
-        ));
+        return Err(ValueError::new("Duration component is outside the supported range").into());
     }
     Ok(value)
 }

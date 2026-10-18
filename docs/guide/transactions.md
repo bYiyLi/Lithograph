@@ -47,7 +47,9 @@ SELECT lithograph_tx_abort();
 
 `tx_begin` options：`branch`、`expectedHead`、`author`、`message`。active transaction 内 query options 不能切换 branch/at/author/message/version context；`graphView` 和 `readOnlyNoExternalIO` 仍可按 execution 指定。安全选项放在每次 `lithograph()`/`lithograph_rows()` 的第三个参数，不是 `tx_begin` options。
 
-任一 execution parse/type/constraint/I/O/interrupt/error，或 `lithograph_rows()` 在 success summary 前被关闭，都会 fail-closed abort 整个 explicit transaction。之后必须重新 begin。
+Unreleased / Phase 19 的 `memoryLimitBytes` 同样属于每次 execution；省略不继承上一条预算，预算错误会使 active transaction 整体 abort。v0.3.2 不支持此字段，完整配置和版本边界见 [Execution Options](../reference/execution-options.md#memory-limit)。
+
+任一 execution 在 internal finalize-success 前发生 parse/type/constraint/I/O/interrupt/error，或 incomplete `lithograph_rows()` 被关闭，都会 fail-closed abort 整个 explicit transaction。之后必须重新 begin。内部已 finalize-success 后的 close 只回收资源；是否 incomplete 不能只按宿主是否拿到 summary 判断，精确边界见 [Transactions Reference](../reference/transactions.md#stream-lifecycle)。
 
 如果业务步骤由多个调用者共同协调，先读取并审查目标 head，再把该 `commit/<id>` 传为 `tx_begin.expectedHead`。Engine 在取得 writer ownership 后比较；不匹配返回 `BRANCH_HEAD_MOVED` 且不开始 transaction。重新读取和审查新状态后才决定新事务，不能只换一个 expectedHead 然后盲目提交旧操作。可运行冲突示例见 [streaming.py](examples/streaming.py)。
 
@@ -71,6 +73,8 @@ ROLLBACK;
 ```
 
 outer rollback 会撤销这两个 Commit/ref 的 SQLite durability，但它们并不会被“合并成一个 Commit”。需要 version atomicity 时使用 Lithograph explicit transaction。
+
+取消其中的 mutating execution 时，真实 SQLite interrupt 可能直接回滚整个 outer transaction，包括宿主在同一事务中先前写入的业务表。Phase 19 的恢复改进会确认实际 transaction 状态；应用仍应在 finalize/close 后检查是否已自动 abort，不能假定只有当前 Lithograph 内部 SAVEPOINT 被撤销。参见[取消与连接池](../reference/transactions.md#cancellation)。
 
 <a id="concurrency"></a>
 

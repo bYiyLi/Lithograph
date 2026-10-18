@@ -33,6 +33,8 @@ INTEGER 为 signed 64-bit，JSON safe range 外使用 Integer tag。SQL scalar �
 - SQLite busy timeout、取消、线程模式和单个 statement 的资源限制属于宿主配置；query options 不提供任意 timeout/readOnly 配置。
 - Lithograph explicit transaction 从 begin 起取得 writer，纯读长任务优先使用普通 pinned read；事务与连接池规则见 [Transactions](transactions.md)。
 - `readOnlyNoExternalIO` 限制本次 Cypher 的 mutation/外部 I/O，允许当前 SQLite database、TEMP/spill 等正常工作；它不创建 OS sandbox。精确 allowlist 见 [安全选项](execution-options.md#read-only-no-external-io)。
+- **Unreleased / Phase 19：** 可选 [memoryLimitBytes](execution-options.md#memory-limit) 限制一次 execution 的受控工作内存；预算拒绝返回 `RESOURCE_ERROR` / `SQLITE_TOOBIG`。它不覆盖 Frontend AST/plan、SQLite 页缓存、Provider 内部内存、宿主已有输入或 allocator 隐含开销，不是 RSS 硬上限。v0.3.2 发行库不支持该 option。
+- **Unreleased / Phase 19：** 长表达式和循环每至多 256 work units 检查中断，可分块长文本每至多 64 KiB 检查；大分配/复制和不可拆分第三方调用前后检查。单次第三方调用执行中不保证异步抢占；实际限制见 [取消与失败](../guide/integration.md#cancellation-and-outcomes)。
 
 <a id="full-text-index-config"></a>
 

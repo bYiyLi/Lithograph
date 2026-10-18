@@ -8,14 +8,12 @@ use crate::storage::{HashId, IndexDefinition, IndexTarget, Snapshot, StandardInd
 
 use super::super::access::PropertyRules;
 use super::super::expression::{
-    self, BindingRow, BindingValue, binding_from_value, binding_value_with_access,
-    compile_expression,
+    self, BindingRow, BindingValue, binding_from_value_controlled, compile_expression,
 };
 use super::super::graph::ResolvedGraphView;
 use super::super::options::ExecutionOptions;
 use super::super::semantic_index::{
-    SemanticEntity, SemanticHit, resolve_semantic_index, vector_candidates,
-    vector_initial_candidate_limit,
+    SemanticEntity, SemanticHit, resolve_semantic_index, vector_initial_candidate_limit,
 };
 use super::super::spill::distinct_row_key;
 use super::super::{QueryError, QueryErrorKind, QueryMetrics, QueryResult};
@@ -23,20 +21,7 @@ use super::{
     PreparedProgram, composed_query_parts, executable_query, projection_body, projection_column,
     required_query_body, surface_expressions,
 };
-
-pub(crate) struct RowSet {
-    pub(crate) columns: Vec<String>,
-    pub(crate) rows: Vec<BindingRow>,
-}
-
-impl RowSet {
-    pub(crate) fn seed() -> Self {
-        Self {
-            columns: Vec::new(),
-            rows: vec![BindingRow::default()],
-        }
-    }
-}
+use crate::query::resources::{ExecutionControl, MemoryReservation};
 
 pub(crate) enum ConditionalBranchQuery<'a> {
     Body(&'a AstNode),
@@ -98,41 +83,100 @@ pub(crate) fn materialize_rows(
     snapshot: &Snapshot<'_>,
     result: RowSet,
     rules: &PropertyRules,
-) -> QueryResult<Vec<Vec<Value>>> {
-    result
-        .rows
-        .into_iter()
-        .map(|row| {
-            result
-                .columns
-                .iter()
-                .map(|column| {
-                    binding_value_with_access(
-                        snapshot,
-                        row.values.get(column).unwrap_or(&BindingValue::Null),
-                        rules,
-                    )
-                })
-                .collect::<QueryResult<Vec<_>>>()
-        })
-        .collect()
+    control: &ExecutionControl<'_>,
+) -> QueryResult<(Vec<Vec<Value>>, MemoryReservation)> {
+    let mut memory = control.reserve(crate::query::resources::allocation_bytes::<Vec<Value>>(
+        result.rows.len(),
+    )?)?;
+    let mut rows = Vec::with_capacity(result.rows.len());
+    for binding in result.rows {
+        control.work(1)?;
+        memory.grow(crate::query::resources::allocation_bytes::<Value>(
+            result.columns.len(),
+        )?)?;
+        let mut row = Vec::with_capacity(result.columns.len());
+        for column in &result.columns {
+            let value = expression::binding_value_with_memory(
+                snapshot,
+                binding.values.get(column).unwrap_or(&BindingValue::Null),
+                rules,
+                control,
+            )?;
+            memory.merge(value.reservation)?;
+            row.push(value.value);
+        }
+        rows.push(row);
+    }
+    Ok((rows, memory))
 }
 
-pub(crate) fn restore_global_bindings(mut rows: RowSet, globals: &BindingRow) -> RowSet {
+pub(crate) fn restore_global_bindings(
+    mut rows: RowSet,
+    globals: &BindingRow,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<RowSet> {
+    rows.track(control)?;
+    let mut memory = rows
+        .memory
+        .take()
+        .ok_or_else(|| QueryError::internal("CALL result lost its memory reservation"))?;
     for name in &globals.order {
-        if !rows.columns.contains(name) {
-            rows.columns.push(name.clone());
-        }
-        let value = globals
-            .values
-            .get(name)
-            .cloned()
-            .unwrap_or(BindingValue::Null);
+        control.work(1)?;
+        restore_global_column(&mut rows.columns, name, &mut memory, control)?;
+        let value = globals.values.get(name).unwrap_or(&BindingValue::Null);
         for row in &mut rows.rows {
-            row.insert(name.clone(), value.clone());
+            restore_global_value(row, name, value, &mut memory, control)?;
         }
     }
-    rows
+    rows.memory = Some(memory);
+    rows.track(control)?;
+    Ok(rows)
+}
+
+fn restore_global_column(
+    columns: &mut Vec<String>,
+    name: &str,
+    memory: &mut MemoryReservation,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<()> {
+    use crate::query::resources::{allocation_bytes, checked_add};
+
+    if !columns.iter().any(|column| column == name) {
+        memory.grow(checked_add(
+            allocation_bytes::<String>(2)?,
+            name.len() as u64,
+        )?)?;
+        columns.push(expression::clone_string_controlled(name, Some(control))?);
+    }
+    Ok(())
+}
+
+fn restore_global_value(
+    row: &mut BindingRow,
+    name: &str,
+    value: &BindingValue,
+    memory: &mut MemoryReservation,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<()> {
+    use crate::query::resources::{allocation_bytes, checked_add, checked_mul, map_entry_bytes};
+
+    control.work(1)?;
+    let bytes = checked_add(
+        checked_add(
+            map_entry_bytes::<BindingValue>()?,
+            allocation_bytes::<String>(2)?,
+        )?,
+        checked_add(
+            checked_mul(name.len() as u64, 2)?,
+            expression::binding_value_bytes(value, Some(control))?,
+        )?,
+    )?;
+    memory.grow(bytes)?;
+    row.insert(
+        expression::clone_string_controlled(name, Some(control))?,
+        expression::clone_binding_value_unreserved_controlled(value, Some(control))?,
+    );
+    Ok(())
 }
 
 fn match_predicate(clause: &AstNode) -> QueryResult<Option<expression::Expr>> {
@@ -257,6 +301,8 @@ struct ReadExecutor<'connection, 'query> {
     source: &'query str,
     metrics: &'query mut QueryMetrics,
     is_interrupted: &'query dyn Fn() -> bool,
+    control: &'query ExecutionControl<'query>,
+    expression_reservation: MemoryReservation,
     global_bindings: BindingRow,
     options: Option<&'query ExecutionOptions>,
     version_mutated: bool,
@@ -269,30 +315,6 @@ struct GroupingPlan {
     has_group_by: bool,
 }
 
-pub(super) fn execute_read_with_version_summary(
-    connection: &Connection,
-    program: &PreparedProgram,
-    commit: HashId,
-    graph_view: &ResolvedGraphView,
-    params: &BTreeMap<String, Value>,
-    metrics: &mut QueryMetrics,
-    is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<(Vec<Vec<Value>>, Option<HashId>)> {
-    execute_read_snapshot_with_version_summary(
-        connection,
-        program,
-        Snapshot::resolve(connection, commit)?,
-        graph_view,
-        params,
-        metrics,
-        is_interrupted,
-    )
-}
-
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the version-procedure boundary keeps immutable query execution inputs explicit"
-)]
 pub(crate) fn execute_version_program(
     connection: &Connection,
     program: &PreparedProgram,
@@ -300,23 +322,18 @@ pub(crate) fn execute_version_program(
     graph_view: &ResolvedGraphView,
     params: &BTreeMap<String, Value>,
     metrics: &mut QueryMetrics,
-    is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<(Vec<Vec<Value>>, HashId)> {
+    control: &ExecutionControl<'_>,
+) -> QueryResult<(Vec<Vec<Value>>, HashId, MemoryReservation)> {
     if program.writes || !program.version_mutation {
         return Err(QueryError::internal(
             "invalid program reached the Version Procedure executor",
         ));
     }
-    let (rows, summary_commit) = execute_read_with_version_summary(
-        connection,
-        program,
-        commit,
-        graph_view,
-        params,
-        metrics,
-        is_interrupted,
+    let snapshot = super::super::graph::resolve_snapshot_with_control(connection, commit, control)?;
+    let (rows, summary_commit, memory) = execute_read_snapshot_with_version_summary(
+        connection, program, snapshot, graph_view, params, metrics, control,
     )?;
-    Ok((rows, summary_commit.unwrap_or(commit)))
+    Ok((rows, summary_commit.unwrap_or(commit), memory))
 }
 
 pub(super) fn execute_read_snapshot_with_version_summary(
@@ -326,8 +343,9 @@ pub(super) fn execute_read_snapshot_with_version_summary(
     graph_view: &ResolvedGraphView,
     params: &BTreeMap<String, Value>,
     metrics: &mut QueryMetrics,
-    is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<(Vec<Vec<Value>>, Option<HashId>)> {
+    control: &ExecutionControl<'_>,
+) -> QueryResult<(Vec<Vec<Value>>, Option<HashId>, MemoryReservation)> {
+    let is_interrupted = || control.check().is_err();
     let mut executor = ReadExecutor {
         connection,
         snapshot,
@@ -335,24 +353,27 @@ pub(super) fn execute_read_snapshot_with_version_summary(
         params,
         source: &program.source,
         metrics,
-        is_interrupted,
+        is_interrupted: &is_interrupted,
+        control,
+        expression_reservation: control.reserve(0)?,
         global_bindings: BindingRow::default(),
         options: Some(&program.options),
         version_mutated: false,
         version_summary_commit: None,
     };
     let result = executor.execute_query_body(&program.root, RowSet::seed())?;
-    let rows = if program.public_result {
+    let (rows, memory) = if program.public_result {
         validate_executed_columns(&program.columns, &result.columns)?;
         materialize_rows(
             &executor.snapshot,
             result,
             &executor.graph_view.query_access,
+            control,
         )?
     } else {
-        Vec::new()
+        (Vec::new(), control.reserve(0)?)
     };
-    Ok((rows, executor.version_summary_commit))
+    Ok((rows, executor.version_summary_commit, memory))
 }
 
 #[allow(
@@ -369,6 +390,7 @@ pub(crate) fn execute_read_clause<'connection>(
     input: RowSet,
     metrics: &mut QueryMetrics,
     is_interrupted: &dyn Fn() -> bool,
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<RowSet> {
     let mut executor = ReadExecutor {
         connection,
@@ -378,6 +400,8 @@ pub(crate) fn execute_read_clause<'connection>(
         source,
         metrics,
         is_interrupted,
+        control,
+        expression_reservation: control.reserve(0)?,
         global_bindings: BindingRow::default(),
         options: None,
         version_mutated: false,
@@ -396,6 +420,29 @@ pub(crate) fn execute_read_clause<'connection>(
 
 impl ReadExecutor<'_, '_> {
     fn execute_query_body(&mut self, body: &AstNode, input: RowSet) -> QueryResult<RowSet> {
+        self.in_expression_scope(|executor| executor.execute_query_body_inner(body, input))
+    }
+
+    fn in_expression_scope(
+        &mut self,
+        run: impl FnOnce(&mut Self) -> QueryResult<RowSet>,
+    ) -> QueryResult<RowSet> {
+        let enclosing =
+            std::mem::replace(&mut self.expression_reservation, self.control.reserve(0)?);
+        let mut result = run(self);
+        let temporary = std::mem::replace(&mut self.expression_reservation, enclosing);
+        if let Ok(rows) = &mut result {
+            if let Some(memory) = rows.memory.as_mut() {
+                memory.merge(temporary)?;
+            } else {
+                rows.memory = Some(temporary);
+            }
+            rows.track(self.control)?;
+        }
+        result
+    }
+
+    fn execute_query_body_inner(&mut self, body: &AstNode, input: RowSet) -> QueryResult<RowSet> {
         self.check_interrupted()?;
         let query = executable_query(body, false)?;
         match query.kind {
@@ -409,26 +456,29 @@ impl ReadExecutor<'_, '_> {
 
     fn execute_composed(&mut self, query: &AstNode, input: RowSet) -> QueryResult<RowSet> {
         let parts = composed_query_parts(query)?;
-        let mut result = self.execute_operand(parts.first, clone_row_set(&input))?;
-        let mut segment_input = clone_row_set(&input);
+        let mut result = self.execute_operand(parts.first, clone_row_set(&input, self.control)?)?;
+        let mut segment_input = clone_row_set(&input, self.control)?;
         let mut previous_operand = parts.first;
         for (connector, operand) in parts.rest {
             self.check_interrupted()?;
             match connector {
                 QueryConnector::Next => {
                     segment_input = rows_for_next(previous_operand, result);
-                    result = self.execute_operand(operand, clone_row_set(&segment_input))?;
+                    result = self
+                        .execute_operand(operand, clone_row_set(&segment_input, self.control)?)?;
                 }
                 QueryConnector::Union
                 | QueryConnector::UnionAll
                 | QueryConnector::UnionDistinct => {
-                    let right = self.execute_operand(operand, clone_row_set(&segment_input))?;
+                    let right = self
+                        .execute_operand(operand, clone_row_set(&segment_input, self.control)?)?;
                     result = union_rows(
                         result,
                         right,
                         connector != QueryConnector::UnionAll,
                         &self.snapshot,
                         &self.graph_view.query_access,
+                        self.control,
                     )?;
                 }
             }
@@ -468,6 +518,7 @@ impl ReadExecutor<'_, '_> {
                     false,
                     &self.snapshot,
                     &self.graph_view.query_access,
+                    self.control,
                 )?,
                 None => branch_result,
             });
@@ -475,6 +526,7 @@ impl ReadExecutor<'_, '_> {
         Ok(output.unwrap_or(RowSet {
             columns: super::infer_columns(query, &input.columns, self.source)?,
             rows: Vec::new(),
+            memory: None,
         }))
     }
 
@@ -486,6 +538,7 @@ impl ReadExecutor<'_, '_> {
         let input = RowSet {
             columns: row.order.clone(),
             rows: vec![row],
+            memory: None,
         };
         match conditional_branch_query(branch)? {
             ConditionalBranchQuery::Body(body) => self.execute_query_body(body, input),
@@ -522,6 +575,23 @@ impl ReadExecutor<'_, '_> {
         kind: ClauseKind,
         rows: RowSet,
     ) -> QueryResult<RowSet> {
+        let mut output = self.execute_single_clause_unaccounted(clause, kind, rows)?;
+        let mut memory =
+            std::mem::replace(&mut self.expression_reservation, self.control.reserve(0)?);
+        if let Some(output_memory) = output.memory.take() {
+            memory.merge(output_memory)?;
+        }
+        output.memory = Some(memory);
+        output.track(self.control)?;
+        Ok(output)
+    }
+
+    fn execute_single_clause_unaccounted(
+        &mut self,
+        clause: &AstNode,
+        kind: ClauseKind,
+        rows: RowSet,
+    ) -> QueryResult<RowSet> {
         match kind {
             ClauseKind::Match | ClauseKind::OptionalMatch => {
                 self.execute_match(clause, kind == ClauseKind::OptionalMatch, rows)
@@ -533,12 +603,13 @@ impl ReadExecutor<'_, '_> {
             ClauseKind::Show => self.execute_show(clause, rows),
             ClauseKind::With => {
                 let projected = self.execute_projection(clause, rows, true)?;
-                Ok(self.restore_global_bindings(projected))
+                self.restore_global_bindings(projected)
             }
             ClauseKind::Return => self.execute_projection(clause, rows, false),
             ClauseKind::Finish => Ok(RowSet {
                 columns: Vec::new(),
                 rows: Vec::new(),
+                memory: None,
             }),
             other => Err(QueryError::semantic(format!(
                 "Phase 06 read program does not execute {other:?} yet"
@@ -573,16 +644,34 @@ impl ReadExecutor<'_, '_> {
             .activate_access_operator_group(access_operator_count);
         let result = (|| {
             let mut rows = Vec::new();
+            let mut memory = self.control.reserve(0)?;
             for input_row in input.rows {
-                rows.extend(self.execute_match_row(
+                let baseline = self.expression_reservation.bytes();
+                let matched = self.execute_match_row(
                     clause,
                     optional,
                     &columns,
                     predicate.as_ref(),
                     input_row,
-                )?);
+                )?;
+                let produced = self.expression_reservation.bytes() - baseline;
+                let mut matched_memory = self.expression_reservation.split(produced)?;
+                let mut bytes = 0;
+                for row in &matched {
+                    bytes = crate::query::resources::checked_add(
+                        bytes,
+                        expression::binding_row_bytes_controlled(row, Some(self.control))?,
+                    )?;
+                }
+                matched_memory.resize(bytes)?;
+                memory.merge(matched_memory)?;
+                rows.extend(matched);
             }
-            Ok(RowSet { columns, rows })
+            Ok(RowSet {
+                columns,
+                rows,
+                memory: Some(memory),
+            })
         })();
         if let Ok(output) = &result {
             self.metrics
@@ -620,15 +709,18 @@ impl ReadExecutor<'_, '_> {
             return self
                 .execute_search_match_row(clause, search, optional, columns, predicate, input);
         }
-        let mut matched = super::path::execute_match(
+        let copied =
+            RowSet::try_clone_rows(&input.order, std::slice::from_ref(&input), self.control)?;
+        let (mut matched, matched_memory) = super::path::execute_match(
             &self.snapshot,
             self.graph_view,
             self.params,
             clause,
-            vec![input.clone()],
+            copied.rows,
             self.metrics,
-            self.is_interrupted,
+            self.control,
         )?;
+        self.expression_reservation.merge(matched_memory)?;
         if let Some(predicate) = predicate {
             matched = self.filter_rows(predicate, matched)?;
         }
@@ -679,6 +771,7 @@ impl ReadExecutor<'_, '_> {
         Ok(RowSet {
             columns: input.columns,
             rows,
+            memory: None,
         })
     }
 
@@ -695,25 +788,24 @@ impl ReadExecutor<'_, '_> {
             let mut output = source.clone();
             for (name, expression) in &bindings {
                 let value = self.evaluate(expression, &source)?;
-                output.insert(name.clone(), binding_from_value(&self.snapshot, value)?);
+                output.insert(
+                    name.clone(),
+                    binding_from_value_controlled(&self.snapshot, value, self.control)?,
+                );
             }
             rows.push(output);
         }
-        Ok(RowSet { columns, rows })
+        Ok(RowSet {
+            columns,
+            rows,
+            memory: None,
+        })
     }
 
     fn execute_unwind(&mut self, clause: &AstNode, input: RowSet) -> QueryResult<RowSet> {
-        let name = clause
-            .descendants()
-            .find(|node| node.kind == AstKind::BindingVariable)
-            .and_then(|node| node.text.clone())
-            .ok_or_else(|| QueryError::semantic("UNWIND/FOR is missing its variable"))?;
-        let expression = surface_expressions(clause)
-            .into_iter()
-            .next()
-            .ok_or_else(|| QueryError::semantic("UNWIND/FOR is missing its list expression"))?;
-        let expression = compile_expression(expression)?;
+        let (name, expression) = compile_unwind(clause)?;
         let mut rows = Vec::new();
+        let mut memory = self.control.reserve(0)?;
         for input_row in input.rows {
             let value = self.evaluate(&expression, &input_row)?;
             let values = match value {
@@ -722,8 +814,16 @@ impl ReadExecutor<'_, '_> {
                 value => vec![value],
             };
             for value in values {
+                self.control.work(1)?;
+                memory.grow(crate::query::resources::checked_add(
+                    expression::binding_row_bytes_controlled(&input_row, Some(self.control))?,
+                    crate::query::resources::value_bytes(&value)?,
+                )?)?;
                 let mut row = input_row.clone();
-                row.insert(name.clone(), binding_from_value(&self.snapshot, value)?);
+                row.insert(
+                    name.clone(),
+                    binding_from_value_controlled(&self.snapshot, value, self.control)?,
+                );
                 rows.push(row);
             }
         }
@@ -731,7 +831,11 @@ impl ReadExecutor<'_, '_> {
         if !columns.contains(&name) {
             columns.push(name);
         }
-        Ok(RowSet { columns, rows })
+        Ok(RowSet {
+            columns,
+            rows,
+            memory: Some(memory),
+        })
     }
 
     fn execute_projection(
@@ -752,7 +856,11 @@ impl ReadExecutor<'_, '_> {
         let projected = self.apply_projection_modifiers(body, &columns, projected)?;
         let projected = self.apply_projection_where(clause, apply_where, projected)?;
         let rows = projected.into_iter().map(|record| record.output).collect();
-        Ok(RowSet { columns, rows })
+        Ok(RowSet {
+            columns,
+            rows,
+            memory: None,
+        })
     }
 
     fn project_rows(
@@ -781,6 +889,7 @@ impl ReadExecutor<'_, '_> {
                 columns,
                 &self.snapshot,
                 &self.graph_view.query_access,
+                self.control,
             )?;
         }
         if let Some(order) = body
@@ -797,6 +906,7 @@ impl ReadExecutor<'_, '_> {
             &self.snapshot,
             self.params,
             &self.graph_view.query_access,
+            self.control,
         )?
         .unwrap_or(0);
         let limit = pagination(
@@ -806,6 +916,7 @@ impl ReadExecutor<'_, '_> {
             &self.snapshot,
             self.params,
             &self.graph_view.query_access,
+            self.control,
         )?;
         Ok(projected
             .into_iter()
@@ -844,8 +955,8 @@ impl ReadExecutor<'_, '_> {
         Ok(filtered)
     }
 
-    fn restore_global_bindings(&self, rows: RowSet) -> RowSet {
-        restore_global_bindings(rows, &self.global_bindings)
+    fn restore_global_bindings(&self, rows: RowSet) -> QueryResult<RowSet> {
+        restore_global_bindings(rows, &self.global_bindings, self.control)
     }
 
     fn scalar_projection(
@@ -854,12 +965,28 @@ impl ReadExecutor<'_, '_> {
         specs: &[ProjectionSpec],
         star: bool,
     ) -> QueryResult<Vec<ProjectedRow>> {
+        self.expression_reservation
+            .grow(crate::query::resources::allocation_bytes::<ProjectedRow>(
+                input.rows.len(),
+            )?)?;
         input
             .rows
             .into_iter()
             .map(|source| {
+                self.expression_reservation
+                    .grow(crate::query::resources::allocation_bytes::<BindingRow>(1)?)?;
                 let mut output = if star {
-                    source.clone()
+                    let mut copied = RowSet::try_clone_rows(
+                        &source.order,
+                        std::slice::from_ref(&source),
+                        self.control,
+                    )?;
+                    if let Some(memory) = copied.memory.take() {
+                        self.expression_reservation.merge(memory)?;
+                    }
+                    copied.rows.pop().ok_or_else(|| {
+                        QueryError::internal("star projection lost its copied row")
+                    })?
                 } else {
                     BindingRow::default()
                 };
@@ -868,7 +995,7 @@ impl ReadExecutor<'_, '_> {
                     let value = self.evaluate(&spec.expression, &source)?;
                     output.insert(
                         spec.column.clone(),
-                        binding_from_value(&self.snapshot, value)?,
+                        binding_from_value_controlled(&self.snapshot, value, self.control)?,
                     );
                 }
                 Ok(ProjectedRow {
@@ -879,340 +1006,21 @@ impl ReadExecutor<'_, '_> {
             .collect()
     }
 
-    fn aggregate_projection(
-        &mut self,
-        input: RowSet,
-        specs: &[ProjectionSpec],
-        star: bool,
-        group_by: Option<&AstNode>,
-    ) -> QueryResult<Vec<ProjectedRow>> {
-        if star {
-            return Err(QueryError::semantic(
-                "RETURN/WITH * cannot be combined with aggregation",
-            ));
-        }
-        let plan = grouping_plan(specs, group_by)?;
-        let mut groups = self.build_aggregate_groups(input.rows, specs, &plan)?;
-        if groups.is_empty() && !has_grouping_keys(specs, &plan) {
-            groups.insert("[]".to_owned(), Vec::new());
-        }
-        self.project_aggregate_groups(groups, specs)
-    }
-
-    fn build_aggregate_groups(
-        &mut self,
-        rows: Vec<BindingRow>,
-        specs: &[ProjectionSpec],
-        plan: &GroupingPlan,
-    ) -> QueryResult<BTreeMap<String, Vec<BindingRow>>> {
-        let mut groups: BTreeMap<String, Vec<BindingRow>> = BTreeMap::new();
-        for row in rows {
-            let aliases = self.projection_alias_values(specs, &row)?;
-            let values = self.grouping_values(specs, plan, &row, &aliases)?;
-            groups
-                .entry(distinct_row_key(&values)?)
-                .or_default()
-                .push(row);
-        }
-        Ok(groups)
-    }
-
-    fn grouping_values(
-        &mut self,
-        specs: &[ProjectionSpec],
-        plan: &GroupingPlan,
-        row: &BindingRow,
-        aliases: &BTreeMap<String, Value>,
-    ) -> QueryResult<Vec<Value>> {
-        if !plan.has_group_by {
-            return specs
-                .iter()
-                .filter(|spec| !spec.aggregate)
-                .map(|spec| self.evaluate(&spec.expression, row))
-                .collect();
-        }
-        plan.explicit_keys
-            .iter()
-            .map(|key| {
-                if plan.group_by_all {
-                    self.evaluate(key, row)
-                } else {
-                    self.evaluate_with_aliases(key, row, aliases)
-                }
-            })
-            .collect()
-    }
-
-    fn project_aggregate_groups(
-        &mut self,
-        groups: BTreeMap<String, Vec<BindingRow>>,
-        specs: &[ProjectionSpec],
-    ) -> QueryResult<Vec<ProjectedRow>> {
-        let mut projected = Vec::with_capacity(groups.len());
-        for group in groups.into_values() {
-            let representative = group.first().cloned().unwrap_or_default();
-            let mut output = BindingRow::default();
-            preserve_common_load_csv_context(&group, &mut output);
-            for spec in specs {
-                let value = self.evaluate_group_expression(
-                    &spec.expression,
-                    &group,
-                    &representative,
-                    &BTreeMap::new(),
-                )?;
-                output.insert(
-                    spec.column.clone(),
-                    binding_from_value(&self.snapshot, value)?,
-                );
-            }
-            projected.push(ProjectedRow { output, group });
-        }
-        Ok(projected)
-    }
-
-    fn projection_alias_values(
-        &mut self,
-        specs: &[ProjectionSpec],
-        row: &BindingRow,
-    ) -> QueryResult<BTreeMap<String, Value>> {
-        let mut aliases = BTreeMap::new();
-        for spec in specs.iter().filter(|spec| !spec.aggregate) {
-            aliases.insert(spec.column.clone(), self.evaluate(&spec.expression, row)?);
-        }
-        Ok(aliases)
-    }
-
-    fn evaluate_with_aliases(
-        &mut self,
-        expression: &expression::Expr,
-        row: &BindingRow,
-        aliases: &BTreeMap<String, Value>,
-    ) -> QueryResult<Value> {
-        let expression = self.materialize_subqueries(expression, row, aliases)?;
-        expression::evaluate_with_aliases_and_access(
-            &expression,
-            &self.snapshot,
-            row,
-            self.params,
-            aliases,
-            &self.graph_view.query_access,
-        )
-    }
-
-    fn evaluate_group_expression(
-        &mut self,
-        expression: &expression::Expr,
-        group: &[BindingRow],
-        representative: &BindingRow,
-        aliases: &BTreeMap<String, Value>,
-    ) -> QueryResult<Value> {
-        let expression =
-            self.materialize_group_expression(expression, group, representative, aliases)?;
-        expression::evaluate_with_aliases_and_access(
-            &expression,
-            &self.snapshot,
-            representative,
-            self.params,
-            aliases,
-            &self.graph_view.query_access,
-        )
-    }
-
-    fn materialize_group_expression(
-        &mut self,
-        value: &expression::Expr,
-        group: &[BindingRow],
-        representative: &BindingRow,
-        aliases: &BTreeMap<String, Value>,
-    ) -> QueryResult<expression::Expr> {
-        expression::transform_expression(value, &mut |candidate| {
-            use expression::Expr;
-            if let Some(value) =
-                graph_expression::evaluate_lazy_graph_expression(candidate, &mut |nested| {
-                    self.evaluate_group_expression(nested, group, representative, aliases)
-                })?
-            {
-                return Ok(Some(Expr::Literal(value)));
-            }
-            if let Some(value) = graph_expression::evaluate_scoped_graph_expression(
-                candidate,
-                aliases,
-                &mut |nested, locals| {
-                    let local = graph_expression::scoped_binding_row(
-                        &self.snapshot,
-                        representative,
-                        locals,
-                    )?;
-                    self.evaluate_group_expression(nested, group, &local, locals)
-                },
-            )? {
-                return Ok(Some(Expr::Literal(value)));
-            }
-            let replacement = match candidate {
-                Expr::Function {
-                    name,
-                    args,
-                    distinct,
-                    star,
-                } if super::super::registry::is_aggregating(name) => {
-                    Some(self.evaluate_aggregate(name, args, *distinct, *star, group)?)
-                }
-                _ => self.evaluate_graph_runtime_candidate(candidate, representative, aliases)?,
-            };
-            Ok(replacement.map(Expr::Literal))
-        })
-    }
-
-    fn evaluate_aggregate(
-        &mut self,
-        name: &str,
-        args: &[expression::Expr],
-        distinct: bool,
-        star: bool,
-        group: &[BindingRow],
-    ) -> QueryResult<Value> {
-        let lower = name.to_ascii_lowercase();
-        if lower == "count" && (star || args.is_empty()) {
-            return Ok(Value::Integer(group.len() as i64));
-        }
-        let Some(argument) = args.first() else {
-            return Err(QueryError::semantic(format!(
-                "{name}() requires an argument"
-            )));
-        };
-        let mut values = Vec::with_capacity(group.len());
-        for row in group {
-            let value = self.evaluate(argument, row)?;
-            if !matches!(value, Value::Null) {
-                values.push(value);
-            }
-        }
-        if distinct {
-            let mut seen = BTreeSet::new();
-            let mut unique = Vec::with_capacity(values.len());
-            for value in values {
-                if seen.insert(distinct_row_key(std::slice::from_ref(&value))?) {
-                    unique.push(value);
-                }
-            }
-            values = unique;
-        }
-        match lower.as_str() {
-            "count" => Ok(Value::Integer(values.len() as i64)),
-            "collect" | "collect_list" => Ok(Value::List(values)),
-            "sum" => aggregate_sum(&values),
-            "avg" => aggregate_average(&values),
-            "min" => aggregate_extreme(&values, false),
-            "max" => aggregate_extreme(&values, true),
-            "percentilecont" | "percentile_cont" => {
-                let percentile = self.aggregate_percentile_argument(name, args, group)?;
-                aggregate_percentile(&values, percentile, true)
-            }
-            "percentiledisc" | "percentile_disc" => {
-                let percentile = self.aggregate_percentile_argument(name, args, group)?;
-                aggregate_percentile(&values, percentile, false)
-            }
-            "stdev" | "stdev_samp" => aggregate_deviation(&values, true),
-            "stdevp" | "stdev_pop" => aggregate_deviation(&values, false),
-            _ => Err(QueryError::internal(format!(
-                "registered aggregate {name} has no evaluator"
-            ))),
-        }
-    }
-
-    fn aggregate_percentile_argument(
-        &mut self,
-        name: &str,
-        args: &[expression::Expr],
-        group: &[BindingRow],
-    ) -> QueryResult<Value> {
-        if args.len() != 2 {
-            return Err(QueryError::semantic(format!(
-                "{name}() expects value and percentile arguments"
-            )));
-        }
-        let empty = BindingRow::default();
-        self.evaluate(&args[1], group.first().unwrap_or(&empty))
-    }
-
-    fn evaluate_projected(
-        &mut self,
-        expression: &expression::Expr,
-        record: &ProjectedRow,
-    ) -> QueryResult<Value> {
-        let aliases = record
-            .output
-            .values
-            .iter()
-            .map(|(name, value)| {
-                Ok((
-                    name.clone(),
-                    binding_value_with_access(
-                        &self.snapshot,
-                        value,
-                        &self.graph_view.query_access,
-                    )?,
-                ))
-            })
-            .collect::<QueryResult<BTreeMap<_, _>>>()?;
-        let representative = record.group.first().unwrap_or(&record.output);
-        self.evaluate_group_expression(expression, &record.group, representative, &aliases)
-    }
-
-    fn sort_projected(&mut self, rows: &mut [ProjectedRow], order: &AstNode) -> QueryResult<()> {
-        let expressions = surface_expressions(order)
-            .into_iter()
-            .map(compile_expression)
-            .collect::<QueryResult<Vec<_>>>()?;
-        let directions = order
-            .descendants()
-            .filter_map(|node| match node.kind {
-                AstKind::OrderDirection(direction) => Some((node.span.start, direction)),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        let mut keyed = Vec::with_capacity(rows.len());
-        for row in rows.iter().cloned() {
-            let mut keys = Vec::with_capacity(expressions.len());
-            for expression in &expressions {
-                keys.push(self.evaluate_projected(expression, &row)?);
-            }
-            keyed.push((row, keys));
-        }
-        for (_, keys) in &keyed {
-            compare_keys(keys, keys, &directions, order)?;
-        }
-        let mut failure = None;
-        keyed.sort_by(|left, right| {
-            if failure.is_some() {
-                return Ordering::Equal;
-            }
-            match compare_keys(&left.1, &right.1, &directions, order) {
-                Ok(ordering) => ordering,
-                Err(error) => {
-                    failure = Some(error);
-                    Ordering::Equal
-                }
-            }
-        });
-        if let Some(error) = failure {
-            return Err(error);
-        }
-        for (target, (row, _)) in rows.iter_mut().zip(keyed) {
-            *target = row;
-        }
-        Ok(())
-    }
-
     fn evaluate(&mut self, expression: &expression::Expr, row: &BindingRow) -> QueryResult<Value> {
-        let expression = self.materialize_subqueries(expression, row, &BTreeMap::new())?;
-        expression::evaluate_with_access(
+        let baseline = self.expression_reservation.bytes();
+        let (expression, _memory) =
+            self.materialize_subqueries(expression, row, &BTreeMap::new())?;
+        let evaluated = expression::evaluate_with_access_control(
             &expression,
             &self.snapshot,
             row,
             self.params,
             &self.graph_view.query_access,
-        )
+            self.control,
+        )?;
+        drop(expression);
+        drop(_memory);
+        self.finish_evaluation(evaluated, baseline)
     }
 
     fn check_interrupted(&self) -> QueryResult<()> {
@@ -1222,6 +1030,20 @@ impl ReadExecutor<'_, '_> {
             Ok(())
         }
     }
+}
+
+pub(crate) fn compile_unwind(clause: &AstNode) -> QueryResult<(String, expression::Expr)> {
+    let name = clause
+        .descendants()
+        .find(|node| node.kind == AstKind::BindingVariable)
+        .and_then(|node| node.text.clone())
+        .ok_or_else(|| QueryError::semantic("UNWIND/FOR is missing its variable"))?;
+    let expression = surface_expressions(clause)
+        .into_iter()
+        .next()
+        .ok_or_else(|| QueryError::semantic("UNWIND/FOR is missing its list expression"))?;
+    let expression = compile_expression(expression)?;
+    Ok((name, expression))
 }
 
 fn preserve_load_csv_context(source: &BindingRow, output: &mut BindingRow) {
@@ -1256,7 +1078,13 @@ fn preserve_common_load_csv_context(group: &[BindingRow], output: &mut BindingRo
     }
 }
 
+mod aggregation;
+mod rowset;
+mod sorting;
+pub(crate) use rowset::RowSet;
+
 mod call;
+pub(crate) use call::{append_call_columns, merge_call_result, project_call_bindings};
 mod graph_expression;
 mod helpers;
 mod load_csv;
@@ -1270,3 +1098,6 @@ use helpers::{
     aggregate_percentile, aggregate_sum, clone_row_set, compare_keys, distinct_projected,
     expr_contains_aggregate, null_extend_row, pagination, pattern_expression_clause, union_rows,
 };
+
+#[cfg(test)]
+mod global_bindings_tests;

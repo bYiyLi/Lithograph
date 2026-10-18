@@ -1,8 +1,9 @@
 use std::collections::BTreeSet;
 
-use rusqlite::Connection;
+use super::VersionExecution as Connection;
 
 use crate::cypher::Value;
+use crate::query::resources::{checked_add, checked_mul, map_entry_bytes};
 use crate::query::{AccessPolicy, PropertyRules, QueryError, QueryResult};
 use crate::storage::{self, HashId, LayerBuilder, OwnerKind, SchemaState, Snapshot};
 
@@ -18,26 +19,30 @@ pub(super) fn check_layer(
     if unrestricted_graph_writes(policy) {
         return Ok(());
     }
-    let before = Snapshot::resolve(connection, before_commit)?;
-    let after = Snapshot::resolve_with_layer(connection, before_commit, layer)?;
-    check_layer_entities(&after, layer, policy)?;
+    let before = connection.snapshot(before_commit)?;
+    let after = connection.with_layer_snapshot(before_commit, layer, next_schema)?;
+    check_layer_entities(connection, &after, layer, policy)?;
     check_touched_properties(connection, &before, &after, layer, policy)?;
-    let previous = SchemaState::load(connection, before_commit)?;
-    check_schema_transition(&previous, next_schema, policy)
+    let previous = connection.load_schema(before_commit)?;
+    check_schema_transition(connection, &previous, next_schema, policy)
 }
 
 fn check_layer_entities(
+    connection: &Connection,
     after: &Snapshot<'_>,
     layer: &LayerBuilder,
     policy: &AccessPolicy,
 ) -> QueryResult<()> {
     for (_, added) in layer.node_changes() {
+        connection.checkpoint()?;
         check_entity_change(added, policy)?;
     }
     for (_, added) in layer.relationship_changes() {
+        connection.checkpoint()?;
         check_entity_change(added, policy)?;
     }
     for (node, _, _) in layer.label_changes() {
+        connection.checkpoint()?;
         if after.node_exists(node)? {
             require(
                 policy.write.allow_label_changes,
@@ -49,11 +54,23 @@ fn check_layer_entities(
 }
 
 pub(super) fn check_schema_transition(
+    connection: &Connection,
     previous: &SchemaState,
     next: &SchemaState,
     policy: &AccessPolicy,
 ) -> QueryResult<()> {
-    if previous.canonical_blob()? != next.canonical_blob()? {
+    let differs = with_schema_workspace(connection, previous, next, || {
+        let check = || {
+            connection
+                .control()
+                .check()
+                .map_err(super::execution::storage_error)
+        };
+        let previous = previous.canonical_blob_checked(&check)?;
+        let next = next.canonical_blob_checked(&check)?;
+        super::canonical::same_bytes(connection, &previous, &next).map(|same| !same)
+    })?;
+    if differs {
         require(
             policy.write.allow_schema_changes,
             "writeAccess.allowSchemaChanges",
@@ -63,11 +80,14 @@ pub(super) fn check_schema_transition(
 }
 
 pub(super) fn check_schema_validation(
+    connection: &Connection,
     previous: &SchemaState,
     next: &SchemaState,
     policy: &AccessPolicy,
 ) -> QueryResult<()> {
-    crate::query::schema::validate_external_transition(previous, next, policy)
+    with_schema_workspace(connection, previous, next, || {
+        crate::query::schema::validate_external_transition(previous, next, policy)
+    })
 }
 
 /// Arbitrary Branch moves inspect only slots touched on either first-parent
@@ -82,20 +102,17 @@ pub(super) fn check_commits(
         return Ok(());
     }
     let common = first_parent_common(connection, before_commit, after_commit)?;
-    let before_touched = storage::touched_layer_between_commits(connection, common, before_commit)?;
-    let after_touched = storage::touched_layer_between_commits(connection, common, after_commit)?;
-    let before = Snapshot::resolve(connection, before_commit)?;
-    let after = Snapshot::resolve(connection, after_commit)?;
-    let mut touched = before_touched;
-    touched.nodes.extend(after_touched.nodes);
-    touched.labels.extend(after_touched.labels);
-    touched.relationships.extend(after_touched.relationships);
-    touched.properties.extend(after_touched.properties);
-    check_touched_entities(&before, &after, &touched, policy)?;
-    check_touched_properties(connection, &before, &after, &touched, policy)?;
-    let previous = SchemaState::load(connection, before_commit)?;
-    let next = SchemaState::load(connection, after_commit)?;
-    check_schema_transition(&previous, &next, policy)
+    let before_touched = connection.touched_layer_between_commits(common, before_commit)?;
+    let after_touched = connection.touched_layer_between_commits(common, after_commit)?;
+    let before = connection.snapshot(before_commit)?;
+    let after = connection.snapshot(after_commit)?;
+    for touched in [&before_touched, &after_touched] {
+        check_touched_entities(connection, &before, &after, touched, policy)?;
+        check_touched_properties(connection, &before, &after, touched, policy)?;
+    }
+    let previous = connection.load_schema(before_commit)?;
+    let next = connection.load_schema(after_commit)?;
+    check_schema_transition(connection, &previous, &next, policy)
 }
 
 fn unrestricted_graph_writes(policy: &AccessPolicy) -> bool {
@@ -112,30 +129,36 @@ fn first_parent_common(
     mut right: HashId,
 ) -> QueryResult<HashId> {
     let mut ancestors = BTreeSet::new();
+    let mut memory = connection.reserve(0)?;
     loop {
+        connection.checkpoint()?;
+        memory.grow(map_entry_bytes::<HashId>()?)?;
         ancestors.insert(left);
-        let Some(parent) = storage::load_commit(connection, left)?.parent1 else {
+        let Some(parent) = super::operations::commit_parents(connection, left)?.0 else {
             break;
         };
         left = parent;
     }
     loop {
+        connection.checkpoint()?;
         if ancestors.contains(&right) {
             return Ok(right);
         }
-        right = storage::load_commit(connection, right)?
-            .parent1
+        right = super::operations::commit_parents(connection, right)?
+            .0
             .ok_or_else(|| QueryError::internal("Version operations have no common Root Commit"))?;
     }
 }
 
 fn check_touched_entities(
+    connection: &Connection,
     before: &Snapshot<'_>,
     after: &Snapshot<'_>,
     touched: &LayerBuilder,
     policy: &AccessPolicy,
 ) -> QueryResult<()> {
     for (node, _) in touched.node_changes() {
+        connection.checkpoint()?;
         let was_present = before.node_exists(node)?;
         let is_present = after.node_exists(node)?;
         if was_present != is_present {
@@ -143,17 +166,19 @@ fn check_touched_entities(
         }
     }
     for (relationship, _) in touched.relationship_changes() {
+        connection.checkpoint()?;
         let was_present = before.relationship(relationship.id)?.is_some();
         let is_present = after.relationship(relationship.id)?.is_some();
         if was_present != is_present {
             check_entity_change(is_present, policy)?;
         }
     }
-    check_touched_labels(before, after, touched, policy)?;
+    check_touched_labels(connection, before, after, touched, policy)?;
     Ok(())
 }
 
 fn check_touched_labels(
+    connection: &Connection,
     before: &Snapshot<'_>,
     after: &Snapshot<'_>,
     touched: &LayerBuilder,
@@ -163,7 +188,7 @@ fn check_touched_labels(
         return Ok(());
     }
     for (node, _, _) in touched.label_changes() {
-        if after.node_exists(node)? && before.labels(node)? != after.labels(node)? {
+        if after.node_exists(node)? && !same_labels(connection, before, after, node)? {
             return require(false, "writeAccess.allowLabelChanges");
         }
     }
@@ -181,31 +206,75 @@ fn check_touched_properties(
         return Ok(());
     }
     for (owner, id, key, _) in touched.property_changes() {
-        if owner_exists(after, owner, id)? && !same_property_state(before, after, owner, id, key)? {
-            policy.check_write_property(&property_name(connection, key)?)?;
+        connection.checkpoint()?;
+        if owner_exists(after, owner, id)?
+            && !same_property_state(connection, before, after, owner, id, key)?
+        {
+            storage::with_property_key_name(connection, key, |name| {
+                let name = name.ok_or_else(|| {
+                    QueryError::internal("Version property dictionary entry is missing")
+                })?;
+                policy.check_write_property(name)
+            })?;
         }
     }
     Ok(())
 }
 
 fn same_property_state(
+    connection: &Connection,
     before: &Snapshot<'_>,
     after: &Snapshot<'_>,
     owner: OwnerKind,
     id: i64,
     key: i64,
 ) -> QueryResult<bool> {
-    let previous = before
-        .property(owner, id, key)?
-        .as_ref()
-        .map(storage::PropertyValue::canonical_bytes)
-        .transpose()?;
-    let next = after
-        .property(owner, id, key)?
-        .as_ref()
-        .map(storage::PropertyValue::canonical_bytes)
-        .transpose()?;
-    Ok(previous == next)
+    before.with_property(owner, id, key, |previous| {
+        after.with_property(owner, id, key, |next| {
+            super::patch::same_property_value_controlled(connection, previous, next)
+        })
+    })
+}
+
+fn same_labels(
+    connection: &Connection,
+    before: &Snapshot<'_>,
+    after: &Snapshot<'_>,
+    node: i64,
+) -> QueryResult<bool> {
+    let mut labels = BTreeSet::new();
+    let mut memory = connection.reserve(0)?;
+    before.visit_node_labels(node, |label| {
+        connection.checkpoint()?;
+        memory.grow(map_entry_bytes::<i64>()?)?;
+        labels.insert(label);
+        Ok::<_, QueryError>(())
+    })?;
+    let mut equal = true;
+    after.visit_node_labels(node, |label| {
+        connection.checkpoint()?;
+        equal &= labels.remove(&label);
+        Ok::<_, QueryError>(())
+    })?;
+    Ok(equal && labels.is_empty())
+}
+
+fn schema_comparison_memory(
+    connection: &Connection,
+    previous: &SchemaState,
+    next: &SchemaState,
+) -> QueryResult<crate::query::resources::MemoryReservation> {
+    let check = || {
+        connection
+            .control()
+            .check()
+            .map_err(super::execution::storage_error)
+    };
+    let bytes = checked_add(
+        storage::schema_state_memory_bytes(previous, &check)?,
+        storage::schema_state_memory_bytes(next, &check)?,
+    )?;
+    connection.reserve(checked_mul(bytes, 8)?)
 }
 
 fn owner_exists(snapshot: &Snapshot<'_>, owner: OwnerKind, id: i64) -> QueryResult<bool> {
@@ -221,11 +290,6 @@ fn check_entity_change(added: bool, policy: &AccessPolicy) -> QueryResult<()> {
     } else {
         require(policy.write.allow_delete, "writeAccess.allowDelete")
     }
-}
-
-fn property_name(connection: &Connection, key: i64) -> QueryResult<String> {
-    storage::property_key_name(connection, key)?
-        .ok_or_else(|| QueryError::internal("Version property dictionary entry is missing"))
 }
 
 pub(super) fn check_slot_read(slot: &str, rules: &PropertyRules) -> QueryResult<()> {
@@ -245,6 +309,7 @@ pub(super) fn check_slot_write(slot: &str, policy: &AccessPolicy) -> QueryResult
 }
 
 pub(super) fn check_resolution_slot(
+    connection: &Connection,
     slot: &str,
     previous: Option<&Value>,
     next: Option<&Value>,
@@ -253,7 +318,7 @@ pub(super) fn check_resolution_slot(
     if graph_property_name(slot).is_some() {
         return check_slot_write(slot, policy);
     }
-    if super::canonical::same_optional_value(previous, next) {
+    if super::canonical::same_optional_value_controlled(connection, previous, next)? {
         return Ok(());
     }
     if slot.starts_with("node/") || slot.starts_with("relationship/") {
@@ -344,4 +409,17 @@ fn operation_slot(operation: &Value) -> Option<&str> {
 
 fn require(allowed: bool, permission: &str) -> QueryResult<()> {
     crate::query::access::require(allowed, permission)
+}
+
+fn with_schema_workspace<T>(
+    connection: &Connection,
+    previous: &SchemaState,
+    next: &SchemaState,
+    operation: impl FnOnce() -> QueryResult<T>,
+) -> QueryResult<T> {
+    let _memory = schema_comparison_memory(connection, previous, next)?;
+    connection.control().check()?;
+    let result = operation();
+    connection.control().check()?;
+    result
 }

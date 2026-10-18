@@ -175,7 +175,7 @@ Outer SQL 自己仍会影响**消费**：例如 `LIMIT 1` 在 `columns` 后关�
 
 每个会产生 SQLite side effect 的 SQL operation 继续拥有自己设计定义的原子 boundary：例如 `lithograph_init()` 保持既有 invocation SAVEPOINT，Cypher execution / maintenance 使用 execution-owned SAVEPOINT 或该 operation 明确拥有的独立 transaction boundary。**本节新增的 terminal-ready -> result preflight -> finalize-success 规则只约束 `lithograph()` / `lithograph_rows()` 的 Cypher execution surface，以及下述 explicit-transaction lifecycle 明确引用该规则的操作，不因此重开 init 等无关 API 的历史 result-delivery contract。**
 
-对普通 side-effecting Cypher execution，scalar SAVEPOINT 覆盖整个 callback；streaming scan 的 SAVEPOINT 从第一次 runtime side effect 持续到 finalize-success、error/cancel 或 `xClose`。普通 write 成功时只有在 terminal-ready payload/envelope 已编码并通过 size/resource checks 后才 `RELEASE` / finalize，随后 public summary/result 才可观察；Lithograph error/panic/cancel 时先 `ROLLBACK TO` 再 `RELEASE`，然后才把 error 返回 SQLite。这样一次 execution 不会留下半写 Layer/Commit/ref/schema。SQL callback/cursor 本身不能依赖“外层 SQL statement 失败会自动撤销递归写入”。`CALL ... IN TRANSACTIONS` 按其专用 inner-transaction contract，不套一个会吞掉已 durable batch 的 outer SAVEPOINT。
+对普通 side-effecting Cypher execution，scalar SAVEPOINT 覆盖整个 callback；streaming scan 的 SAVEPOINT 从第一次 runtime side effect 持续到 finalize-success、error/cancel 或 `xClose`。普通 write 成功时只有在 terminal-ready payload/envelope 已编码并通过 size/resource checks 后才 `RELEASE` / finalize，随后 public summary/result 才可观察；普通 error/panic/cancel 的可用 cleanup 路径先 `ROLLBACK TO` 再 `RELEASE`，然后才把 error 返回 SQLite。真实宿主 interrupt 的恢复与实际 autocommit 验证由 [Runtime](runtime.md#sqlite-interrupt-recovery) 拥有；它可能整体 abort caller-owned SQLite transaction，不能承诺只回滚内部 SAVEPOINT。这样一次 execution 不会留下半写 Layer/Commit/ref/schema。SQL callback/cursor 本身不能依赖“外层 SQL statement 失败会自动撤销递归写入”。`CALL ... IN TRANSACTIONS` 按其专用 inner-transaction contract，不套一个会吞掉已 durable batch 的 outer SAVEPOINT。
 
 因此 side-effecting `lithograph_rows()` 的 writer/savepoint lifetime 与 caller 消费速度直接相关：一旦 execution 开始真实 write，它必须保持可 rollback boundary直到 finalize-success 或 cancel/close，慢 consumer、应用停顿、长 external I/O 或巨大 result stream都会延长 SQLite single-writer hold / WAL 等待。这是“stream provisional rows但最终仍原子提交”的必要成本，不允许通过提前 commit、后台继续 execution 或把剩余 rows预物化来隐藏。调用方应持续消费到 terminal或及时 close；需要避免长 writer时应调整 query/transaction batching，而不是改变 rows事务语义。
 
@@ -242,6 +242,7 @@ Lithograph 不导出 application-facing Cypher execution / validation / transact
   "author": "alice@example.com",
   "message": "update graph",
   "readOnlyNoExternalIO": true,
+  "memoryLimitBytes": 67108864,
   "graphView": {
     "requireAllLabels": ["tenant_acme"],
     "excludeAnyLabels": ["internal"]
@@ -258,6 +259,7 @@ Lithograph 不导出 application-facing Cypher execution / validation / transact
 - `readOnlyNoExternalIO` 是可选 Boolean，省略或 `false` 保持既有执行语义；`true` 为本次 `lithograph()` / `lithograph_rows()` execution 同时施加只读与禁止外部 I/O 约束。非 Boolean（包括 `null`）返回 `INVALID_ARGUMENT`。该选项可与 `branch`、`at`、`graphView` 及 active SQL explicit transaction 中的 query-local options 组合；它不改变所选 Snapshot 或 transaction 的含义；
 - 该约束在 Core 对完整、已解析并通过 semantic validation 的 Cypher AST 做 prepare 时判定，覆盖所有嵌套子查询和条件/组合分支，不依赖原始 query text、参数值、实际结果行数或 runtime 分支是否会执行。Graph/Schema/Index/Version/connection checkout/maintenance mutation、`CALL ... IN TRANSACTIONS`、`LOAD CSV`（无论 URI 来自字面量还是参数）以及 Managed Semantic query/rebuild/create 都在执行前返回 `INVALID_ARGUMENT`；注册 Procedure 仅允许已分类为无外部 I/O 的只读 operation，Full-text query Procedure 也拒绝，因为它可以调用宿主注册的 tokenizer。`EXPLAIN` / `PROFILE` 不豁免；
 - 安全模式允许普通 graph/history/Schema `SHOW`、已分类的只读 Version Procedure 与 Raw Vector `SEARCH`。它不禁止读取当前 SQLite database、SQLite 自己的 TEMP/spill/derived-state 工作，也不约束同一 connection 上由调用方直接发出的其它 SQL、`lithograph_init()` 或单独调用的 transaction lifecycle API；能自行构造 options 或直接调用其它 SQL 的主体仍拥有相应宿主权限。要把它用于不可信 Cypher，上层必须强制设置此选项并控制 SQL execution surface；
+- `memoryLimitBytes` 是可选的正 JSON 整数，范围为 `1..9223372036854775807` bytes；省略时不增加 execution 内存限额，已有函数、SQLite 和宿主资源限制仍生效。显式 `null`、零、负数、小数、Boolean、字符串及越界值返回 `INVALID_ARGUMENT`。该选项适用于两个 SQL execution surface 和 active explicit transaction 内的每次 execution，也可与其它合法 query-local options 组合；它不是 `lithograph_tx_begin()` option。预算归属、分配和回收由 [Execution Resource State](query-engine.md#execution-resources) 定义，覆盖范围及宿主责任见 [Runtime](runtime.md#execution-memory-boundary)；
 - `graphView` 是 query-local Graph View specification；省略或 `{}` 表示完整 Snapshot graph。它不持久化、不命名、不进入 Commit/Layer/Schema hash，也不改变 connection checkout；
 - `graphView.requireAllLabels` 是 Node 必须同时拥有的 Label 集合；省略或空数组表示没有正向 Label 限制；
 - `graphView.excludeAnyLabels` 是 Node 不能拥有的 Label 集合；命中任意一个即不可见；省略或空数组表示没有排除 Label；
@@ -286,7 +288,7 @@ SQL explicit transaction 的 begin options 使用独立的 transaction-level sha
 - `branch` 省略时使用当前 connection active Branch；开始后 target Branch 固定，active transaction 内的普通 execution 不能切换 Branch；
 - `expectedHead` 可省略；提供时只接受 resolved `commit/<id>`，并在取得 writer ownership 后与 target Branch 当前 head 原子比较，不一致返回 `BRANCH_HEAD_MOVED` 且 transaction 不开始；
 - `author` / `message` 只属于最终唯一 Commit；active transaction 内各 `lithograph()` / `lithograph_rows()` execution 不再接受自己的 Commit metadata；
-- active transaction 内 execution 可以使用 query-local `graphView`、`readOnlyNoExternalIO` 及后续版本的 `readAccess` / `writeAccess`，但 `branch` / `at` / `author` / `message` / `mergeSession` 等会选择另一 transaction/version context 的 options 返回 `INVALID_ARGUMENT`；
+- active transaction 内 execution 可以使用 query-local `graphView`、`readOnlyNoExternalIO`、`readAccess` / `writeAccess` 和 `memoryLimitBytes`，但 `branch` / `at` / `author` / `message` / `mergeSession` 等会选择另一 transaction/version context 的 options 返回 `INVALID_ARGUMENT`；
 - Version Procedure、Branch/Tag/Commit Data mutation、checkout/GC，以及 `CALL { ... } IN TRANSACTIONS` / `IN CONCURRENT TRANSACTIONS` 不能在 explicit transaction 内嵌套执行，返回 `TRANSACTION_BOUNDARY_REQUIRED`；
 - External I/O 本身不禁止 explicit transaction execution；普通 `LOAD CSV`、Managed Semantic query 等只要不另行拥有独立 transaction/version lifecycle 就可以执行。显式 rebuild/maintenance procedure 是否允许由其 own lifecycle contract 决定。调用方承担长 I/O 延长 SQLite single-writer ownership 的成本；失败时整个 explicit transaction fail closed abort。
 
@@ -517,3 +519,5 @@ LITHOGRAPH_<CATEGORY>: <message> [line=<N>,column=<N>]
 只有 Core 提供 query source position 时才追加第二种**尾部 suffix**；`line` / `column` 都是 1-based decimal integer，中间固定使用英文逗号且不插入额外空格。没有 position 时使用第一种形式，不伪造 `0` / `null`。调用方若需要机器识别，解析稳定 category prefix 与可选 trailing location suffix；`<message>` 本身仍是人类可读诊断，不承诺可机器解析。
 
 SQL surface 同时通过 `sqlite3_result_error_code` 保留 SQLite primary result code；parse/semantic/type/schema/version argument error 通常为 `SQLITE_ERROR`，API misuse 为 `SQLITE_MISUSE`，明确访问禁令为 `ACCESS_DENIED` + `SQLITE_AUTH`，host lock contention 的 `SQLITE_BUSY/SQLITE_LOCKED` 映射 `BUSY`，host/user cancellation 的 `SQLITE_INTERRUPT` 映射 `INTERRUPTED` 并保留 `SQLITE_INTERRUPT`，`SQLITE_NOMEM/SQLITE_TOOBIG/SQLITE_FULL` 映射 `RESOURCE_ERROR`，I/O/open/read-only-file 类错误映射 `IO_ERROR`。Interrupt 不是 memory/disk resource exhaustion，不能为了沿用旧 adapter enum 把它写成 `RESOURCE_ERROR`。SQLite 对少数 resource result code 有宿主级 canonicalization：例如 `SQLITE_NOMEM` 可能把自定义 text 改写成 `out of memory`。真实 primary code 始终比保留 Lithograph prefix 更优先，不能为了 error text 伪装成 `SQLITE_ERROR`。错误不得泄漏内部 SQLite table/schema 或 Provider secret。
+
+`memoryLimitBytes` 的 execution 预算拒绝固定返回 `RESOURCE_ERROR` + `SQLITE_TOOBIG`，不同于系统实际 allocation failure 的 `SQLITE_NOMEM`。预算耗尽走普通 execution failure 路径：不截断为成功结果，不产生成功 summary，未发布写入回滚，active explicit transaction 整体 abort；transaction subquery 的已 durable batch 仍遵循原有保留语义。此选项与改进的表达式取消属于 Unreleased 变更，当前实施与验收状态见 [Phase 19](../development/phases/19-query-correctness-resources.md)；v0.3.2 发行库不支持新选项。

@@ -31,6 +31,9 @@ pub(super) fn sql_tx_begin(
             "Lithograph explicit transaction requires SQLite autocommit mode",
         ));
     }
+    // Keep this TEMP object outside the explicit transaction. No statement or
+    // blob handle is retained while the transaction is idle.
+    interrupt_cleanup::prepare(connection)?;
     connection
         .execute_batch("BEGIN IMMEDIATE")
         .map_err(|error| map_sqlite_error(error, "failed to begin explicit transaction"))?;
@@ -201,7 +204,11 @@ pub(super) fn execution_options(text: &str, branch: &str) -> LithographResult<St
     for key in object.keys() {
         if !matches!(
             key.as_str(),
-            "graphView" | "readOnlyNoExternalIO" | "readAccess" | "writeAccess"
+            "graphView"
+                | "readOnlyNoExternalIO"
+                | "readAccess"
+                | "writeAccess"
+                | "memoryLimitBytes"
         ) {
             return Err(LithographError::invalid_argument(format!(
                 "explicit transaction execution does not accept option {key}"
@@ -215,6 +222,7 @@ pub(super) fn execution_options(text: &str, branch: &str) -> LithographResult<St
         "readOnlyNoExternalIO",
         "readAccess",
         "writeAccess",
+        "memoryLimitBytes",
     ] {
         if let Some(value) = object.get(key) {
             options.insert(key.to_owned(), value.clone());
@@ -443,6 +451,9 @@ fn rollback_explicit_transaction(
     db: *mut ffi::sqlite3,
     connection: &Connection,
 ) -> LithographResult<()> {
+    if interrupt_cleanup::recover(connection)? {
+        return Ok(());
+    }
     let rollback = connection
         .execute_batch("ROLLBACK")
         .map_err(|error| map_sqlite_error(error, "failed to rollback explicit transaction"));

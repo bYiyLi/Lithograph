@@ -89,7 +89,39 @@ python3 docs/guide/examples/streaming.py /absolute/path/lithograph.dylib
 
 应用可以用 driver 提供的 `interrupt()`（C 为 `sqlite3_interrupt()`）取消执行；耗时 operator 在检查点停止，返回 SQLite interrupt。跨线程调用必须遵守实际 binding 与 SQLite threading mode。取消后 close/finalize 对应 cursor，再检查事务是否已经自动 abort。
 
+Unreleased / Phase 19 将中断检查传入长表达式和函数循环，包括嵌套 `reduce()`；可分块的长文本也分段检查。第三方不可拆分调用只保证调用前后检查，阻塞中的单次调用仍受其已有 timeout 合同约束。宿主使用自己的请求期限调用 `interrupt()`，不存在 query `timeout` option。
+
+真实中断可能使 caller-owned SQLite transaction 整体回滚，包含此前尚未提交的宿主业务写入。Phase 19 的普通潜在写与 active explicit execution 会确认 SQLite 已恢复到 autocommit；无法证明清理完成时隔离 connection 并返回 `INTERNAL_ERROR`，应关闭丢弃。应用 finalize/close 后检查实际事务状态，不把收到 code 9 理解成只撤销本次调用的内部 SAVEPOINT；连接池复用条件见 [取消与连接池](../reference/transactions.md#cancellation)。
+
 Lithograph 会在普通 execution 的 finalize-success 前预检自己的 JSON 编码和长度限制，已检测到的失败会走回滚。SQLite 最终交付结果或宿主后续处理结果时仍可能失败，调用方有时无法确认是否已经成功；遇到这种不确定状态，先通过 Branch head、业务键和 history 核对结果，再决定是否重放。batch 查询的最终 envelope/stream 即使失败，也可能已提交 earlier batch；参见 [事务生命周期](../reference/transactions.md)。
+
+<a id="execution-memory-budget"></a>
+
+### 设置 execution 内存预算（Unreleased）
+
+以下能力属于 Unreleased 变更，当前实施与验收状态见 [Phase 19](../development/phases/19-query-correctness-resources.md)；**v0.3.2 发行库不接受 `memoryLimitBytes`**。宿主使用包含本功能的构建时，在原有受控 options 中增加正整数预算；下例继续使用已加载扩展、初始化完成的 `db`，且只允许客户端传 query/params：
+
+```python
+def budgeted_read(db, cypher, params):
+    options = {
+        "readOnlyNoExternalIO": True,
+        "memoryLimitBytes": 64 * 1024 * 1024,
+    }
+    cursor = db.execute(
+        "SELECT lithograph(?, ?, ?)",
+        (cypher, json.dumps(params, allow_nan=False), json.dumps(options)),
+    )
+    try:
+        return json.loads(cursor.fetchone()[0])
+    finally:
+        cursor.close()
+```
+
+64 MiB 是此宿主示例的选择，不是 Lithograph 默认值。省略该字段保持原有行为；不要让客户端覆盖或在失败重试时移除配额。预算按每次 execution 独立指定，包含参数、中间值及结果编码/收集；active explicit transaction 内也要每次传入，不能放在 `tx_begin`。
+
+例如 `RETURN size(range(1,500000)) AS c` 只返回一个数字，但仍需构造中间 List；包含本功能的构建在 16 MiB 下返回 `RESOURCE_ERROR` / `SQLITE_TOOBIG`，在 256 MiB 下返回 `500000`。结果越大时优先选择 rows 接口，使用完全相同的受控 options，完整消费到 summary 和 `SQLITE_DONE`；scalar 需要保留完整 envelope，更容易达到预算。预算失败遵循现有回滚规则，已 durable batch 仍可能存在。
+
+这项预算不是进程 RSS 硬上限，不覆盖 AST/plan、SQLite 页缓存、Provider 内存、宿主已有输入缓冲或 allocator 隐含开销；主服务的硬隔离、并发和期限仍由宿主管理。范围与错误精确说明见 [Execution Options](../reference/execution-options.md#memory-limit)，实际验收状态见 [Phase 19](../development/phases/19-query-correctness-resources.md)。
 
 <a id="c-host"></a>
 

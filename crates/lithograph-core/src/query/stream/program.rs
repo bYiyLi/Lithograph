@@ -6,12 +6,14 @@ use crate::query::ingestion::{
     CompiledLoadCsv, CsvStream, compile_load_csv, csv_binding_row, evaluate_csv_source,
 };
 use crate::query::plan::{OrderItem, Projection, ProjectionPlan};
+use crate::query::resources::{ExecutionControl, MemoryReservation};
 use crate::query::spill::{BINDING_SPILL_BATCH_ROWS, BindingSpill};
 
 #[derive(Debug)]
 pub(crate) struct ProgramStream {
     source: Box<dyn BindingSource>,
     columns: Vec<String>,
+    output_memory: Option<MemoryReservation>,
 }
 
 struct ProgramRuntime<'a, 'connection> {
@@ -21,6 +23,38 @@ struct ProgramRuntime<'a, 'connection> {
     params: &'a std::collections::BTreeMap<String, Value>,
     metrics: &'a mut QueryMetrics,
     is_interrupted: &'a dyn Fn() -> bool,
+    control: &'a ExecutionControl<'a>,
+    expression_memory: MemoryReservation,
+}
+
+impl ProgramRuntime<'_, '_> {
+    fn copy_binding(&mut self, row: &BindingRow) -> QueryResult<BindingRow> {
+        let mut copied = crate::query::completeness::execute::RowSet::try_clone_rows(
+            &row.order,
+            std::slice::from_ref(row),
+            self.control,
+        )?;
+        if let Some(memory) = copied.memory.take() {
+            self.expression_memory.merge(memory)?;
+        }
+        copied
+            .rows
+            .pop()
+            .ok_or_else(|| QueryError::internal("streamed copy lost its row"))
+    }
+
+    fn evaluate(&mut self, expr: &Expr, row: &BindingRow) -> QueryResult<Value> {
+        let evaluated = expression::evaluate_with_access_control(
+            expr,
+            self.snapshot,
+            row,
+            self.params,
+            &self.graph_view.query_access,
+            self.control,
+        )?;
+        self.expression_memory.merge(evaluated.reservation)?;
+        Ok(evaluated.value)
+    }
 }
 
 trait BindingSource: std::fmt::Debug {
@@ -80,21 +114,22 @@ impl BindingSource for DistinctBindingSource {
     fn next(&mut self, runtime: &mut ProgramRuntime<'_, '_>) -> QueryResult<Option<BindingRow>> {
         if matches!(self.state, DistinctBindingState::Pending) {
             let connection = open_spill_connection()?;
-            let mut spill = DistinctSpill::create(&connection)?;
+            let mut spill = DistinctSpill::create_with_resources(
+                &connection,
+                runtime.control.resources().clone(),
+            )?;
             while let Some(binding) = self.upstream.next(runtime)? {
                 check_interrupted(runtime.is_interrupted)?;
-                let row = self
-                    .columns
-                    .iter()
-                    .map(|column| {
-                        expression::binding_value_with_access(
-                            runtime.snapshot,
-                            binding.values.get(column).unwrap_or(&BindingValue::Null),
-                            &runtime.graph_view.query_access,
-                        )
-                    })
-                    .collect::<QueryResult<Vec<_>>>()?;
-                spill.push(&connection, &row)?;
+                let (row, _row_memory) = materialized_binding_values(
+                    runtime.snapshot,
+                    &binding,
+                    &self.columns,
+                    &runtime.graph_view.query_access,
+                    runtime.control,
+                )?;
+                spill.push(&connection, &row, runtime.control)?;
+                drop(binding);
+                runtime.expression_memory.resize(0)?;
             }
             self.state = DistinctBindingState::Ready {
                 connection,
@@ -104,14 +139,12 @@ impl BindingSource for DistinctBindingSource {
         let DistinctBindingState::Ready { connection, output } = &mut self.state else {
             return Ok(None);
         };
-        let Some((sequence, row)) = read_output_row(connection, &output.table, output.after)?
+        let Some((row, _row_memory)) = next_program_spill_row(connection, output, runtime.control)?
         else {
-            drop_temp_table(connection, &output.table)?;
             self.state = DistinctBindingState::Done;
             return Ok(None);
         };
-        output.after = sequence;
-        projected_binding(runtime.snapshot, &self.columns, row).map(Some)
+        projected_binding(runtime.snapshot, &self.columns, row, runtime.control).map(Some)
     }
 }
 
@@ -123,6 +156,7 @@ struct BatchClauseSource {
     input_columns: Vec<String>,
     output_columns: Vec<String>,
     buffered: std::collections::VecDeque<BindingRow>,
+    buffered_memory: Option<MemoryReservation>,
     done: bool,
     input_batch_rows: usize,
 }
@@ -136,6 +170,8 @@ impl BindingSource for BatchClauseSource {
             if self.done {
                 return Ok(None);
             }
+            self.buffered_memory = None;
+            let baseline = runtime.expression_memory.bytes();
             let mut input = Vec::with_capacity(self.input_batch_rows);
             while input.len() < self.input_batch_rows {
                 check_interrupted(runtime.is_interrupted)?;
@@ -158,9 +194,11 @@ impl BindingSource for BatchClauseSource {
                 super::super::completeness::execute::RowSet {
                     columns: self.input_columns.clone(),
                     rows: input,
+                    memory: None,
                 },
                 runtime.metrics,
                 runtime.is_interrupted,
+                runtime.control,
             )?;
             if result.columns != self.output_columns {
                 return Err(QueryError::internal(format!(
@@ -168,7 +206,9 @@ impl BindingSource for BatchClauseSource {
                     result.columns, self.output_columns
                 )));
             }
+            self.buffered_memory = result.memory;
             self.buffered.extend(result.rows);
+            runtime.expression_memory.resize(baseline)?;
         }
     }
 }
@@ -192,11 +232,17 @@ impl BindingSource for SeedSource {
 #[derive(Debug)]
 struct RowsSource {
     rows: std::collections::VecDeque<BindingRow>,
+    memory: MemoryReservation,
 }
 
 impl BindingSource for RowsSource {
-    fn next(&mut self, _runtime: &mut ProgramRuntime<'_, '_>) -> QueryResult<Option<BindingRow>> {
-        Ok(self.rows.pop_front())
+    fn next(&mut self, runtime: &mut ProgramRuntime<'_, '_>) -> QueryResult<Option<BindingRow>> {
+        let Some(row) = self.rows.pop_front() else {
+            return Ok(None);
+        };
+        let bytes = expression::binding_row_bytes_controlled(&row, Some(runtime.control))?;
+        runtime.expression_memory.merge(self.memory.split(bytes)?)?;
+        Ok(Some(row))
     }
 }
 
@@ -206,20 +252,26 @@ struct SpilledSource {
     spill: BindingSpill,
     after: i64,
     buffered: std::collections::VecDeque<BindingRow>,
+    memory: Option<MemoryReservation>,
     done: bool,
 }
 
 impl BindingSource for SpilledSource {
-    fn next(&mut self, _runtime: &mut ProgramRuntime<'_, '_>) -> QueryResult<Option<BindingRow>> {
+    fn next(&mut self, runtime: &mut ProgramRuntime<'_, '_>) -> QueryResult<Option<BindingRow>> {
         if let Some(row) = self.buffered.pop_front() {
             return Ok(Some(row));
         }
         if self.done {
             return Ok(None);
         }
-        let batch =
-            self.spill
-                .read_batch(&self.connection, self.after, BINDING_SPILL_BATCH_ROWS)?;
+        self.memory = None;
+        let (batch, memory) = self.spill.read_batch_reserved(
+            &self.connection,
+            self.after,
+            BINDING_SPILL_BATCH_ROWS,
+            runtime.control,
+        )?;
+        self.memory = Some(memory);
         if batch.is_empty() {
             self.done = true;
             return Ok(None);
@@ -235,6 +287,7 @@ struct MatchSource {
     upstream: Box<dyn BindingSource>,
     step: MatchStep,
     current: Option<StepCursor>,
+    _index_memory: MemoryReservation,
 }
 
 impl BindingSource for MatchSource {
@@ -247,6 +300,7 @@ impl BindingSource for MatchSource {
                     runtime.graph_view,
                     runtime.params,
                     runtime.metrics,
+                    runtime.control,
                 )? {
                     return Ok(Some(row));
                 }
@@ -255,7 +309,7 @@ impl BindingSource for MatchSource {
             let Some(input) = self.upstream.next(runtime)? else {
                 return Ok(None);
             };
-            self.current = Some(StepCursor::new(self.step.clone(), input));
+            self.current = Some(StepCursor::new(self.step.clone(), input, runtime.control)?);
         }
     }
 }
@@ -269,20 +323,17 @@ struct FilterSource {
 impl BindingSource for FilterSource {
     fn next(&mut self, runtime: &mut ProgramRuntime<'_, '_>) -> QueryResult<Option<BindingRow>> {
         loop {
+            let baseline = runtime.expression_memory.bytes();
             check_interrupted(runtime.is_interrupted)?;
             let Some(row) = self.upstream.next(runtime)? else {
                 return Ok(None);
             };
-            let value = expression::evaluate_with_access(
-                &self.predicate,
-                runtime.snapshot,
-                &row,
-                runtime.params,
-                &runtime.graph_view.query_access,
-            )?;
+            let value = runtime.evaluate(&self.predicate, &row)?;
             if expression::predicate(value)? {
                 return Ok(Some(row));
             }
+            drop(row);
+            runtime.expression_memory.resize(baseline)?;
         }
     }
 }
@@ -299,18 +350,16 @@ impl BindingSource for LetSource {
         let Some(source) = self.upstream.next(runtime)? else {
             return Ok(None);
         };
-        let mut output = source.clone();
+        let mut output = runtime.copy_binding(&source)?;
         for (name, expression) in &self.bindings {
-            let value = expression::evaluate_with_access(
-                expression,
-                runtime.snapshot,
-                &source,
-                runtime.params,
-                &runtime.graph_view.query_access,
-            )?;
+            let value = runtime.evaluate(expression, &source)?;
             output.insert(
                 name.clone(),
-                expression::binding_from_value(runtime.snapshot, value)?,
+                expression::binding_from_value_controlled(
+                    runtime.snapshot,
+                    value,
+                    runtime.control,
+                )?,
             );
         }
         Ok(Some(output))
@@ -324,6 +373,8 @@ struct UnwindSource {
     expression: Expr,
     current_input: Option<BindingRow>,
     current_values: std::vec::IntoIter<Value>,
+    values_memory: Option<MemoryReservation>,
+    input_memory: Option<MemoryReservation>,
 }
 
 impl BindingSource for UnwindSource {
@@ -331,35 +382,47 @@ impl BindingSource for UnwindSource {
         loop {
             check_interrupted(runtime.is_interrupted)?;
             if let Some(value) = self.current_values.next() {
-                let mut row = self
+                let input = self
                     .current_input
                     .as_ref()
-                    .ok_or_else(|| QueryError::internal("UNWIND stream lost its input row"))?
-                    .clone();
+                    .ok_or_else(|| QueryError::internal("UNWIND stream lost its input row"))?;
+                let mut row = runtime.copy_binding(input)?;
                 row.insert(
                     self.name.clone(),
-                    expression::binding_from_value(runtime.snapshot, value)?,
+                    expression::binding_from_value_controlled(
+                        runtime.snapshot,
+                        value,
+                        runtime.control,
+                    )?,
                 );
                 return Ok(Some(row));
             }
             let Some(input) = self.upstream.next(runtime)? else {
                 self.current_input = None;
+                self.values_memory = None;
+                self.input_memory = None;
                 return Ok(None);
             };
-            let value = expression::evaluate_with_access(
+            self.values_memory = None;
+            self.input_memory = Some(runtime.control.reserve(
+                expression::binding_row_bytes_controlled(&input, Some(runtime.control))?,
+            )?);
+            let value = expression::evaluate_with_access_control(
                 &self.expression,
                 runtime.snapshot,
                 &input,
                 runtime.params,
                 &runtime.graph_view.query_access,
+                runtime.control,
             )?;
-            let values = match value {
+            let values = match value.value {
                 Value::Null => Vec::new(),
                 Value::List(values) => values,
                 value => vec![value],
             };
             self.current_input = Some(input);
             self.current_values = values.into_iter();
+            self.values_memory = Some(value.reservation);
         }
     }
 }
@@ -369,6 +432,7 @@ struct LoadCsvSource {
     spec: CompiledLoadCsv,
     current_input: Option<BindingRow>,
     current_stream: Option<CsvStream>,
+    input_memory: Option<MemoryReservation>,
 }
 
 impl std::fmt::Debug for LoadCsvSource {
@@ -386,37 +450,45 @@ impl BindingSource for LoadCsvSource {
         loop {
             check_interrupted(runtime.is_interrupted)?;
             if let Some(stream) = self.current_stream.as_mut() {
-                if let Some((value, line)) = stream.next_value()? {
+                if let Some((value, line, memory)) = stream.next_value(runtime.control)? {
                     let input = self.current_input.as_ref().ok_or_else(|| {
                         QueryError::internal("LOAD CSV stream lost its input row")
                     })?;
-                    return Ok(Some(csv_binding_row(
+                    let (row, memory) = csv_binding_row(
                         input,
                         &self.spec.binding,
                         value,
                         stream.file_path(),
                         line,
-                    )));
+                        memory,
+                        runtime.control,
+                    )?;
+                    runtime.expression_memory.merge(memory)?;
+                    return Ok(Some(row));
                 }
                 self.current_stream = None;
                 self.current_input = None;
+                self.input_memory = None;
             }
 
+            let baseline = runtime.expression_memory.bytes();
             let Some(input) = self.upstream.next(runtime)? else {
                 return Ok(None);
             };
-            let (source, delimiter) = evaluate_csv_source(&self.spec, |expr| {
-                expression::evaluate_with_access(
-                    expr,
-                    runtime.snapshot,
-                    &input,
-                    runtime.params,
-                    &runtime.graph_view.query_access,
-                )
-            })?;
-            self.current_stream =
-                Some(CsvStream::open(&source, delimiter, self.spec.with_headers)?);
+            self.input_memory = Some(runtime.control.reserve(
+                expression::binding_row_bytes_controlled(&input, Some(runtime.control))?,
+            )?);
+            let (source, delimiter) =
+                evaluate_csv_source(&self.spec, |expr| runtime.evaluate(expr, &input))?;
+            self.current_stream = Some(CsvStream::open(
+                &source,
+                delimiter,
+                self.spec.with_headers,
+                runtime.control,
+            )?);
             self.current_input = Some(input);
+            drop(source);
+            runtime.expression_memory.resize(baseline)?;
         }
     }
 }
@@ -437,6 +509,7 @@ impl BindingSource for ProjectionSource {
             return Ok(None);
         }
         loop {
+            let baseline = runtime.expression_memory.bytes();
             check_interrupted(runtime.is_interrupted)?;
             let Some(input) = self.upstream.next(runtime)? else {
                 return Ok(None);
@@ -444,20 +517,21 @@ impl BindingSource for ProjectionSource {
             let mut output = BindingRow::default();
             output.load_csv_context.clone_from(&input.load_csv_context);
             for projection in &self.projections {
-                let value = expression::evaluate_with_access(
-                    &projection.expression,
-                    runtime.snapshot,
-                    &input,
-                    runtime.params,
-                    &runtime.graph_view.query_access,
-                )?;
+                let value = runtime.evaluate(&projection.expression, &input)?;
                 output.insert(
                     projection.column.clone(),
-                    expression::binding_from_value(runtime.snapshot, value)?,
+                    expression::binding_from_value_controlled(
+                        runtime.snapshot,
+                        value,
+                        runtime.control,
+                    )?,
                 );
             }
             if self.seen < self.skip {
                 self.seen = self.seen.saturating_add(1);
+                drop(input);
+                drop(output);
+                runtime.expression_memory.resize(baseline)?;
                 continue;
             }
             self.seen = self.seen.saturating_add(1);
@@ -511,19 +585,19 @@ impl BindingSource for BarrierProjectionSource {
                 self.state = BarrierProjectionState::Done;
                 return Ok(None);
             }
-            let Some((sequence, row)) = read_output_row(connection, &output.table, output.after)?
+            let Some((row, _row_memory)) =
+                next_program_spill_row(connection, output, runtime.control)?
             else {
-                drop_temp_table(connection, &output.table)?;
                 self.state = BarrierProjectionState::Done;
                 return Ok(None);
             };
-            output.after = sequence;
             if *skipped < self.skip {
                 *skipped = skipped.saturating_add(1);
                 continue;
             }
             *emitted = emitted.saturating_add(1);
-            return projected_binding(runtime.snapshot, &self.columns, row).map(Some);
+            return projected_binding(runtime.snapshot, &self.columns, row, runtime.control)
+                .map(Some);
         }
     }
 }
@@ -550,18 +624,22 @@ impl BarrierProjectionSource {
         connection: &Connection,
         runtime: &mut ProgramRuntime<'_, '_>,
     ) -> QueryResult<SpillOutput> {
-        let mut spill = DistinctSpill::create(connection)?;
+        let mut spill =
+            DistinctSpill::create_with_resources(connection, runtime.control.resources().clone())?;
         while let Some(input) = self.upstream.next(runtime)? {
             check_interrupted(runtime.is_interrupted)?;
-            let (row, _) = project_binding_values(
+            let (row, _, _memory) = project_binding_values(
                 runtime.snapshot,
                 runtime.params,
                 &input,
                 &self.projections,
                 &self.order,
                 &runtime.graph_view.query_access,
+                runtime.control,
             )?;
-            spill.push(connection, &row)?;
+            spill.push(connection, &row, runtime.control)?;
+            drop(input);
+            runtime.expression_memory.resize(0)?;
         }
         Ok(spill.output())
     }
@@ -572,20 +650,28 @@ impl BarrierProjectionSource {
         runtime: &mut ProgramRuntime<'_, '_>,
     ) -> QueryResult<SpillOutput> {
         let directions = self.order.iter().map(|item| item.descending).collect();
-        let mut spill = SortSpill::create(connection, self.distinct, directions)?;
+        let mut spill = SortSpill::create_with_resources(
+            connection,
+            self.distinct,
+            directions,
+            runtime.control.resources().clone(),
+        )?;
         while let Some(input) = self.upstream.next(runtime)? {
             check_interrupted(runtime.is_interrupted)?;
-            let (row, keys) = project_binding_values(
+            let (row, keys, _memory) = project_binding_values(
                 runtime.snapshot,
                 runtime.params,
                 &input,
                 &self.projections,
                 &self.order,
                 &runtime.graph_view.query_access,
+                runtime.control,
             )?;
-            spill.push(connection, row, keys)?;
+            spill.push(connection, row, keys, runtime.control)?;
+            drop(input);
+            runtime.expression_memory.resize(0)?;
         }
-        let total = spill.finish(connection, runtime.is_interrupted)?;
+        let total = spill.finish(connection, runtime.control)?;
         spill.cleanup_aux(connection)?;
         Ok(spill.into_output(total))
     }
@@ -598,53 +684,132 @@ fn project_binding_values(
     projections: &[Projection],
     order: &[OrderItem],
     query_access: &crate::query::access::PropertyRules,
-) -> QueryResult<(Vec<Value>, Vec<Value>)> {
-    let row = projections
-        .iter()
-        .map(|projection| {
-            expression::evaluate_with_access(
-                &projection.expression,
-                snapshot,
-                input,
-                params,
-                query_access,
-            )
-        })
-        .collect::<QueryResult<Vec<_>>>()?;
-    let aliases = projections
-        .iter()
-        .map(|projection| projection.column.clone())
-        .zip(row.iter().cloned())
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let keys = order
-        .iter()
-        .map(|item| {
-            expression::evaluate_with_aliases_and_access(
-                &item.expression,
-                snapshot,
-                input,
-                params,
-                &aliases,
-                query_access,
-            )
-        })
-        .collect::<QueryResult<Vec<_>>>()?;
-    Ok((row, keys))
+    control: &ExecutionControl<'_>,
+) -> QueryResult<(Vec<Value>, Vec<Value>, MemoryReservation)> {
+    let (row, mut memory) =
+        projection_values(snapshot, params, input, projections, query_access, control)?;
+    let alias_bytes = crate::query::resources::checked_add(
+        crate::query::resources::row_bytes(&row)?,
+        projections
+            .iter()
+            .map(|p| p.column.capacity() as u64 + 192)
+            .sum(),
+    )?;
+    let _aliases_memory = control.reserve(alias_bytes)?;
+    let mut aliases = std::collections::BTreeMap::new();
+    for (projection, value) in projections.iter().zip(&row) {
+        aliases.insert(
+            projection.column.clone(),
+            expression::clone_value_unreserved_controlled(value, Some(control))?,
+        );
+    }
+    memory.grow(crate::query::resources::allocation_bytes::<Value>(
+        order.len(),
+    )?)?;
+    let mut keys = Vec::with_capacity(order.len());
+    for item in order {
+        let evaluated = expression::evaluate_with_aliases_and_access_control(
+            &item.expression,
+            snapshot,
+            input,
+            params,
+            &aliases,
+            query_access,
+            control,
+        )?;
+        memory.merge(evaluated.reservation)?;
+        keys.push(evaluated.value);
+    }
+    Ok((row, keys, memory))
+}
+
+fn projection_values(
+    snapshot: &Snapshot<'_>,
+    params: &std::collections::BTreeMap<String, Value>,
+    input: &BindingRow,
+    projections: &[Projection],
+    query_access: &crate::query::access::PropertyRules,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<(Vec<Value>, MemoryReservation)> {
+    let mut memory = control.reserve(crate::query::resources::allocation_bytes::<Value>(
+        projections.len(),
+    )?)?;
+    let mut row = Vec::with_capacity(projections.len());
+    for projection in projections {
+        let evaluated = expression::evaluate_with_access_control(
+            &projection.expression,
+            snapshot,
+            input,
+            params,
+            query_access,
+            control,
+        )?;
+        memory.merge(evaluated.reservation)?;
+        row.push(evaluated.value);
+    }
+    Ok((row, memory))
+}
+
+fn next_program_spill_row(
+    connection: &Connection,
+    output: &mut SpillOutput,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<Option<(Vec<Value>, MemoryReservation)>> {
+    let Some((sequence, row, memory)) =
+        read_output_row_with_resources(connection, &output.table, output.after, control)?
+    else {
+        drop_temp_table(connection, &output.table)?;
+        return Ok(None);
+    };
+    output.after = sequence;
+    Ok(Some((row, memory)))
+}
+
+fn materialized_binding_values(
+    snapshot: &Snapshot<'_>,
+    row: &BindingRow,
+    columns: &[String],
+    rules: &crate::query::access::PropertyRules,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<(Vec<Value>, MemoryReservation)> {
+    let mut memory = control.reserve(crate::query::resources::allocation_bytes::<Value>(
+        columns.len(),
+    )?)?;
+    let mut values = Vec::with_capacity(columns.len());
+    for column in columns {
+        let value = expression::binding_value_with_memory(
+            snapshot,
+            row.values.get(column).unwrap_or(&BindingValue::Null),
+            rules,
+            control,
+        )?;
+        memory.merge(value.reservation)?;
+        values.push(value.value);
+    }
+    Ok((values, memory))
 }
 
 fn projected_binding(
     snapshot: &Snapshot<'_>,
     columns: &[String],
     values: Vec<Value>,
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<BindingRow> {
     let mut row = BindingRow::default();
     for (column, value) in columns.iter().cloned().zip(values) {
-        row.insert(column, expression::binding_from_value(snapshot, value)?);
+        row.insert(
+            column,
+            expression::binding_from_value_controlled(snapshot, value, control)?,
+        );
     }
     Ok(row)
 }
 
 impl ProgramStream {
+    pub(crate) fn take_output_memory(&mut self) -> Option<MemoryReservation> {
+        self.output_memory.take()
+    }
+
     pub(crate) fn columns(&self) -> &[String] {
         &self.columns
     }
@@ -656,17 +821,29 @@ impl ProgramStream {
         graph_view: &ResolvedGraphView,
         params: &std::collections::BTreeMap<String, Value>,
         metrics: &mut QueryMetrics,
-        is_interrupted: &dyn Fn() -> bool,
+        control: &ExecutionControl<'_>,
     ) -> QueryResult<Option<BindingRow>> {
+        let is_interrupted = || control.check().is_err();
         let mut runtime = ProgramRuntime {
             connection,
             snapshot,
             graph_view,
             params,
             metrics,
-            is_interrupted,
+            is_interrupted: &is_interrupted,
+            control,
+            expression_memory: control.reserve(0)?,
         };
-        self.source.next(&mut runtime)
+        let row = self.source.next(&mut runtime)?;
+        let mut memory = runtime.expression_memory;
+        memory.resize(
+            row.as_ref()
+                .map(|row| expression::binding_row_bytes_controlled(row, Some(control)))
+                .transpose()?
+                .unwrap_or(0),
+        )?;
+        self.output_memory = Some(memory);
+        Ok(row)
     }
 
     pub(crate) fn next(
@@ -676,698 +853,27 @@ impl ProgramStream {
         graph_view: &ResolvedGraphView,
         params: &std::collections::BTreeMap<String, Value>,
         metrics: &mut QueryMetrics,
-        is_interrupted: &dyn Fn() -> bool,
+        control: &ExecutionControl<'_>,
     ) -> QueryResult<Option<Vec<Value>>> {
-        let Some(row) = self.next_binding(
-            connection,
+        let Some(row) =
+            self.next_binding(connection, snapshot, graph_view, params, metrics, control)?
+        else {
+            return Ok(None);
+        };
+        let (values, memory) = materialized_binding_values(
             snapshot,
-            graph_view,
-            params,
-            metrics,
-            is_interrupted,
-        )?
-        else {
-            return Ok(None);
-        };
-        self.columns
-            .iter()
-            .map(|column| {
-                expression::binding_value_with_access(
-                    snapshot,
-                    row.values.get(column).unwrap_or(&BindingValue::Null),
-                    &graph_view.query_access,
-                )
-            })
-            .collect::<QueryResult<Vec<_>>>()
-            .map(Some)
+            &row,
+            &self.columns,
+            &graph_view.query_access,
+            control,
+        )?;
+        self.output_memory = Some(memory);
+        Ok(Some(values))
     }
 }
 
-pub(super) fn build_program_stream(
-    connection: &Connection,
-    program: &PreparedProgram,
-    snapshot: &Snapshot<'_>,
-    mode: ExecutionMode,
-    params: &std::collections::BTreeMap<String, Value>,
-) -> QueryResult<Option<ProgramStream>> {
-    if mode == ExecutionMode::Profile
-        || !program.public_result
-        || program.writes
-        || program.version_operation
-        || program.transaction_options.is_some()
-        || has_nonstreamable_operator(program)
-    {
-        return Ok(None);
-    }
-
-    let query = super::super::completeness::executable_query(&program.root, true)?;
-    let stream = build_query_stream(connection, program, snapshot, params, query)?;
-    let Some(stream) = stream else {
-        return Ok(None);
-    };
-    if stream.columns != program.columns {
-        return Ok(None);
-    }
-    Ok(Some(stream))
-}
-
-fn build_query_stream(
-    connection: &Connection,
-    program: &PreparedProgram,
-    snapshot: &Snapshot<'_>,
-    params: &std::collections::BTreeMap<String, Value>,
-    query: &AstNode,
-) -> QueryResult<Option<ProgramStream>> {
-    match query.kind {
-        AstKind::SingleQuery => build_clause_stream(
-            connection,
-            program,
-            snapshot,
-            params,
-            Box::new(SeedSource { emitted: false }),
-            Vec::new(),
-            &query.children,
-        ),
-        AstKind::ComposedQuery => {
-            build_composed_union_stream(connection, program, snapshot, params, query)
-        }
-        AstKind::Subquery(SubqueryKind::Braced) => {
-            let body = super::super::completeness::required_query_body(
-                query,
-                "braced query is missing its body",
-            )?;
-            let nested = super::super::completeness::executable_query(body, true)?;
-            build_query_stream(connection, program, snapshot, params, nested)
-        }
-        _ => Ok(None),
-    }
-}
-
-fn build_query_stream_from_input(
-    connection: &Connection,
-    program: &PreparedProgram,
-    snapshot: &Snapshot<'_>,
-    params: &std::collections::BTreeMap<String, Value>,
-    query: &AstNode,
-    source: Box<dyn BindingSource>,
-    columns: Vec<String>,
-) -> QueryResult<Option<ProgramStream>> {
-    match query.kind {
-        AstKind::SingleQuery => build_clause_stream(
-            connection,
-            program,
-            snapshot,
-            params,
-            source,
-            columns,
-            &query.children,
-        ),
-        AstKind::Subquery(SubqueryKind::Braced) => {
-            let body = super::super::completeness::required_query_body(
-                query,
-                "braced query is missing its body",
-            )?;
-            let nested = super::super::completeness::executable_query(body, true)?;
-            build_query_stream_from_input(
-                connection, program, snapshot, params, nested, source, columns,
-            )
-        }
-        _ => Ok(None),
-    }
-}
-
-fn build_composed_union_stream(
-    connection: &Connection,
-    program: &PreparedProgram,
-    snapshot: &Snapshot<'_>,
-    params: &std::collections::BTreeMap<String, Value>,
-    query: &AstNode,
-) -> QueryResult<Option<ProgramStream>> {
-    let parts = super::super::completeness::composed_query_parts(query)?;
-    let has_next = parts
-        .rest
-        .iter()
-        .any(|(connector, _)| *connector == QueryConnector::Next);
-    if has_next {
-        if parts
-            .rest
-            .iter()
-            .any(|(connector, _)| *connector != QueryConnector::Next)
-        {
-            return Ok(None);
-        }
-        let Some(mut current) =
-            build_query_stream(connection, program, snapshot, params, parts.first)?
-        else {
-            return Ok(None);
-        };
-        let mut previous = parts.first;
-        for (_, operand) in parts.rest {
-            let ProgramStream { source, columns } = current;
-            let (source, columns) = if crate::cypher::query_body_returns_columns(previous) {
-                (source, columns)
-            } else if crate::cypher::query_body_ends_with_call(previous) {
-                (
-                    Box::new(UnitMapSource { upstream: source }) as Box<dyn BindingSource>,
-                    Vec::new(),
-                )
-            } else {
-                return Ok(None);
-            };
-            let Some(next) = build_query_stream_from_input(
-                connection, program, snapshot, params, operand, source, columns,
-            )?
-            else {
-                return Ok(None);
-            };
-            current = next;
-            previous = operand;
-        }
-        return Ok(Some(current));
-    }
-    let Some(first) = build_query_stream(connection, program, snapshot, params, parts.first)?
-    else {
-        return Ok(None);
-    };
-    let ProgramStream {
-        mut source,
-        columns,
-    } = first;
-    for (connector, operand) in parts.rest {
-        let Some(right) = build_query_stream(connection, program, snapshot, params, operand)?
-        else {
-            return Ok(None);
-        };
-        if right.columns != columns {
-            return Err(QueryError::internal(format!(
-                "UNION stream columns {:?} differ from {:?}",
-                right.columns, columns
-            )));
-        }
-        source = Box::new(ConcatSource {
-            left: source,
-            right: right.source,
-            left_done: false,
-        });
-        if connector != QueryConnector::UnionAll {
-            source = Box::new(DistinctBindingSource {
-                upstream: source,
-                columns: columns.clone(),
-                state: DistinctBindingState::Pending,
-            });
-        }
-    }
-    Ok(Some(ProgramStream { source, columns }))
-}
-
-pub(crate) fn build_program_prefix_stream(
-    connection: &Connection,
-    program: &PreparedProgram,
-    snapshot: &Snapshot<'_>,
-    params: &std::collections::BTreeMap<String, Value>,
-    clauses: &[AstNode],
-) -> QueryResult<Option<ProgramStream>> {
-    build_clause_stream(
-        connection,
-        program,
-        snapshot,
-        params,
-        Box::new(SeedSource { emitted: false }),
-        Vec::new(),
-        clauses,
-    )
-}
-
-pub(crate) fn build_program_suffix_stream(
-    connection: &Connection,
-    program: &PreparedProgram,
-    snapshot: &Snapshot<'_>,
-    params: &std::collections::BTreeMap<String, Value>,
-    input_columns: Vec<String>,
-    input_rows: Vec<BindingRow>,
-    clauses: &[AstNode],
-) -> QueryResult<Option<ProgramStream>> {
-    build_clause_stream(
-        connection,
-        program,
-        snapshot,
-        params,
-        Box::new(RowsSource {
-            rows: input_rows.into(),
-        }),
-        input_columns,
-        clauses,
-    )
-}
-
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the spilled suffix builder keeps execution state explicit at one internal boundary"
-)]
-pub(crate) fn build_program_spilled_suffix_stream(
-    connection: &Connection,
-    program: &PreparedProgram,
-    snapshot: &Snapshot<'_>,
-    params: &std::collections::BTreeMap<String, Value>,
-    input_columns: Vec<String>,
-    spill_connection: Connection,
-    spill: BindingSpill,
-    clauses: &[AstNode],
-) -> QueryResult<Option<ProgramStream>> {
-    build_clause_stream(
-        connection,
-        program,
-        snapshot,
-        params,
-        Box::new(SpilledSource {
-            connection: spill_connection,
-            spill,
-            after: -1,
-            buffered: std::collections::VecDeque::new(),
-            done: false,
-        }),
-        input_columns,
-        clauses,
-    )
-}
-
-fn build_clause_stream(
-    connection: &Connection,
-    program: &PreparedProgram,
-    snapshot: &Snapshot<'_>,
-    params: &std::collections::BTreeMap<String, Value>,
-    mut source: Box<dyn BindingSource>,
-    mut columns: Vec<String>,
-    clauses: &[AstNode],
-) -> QueryResult<Option<ProgramStream>> {
-    let builder = ClauseStreamBuilder {
-        connection,
-        program,
-        snapshot,
-        params,
-    };
-    for clause in clauses {
-        let AstKind::Clause(kind) = clause.kind else {
-            continue;
-        };
-        let next_columns =
-            super::super::completeness::infer_clause_columns(clause, &columns, &program.source)?;
-        source = match builder.apply(source, &columns, &next_columns, clause, kind)? {
-            Some(source) => source,
-            None => return Ok(None),
-        };
-        columns = next_columns;
-    }
-    Ok(Some(ProgramStream { source, columns }))
-}
-
-struct ClauseStreamBuilder<'a, 'snapshot> {
-    connection: &'a Connection,
-    program: &'a PreparedProgram,
-    snapshot: &'a Snapshot<'snapshot>,
-    params: &'a std::collections::BTreeMap<String, Value>,
-}
-
-impl ClauseStreamBuilder<'_, '_> {
-    fn apply(
-        &self,
-        source: Box<dyn BindingSource>,
-        columns: &[String],
-        next_columns: &[String],
-        clause: &AstNode,
-        kind: ClauseKind,
-    ) -> QueryResult<Option<Box<dyn BindingSource>>> {
-        if matches!(
-            kind,
-            ClauseKind::Filter | ClauseKind::Let | ClauseKind::Unwind | ClauseKind::For
-        ) && clause_requires_graph_executor(clause)
-        {
-            return Ok(Some(self.batch_source(
-                source,
-                clause,
-                columns,
-                next_columns,
-            )));
-        }
-        match kind {
-            ClauseKind::Match | ClauseKind::OptionalMatch => {
-                self.match_source(source, columns, next_columns, clause, kind)
-            }
-            ClauseKind::Filter => self.filter_source(source, clause),
-            ClauseKind::Let => self.let_source(source, clause),
-            ClauseKind::Unwind | ClauseKind::For => self.unwind_source(source, clause),
-            ClauseKind::LoadCsv => Ok(Some(Box::new(LoadCsvSource {
-                upstream: source,
-                spec: compile_load_csv(clause)?,
-                current_input: None,
-                current_stream: None,
-            }))),
-            ClauseKind::Call if call_clause_can_batch_stream(clause) => Ok(Some(
-                self.batch_source(source, clause, columns, next_columns),
-            )),
-            ClauseKind::Show => Ok(Some(self.batch_source(
-                source,
-                clause,
-                columns,
-                next_columns,
-            ))),
-            ClauseKind::With | ClauseKind::Return => {
-                self.projection_source(source, columns, next_columns, clause, kind)
-            }
-            _ => Ok(None),
-        }
-    }
-
-    fn match_source(
-        &self,
-        source: Box<dyn BindingSource>,
-        columns: &[String],
-        next_columns: &[String],
-        clause: &AstNode,
-        kind: ClauseKind,
-    ) -> QueryResult<Option<Box<dyn BindingSource>>> {
-        if match_requires_complex_executor(clause) {
-            return Ok(Some(Box::new(BatchClauseSource {
-                upstream: source,
-                clause: clause.clone(),
-                source: self.program.source.clone(),
-                input_columns: columns.to_vec(),
-                output_columns: next_columns.to_vec(),
-                buffered: std::collections::VecDeque::new(),
-                done: false,
-                input_batch_rows: 1,
-            })));
-        }
-        let Ok(mut step) = super::super::plan::lower_match(
-            self.connection,
-            clause,
-            kind == ClauseKind::OptionalMatch,
-        ) else {
-            return Ok(None);
-        };
-        if let Ok(schema) = self.snapshot.schema_state() {
-            super::super::schema::select_standard_index_seeks(
-                &schema,
-                std::slice::from_mut(&mut step),
-                self.params,
-                &self.program.options.access.read.query,
-            );
-        }
-        Ok(Some(Box::new(MatchSource {
-            upstream: source,
-            step,
-            current: None,
-        })))
-    }
-
-    fn filter_source(
-        &self,
-        source: Box<dyn BindingSource>,
-        clause: &AstNode,
-    ) -> QueryResult<Option<Box<dyn BindingSource>>> {
-        Ok(Some(Box::new(FilterSource {
-            upstream: source,
-            predicate: first_expression(clause, "FILTER is missing its predicate")?,
-        })))
-    }
-
-    fn let_source(
-        &self,
-        source: Box<dyn BindingSource>,
-        clause: &AstNode,
-    ) -> QueryResult<Option<Box<dyn BindingSource>>> {
-        Ok(Some(Box::new(LetSource {
-            upstream: source,
-            bindings: expression::compile_let_bindings(clause)?,
-        })))
-    }
-
-    fn unwind_source(
-        &self,
-        source: Box<dyn BindingSource>,
-        clause: &AstNode,
-    ) -> QueryResult<Option<Box<dyn BindingSource>>> {
-        let name = clause
-            .descendants()
-            .find(|node| node.kind == AstKind::BindingVariable)
-            .and_then(|node| node.text.clone())
-            .ok_or_else(|| QueryError::semantic("UNWIND/FOR is missing its variable"))?;
-        let expression = first_expression(clause, "UNWIND/FOR is missing its list expression")?;
-        Ok(Some(Box::new(UnwindSource {
-            upstream: source,
-            name,
-            expression,
-            current_input: None,
-            current_values: Vec::new().into_iter(),
-        })))
-    }
-
-    fn projection_source(
-        &self,
-        source: Box<dyn BindingSource>,
-        columns: &[String],
-        next_columns: &[String],
-        clause: &AstNode,
-        kind: ClauseKind,
-    ) -> QueryResult<Option<Box<dyn BindingSource>>> {
-        if projection_requires_global_executor(clause) {
-            return Ok(None);
-        }
-        if kind == ClauseKind::With && clause.descendants().any(|node| node.kind == AstKind::Where)
-        {
-            if projection_has_global_modifier(clause) {
-                return Ok(None);
-            }
-            return Ok(Some(self.batch_source(
-                source,
-                clause,
-                columns,
-                next_columns,
-            )));
-        }
-        if projection_requires_batch_executor(clause) {
-            return Ok(Some(self.batch_source(
-                source,
-                clause,
-                columns,
-                next_columns,
-            )));
-        }
-        let Ok(plan) =
-            super::super::plan::lower_projection(clause, &self.program.source, self.params)
-        else {
-            return Ok(None);
-        };
-        let mut source = self.lower_projection_source(source, next_columns, plan);
-        if kind == ClauseKind::With
-            && let Some(where_node) = clause
-                .descendants()
-                .find(|node| node.kind == AstKind::Where)
-        {
-            source = Box::new(FilterSource {
-                upstream: source,
-                predicate: first_expression(where_node, "WITH WHERE is missing its predicate")?,
-            });
-        }
-        Ok(Some(source))
-    }
-
-    fn lower_projection_source(
-        &self,
-        source: Box<dyn BindingSource>,
-        next_columns: &[String],
-        plan: ProjectionPlan,
-    ) -> Box<dyn BindingSource> {
-        let ProjectionPlan {
-            projections,
-            order,
-            skip,
-            limit,
-            distinct,
-        } = plan;
-        if order.is_empty() && !distinct {
-            return Box::new(ProjectionSource {
-                upstream: source,
-                projections,
-                skip,
-                limit,
-                seen: 0,
-                emitted: 0,
-            });
-        }
-        Box::new(BarrierProjectionSource {
-            upstream: source,
-            projections,
-            order,
-            distinct,
-            skip,
-            limit,
-            columns: next_columns.to_vec(),
-            state: BarrierProjectionState::Pending,
-        })
-    }
-
-    fn batch_source(
-        &self,
-        source: Box<dyn BindingSource>,
-        clause: &AstNode,
-        columns: &[String],
-        next_columns: &[String],
-    ) -> Box<dyn BindingSource> {
-        batch_clause_source(source, clause, self.program, columns, next_columns)
-    }
-}
-
-fn has_nonstreamable_operator(program: &PreparedProgram) -> bool {
-    program.logical.operators.iter().any(|operator| {
-        matches!(
-            operator,
-            LogicalOperator::Aggregate
-                | LogicalOperator::When
-                | LogicalOperator::Eager
-                | LogicalOperator::Mutation { .. }
-                | LogicalOperator::Schema { .. }
-                | LogicalOperator::Commit
-        )
-    })
-}
-
-fn match_requires_complex_executor(clause: &AstNode) -> bool {
-    clause_requires_graph_executor(clause)
-        || clause.descendants().any(|node| {
-            matches!(
-                node.kind,
-                AstKind::Search
-                    | AstKind::MatchMode(_)
-                    | AstKind::PathMode(_)
-                    | AstKind::PathSelector(_)
-                    | AstKind::Quantifier(_)
-                    | AstKind::VariableLength
-            )
-        })
-}
-
-fn projection_requires_global_executor(clause: &AstNode) -> bool {
-    clause.descendants().any(|node| {
-        node.kind == AstKind::GroupBy
-            || (node.kind == AstKind::FunctionName
-                && node
-                    .text
-                    .as_deref()
-                    .is_some_and(super::super::registry::is_aggregating))
-    }) || interpolation_contains(
-        clause,
-        |expression| matches!(expression, Expr::Function { name, .. } if super::super::registry::is_aggregating(name)),
-    ) || (projection_requires_batch_executor(clause) && projection_has_global_modifier(clause))
-}
-
-fn projection_requires_batch_executor(clause: &AstNode) -> bool {
-    clause_requires_graph_executor(clause)
-        || clause
-            .descendants()
-            .any(|node| node.kind == AstKind::StarProjection)
-}
-
-fn projection_has_global_modifier(clause: &AstNode) -> bool {
-    clause.descendants().any(|node| {
-        matches!(
-            node.kind,
-            AstKind::OrderBy
-                | AstKind::Skip
-                | AstKind::Limit
-                | AstKind::SetQuantifier(crate::cypher::SetQuantifierKind::Distinct)
-        )
-    })
-}
-
-fn clause_contains_subquery(clause: &AstNode) -> bool {
-    clause.descendants().any(|node| {
-        matches!(
-            node.kind,
-            AstKind::Subquery(_) | AstKind::Expression(ExpressionKind::Subquery)
-        )
-    })
-}
-
-fn clause_requires_graph_executor(clause: &AstNode) -> bool {
-    clause_contains_subquery(clause)
-        || has_graph_expression(clause, false)
-        || interpolation_contains(clause, |expression| {
-            matches!(
-                expression,
-                Expr::Subquery { .. } | Expr::PatternPredicate(_) | Expr::PatternComprehension(_)
-            )
-        })
-}
-
-fn interpolation_contains(clause: &AstNode, predicate: impl Fn(&Expr) -> bool) -> bool {
-    clause
-        .descendants()
-        .filter(|node| node.kind == AstKind::Expression(ExpressionKind::InterpolatedString))
-        .any(|node| {
-            // Interpolation is atomic in the source AST. Inspect its compiled
-            // expressions once while selecting the stream operator, rather
-            // than sending graph subqueries to the scalar evaluator.
-            let Ok(expression) = expression::compile_expression(node) else {
-                return true;
-            };
-            let mut found = false;
-            let _ = expression::transform_expression(&expression, &mut |candidate| {
-                found |= predicate(candidate);
-                Ok(None)
-            });
-            found
-        })
-}
-
-fn has_graph_expression(node: &AstNode, expression_context: bool) -> bool {
-    if expression_context && node.kind == AstKind::Pattern {
-        return true;
-    }
-    let expression_context = expression_context || matches!(node.kind, AstKind::Expression(_));
-    node.children
-        .iter()
-        .any(|child| has_graph_expression(child, expression_context))
-}
-
-fn batch_clause_source(
-    upstream: Box<dyn BindingSource>,
-    clause: &AstNode,
-    program: &PreparedProgram,
-    input_columns: &[String],
-    output_columns: &[String],
-) -> Box<dyn BindingSource> {
-    Box::new(BatchClauseSource {
-        upstream,
-        clause: clause.clone(),
-        source: program.source.clone(),
-        input_columns: input_columns.to_vec(),
-        output_columns: output_columns.to_vec(),
-        buffered: std::collections::VecDeque::new(),
-        done: false,
-        input_batch_rows: 1,
-    })
-}
-
-fn call_clause_can_batch_stream(clause: &AstNode) -> bool {
-    if clause_contains_subquery(clause) {
-        return true;
-    }
-    let Some(name) = clause
-        .descendants()
-        .find(|node| node.kind == AstKind::FunctionName)
-        .and_then(|node| node.text.as_deref())
-    else {
-        return false;
-    };
-    !super::super::registry::is_version_procedure(name)
-        && !super::super::registry::is_semantic_maintenance(name)
-}
-
-fn first_expression(node: &AstNode, message: &str) -> QueryResult<Expr> {
-    let expression = expression::surface_expressions(node)
-        .into_iter()
-        .next()
-        .ok_or_else(|| QueryError::semantic(message))?;
-    expression::compile_expression(expression)
-}
+mod builder;
+pub(super) use builder::build_program_stream;
+pub(crate) use builder::{
+    build_program_prefix_stream, build_program_spilled_suffix_stream, build_program_suffix_stream,
+};

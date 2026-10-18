@@ -87,10 +87,10 @@ unsafe extern "C" fn scalar_execute(
                     return transaction::fail_closed_sql_transaction(connection, error);
                 }
             };
-            if let Err(error) = validate_query_ready(connection, &query) {
+            if let Err(error) = validate_query_ready(connection, query) {
                 return transaction::fail_closed_sql_transaction(connection, error);
             }
-            execution::scalar_result(connection, &query, &params, &options)
+            execution::scalar_result(connection, query, params, options)
         });
     }
 }
@@ -207,25 +207,25 @@ fn validate_query_ready(connection: &Connection, query: &str) -> LithographResul
     Ok(())
 }
 
-fn execution_args(args: &ScalarArgs) -> LithographResult<(String, String, String)> {
+fn execution_args(args: &ScalarArgs) -> LithographResult<(&str, &str, &str)> {
     if !(1..=3).contains(&args.len()) {
         return Err(LithographError::invalid_argument(
             "lithograph() expects query [, params [, options]]",
         ));
     }
     // SAFETY: `args` contains SQLite-owned values for this callback.
-    let query = args.text(0, "query must be TEXT")?;
+    let query = args.text_ref(0, "query must be TEXT")?;
     let params = if args.len() >= 2 {
         // SAFETY: `args` contains SQLite-owned values for this callback.
-        args.text(1, "params must be JSON TEXT")?
+        args.text_ref(1, "params must be JSON TEXT")?
     } else {
-        "{}".to_owned()
+        "{}"
     };
     let options = if args.len() >= 3 {
         // SAFETY: `args` contains SQLite-owned values for this callback.
-        args.text(2, "options must be JSON TEXT")?
+        args.text_ref(2, "options must be JSON TEXT")?
     } else {
-        "{}".to_owned()
+        "{}"
     };
     Ok((query, params, options))
 }
@@ -325,6 +325,11 @@ impl ScalarArgs {
     }
 
     fn text(&self, index: usize, invalid_type_message: &str) -> LithographResult<String> {
+        self.text_ref(index, invalid_type_message)
+            .map(str::to_owned)
+    }
+
+    fn text_ref(&self, index: usize, invalid_type_message: &str) -> LithographResult<&str> {
         // SAFETY: `ScalarArgs` is only constructed by `scalar_args`, which
         // copies SQLite-owned callback values that remain live for this call.
         unsafe { scalar_text_arg(&self.values, index, invalid_type_message) }
@@ -351,11 +356,11 @@ unsafe fn scalar_args(
     Ok(ScalarArgs { values })
 }
 
-unsafe fn scalar_text_arg(
-    args: &[*mut ffi::sqlite3_value],
+unsafe fn scalar_text_arg<'a>(
+    args: &'a [*mut ffi::sqlite3_value],
     index: usize,
     invalid_type_message: &str,
-) -> LithographResult<String> {
+) -> LithographResult<&'a str> {
     let Some(&value) = args.get(index) else {
         return Err(LithographError::internal(
             "SQLite scalar callback is missing a registered argument",
@@ -385,10 +390,10 @@ unsafe fn scalar_text_arg(
     let length = unsafe { ffi::sqlite3_value_bytes(value) };
     let length = usize::try_from(length)
         .map_err(|_| LithographError::internal("SQLite returned a negative TEXT byte length"))?;
-    // SAFETY: the UTF-8 pointer is readable for `length` bytes until callback
-    // return; copy it into owned Rust memory now.
+    // SAFETY: SQLite owns these bytes until callback return. ScalarArgs is
+    // confined to that callback and never converts the same value to another
+    // representation while this borrowed UTF-8 view exists.
     let bytes = unsafe { std::slice::from_raw_parts(text, length) };
     std::str::from_utf8(bytes)
-        .map(str::to_owned)
         .map_err(|_| LithographError::invalid_argument("TEXT input must contain valid UTF-8"))
 }

@@ -180,7 +180,7 @@ fn vector_order_compare(left: &VectorValue, right: &VectorValue) -> Ordering {
     }
 }
 
-fn vector_type_rank(value: VectorCoordinateType) -> u8 {
+pub(crate) fn vector_type_rank(value: VectorCoordinateType) -> u8 {
     match value {
         VectorCoordinateType::I8 => 0,
         VectorCoordinateType::I16 => 1,
@@ -216,7 +216,7 @@ fn sort_integer_float(integer: i64, float: f64) -> Ordering {
     }
 }
 
-fn sort_float(left: f64, right: f64) -> Ordering {
+pub(crate) fn sort_float(left: f64, right: f64) -> Ordering {
     match (left.is_nan(), right.is_nan()) {
         (true, true) => Ordering::Equal,
         (true, false) => Ordering::Greater,

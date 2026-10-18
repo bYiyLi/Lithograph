@@ -17,7 +17,7 @@ impl<'connection> Snapshot<'connection> {
         need_nodes: bool,
         need_relationships: bool,
     ) -> StorageResult<Option<SnapshotStatistics>> {
-        let mut statistics = match self.checkpoint {
+        let mut statistics = match self.state.checkpoint {
             Some(checkpoint) => {
                 let Some(statistics) = load_checkpoint_statistics(self.connection, checkpoint)?
                 else {
@@ -47,7 +47,7 @@ impl<'connection> Snapshot<'connection> {
         statistics: &mut SnapshotStatistics,
         checkpoint_max_node: NodeId,
     ) -> StorageResult<()> {
-        for (&node_id, &op) in &self.overlay.nodes {
+        for (&node_id, &op) in &self.state.overlay.nodes {
             let before = if node_id > checkpoint_max_node {
                 false
             } else {
@@ -67,6 +67,7 @@ impl<'connection> Snapshot<'connection> {
         for &label_id in labels {
             let count = statistics.label_counts.entry(label_id).or_default();
             for (&(_, node_id), &op) in self
+                .state
                 .overlay
                 .labels_by_label
                 .range((label_id, 0)..=(label_id, i64::MAX))
@@ -89,7 +90,7 @@ impl<'connection> Snapshot<'connection> {
         need_relationships: bool,
     ) -> StorageResult<()> {
         let checkpoint_max_relationship = self.checkpoint_max_relationship_id()?;
-        for (&relationship_id, delta) in &self.overlay.relationships {
+        for (&relationship_id, delta) in &self.state.overlay.relationships {
             let before_type = if relationship_id > checkpoint_max_relationship {
                 None
             } else {
@@ -122,7 +123,7 @@ impl<'connection> Snapshot<'connection> {
     }
 
     fn checkpoint_max_node_id(&self) -> StorageResult<NodeId> {
-        let Some(checkpoint) = self.checkpoint else {
+        let Some(checkpoint) = self.state.checkpoint else {
             return Ok(0);
         };
         self.connection
@@ -135,7 +136,7 @@ impl<'connection> Snapshot<'connection> {
     }
 
     fn checkpoint_max_relationship_id(&self) -> StorageResult<RelationshipId> {
-        let Some(checkpoint) = self.checkpoint else {
+        let Some(checkpoint) = self.state.checkpoint else {
             return Ok(0);
         };
         self.connection
@@ -148,7 +149,7 @@ impl<'connection> Snapshot<'connection> {
     }
 
     fn checkpoint_node_exists(&self, node_id: NodeId) -> StorageResult<bool> {
-        let Some(checkpoint) = self.checkpoint else {
+        let Some(checkpoint) = self.state.checkpoint else {
             return Ok(false);
         };
         let exists: i64 = self.connection.query_row(
@@ -160,7 +161,7 @@ impl<'connection> Snapshot<'connection> {
     }
 
     fn checkpoint_label_exists(&self, node_id: NodeId, label_id: LabelId) -> StorageResult<bool> {
-        let Some(checkpoint) = self.checkpoint else {
+        let Some(checkpoint) = self.state.checkpoint else {
             return Ok(false);
         };
         let exists: i64 = self.connection.query_row(
@@ -175,7 +176,7 @@ impl<'connection> Snapshot<'connection> {
         &self,
         relationship_id: RelationshipId,
     ) -> StorageResult<Option<RelationshipTypeId>> {
-        let Some(checkpoint) = self.checkpoint else {
+        let Some(checkpoint) = self.state.checkpoint else {
             return Ok(None);
         };
         self.connection

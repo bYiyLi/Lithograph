@@ -3,7 +3,7 @@
 use rusqlite::Connection;
 
 use super::layer::{DeltaOp, LayerBuilder, PropertyDelta, RelationshipDelta, RelationshipRecord};
-use super::property::PropertyColumns;
+use super::snapshot_read::{self, ReadLease, SnapshotReadObserver};
 use super::{OwnerKind, StorageError, StorageResult};
 
 pub(super) fn load_node_deltas(
@@ -129,39 +129,57 @@ pub(super) fn visit_property_deltas(
     layer_id: i64,
     mut visitor: impl FnMut(OwnerKind, i64, i64, PropertyDelta) -> StorageResult<()>,
 ) -> StorageResult<()> {
+    visit_property_deltas_observed(
+        connection,
+        layer_id,
+        None,
+        &|| Ok(()),
+        |kind, owner, key, delta, _memory| visitor(kind, owner, key, delta),
+    )
+}
+
+pub(super) fn visit_property_deltas_observed(
+    connection: &Connection,
+    layer_id: i64,
+    observer: Option<&dyn SnapshotReadObserver>,
+    check: &dyn Fn() -> StorageResult<()>,
+    mut visitor: impl FnMut(OwnerKind, i64, i64, PropertyDelta, Option<ReadLease>) -> StorageResult<()>,
+) -> StorageResult<()> {
     let mut statement = connection.prepare(
         "SELECT owner_kind, owner_id, key_id, op, type_tag, int_value, real_value, text_value, blob_value, aux_value FROM main._lithograph_property_delta WHERE layer_id = ?1 ORDER BY owner_kind, owner_id, key_id",
     )?;
     let mut rows = statement.query([layer_id])?;
     while let Some(row) = rows.next()? {
+        check()?;
         let owner_kind = OwnerKind::from_i64(row.get(0)?)?;
         let owner_id = row.get::<_, i64>(1)?;
         let key_id = row.get::<_, i64>(2)?;
-        visitor(owner_kind, owner_id, key_id, property_delta_from_row(row)?)?;
+        let (delta, memory) = property_delta_from_row_observed(row, observer, check)?;
+        visitor(owner_kind, owner_id, key_id, delta, memory)?;
     }
     Ok(())
 }
 
-fn property_delta_from_row(row: &rusqlite::Row<'_>) -> StorageResult<PropertyDelta> {
+pub(super) fn property_delta_from_row_observed(
+    row: &rusqlite::Row<'_>,
+    observer: Option<&dyn SnapshotReadObserver>,
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<(PropertyDelta, Option<ReadLease>)> {
     let op = DeltaOp::from_i64(row.get(3)?)?;
     let type_tag = row.get::<_, Option<i64>>(4)?;
     if op == DeltaOp::Remove {
         ensure_remove_payload_is_empty(row, type_tag)?;
-        return Ok(PropertyDelta { op, value: None });
+        return Ok((PropertyDelta { op, value: None }, None));
     }
-    let columns = PropertyColumns {
-        type_tag: type_tag
-            .ok_or_else(|| StorageError::corrupt("set property row is missing type tag"))?,
-        int_value: row.get(5)?,
-        real_value: row.get(6)?,
-        text_value: row.get(7)?,
-        blob_value: row.get(8)?,
-        aux_value: row.get(9)?,
-    };
-    Ok(PropertyDelta {
-        op,
-        value: Some(columns.to_value()?),
-    })
+    type_tag.ok_or_else(|| StorageError::corrupt("set property row is missing type tag"))?;
+    let property = snapshot_read::property_from_row(row, 4, observer, check)?;
+    Ok((
+        PropertyDelta {
+            op,
+            value: Some(property.value),
+        },
+        property.memory,
+    ))
 }
 
 fn ensure_remove_payload_is_empty(
@@ -171,9 +189,9 @@ fn ensure_remove_payload_is_empty(
     let payload_present = type_tag.is_some()
         || row.get::<_, Option<i64>>(5)?.is_some()
         || row.get::<_, Option<f64>>(6)?.is_some()
-        || row.get::<_, Option<String>>(7)?.is_some()
-        || row.get::<_, Option<Vec<u8>>>(8)?.is_some()
-        || row.get::<_, Option<Vec<u8>>>(9)?.is_some();
+        || !matches!(row.get_ref(7)?, rusqlite::types::ValueRef::Null)
+        || !matches!(row.get_ref(8)?, rusqlite::types::ValueRef::Null)
+        || !matches!(row.get_ref(9)?, rusqlite::types::ValueRef::Null);
     if payload_present {
         Err(StorageError::corrupt(
             "removed property row must not retain a typed payload",

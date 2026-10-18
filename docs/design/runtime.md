@@ -31,6 +31,16 @@ Rust 负责 parser/semantic model、planner、executor、version engine、typed 
 
 Lithograph 不静默修改宿主的 journal mode、synchronous level 或其它 durability PRAGMA。
 
+<a id="sqlite-interrupt-recovery"></a>
+
+### SQLite Interrupt 后的事务恢复
+
+真实 `sqlite3_interrupt()` 的状态会持续到当前所有运行中的 SQLite statement 结束；因此 outer scalar / virtual-table `SELECT` 仍 active 时，callback 内新发出的 `ROLLBACK TO` / `ROLLBACK` 也可能立即返回 `SQLITE_INTERRUPT`。不能依赖外层只读 `SELECT` 的失败自动撤销 callback 已执行的递归写入，也不能只清除 Lithograph 内存中的 active state 就声称 SQLite transaction 已回滚。SQLite 的公开行为与状态判断依据分别见 [interrupt](https://www.sqlite.org/c3ref/interrupt.html) 和 [get_autocommit](https://www.sqlite.org/c3ref/get_autocommit.html)（2026-10-18 核对）。
+
+普通潜在写 execution 与 active Lithograph explicit transaction 在进入 runtime 前准备 connection-local 的空 TEMP guard table，并在 graph write 或 explicit `BEGIN` 前校验其普通 rowid table、单个 BLOB column、无 index/foreign key/trigger 与空表形状，保证它可用于 writable BLOB recovery。同名 TEMP object 不兼容时返回 `STORAGE_ERROR` / `SQLITE_ERROR`，不覆盖或删除宿主已有 object；纯 read execution 与参数/options 验证失败不额外要求 guard。收到真实宿主中断且 SQLite 仍不处于 autocommit mode 时，adapter 使用公开 [sqlite3_blob_open()](https://www.sqlite.org/c3ref/blob_open.html) 对 guard 的不存在 rowid 发起 writable open，使 SQLite write VM 在真实中断状态下结束并实际 abort 整个 transaction；不读取或写入宿主业务行，不修改 SQLite 私有结构、清除中断标志或伪造返回码。只有真实返回 `SQLITE_INTERRUPT`、已取得的 BLOB handle 正常关闭且 `sqlite3_get_autocommit()` 确认为 true，才按已恢复处理，并清除 explicit staged state。SQLite 已自动结束 transaction 时仍必须确认 autocommit 状态。纯 read execution 不为 caller-owned transaction 增加这项恢复或 TEMP guard 要求。
+
+这条恢复路径服从 SQLite write interruption 的 **whole-transaction rollback** 语义：普通 mutating execution 位于 caller-owned SQLite transaction 时，宿主先前尚未提交的业务写入也可能一起撤销，不能承诺只撤销 Lithograph 内层 SAVEPOINT。宿主在取消后必须查询实际 transaction 状态；仍 active 时才由宿主继续决定 COMMIT/ROLLBACK。无法完成或证明恢复时沿用 [SQL Bridge](interfaces.md#sql-bridge) 的 `INTERNAL_ERROR` 与 cleanup-failure quarantine，关闭丢弃 connection。成功恢复保留 `INTERRUPTED` / `SQLITE_INTERRUPT`，不产生成功 summary；已经 durable 的 transaction-subquery batch 不受后续 rollback 影响。
+
 <a id="artifacts"></a>
 
 ### Supported Artifacts
@@ -66,6 +76,16 @@ OpenAI-compatible Provider 的可选 cache database 是宿主显式配置的独�
 `_lithograph_*` 是内部表。直接 SQL 修改这些表不属于公开 API；由于数据库文件所有者最终拥有 SQLite 全权限，Lithograph 不伪装成能阻止文件所有者篡改，而通过 hash、referential integrity 和 `lithograph_integrity_check()` 检测损坏。
 
 该 integrity contract 证明 database 内仍存在的 canonical evidence 是否自洽，不提供独立于数据库文件的 authenticity / anti-tamper trust anchor。拥有文件全权限的主体若删除全部 Lithograph internal evidence，结果在单文件内部与从未初始化的 pristine database 不可区分；若同时自洽重写全部 canonical data/hash，也不能仅靠同一文件证明其历史真实性。需要这种外部真实性保证的部署必须由宿主另行提供 trusted backup、signature/attestation 或其它外部锚点，Lithograph 不在 embedded database 内伪造该能力。
+
+<a id="execution-memory-boundary"></a>
+
+### Execution 内存与宿主边界
+
+宿主可通过 [Interfaces](interfaces.md#query-options) 的 `memoryLimitBytes` 显式限制单次 execution 的引擎计账工作内存；省略时保持既有行为。该预算按受控运行时容器容量和必要的保守开销计账，分配与回收规则由 [Query Engine](query-engine.md#execution-resources) 拥有，不是进程 RSS 或精确 allocator 硬上限。
+
+预算不包含宿主已有输入缓冲、Frontend AST/plan、SQLite 页缓存、Provider 内部内存和 allocator 隐含开销。SQLite 自己的 heap limit 也不能限制 Rust 运行时分配；只读权限、结果行数限制和 `size()` 的标量结果均不能证明中间计算内存有界。不更换全局 allocator，不修改宿主 SQLite heap limit，不改变 Provider SPI。
+
+宿主继续负责请求期限、`sqlite3_interrupt()`、并发数、SQLite/TEMP 磁盘配置和结果消费；需要主服务在不可抢占调用、未覆盖分配或原生内存耗尽时仍有硬保护的部署，应在宿主层提供受操作系统资源约束的执行隔离。Lithograph 保持标准 embedded extension，本轮不增加独立服务或执行进程。取消检查点和第三方调用边界见 [Cancellation](query-engine.md#cancellation-and-connection-state)。
 
 <a id="large-scale-invariants"></a>
 

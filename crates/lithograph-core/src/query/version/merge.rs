@@ -1,21 +1,33 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use rusqlite::Connection;
+use super::VersionExecution as Connection;
+use super::{VersionLayer, VersionOwned, VersionState};
 
 use crate::cypher::{self, Value};
-use crate::storage::{self, CommitMetadata, HashId, MergeSessionRecord, SnapshotState};
+use crate::storage::{self, HashId, MergeSessionRecord, SnapshotState};
 
-use super::canonical::same_optional_value;
 use super::{
     ProcedureRow, branch_not_found, commit_value, now_micros, resolve_descriptor, row, string_arg,
     string_value, target_branch,
 };
 use crate::query::options::ExecutionOptions;
-use crate::query::{QueryError, QueryErrorKind, QueryResult, schema as qs};
+use crate::query::resources::{
+    MemoryReservation, allocation_bytes, checked_add, checked_mul, map_entry_bytes,
+    value_bytes_controlled,
+};
+use crate::query::{QueryError, QueryErrorKind, QueryResult};
 
+mod budget;
+mod resolutions;
+pub(super) use resolutions::load_resolutions;
+use resolutions::{encode_resolution, resolution_ids, resolution_items};
 mod support;
+mod topology;
 
 use support::*;
+
+mod dependencies;
+use dependencies::node_dependents_changed;
 
 mod conflict_page;
 use conflict_page::{ConflictPage, ConflictPageBuilder};
@@ -25,26 +37,10 @@ pub(crate) use sparse::sparse_candidate_layer;
 use sparse::try_sparse_property_merge;
 
 mod state;
+mod virtual_base;
+use virtual_base::{VirtualValue, from_logical_slots, virtual_base};
 
-pub(crate) use state::{logical_slots, set_logical_slot};
-
-#[derive(Debug, Clone)]
-enum VirtualValue {
-    Known(Option<Value>),
-    Unknown,
-}
-
-impl PartialEq for VirtualValue {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Known(left), Self::Known(right)) => {
-                same_optional_value(left.as_ref(), right.as_ref())
-            }
-            (Self::Unknown, Self::Unknown) => true,
-            _ => false,
-        }
-    }
-}
+pub(crate) use state::{VersionSlots, logical_slots, serde_value, set_logical_slot};
 
 #[derive(Debug, Clone)]
 pub(crate) struct MergeConflict {
@@ -56,24 +52,25 @@ pub(crate) struct MergeConflict {
     pub resolution: Option<Value>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct MergeComputation {
     pub status: &'static str,
     pub unresolved: usize,
-    pub candidate: Option<SnapshotState>,
+    pub candidate: Option<VersionState>,
 }
 
 pub(crate) struct ThreeWayOutcome {
-    pub candidate: SnapshotState,
+    pub candidate: VersionState,
     pub conflicts: Vec<MergeConflict>,
+    pub _conflicts_memory: MemoryReservation,
 }
 
 enum FinalizeAction {
     UpToDate,
     FastForward,
     Merge {
-        layer: storage::LayerBuilder,
-        schema_blob: Vec<u8>,
+        layer: VersionLayer,
+        schema_blob: VersionOwned<Vec<u8>>,
     },
 }
 
@@ -87,13 +84,14 @@ struct MergeIdentity<'a> {
 
 struct ConflictScanContext<'a> {
     identity: MergeIdentity<'a>,
-    base: BTreeMap<String, VirtualValue>,
-    ours: BTreeMap<String, Value>,
-    theirs: BTreeMap<String, Value>,
-    ours_state: SnapshotState,
-    slots: BTreeSet<String>,
+    base: VersionOwned<BTreeMap<String, VirtualValue>>,
+    ours: VersionSlots,
+    theirs: VersionSlots,
+    ours_state: VersionState,
+    slots: VersionOwned<BTreeSet<String>>,
     derived: Vec<MergeConflict>,
-    candidate: SnapshotState,
+    candidate: VersionState,
+    _derived_memory: MemoryReservation,
     unresolved: usize,
 }
 
@@ -112,7 +110,7 @@ pub(crate) fn compute_summary(
     if let Some(sparse) =
         try_sparse_property_merge(connection, ours_commit, theirs_commit, resolutions)?
     {
-        let unresolved = sparse.unresolved_count()?;
+        let unresolved = sparse.unresolved_count(connection)?;
         return Ok(MergeComputation {
             status: if unresolved == 0 {
                 "ready"
@@ -142,7 +140,7 @@ fn prepare_conflict_scan<'a>(
     theirs_commit: HashId,
     resolutions: &'a BTreeMap<HashId, Value>,
 ) -> QueryResult<ConflictScanContext<'a>> {
-    let bases = storage::best_common_ancestors(connection, ours_commit, theirs_commit)?;
+    let bases = topology::best_common_ancestors(connection, ours_commit, theirs_commit)?;
     if bases.is_empty() {
         return Err(QueryError::new(
             QueryErrorKind::Storage,
@@ -164,72 +162,77 @@ fn prepare_conflict_scan<'a>(
 fn prepare_conflict_scan_from_base<'a>(
     connection: &Connection,
     base_identity: String,
-    base: BTreeMap<String, VirtualValue>,
+    base: VersionOwned<BTreeMap<String, VirtualValue>>,
     ours_commit: HashId,
     theirs_commit: HashId,
     replay_identity: bool,
     resolutions: &'a BTreeMap<HashId, Value>,
 ) -> QueryResult<ConflictScanContext<'a>> {
-    let ours_state = storage::load_snapshot_state(connection, ours_commit)?;
-    let theirs_state = storage::load_snapshot_state(connection, theirs_commit)?;
+    let ours_state = connection.load_state(ours_commit)?;
+    let theirs_state = connection.load_state(theirs_commit)?;
     let ours = logical_slots(connection, &ours_state)?;
     let theirs = logical_slots(connection, &theirs_state)?;
     let identity = MergeIdentity {
         base_identity,
         ours_commit,
         ours_identity: if replay_identity {
-            logical_state_identity(&ours)?
+            budget::logical_identity(connection, &ours)?
         } else {
             commit_identity(ours_commit)
         },
         theirs_identity: commit_identity(theirs_commit),
         resolutions,
     };
-    let slots = merge_slots(&base, &ours, &theirs);
-    let mut candidate = ours_state.clone();
-    let mut unresolved = 0_usize;
-    for slot in &slots {
-        if let Some(conflict) = apply_slot_candidate(
-            connection,
-            &identity,
-            &base,
-            &ours,
-            &theirs,
-            &mut candidate,
-            slot,
-        )? && conflict.resolution.is_none()
-        {
-            unresolved += 1;
-        }
-    }
-    let mut derived = Vec::new();
-    if unresolved == 0 {
-        add_schema_validation_conflicts(
-            connection,
-            &identity,
-            &base,
-            &ours,
-            &theirs,
-            &mut candidate,
-            &mut derived,
-        )?;
-        unresolved = derived
-            .iter()
-            .filter(|conflict| conflict.resolution.is_none())
-            .count();
-    }
-    derived.sort_by(|left, right| left.slot.cmp(&right.slot).then(left.id.cmp(&right.id)));
-    Ok(ConflictScanContext {
+    let slots = merge_slots(connection, &base, &ours, &theirs)?;
+    let candidate = connection.clone_state(&ours_state)?;
+    let mut scan = ConflictScanContext {
         identity,
         base,
         ours,
         theirs,
         ours_state,
         slots,
-        derived,
+        derived: Vec::new(),
         candidate,
-        unresolved,
-    })
+        unresolved: 0,
+        _derived_memory: connection.reserve(0)?,
+    };
+    populate_candidate(connection, &mut scan)?;
+    Ok(scan)
+}
+
+fn populate_candidate(
+    connection: &Connection,
+    scan: &mut ConflictScanContext<'_>,
+) -> QueryResult<()> {
+    for slot in scan.slots.iter() {
+        let conflict = apply_slot_candidate(
+            connection,
+            &scan.identity,
+            &scan.base,
+            &scan.ours,
+            &scan.theirs,
+            &mut scan.candidate,
+            slot,
+        )?;
+        if conflict
+            .value
+            .is_some_and(|value| value.resolution.is_none())
+        {
+            scan.unresolved += 1;
+        }
+    }
+    if scan.unresolved == 0 {
+        add_schema_validation_conflicts(connection, scan)?;
+        scan.unresolved = scan
+            .derived
+            .iter()
+            .filter(|conflict| conflict.resolution.is_none())
+            .count();
+    }
+    scan.derived
+        .sort_by(|left, right| left.slot.cmp(&right.slot).then(left.id.cmp(&right.id)));
+    Ok(())
 }
 
 pub(crate) fn three_way_from_base(
@@ -239,13 +242,8 @@ pub(crate) fn three_way_from_base(
     theirs_commit: HashId,
     resolutions: &BTreeMap<HashId, Value>,
 ) -> QueryResult<ThreeWayOutcome> {
-    let base = logical_slots(
-        connection,
-        &storage::load_snapshot_state(connection, base_commit)?,
-    )?
-    .into_iter()
-    .map(|(slot, value)| (slot, VirtualValue::Known(Some(value))))
-    .collect();
+    let state = connection.load_state(base_commit)?;
+    let base = from_logical_slots(connection, logical_slots(connection, &state)?)?;
     let scan = prepare_conflict_scan_from_base(
         connection,
         merge_base_identity(&[base_commit]),
@@ -256,13 +254,17 @@ pub(crate) fn three_way_from_base(
         resolutions,
     )?;
     let mut conflicts = Vec::new();
-    visit_conflicts(connection, &scan, |conflict| {
+    let mut conflicts_memory = connection.reserve(0)?;
+    visit_conflicts(connection, &scan, |conflict, memory| {
+        budget::reserve_push(connection, &conflicts, &mut conflicts_memory)?;
+        conflicts_memory.merge(memory)?;
         conflicts.push(conflict);
-        false
+        Ok(false)
     })?;
     Ok(ThreeWayOutcome {
         candidate: scan.candidate,
         conflicts,
+        _conflicts_memory: conflicts_memory,
     })
 }
 
@@ -273,14 +275,15 @@ fn conflict_page(
     resolutions: &BTreeMap<HashId, Value>,
     offset: usize,
     limit: usize,
-) -> QueryResult<ConflictPage> {
+) -> QueryResult<(ConflictPage, MemoryReservation)> {
     if topology_computation(connection, ours_commit, theirs_commit)?.is_some() {
-        return ConflictPageBuilder::new(offset, limit).finish();
+        let memory = connection.reserve(allocation_bytes::<MergeConflict>(limit)?)?;
+        return Ok((ConflictPageBuilder::new(offset, limit).finish()?, memory));
     }
     if let Some(sparse) =
         try_sparse_property_merge(connection, ours_commit, theirs_commit, resolutions)?
     {
-        return sparse.conflict_page(offset, limit);
+        return sparse.conflict_page(connection, offset, limit);
     }
     let scan = prepare_conflict_scan(connection, ours_commit, theirs_commit, resolutions)?;
     collect_conflict_page(connection, &scan, offset, limit)
@@ -292,26 +295,35 @@ fn conflicts_for_ids(
     theirs_commit: HashId,
     resolutions: &BTreeMap<HashId, Value>,
     requested: &BTreeSet<HashId>,
-) -> QueryResult<BTreeMap<HashId, MergeConflict>> {
+) -> QueryResult<VersionOwned<BTreeMap<HashId, MergeConflict>>> {
     if requested.is_empty()
         || topology_computation(connection, ours_commit, theirs_commit)?.is_some()
     {
-        return Ok(BTreeMap::new());
+        return Ok(VersionOwned {
+            value: BTreeMap::new(),
+            memory: connection.reserve(0)?,
+        });
     }
     if let Some(sparse) =
         try_sparse_property_merge(connection, ours_commit, theirs_commit, resolutions)?
     {
-        return sparse.conflicts_for_ids(requested);
+        return sparse.conflicts_for_ids(connection, requested);
     }
     let scan = prepare_conflict_scan(connection, ours_commit, theirs_commit, resolutions)?;
     let mut found = BTreeMap::new();
-    visit_conflicts(connection, &scan, |conflict| {
+    let mut memory = connection.reserve(0)?;
+    visit_conflicts(connection, &scan, |conflict, claim| {
         if requested.contains(&conflict.id) {
+            memory.grow(map_entry_bytes::<MergeConflict>()?)?;
+            memory.merge(claim)?;
             found.insert(conflict.id, conflict);
         }
-        found.len() == requested.len()
+        Ok(found.len() == requested.len())
     })?;
-    Ok(found)
+    Ok(VersionOwned {
+        value: found,
+        memory,
+    })
 }
 
 fn collect_conflict_page(
@@ -319,55 +331,98 @@ fn collect_conflict_page(
     scan: &ConflictScanContext<'_>,
     offset: usize,
     limit: usize,
-) -> QueryResult<ConflictPage> {
+) -> QueryResult<(ConflictPage, MemoryReservation)> {
+    let mut memory = connection.reserve(allocation_bytes::<MergeConflict>(limit)?)?;
     let mut builder = ConflictPageBuilder::new(offset, limit);
-    visit_conflicts(connection, scan, |conflict| builder.push(conflict))?;
-    builder.finish()
+    visit_conflicts(connection, scan, |conflict, claim| {
+        let previous = builder.retained();
+        let done = builder.push(conflict);
+        if builder.retained() > previous {
+            memory.merge(claim)?;
+        }
+        Ok(done)
+    })?;
+    Ok((builder.finish()?, memory))
 }
 
 fn visit_conflicts(
     connection: &Connection,
     scan: &ConflictScanContext<'_>,
-    mut visit: impl FnMut(MergeConflict) -> bool,
+    mut visit: impl FnMut(MergeConflict, MemoryReservation) -> QueryResult<bool>,
 ) -> QueryResult<()> {
-    let mut candidate = scan.ours_state.clone();
-    let mut derived_index = 0_usize;
-    for slot in &scan.slots {
+    let mut candidate = connection.clone_state(&scan.ours_state)?;
+    let mut derived_index = 0;
+    for slot in scan.slots.iter() {
         while derived_index < scan.derived.len() && scan.derived[derived_index].slot < *slot {
-            if visit(scan.derived[derived_index].clone()) {
+            if visit_copied_conflict(connection, &scan.derived[derived_index], &mut visit)? {
                 return Ok(());
             }
             derived_index += 1;
         }
-        let mut current = Vec::with_capacity(2);
-        if let Some(conflict) = apply_slot_candidate(
-            connection,
-            &scan.identity,
-            &scan.base,
-            &scan.ours,
-            &scan.theirs,
-            &mut candidate,
-            slot,
-        )? {
-            current.push(conflict);
-        }
-        while derived_index < scan.derived.len() && scan.derived[derived_index].slot == *slot {
-            current.push(scan.derived[derived_index].clone());
-            derived_index += 1;
-        }
-        current.sort_by_key(|conflict| conflict.id);
-        for conflict in current {
-            if visit(conflict) {
+        let current =
+            collect_slot_conflicts(connection, scan, &mut candidate, slot, &mut derived_index)?;
+        for conflict in current.value {
+            if visit(conflict.value, conflict.memory)? {
                 return Ok(());
             }
         }
     }
     for conflict in &scan.derived[derived_index..] {
-        if visit(conflict.clone()) {
+        if visit_copied_conflict(connection, conflict, &mut visit)? {
             return Ok(());
         }
     }
     Ok(())
+}
+
+type OwnedConflict = VersionOwned<MergeConflict>;
+
+fn visit_copied_conflict(
+    connection: &Connection,
+    conflict: &MergeConflict,
+    visit: &mut impl FnMut(MergeConflict, MemoryReservation) -> QueryResult<bool>,
+) -> QueryResult<bool> {
+    let conflict = budget::copy_conflict(connection, conflict)?;
+    visit(conflict.value, conflict.memory)
+}
+
+fn collect_slot_conflicts(
+    connection: &Connection,
+    scan: &ConflictScanContext<'_>,
+    candidate: &mut VersionState,
+    slot: &str,
+    derived_index: &mut usize,
+) -> QueryResult<VersionOwned<Vec<OwnedConflict>>> {
+    let mut memory = connection.reserve(allocation_bytes::<OwnedConflict>(2)?)?;
+    let mut current = Vec::with_capacity(2);
+    let conflict = apply_slot_candidate(
+        connection,
+        &scan.identity,
+        &scan.base,
+        &scan.ours,
+        &scan.theirs,
+        candidate,
+        slot,
+    )?;
+    if let Some(value) = conflict.value {
+        current.push(VersionOwned {
+            value,
+            memory: conflict.memory,
+        });
+    }
+    while *derived_index < scan.derived.len() && scan.derived[*derived_index].slot == slot {
+        budget::reserve_push(connection, &current, &mut memory)?;
+        current.push(budget::copy_conflict(
+            connection,
+            &scan.derived[*derived_index],
+        )?);
+        *derived_index += 1;
+    }
+    current.sort_unstable_by_key(|conflict| conflict.value.id);
+    Ok(VersionOwned {
+        value: current,
+        memory,
+    })
 }
 
 fn topology_computation(
@@ -375,68 +430,98 @@ fn topology_computation(
     ours_commit: HashId,
     theirs_commit: HashId,
 ) -> QueryResult<Option<MergeComputation>> {
-    if ours_commit == theirs_commit || storage::is_ancestor(connection, theirs_commit, ours_commit)?
+    if ours_commit == theirs_commit
+        || topology::is_ancestor(connection, theirs_commit, ours_commit)?
     {
         return Ok(Some(MergeComputation {
             status: "up_to_date",
             unresolved: 0,
-            candidate: Some(storage::load_snapshot_state(connection, ours_commit)?),
+            candidate: Some(connection.load_state(ours_commit)?),
         }));
     }
-    if storage::is_ancestor(connection, ours_commit, theirs_commit)? {
+    if topology::is_ancestor(connection, ours_commit, theirs_commit)? {
         return Ok(Some(MergeComputation {
             status: "fast_forward",
             unresolved: 0,
-            candidate: Some(storage::load_snapshot_state(connection, theirs_commit)?),
+            candidate: Some(connection.load_state(theirs_commit)?),
         }));
     }
     Ok(None)
 }
 
 fn direct_slot_decision(
+    connection: &Connection,
     identity: &MergeIdentity<'_>,
     slot: String,
     base: VirtualValue,
     ours: Option<Value>,
     theirs: Option<Value>,
-) -> QueryResult<(Option<Value>, Option<MergeConflict>)> {
-    if same_optional_value(ours.as_ref(), theirs.as_ref()) {
-        return Ok((ours, None));
+) -> QueryResult<VersionOwned<(Option<Value>, Option<MergeConflict>)>> {
+    let mut memory = connection.reserve(0)?;
+    if super::canonical::same_optional_value_controlled(connection, ours.as_ref(), theirs.as_ref())?
+    {
+        return Ok(VersionOwned {
+            value: (ours, None),
+            memory,
+        });
     }
-    match base {
-        VirtualValue::Known(base) if same_optional_value(ours.as_ref(), base.as_ref()) => {
-            Ok((theirs, None))
+    if let VirtualValue::Known(value) = &base {
+        if super::canonical::same_optional_value_controlled(
+            connection,
+            ours.as_ref(),
+            value.as_ref(),
+        )? {
+            return Ok(VersionOwned {
+                value: (theirs, None),
+                memory,
+            });
         }
-        VirtualValue::Known(base) if same_optional_value(theirs.as_ref(), base.as_ref()) => {
-            Ok((ours, None))
-        }
-        VirtualValue::Known(base) => {
-            let conflict = conflict(identity, slot, base, ours, theirs)?;
-            Ok((
-                resolved_value(&conflict, identity.resolutions)?,
-                Some(conflict),
-            ))
-        }
-        VirtualValue::Unknown => {
-            let conflict = conflict(identity, slot, None, ours, theirs)?;
-            Ok((
-                resolved_value(&conflict, identity.resolutions)?,
-                Some(conflict),
-            ))
+        if super::canonical::same_optional_value_controlled(
+            connection,
+            theirs.as_ref(),
+            value.as_ref(),
+        )? {
+            return Ok(VersionOwned {
+                value: (ours, None),
+                memory,
+            });
         }
     }
+    let base = match base {
+        VirtualValue::Known(value) => value,
+        VirtualValue::Unknown => None,
+    };
+    let conflict = conflict(connection, identity, slot, base, ours, theirs, &mut memory)?;
+    let decision = budget::resolve_value(connection, &conflict, identity.resolutions)?;
+    memory.merge(decision.memory)?;
+    Ok(VersionOwned {
+        value: (decision.value, Some(conflict)),
+        memory,
+    })
 }
 
 fn merge_slots(
+    connection: &Connection,
     base: &BTreeMap<String, VirtualValue>,
     ours: &BTreeMap<String, Value>,
     theirs: &BTreeMap<String, Value>,
-) -> BTreeSet<String> {
+) -> QueryResult<VersionOwned<BTreeSet<String>>> {
     let mut slots = BTreeSet::new();
-    slots.extend(base.keys().cloned());
-    slots.extend(ours.keys().cloned());
-    slots.extend(theirs.keys().cloned());
-    slots
+    let mut memory = connection.reserve(0)?;
+    for key in base.keys().chain(ours.keys()).chain(theirs.keys()) {
+        connection.checkpoint()?;
+        if !slots.contains(key) {
+            memory.grow(checked_add(map_entry_bytes::<()>()?, key.len() as u64)?)?;
+            slots.insert(crate::query::expression::clone_string_controlled(
+                key,
+                Some(connection.control()),
+            )?);
+        }
+    }
+    Ok(VersionOwned {
+        value: slots,
+        memory,
+    })
 }
 
 fn apply_slot_candidate(
@@ -445,27 +530,25 @@ fn apply_slot_candidate(
     base: &BTreeMap<String, VirtualValue>,
     ours: &BTreeMap<String, Value>,
     theirs: &BTreeMap<String, Value>,
-    candidate: &mut SnapshotState,
+    candidate: &mut VersionState,
     slot: &str,
-) -> QueryResult<Option<MergeConflict>> {
-    let ours_value = effective_slot_value(base, ours, slot);
-    let theirs_value = effective_slot_value(base, theirs, slot);
-    let base_value = base.get(slot).cloned().unwrap_or(VirtualValue::Known(None));
-    let (decision, direct_conflict) = direct_slot_decision(
-        identity,
-        slot.to_owned(),
-        base_value,
-        ours_value,
-        theirs_value,
-    )?;
-    let dependency_conflict = if direct_conflict.is_none() {
-        node_delete_modify_conflict(identity, base, ours, theirs, slot)?
+) -> QueryResult<VersionOwned<Option<MergeConflict>>> {
+    let VersionOwned {
+        value: (decision, direct_conflict),
+        mut memory,
+    } = prepare_slot_decision(connection, identity, base, ours, theirs, slot)?;
+    let dependency = if direct_conflict.is_none() {
+        node_delete_modify_conflict(connection, identity, base, ours, theirs, slot, &mut memory)?
     } else {
         None
     };
-    let slot_conflict = direct_conflict.or(dependency_conflict);
-    let decision = match slot_conflict.as_ref() {
-        Some(conflict) => resolved_value(conflict, identity.resolutions)?,
+    let conflict = direct_conflict.or(dependency);
+    let decision = match conflict.as_ref() {
+        Some(conflict) => {
+            let value = budget::resolve_value(connection, conflict, identity.resolutions)?;
+            memory.merge(value.memory)?;
+            value.value
+        }
         None => decision,
     };
     let decision = if node_child_owner(slot).is_some_and(|node| !candidate.nodes.contains(&node)) {
@@ -474,44 +557,119 @@ fn apply_slot_candidate(
         decision
     };
     set_logical_slot(connection, candidate, slot, decision.as_ref())?;
-    if slot_conflict.is_some() {
-        return Ok(slot_conflict);
+    drop(decision);
+    if conflict.is_some() {
+        return finish_conflict(connection, conflict, memory);
     }
-    let Some(relationship_id) = relationship_existence_slot(slot) else {
-        return Ok(None);
-    };
-    let invalid = candidate
-        .relationships
-        .get(&relationship_id)
-        .is_some_and(|relationship| {
-            !candidate.nodes.contains(&relationship.source)
-                || !candidate.nodes.contains(&relationship.target)
-        });
-    if !invalid {
-        return Ok(None);
-    }
-    let base_value = match base.get(slot) {
-        Some(VirtualValue::Known(value)) => value.clone(),
-        _ => None,
-    };
-    let conflict = conflict(
-        identity,
-        slot.to_owned(),
-        base_value,
-        ours.get(slot).cloned(),
-        theirs.get(slot).cloned(),
-    )?;
-    let choice = resolved_value(&conflict, identity.resolutions)?;
-    set_logical_slot(connection, candidate, slot, choice.as_ref())?;
-    Ok(Some(conflict))
+    drop(memory);
+    invalid_relationship_conflict(connection, identity, base, ours, theirs, candidate, slot)
 }
 
-fn node_delete_modify_conflict(
+fn prepare_slot_decision(
+    connection: &Connection,
     identity: &MergeIdentity<'_>,
     base: &BTreeMap<String, VirtualValue>,
     ours: &BTreeMap<String, Value>,
     theirs: &BTreeMap<String, Value>,
     slot: &str,
+) -> QueryResult<VersionOwned<(Option<Value>, Option<MergeConflict>)>> {
+    let mut memory = connection.reserve(checked_add(slot.len() as u64, 64)?)?;
+    let (ours, ours_memory) =
+        budget::copy_optional(connection, effective_slot_value(base, ours, slot))?;
+    let (theirs, theirs_memory) =
+        budget::copy_optional(connection, effective_slot_value(base, theirs, slot))?;
+    memory.merge(ours_memory)?;
+    memory.merge(theirs_memory)?;
+    let base = copy_base_value(connection, base.get(slot), &mut memory)?;
+    let mut decision =
+        direct_slot_decision(connection, identity, slot.to_owned(), base, ours, theirs)?;
+    decision.memory.merge(memory)?;
+    Ok(decision)
+}
+
+fn copy_base_value(
+    connection: &Connection,
+    value: Option<&VirtualValue>,
+    memory: &mut MemoryReservation,
+) -> QueryResult<VirtualValue> {
+    match value {
+        Some(VirtualValue::Known(value)) => {
+            let (value, claim) = budget::copy_optional(connection, value.as_ref())?;
+            memory.merge(claim)?;
+            Ok(VirtualValue::Known(value))
+        }
+        Some(VirtualValue::Unknown) => Ok(VirtualValue::Unknown),
+        None => Ok(VirtualValue::Known(None)),
+    }
+}
+
+fn invalid_relationship_conflict(
+    connection: &Connection,
+    identity: &MergeIdentity<'_>,
+    base: &BTreeMap<String, VirtualValue>,
+    ours: &BTreeMap<String, Value>,
+    theirs: &BTreeMap<String, Value>,
+    candidate: &mut VersionState,
+    slot: &str,
+) -> QueryResult<VersionOwned<Option<MergeConflict>>> {
+    let mut memory = connection.reserve(checked_add(slot.len() as u64, 64)?)?;
+    if !invalid_relationship(candidate, slot) {
+        return finish_conflict(connection, None, memory);
+    }
+    let base = match base.get(slot) {
+        Some(VirtualValue::Known(value)) => value.as_ref(),
+        _ => None,
+    };
+    let (base, base_memory) = budget::copy_optional(connection, base)?;
+    let (ours, ours_memory) = budget::copy_optional(connection, ours.get(slot))?;
+    let (theirs, theirs_memory) = budget::copy_optional(connection, theirs.get(slot))?;
+    memory.merge(base_memory)?;
+    memory.merge(ours_memory)?;
+    memory.merge(theirs_memory)?;
+    let conflict = conflict(
+        connection,
+        identity,
+        slot.to_owned(),
+        base,
+        ours,
+        theirs,
+        &mut memory,
+    )?;
+    let choice = budget::resolve_value(connection, &conflict, identity.resolutions)?;
+    set_logical_slot(connection, candidate, slot, choice.value.as_ref())?;
+    finish_conflict(connection, Some(conflict), memory)
+}
+
+fn invalid_relationship(candidate: &VersionState, slot: &str) -> bool {
+    relationship_existence_slot(slot)
+        .and_then(|id| candidate.relationships.get(&id))
+        .is_some_and(|relationship| {
+            !candidate.nodes.contains(&relationship.source)
+                || !candidate.nodes.contains(&relationship.target)
+        })
+}
+
+fn finish_conflict(
+    connection: &Connection,
+    value: Option<MergeConflict>,
+    mut memory: MemoryReservation,
+) -> QueryResult<VersionOwned<Option<MergeConflict>>> {
+    let bytes = match &value {
+        Some(value) => budget::conflict_bytes(connection, value)?,
+        None => 0,
+    };
+    memory.resize(bytes)?;
+    Ok(VersionOwned { value, memory })
+}
+
+fn node_delete_modify_conflict(
+    connection: &Connection,
+    identity: &MergeIdentity<'_>,
+    base: &BTreeMap<String, VirtualValue>,
+    ours: &BTreeMap<String, Value>,
+    theirs: &BTreeMap<String, Value>,
+    slot: &str,
+    memory: &mut MemoryReservation,
 ) -> QueryResult<Option<MergeConflict>> {
     let Some(node_id) = node_existence_slot(slot) else {
         return Ok(None);
@@ -519,52 +677,52 @@ fn node_delete_modify_conflict(
     let Some(VirtualValue::Known(Some(base_value))) = base.get(slot) else {
         return Ok(None);
     };
-    let ours_value = ours.get(slot).cloned();
-    let theirs_value = theirs.get(slot).cloned();
+    let ours_value = ours.get(slot);
+    let theirs_value = theirs.get(slot);
     let modified_other_side = match (ours_value.as_ref(), theirs_value.as_ref()) {
-        (None, Some(_)) => node_dependents_changed(base, theirs, node_id),
-        (Some(_), None) => node_dependents_changed(base, ours, node_id),
+        (None, Some(_)) => node_dependents_changed(connection, base, theirs, node_id)?,
+        (Some(_), None) => node_dependents_changed(connection, base, ours, node_id)?,
         _ => false,
     };
     if !modified_other_side {
         return Ok(None);
     }
+    let (base, base_memory) = budget::copy_optional(connection, Some(base_value))?;
+    let (ours, ours_memory) = budget::copy_optional(connection, ours_value)?;
+    let (theirs, theirs_memory) = budget::copy_optional(connection, theirs_value)?;
+    memory.grow(slot.len() as u64)?;
+    memory.merge(base_memory)?;
+    memory.merge(ours_memory)?;
+    memory.merge(theirs_memory)?;
     conflict(
+        connection,
         identity,
         slot.to_owned(),
-        Some(base_value.clone()),
-        ours_value,
-        theirs_value,
+        base,
+        ours,
+        theirs,
+        memory,
     )
     .map(Some)
 }
 
-fn node_dependents_changed(
-    base: &BTreeMap<String, VirtualValue>,
-    side: &BTreeMap<String, Value>,
-    node_id: &str,
-) -> bool {
-    node_children_changed(base, side, node_id)
-        || relationship_dependencies_changed(base, side, node_id)
-}
-
-fn effective_slot_value(
-    base: &BTreeMap<String, VirtualValue>,
-    side: &BTreeMap<String, Value>,
+fn effective_slot_value<'a>(
+    base: &'a BTreeMap<String, VirtualValue>,
+    side: &'a BTreeMap<String, Value>,
     slot: &str,
-) -> Option<Value> {
+) -> Option<&'a Value> {
     let Some(node) = node_child_owner(slot) else {
-        return side.get(slot).cloned();
+        return side.get(slot);
     };
     let owner_slot = format!("node/{node}");
     let base_owner_exists = matches!(base.get(&owner_slot), Some(VirtualValue::Known(Some(_))));
     if base_owner_exists && !side.contains_key(&owner_slot) {
         return match base.get(slot) {
-            Some(VirtualValue::Known(value)) => value.clone(),
-            _ => side.get(slot).cloned(),
+            Some(VirtualValue::Known(value)) => value.as_ref(),
+            _ => side.get(slot),
         };
     }
-    side.get(slot).cloned()
+    side.get(slot)
 }
 
 fn node_child_owner(slot: &str) -> Option<i64> {
@@ -579,81 +737,6 @@ fn node_child_owner(slot: &str) -> Option<i64> {
 fn node_existence_slot(slot: &str) -> Option<&str> {
     let node = slot.strip_prefix("node/")?;
     (!node.contains('/')).then_some(node)
-}
-
-fn node_children_changed(
-    base: &BTreeMap<String, VirtualValue>,
-    side: &BTreeMap<String, Value>,
-    node_id: &str,
-) -> bool {
-    let prefix = format!("node/{node_id}/");
-    let mut slots = BTreeSet::new();
-    slots.extend(
-        base.keys()
-            .filter(|slot| slot.starts_with(&prefix))
-            .cloned(),
-    );
-    slots.extend(
-        side.keys()
-            .filter(|slot| slot.starts_with(&prefix))
-            .cloned(),
-    );
-    slots.into_iter().any(|slot| {
-        let side_value = side.get(&slot);
-        match base.get(&slot) {
-            Some(VirtualValue::Known(base_value)) => {
-                !same_optional_value(base_value.as_ref(), side_value)
-            }
-            Some(VirtualValue::Unknown) => true,
-            None => side_value.is_some(),
-        }
-    })
-}
-
-fn relationship_dependencies_changed(
-    base: &BTreeMap<String, VirtualValue>,
-    side: &BTreeMap<String, Value>,
-    node_id: &str,
-) -> bool {
-    let endpoint = format!("n:{node_id}");
-    side.iter().any(|(slot, value)| {
-        if relationship_existence_slot(slot).is_none()
-            || !relationship_value_references_endpoint(value, &endpoint)
-        {
-            return false;
-        }
-        if match base.get(slot) {
-            Some(VirtualValue::Known(base_value)) => {
-                !same_optional_value(base_value.as_ref(), Some(value))
-            }
-            Some(VirtualValue::Unknown) => true,
-            None => true,
-        } {
-            return true;
-        }
-        let prefix = format!("{slot}/property/");
-        let mut properties = BTreeSet::new();
-        properties.extend(
-            base.keys()
-                .filter(|candidate| candidate.starts_with(&prefix))
-                .cloned(),
-        );
-        properties.extend(
-            side.keys()
-                .filter(|candidate| candidate.starts_with(&prefix))
-                .cloned(),
-        );
-        properties.into_iter().any(|property| {
-            let side_value = side.get(&property);
-            match base.get(&property) {
-                Some(VirtualValue::Known(base_value)) => {
-                    !same_optional_value(base_value.as_ref(), side_value)
-                }
-                Some(VirtualValue::Unknown) => true,
-                None => side_value.is_some(),
-            }
-        })
-    })
 }
 
 fn relationship_value_references_endpoint(value: &Value, endpoint: &str) -> bool {
@@ -675,26 +758,34 @@ fn relationship_existence_slot(slot: &str) -> Option<i64> {
 
 fn add_schema_validation_conflicts(
     connection: &Connection,
-    identity: &MergeIdentity<'_>,
-    base: &BTreeMap<String, VirtualValue>,
-    ours: &BTreeMap<String, Value>,
-    theirs: &BTreeMap<String, Value>,
-    candidate: &mut SnapshotState,
-    conflicts: &mut Vec<MergeConflict>,
+    scan: &mut ConflictScanContext<'_>,
 ) -> QueryResult<()> {
+    let ConflictScanContext {
+        identity,
+        base,
+        ours,
+        theirs,
+        candidate,
+        derived: conflicts,
+        _derived_memory: memory,
+        ..
+    } = scan;
     let mut applied = BTreeSet::new();
     let mut resolved = Vec::new();
     loop {
-        let validation =
+        let (validation, _validation_memory) =
             candidate_validation_conflicts(connection, identity.ours_commit, candidate)?;
         let mut unresolved = Vec::new();
         let mut changed = false;
         for (slot, error) in validation {
-            let conflict = derived_schema_conflict(identity, &slot, base, ours, theirs)?;
+            let conflict =
+                derived_schema_conflict(connection, identity, &slot, base, ours, theirs, memory)?;
             if conflict.resolution.is_none() {
+                budget::reserve_push(connection, &unresolved, memory)?;
                 unresolved.push(conflict);
                 continue;
             }
+            memory.grow(map_entry_bytes::<HashId>()?)?;
             if !applied.insert(conflict.id) {
                 return Err(QueryError::invalid_argument(format!(
                     "resolution for derived merge conflict {} does not produce a valid candidate: {}",
@@ -702,16 +793,19 @@ fn add_schema_validation_conflicts(
                     error.message
                 )));
             }
-            resolved.push(conflict.clone());
-            let replacement = resolved_value(&conflict, identity.resolutions)?;
-            set_logical_slot(connection, candidate, &slot, replacement.as_ref())?;
+            let replacement = budget::resolve_value(connection, &conflict, identity.resolutions)?;
+            set_logical_slot(connection, candidate, &slot, replacement.value.as_ref())?;
+            budget::reserve_push(connection, &resolved, memory)?;
+            resolved.push(conflict);
             changed = true;
         }
         if changed {
             continue;
         }
-        conflicts.extend(resolved);
-        conflicts.extend(unresolved);
+        for conflict in resolved.into_iter().chain(unresolved) {
+            budget::reserve_push(connection, conflicts, memory)?;
+            conflicts.push(conflict);
+        }
         break;
     }
     Ok(())
@@ -721,155 +815,72 @@ fn candidate_validation_conflicts(
     connection: &Connection,
     ours_commit: HashId,
     candidate: &SnapshotState,
-) -> QueryResult<Vec<(String, QueryError)>> {
-    let ours = storage::load_snapshot_state(connection, ours_commit)?;
-    let layer = storage::layer_between(&ours, candidate)?;
-    let snapshot = storage::Snapshot::resolve_with_layer_and_schema(
+) -> QueryResult<(Vec<(String, QueryError)>, MemoryReservation)> {
+    let ours = connection.load_state(ours_commit)?;
+    let layer = connection.layer_between(&ours, candidate)?;
+    let snapshot = connection.with_layer_snapshot(ours_commit, &layer, &candidate.schema)?;
+    snapshot.validate_graph_invariants_checked(&super::execution::storage_check(
+        connection.control(),
+    ))?;
+    super::super::schema::validation_conflicts_controlled(
         connection,
-        ours_commit,
-        &layer,
-        candidate.schema.clone(),
-    )?;
-    snapshot.validate_graph_invariants()?;
-    super::super::schema::validation_conflicts(connection, &candidate.schema, &snapshot)
+        &candidate.schema,
+        &snapshot,
+        connection.control(),
+    )
 }
 
 fn derived_schema_conflict(
+    connection: &Connection,
     identity: &MergeIdentity<'_>,
     slot: &str,
     base: &BTreeMap<String, VirtualValue>,
     ours: &BTreeMap<String, Value>,
     theirs: &BTreeMap<String, Value>,
+    memory: &mut MemoryReservation,
 ) -> QueryResult<MergeConflict> {
     let base_value = match base.get(slot) {
-        Some(VirtualValue::Known(value)) => value.clone(),
+        Some(VirtualValue::Known(value)) => value.as_ref(),
         Some(VirtualValue::Unknown) | None => None,
     };
+    let (base_value, base_memory) = budget::copy_optional(connection, base_value)?;
+    let (ours, ours_memory) = budget::copy_optional(connection, ours.get(slot))?;
+    let (theirs, theirs_memory) = budget::copy_optional(connection, theirs.get(slot))?;
+    memory.grow(slot.len() as u64)?;
+    memory.merge(base_memory)?;
+    memory.merge(ours_memory)?;
+    memory.merge(theirs_memory)?;
     conflict(
+        connection,
         identity,
         slot.to_owned(),
         base_value,
-        ours.get(slot).cloned(),
-        theirs.get(slot).cloned(),
+        ours,
+        theirs,
+        memory,
     )
 }
 
-fn virtual_base(
-    connection: &Connection,
-    bases: &[HashId],
-) -> QueryResult<BTreeMap<String, VirtualValue>> {
-    if bases.len() == 1 {
-        return logical_slots(
-            connection,
-            &storage::load_snapshot_state(connection, bases[0])?,
-        )
-        .map(|slots| {
-            slots
-                .into_iter()
-                .map(|(slot, value)| (slot, VirtualValue::Known(Some(value))))
-                .collect()
-        });
-    }
-    let mut current = virtual_merge_commits(connection, bases[0], bases[1])?;
-    for commit in &bases[2..] {
-        let right = logical_slots(
-            connection,
-            &storage::load_snapshot_state(connection, *commit)?,
-        )?;
-        let mut slots = BTreeSet::new();
-        slots.extend(current.keys().cloned());
-        slots.extend(right.keys().cloned());
-        let mut next = BTreeMap::new();
-        for slot in slots {
-            let left = current
-                .get(&slot)
-                .cloned()
-                .unwrap_or(VirtualValue::Known(None));
-            let right = VirtualValue::Known(right.get(&slot).cloned());
-            let value = if left == right {
-                left
-            } else {
-                VirtualValue::Unknown
-            };
-            if value != VirtualValue::Known(None) {
-                next.insert(slot, value);
-            }
-        }
-        current = next;
-    }
-    Ok(current)
-}
-
-fn virtual_merge_commits(
-    connection: &Connection,
-    ours_commit: HashId,
-    theirs_commit: HashId,
-) -> QueryResult<BTreeMap<String, VirtualValue>> {
-    let bases = storage::best_common_ancestors(connection, ours_commit, theirs_commit)?;
-    let base = if bases.is_empty() {
-        BTreeMap::new()
-    } else {
-        virtual_base(connection, &bases)?
-    };
-    let ours = logical_slots(
-        connection,
-        &storage::load_snapshot_state(connection, ours_commit)?,
-    )?;
-    let theirs = logical_slots(
-        connection,
-        &storage::load_snapshot_state(connection, theirs_commit)?,
-    )?;
-    let mut slots = BTreeSet::new();
-    slots.extend(base.keys().cloned());
-    slots.extend(ours.keys().cloned());
-    slots.extend(theirs.keys().cloned());
-    let mut merged = BTreeMap::new();
-    for slot in slots {
-        let ours = ours.get(&slot).cloned();
-        let theirs = theirs.get(&slot).cloned();
-        let base = base
-            .get(&slot)
-            .cloned()
-            .unwrap_or(VirtualValue::Known(None));
-        let value = if same_optional_value(ours.as_ref(), theirs.as_ref()) {
-            VirtualValue::Known(ours)
-        } else {
-            match base {
-                VirtualValue::Known(base) if same_optional_value(ours.as_ref(), base.as_ref()) => {
-                    VirtualValue::Known(theirs)
-                }
-                VirtualValue::Known(base)
-                    if same_optional_value(theirs.as_ref(), base.as_ref()) =>
-                {
-                    VirtualValue::Known(ours)
-                }
-                _ => VirtualValue::Unknown,
-            }
-        };
-        if value != VirtualValue::Known(None) {
-            merged.insert(slot, value);
-        }
-    }
-    Ok(merged)
-}
-
 fn conflict(
+    connection: &Connection,
     identity: &MergeIdentity<'_>,
     slot: String,
     base: Option<Value>,
     ours: Option<Value>,
     theirs: Option<Value>,
+    memory: &mut MemoryReservation,
 ) -> QueryResult<MergeConflict> {
-    let id = conflict_id(
-        &identity.base_identity,
-        &identity.ours_identity,
-        &identity.theirs_identity,
+    let id = budget::conflict_hash(
+        connection,
+        identity,
         &slot,
         base.as_ref(),
         ours.as_ref(),
         theirs.as_ref(),
-    );
-    let resolution = identity.resolutions.get(&id).cloned();
+    )?;
+    let (resolution, resolution_memory) =
+        budget::copy_optional(connection, identity.resolutions.get(&id))?;
+    memory.merge(resolution_memory)?;
     if let Some(resolution) = &resolution {
         validate_resolution_shape(resolution)?;
         validate_resolution_slot_value(&slot, resolution)?;
@@ -882,90 +893,6 @@ fn conflict(
         theirs,
         resolution,
     })
-}
-
-fn resolved_value(
-    conflict: &MergeConflict,
-    resolutions: &BTreeMap<HashId, Value>,
-) -> QueryResult<Option<Value>> {
-    let Some(resolution) = resolutions.get(&conflict.id) else {
-        return Ok(conflict.ours.clone());
-    };
-    let Value::Map(map) = resolution else {
-        return Err(QueryError::invalid_argument(
-            "merge resolution must be a Map",
-        ));
-    };
-    match string_map(map, "choice")? {
-        "ours" => Ok(conflict.ours.clone()),
-        "theirs" => Ok(conflict.theirs.clone()),
-        "value" => match map.get("value") {
-            Some(Value::Null) | None => Ok(None),
-            Some(value) => Ok(Some(value.clone())),
-        },
-        _ => Err(QueryError::invalid_argument(
-            "resolution choice must be ours, theirs, or value",
-        )),
-    }
-}
-
-fn resolution_ids(value: Option<&Value>) -> QueryResult<BTreeSet<HashId>> {
-    let mut ids = BTreeSet::new();
-    for item in resolution_list(value)? {
-        let map = resolution_map(item)?;
-        let id = resolution_conflict_id(map)?;
-        if !ids.insert(id) {
-            return Err(QueryError::invalid_argument(
-                "duplicate conflictId in resolutions",
-            ));
-        }
-    }
-    Ok(ids)
-}
-
-fn resolution_items(
-    value: Option<&Value>,
-    conflicts: &BTreeMap<HashId, MergeConflict>,
-) -> QueryResult<BTreeMap<HashId, Value>> {
-    let mut result = BTreeMap::new();
-    for item in resolution_list(value)? {
-        let map = resolution_map(item)?;
-        let id = resolution_conflict_id(map)?;
-        if result.contains_key(&id) {
-            return Err(QueryError::invalid_argument(
-                "duplicate conflictId in resolutions",
-            ));
-        }
-        let conflict = conflicts
-            .get(&id)
-            .ok_or_else(|| QueryError::invalid_argument("unknown conflictId"))?;
-        let choice = string_map(map, "choice")?;
-        let mut normalized =
-            BTreeMap::from([("choice".to_owned(), Value::String(choice.to_owned()))]);
-        match choice {
-            "ours" | "theirs" => {
-                if map.contains_key("value") {
-                    return Err(QueryError::invalid_argument(
-                        "ours/theirs resolution cannot contain value",
-                    ));
-                }
-            }
-            "value" => {
-                let value = map.get("value").ok_or_else(|| {
-                    QueryError::invalid_argument("value resolution requires value")
-                })?;
-                validate_explicit_value(&conflict.slot, value)?;
-                normalized.insert("value".to_owned(), value.clone());
-            }
-            _ => {
-                return Err(QueryError::invalid_argument(
-                    "resolution choice must be ours, theirs, or value",
-                ));
-            }
-        }
-        result.insert(id, Value::Map(normalized));
-    }
-    Ok(result)
 }
 
 fn resolution_list(value: Option<&Value>) -> QueryResult<&[Value]> {
@@ -1037,45 +964,17 @@ fn validate_resolution_slot_value(slot: &str, resolution: &Value) -> QueryResult
     Ok(())
 }
 
-fn encode_resolution(value: &Value) -> QueryResult<String> {
-    serde_json::to_string(&cypher::encode_json(value)).map_err(|error| {
-        QueryError::internal(format!("failed to encode merge resolution: {error}"))
-    })
-}
-
-pub(super) fn load_resolutions(
-    connection: &Connection,
-    session: &str,
-) -> QueryResult<BTreeMap<HashId, Value>> {
-    storage::load_merge_resolutions(connection, session)?
-        .into_iter()
-        .map(|(id, text)| {
-            let json: serde_json::Value = serde_json::from_str(&text).map_err(|_| {
-                QueryError::new(
-                    QueryErrorKind::Storage,
-                    "stored merge resolution JSON is invalid",
-                )
-            })?;
-            let value = cypher::decode_json(&json)?;
-            Ok((id, value))
-        })
-        .collect()
-}
-
 fn session_status_row(
     session: &MergeSessionRecord,
     computation: &MergeComputation,
 ) -> ProcedureRow {
-    row([
+    let mut output = row([
         ("session", Value::String(session.id.clone())),
         ("targetBranch", Value::String(session.target_branch.clone())),
         ("ours", commit_value(session.ours)),
         ("theirs", commit_value(session.theirs)),
         ("revision", Value::Integer(session.revision)),
-        ("status", Value::String(computation.status.to_owned())),
-        (
-            "unresolved",
-            Value::Integer(i64::try_from(computation.unresolved).unwrap_or(i64::MAX)),
-        ),
-    ])
+    ]);
+    procedures::append_computation_status(&mut output, computation);
+    output
 }

@@ -3,11 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use rusqlite::Connection;
 
 use crate::cypher::{AstKind, AstNode, ClauseKind, Value};
-use crate::query::access::PropertyRules;
 use crate::query::expression::{self, BindingRow, compile_expression, surface_expressions};
 use crate::storage::{
-    HashId, IndexConfiguration, IndexDefinition, IndexTarget, SchemaState, Snapshot,
-    StandardIndexKind,
+    HashId, IndexConfiguration, IndexDefinition, IndexTarget, SchemaState, StandardIndexKind,
 };
 
 use super::super::super::QueryResult;
@@ -71,15 +69,22 @@ pub(super) fn apply_create_index(
     state: &mut SchemaState,
     clause: &AstNode,
     kind: SemanticCreateKind,
-    params: &BTreeMap<String, Value>,
-    query_access: &PropertyRules,
+    execution: &super::SchemaExecution<'_>,
 ) -> QueryResult<()> {
-    let arguments = create_arguments(connection, base_commit, clause, params, query_access)?;
+    let (arguments, _arguments_memory) =
+        create_arguments(connection, base_commit, clause, execution)?;
     if arguments.len() != 4 {
         return Err(schema_error(
             "Semantic Index create procedure requires exactly 4 arguments",
         ));
     }
+    let control = execution.control;
+    // Definition construction may simultaneously retain labels, a uniqueness
+    // tree and a JSON Provider configuration alongside the evaluated arguments.
+    let _definition_memory = control.reserve(crate::query::resources::checked_mul(
+        _arguments_memory.bytes(),
+        4,
+    )?)?;
     let name = required_nonempty_string(&arguments[0], "indexName")?;
     let labels_or_types = required_string_list(
         &arguments[1],
@@ -87,12 +92,13 @@ pub(super) fn apply_create_index(
             SemanticCreateKind::Node => "labels",
             SemanticCreateKind::Relationship => "relationshipTypes",
         },
+        control,
     )?;
     let source_property = required_nonempty_string(&arguments[2], "sourceProperty")?;
     let Value::Map(options) = &arguments[3] else {
         return Err(schema_error("Semantic Index options must be a MAP"));
     };
-    let configuration = parse_options(options)?;
+    let configuration = parse_options(options, control)?;
     let target = match kind {
         SemanticCreateKind::Node => IndexTarget::NodeProperties {
             label: labels_or_types[0].clone(),
@@ -194,9 +200,9 @@ fn create_arguments(
     connection: &Connection,
     base_commit: HashId,
     clause: &AstNode,
-    params: &BTreeMap<String, Value>,
-    query_access: &PropertyRules,
-) -> QueryResult<Vec<Value>> {
+    execution: &super::SchemaExecution<'_>,
+) -> QueryResult<(Vec<Value>, crate::query::MemoryReservation)> {
+    let control = execution.control;
     let name_end = clause
         .descendants()
         .find(|node| node.kind == AstKind::FunctionName)
@@ -205,18 +211,34 @@ fn create_arguments(
         .descendants()
         .find(|node| node.kind == AstKind::ArgumentList && node.span.start >= name_end)
         .ok_or_else(|| schema_error("Semantic Index create procedure is missing arguments"))?;
-    let snapshot = Snapshot::resolve(connection, base_commit)?;
+    let snapshot =
+        crate::query::graph::resolve_snapshot_with_control(connection, base_commit, control)?;
     let row = BindingRow::default();
-    surface_expressions(arguments)
-        .into_iter()
-        .map(|node| {
-            let expression = compile_expression(node)?;
-            expression::evaluate_with_access(&expression, &snapshot, &row, params, query_access)
-        })
-        .collect()
+    let expressions = surface_expressions(arguments);
+    let mut memory = control.reserve(crate::query::resources::allocation_bytes::<Value>(
+        expressions.len(),
+    )?)?;
+    let mut values = Vec::with_capacity(expressions.len());
+    for node in expressions {
+        let expression = compile_expression(node)?;
+        let evaluated = expression::evaluate_with_access_control(
+            &expression,
+            &snapshot,
+            &row,
+            execution.params,
+            execution.query_access,
+            control,
+        )?;
+        memory.merge(evaluated.reservation)?;
+        values.push(evaluated.value);
+    }
+    Ok((values, memory))
 }
 
-fn parse_options(options: &BTreeMap<String, Value>) -> QueryResult<IndexConfiguration> {
+fn parse_options(
+    options: &BTreeMap<String, Value>,
+    control: &crate::query::ExecutionControl<'_>,
+) -> QueryResult<IndexConfiguration> {
     let supported = BTreeSet::from(["provider", "providerConfig", "dimensions", "similarity"]);
     if let Some(key) = options.keys().find(|key| !supported.contains(key.as_str())) {
         return Err(schema_error(format!(
@@ -235,7 +257,7 @@ fn parse_options(options: &BTreeMap<String, Value>) -> QueryResult<IndexConfigur
     let Value::Map(_) = provider_config else {
         return Err(schema_error("Semantic Index providerConfig must be a MAP"));
     };
-    let provider_config = json_value(provider_config)?;
+    let provider_config = json_value(provider_config, control)?;
     let dimensions = match options.get("dimensions") {
         Some(Value::Integer(value)) if (1..=4096).contains(value) => *value as u64,
         Some(_) => {
@@ -265,10 +287,57 @@ fn parse_options(options: &BTreeMap<String, Value>) -> QueryResult<IndexConfigur
     })
 }
 
-fn json_value(value: &Value) -> QueryResult<serde_json::Value> {
-    crate::query::version::value_to_json(value).map_err(|_| {
-        schema_error("Semantic Index providerConfig must contain only JSON-compatible values")
-    })
+fn json_value(
+    value: &Value,
+    control: &crate::query::ExecutionControl<'_>,
+) -> QueryResult<serde_json::Value> {
+    control.work(1)?;
+    match value {
+        Value::Null => Ok(serde_json::Value::Null),
+        Value::Boolean(value) => Ok((*value).into()),
+        Value::Integer(value) => Ok((*value).into()),
+        Value::Float(value) if value.is_finite() => serde_json::Number::from_f64(*value)
+            .map(serde_json::Value::Number)
+            .ok_or_else(|| {
+                schema_error("Semantic Index providerConfig must contain finite numbers")
+            }),
+        Value::String(value) => Ok(clone_text(value, control)?.into()),
+        Value::List(values) => {
+            let mut output = Vec::with_capacity(values.len());
+            for value in values {
+                output.push(json_value(value, control)?);
+            }
+            Ok(serde_json::Value::Array(output))
+        }
+        Value::Map(values) => {
+            let mut output = serde_json::Map::new();
+            for (key, value) in values {
+                output.insert(clone_text(key, control)?, json_value(value, control)?);
+            }
+            Ok(serde_json::Value::Object(output))
+        }
+        _ => Err(schema_error(
+            "Semantic Index providerConfig must contain only JSON-compatible values",
+        )),
+    }
+}
+
+fn clone_text(value: &str, control: &crate::query::ExecutionControl<'_>) -> QueryResult<String> {
+    control.check()?;
+    let mut output = String::with_capacity(value.len());
+    let mut offset = 0;
+    while offset < value.len() {
+        let mut end = offset.saturating_add(64 * 1024).min(value.len());
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        let chunk = &value[offset..end];
+        output.push_str(chunk);
+        control.bytes(chunk.len() as u64)?;
+        offset = end;
+    }
+    control.check()?;
+    Ok(output)
 }
 
 fn required_nonempty_string(value: &Value, role: &str) -> QueryResult<String> {
@@ -285,7 +354,11 @@ fn required_nonempty_string(value: &Value, role: &str) -> QueryResult<String> {
     }
 }
 
-fn required_string_list(value: &Value, role: &str) -> QueryResult<Vec<String>> {
+fn required_string_list(
+    value: &Value,
+    role: &str,
+    control: &crate::query::ExecutionControl<'_>,
+) -> QueryResult<Vec<String>> {
     let Value::List(values) = value else {
         return Err(schema_error(format!(
             "Semantic Index {role} must be a non-empty LIST<STRING>"
@@ -299,6 +372,7 @@ fn required_string_list(value: &Value, role: &str) -> QueryResult<Vec<String>> {
     let mut result = Vec::with_capacity(values.len());
     let mut unique = BTreeSet::new();
     for value in values {
+        control.work(1)?;
         let value = required_nonempty_string(value, role)?;
         if !unique.insert(value.clone()) {
             return Err(schema_error(format!(

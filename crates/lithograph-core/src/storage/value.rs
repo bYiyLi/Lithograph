@@ -1,7 +1,8 @@
 use super::encoding::{
-    canonical_f32_bits, canonical_f64_bits, decode_counted, decode_i32, decode_i64, decode_u32,
-    decode_u64, decode_uleb_field, encode_counted, i32_bytes, i64_bytes, parse_record, record,
-    u32_bytes, u64_bytes, uleb_bytes,
+    borrowed_counted_fields, borrowed_record_fields, canonical_f32_bits, canonical_f64_bits,
+    copy_bytes_checked, decode_i32, decode_i64, decode_u32, decode_u64, decode_uleb_field,
+    encode_counted_checked, equal_bytes_checked, i32_bytes, i64_bytes, record_checked, u32_bytes,
+    u64_bytes, uleb_bytes,
 };
 use super::{StorageError, StorageResult};
 
@@ -91,18 +92,30 @@ impl PropertyValue {
     /// LCE1 can decode a broader tagged List shape because storage format 1 is frozen; callers
     /// at the mutation/type boundary must use this predicate before persisting user data.
     pub fn is_property_value(&self) -> bool {
+        self.is_property_value_checked(&|| Ok(())).unwrap_or(false)
+    }
+
+    pub(crate) fn is_property_value_checked(
+        &self,
+        check: &dyn Fn() -> StorageResult<()>,
+    ) -> StorageResult<bool> {
+        check()?;
         let Self::List(values) = self else {
-            return true;
+            return Ok(true);
         };
         let Some(first) = values.first() else {
-            return true;
+            return Ok(true);
         };
         let Some(family) = list_element_family(first) else {
-            return false;
+            return Ok(false);
         };
-        values
-            .iter()
-            .all(|value| list_element_family(value) == Some(family))
+        for value in values {
+            check()?;
+            if list_element_family(value) != Some(family) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     pub(crate) fn type_tag(&self) -> i64 {
@@ -110,6 +123,14 @@ impl PropertyValue {
     }
 
     pub(crate) fn canonical_bytes(&self) -> StorageResult<Vec<u8>> {
+        self.canonical_bytes_checked(&|| Ok(()))
+    }
+
+    pub(crate) fn canonical_bytes_checked(
+        &self,
+        check: &dyn Fn() -> StorageResult<()>,
+    ) -> StorageResult<Vec<u8>> {
+        check()?;
         let fields = match self {
             Self::Boolean(value) => vec![vec![BOOLEAN], vec![u8::from(*value)]],
             Self::Integer(value) => vec![vec![INTEGER], i64_bytes(*value)],
@@ -117,13 +138,14 @@ impl PropertyValue {
                 vec![FLOAT],
                 canonical_f64_bits(*value).to_le_bytes().to_vec(),
             ],
-            Self::String(value) => vec![vec![STRING], value.as_bytes().to_vec()],
+            Self::String(value) => vec![vec![STRING], copy_bytes_checked(value.as_bytes(), check)?],
             Self::List(values) => {
-                let items = values
-                    .iter()
-                    .map(Self::canonical_bytes)
-                    .collect::<StorageResult<Vec<_>>>()?;
-                vec![vec![LIST], encode_counted(&items)]
+                let mut items = Vec::with_capacity(values.len());
+                for value in values {
+                    check()?;
+                    items.push(value.canonical_bytes_checked(check)?);
+                }
+                vec![vec![LIST], encode_counted_checked(&items, check)?]
             }
             Self::Date(days) => vec![vec![DATE], i64_bytes(*days)],
             Self::LocalTime(nanos) => vec![vec![LOCAL_TIME], u64_bytes(*nanos)],
@@ -148,7 +170,7 @@ impl PropertyValue {
                 vec![ZONED_DATETIME],
                 i64_bytes(value.epoch_seconds),
                 u32_bytes(value.nanoseconds),
-                value.zone_id.as_bytes().to_vec(),
+                copy_bytes_checked(value.zone_id.as_bytes(), check)?,
             ],
             Self::Duration {
                 months,
@@ -162,32 +184,38 @@ impl PropertyValue {
                 i64_bytes(*seconds),
                 i64_bytes(*nanoseconds),
             ],
-            Self::Point(value) => point_fields(value),
-            Self::Vector(value) => vector_fields(value)?,
+            Self::Point(value) => point_fields(value, check)?,
+            Self::Vector(value) => vector_fields(value, check)?,
             Self::Uuid(value) => vec![vec![UUID], value.to_vec()],
         };
-        Ok(record("VALUE", &fields))
+        record_checked("VALUE", &fields, check)
     }
 
+    #[cfg(test)]
     pub(crate) fn from_canonical_bytes(bytes: &[u8]) -> StorageResult<Self> {
-        let fields = parse_record(bytes, "VALUE")?;
-        let tag_field = fields
-            .first()
-            .copied()
-            .ok_or_else(|| StorageError::corrupt("VALUE record is missing type tag"))?;
+        Self::from_canonical_bytes_checked(bytes, &|| Ok(()))
+    }
+
+    pub(crate) fn from_canonical_bytes_checked(
+        bytes: &[u8],
+        check: &dyn Fn() -> StorageResult<()>,
+    ) -> StorageResult<Self> {
+        check()?;
+        let (fields, count) = borrowed_value_fields(bytes, check)?;
+        let tag_field = fields[0];
         if tag_field.len() != 1 {
             return Err(StorageError::corrupt("VALUE type tag must be one byte"));
         }
         let tag = tag_field[0];
         let expected = expected_field_count(tag)?;
-        if fields.len() != expected {
+        if count != expected {
             return Err(StorageError::corrupt(format!(
                 "VALUE type tag {tag} requires {expected} field(s), found {}",
-                fields.len()
+                count
             )));
         }
-        let value = decode_value(tag, &fields[1..])?;
-        if value.canonical_bytes()? != bytes {
+        let value = decode_value(tag, &fields[1..count], check)?;
+        if !equal_bytes_checked(&value.canonical_bytes_checked(check)?, bytes, check)? {
             return Err(StorageError::corrupt(
                 "VALUE record is not in canonical LCE1 form",
             ));
@@ -215,29 +243,41 @@ impl PropertyValue {
     }
 }
 
-fn point_fields(value: &PointValue) -> Vec<Vec<u8>> {
+fn point_fields(
+    value: &PointValue,
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<Vec<Vec<u8>>> {
+    check()?;
     let mut packed = Vec::with_capacity(value.coordinates.len() * 8);
     for coordinate in &value.coordinates {
+        check()?;
         packed.extend_from_slice(&canonical_f64_bits(*coordinate).to_le_bytes());
     }
-    vec![
+    Ok(vec![
         vec![POINT],
         i64_bytes(value.crs),
         uleb_bytes(value.coordinates.len() as u64),
         packed,
-    ]
+    ])
 }
 
-fn vector_fields(value: &VectorValue) -> StorageResult<Vec<Vec<u8>>> {
+fn vector_fields(
+    value: &VectorValue,
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<Vec<Vec<u8>>> {
     Ok(vec![
         vec![VECTOR],
         vec![value.coordinate_type as u8],
         uleb_bytes(value.dimension),
-        canonicalize_vector_bytes(value)?,
+        canonicalize_vector_bytes(value, check)?,
     ])
 }
 
-fn canonicalize_vector_bytes(value: &VectorValue) -> StorageResult<Vec<u8>> {
+fn canonicalize_vector_bytes(
+    value: &VectorValue,
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<Vec<u8>> {
+    check()?;
     let width = coordinate_width(value.coordinate_type);
     let dimension = usize::try_from(value.dimension)
         .map_err(|_| StorageError::corrupt("Vector dimension exceeds addressable size"))?;
@@ -250,24 +290,25 @@ fn canonicalize_vector_bytes(value: &VectorValue) -> StorageResult<Vec<u8>> {
         ));
     }
     match value.coordinate_type {
-        VectorCoordinateType::F32 => canonicalize_f32_vector(&value.packed),
-        VectorCoordinateType::F64 => canonicalize_f64_vector(&value.packed),
-        _ => Ok(value.packed.clone()),
+        VectorCoordinateType::F32 => canonicalize_float_vector(&value.packed, check, |chunk| {
+            canonical_f32_bits(f32::from_le_bytes(chunk)).to_le_bytes()
+        }),
+        VectorCoordinateType::F64 => canonicalize_float_vector(&value.packed, check, |chunk| {
+            canonical_f64_bits(f64::from_le_bytes(chunk)).to_le_bytes()
+        }),
+        _ => copy_bytes_checked(&value.packed, check),
     }
 }
 
-fn canonicalize_f32_vector(bytes: &[u8]) -> StorageResult<Vec<u8>> {
-    let mut output = Vec::with_capacity(bytes.len());
-    for chunk in bytes.as_chunks::<4>().0 {
-        output.extend_from_slice(&canonical_f32_bits(f32::from_le_bytes(*chunk)).to_le_bytes());
-    }
-    Ok(output)
-}
-
-fn canonicalize_f64_vector(bytes: &[u8]) -> StorageResult<Vec<u8>> {
-    let mut output = Vec::with_capacity(bytes.len());
-    for chunk in bytes.as_chunks::<8>().0 {
-        output.extend_from_slice(&canonical_f64_bits(f64::from_le_bytes(*chunk)).to_le_bytes());
+fn canonicalize_float_vector<const N: usize>(
+    bytes: &[u8],
+    check: &dyn Fn() -> StorageResult<()>,
+    canonicalize: impl Fn([u8; N]) -> [u8; N],
+) -> StorageResult<Vec<u8>> {
+    let mut output = copy_bytes_checked(bytes, check)?;
+    for chunk in output.as_chunks_mut::<N>().0 {
+        check()?;
+        *chunk = canonicalize(*chunk);
     }
     Ok(output)
 }
@@ -299,20 +340,29 @@ fn list_element_family(value: &PropertyValue) -> Option<u8> {
     }
 }
 
-fn decode_value(tag: u8, fields: &[&[u8]]) -> StorageResult<PropertyValue> {
+fn decode_value(
+    tag: u8,
+    fields: &[&[u8]],
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<PropertyValue> {
+    check()?;
     match tag {
-        BOOLEAN | INTEGER | FLOAT | STRING | LIST => decode_basic_value(tag, fields),
+        BOOLEAN | INTEGER | FLOAT | STRING | LIST => decode_basic_value(tag, fields, check),
         DATE | LOCAL_TIME | TIME | LOCAL_DATETIME | ZONED_DATETIME | DURATION => {
-            decode_temporal_value(tag, fields)
+            decode_temporal_value(tag, fields, check)
         }
-        POINT | VECTOR | UUID => decode_special_value(tag, fields),
+        POINT | VECTOR | UUID => decode_special_value(tag, fields, check),
         _ => Err(StorageError::corrupt(format!(
             "unknown property type tag {tag}"
         ))),
     }
 }
 
-fn decode_basic_value(tag: u8, fields: &[&[u8]]) -> StorageResult<PropertyValue> {
+fn decode_basic_value(
+    tag: u8,
+    fields: &[&[u8]],
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<PropertyValue> {
     match tag {
         BOOLEAN => match one_byte(fields, 0)? {
             0 => Ok(PropertyValue::Boolean(false)),
@@ -325,13 +375,20 @@ fn decode_basic_value(tag: u8, fields: &[&[u8]]) -> StorageResult<PropertyValue>
         FLOAT => Ok(PropertyValue::Float(f64::from_bits(decode_u64(field(
             fields, 0,
         )?)?))),
-        STRING => Ok(PropertyValue::String(utf8(field(fields, 0)?)?)),
-        LIST => decode_list(fields),
+        STRING => Ok(PropertyValue::String(utf8_checked(
+            field(fields, 0)?,
+            check,
+        )?)),
+        LIST => decode_list(fields, check),
         _ => Err(StorageError::corrupt("invalid basic property type tag")),
     }
 }
 
-fn decode_temporal_value(tag: u8, fields: &[&[u8]]) -> StorageResult<PropertyValue> {
+fn decode_temporal_value(
+    tag: u8,
+    fields: &[&[u8]],
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<PropertyValue> {
     match tag {
         DATE => Ok(PropertyValue::Date(decode_i64(field(fields, 0)?)?)),
         LOCAL_TIME => Ok(PropertyValue::LocalTime(decode_u64(field(fields, 0)?)?)),
@@ -343,26 +400,33 @@ fn decode_temporal_value(tag: u8, fields: &[&[u8]]) -> StorageResult<PropertyVal
             day: decode_i64(field(fields, 0)?)?,
             nanoseconds: decode_u64(field(fields, 1)?)?,
         }),
-        ZONED_DATETIME => decode_zoned_datetime(fields),
+        ZONED_DATETIME => decode_zoned_datetime(fields, check),
         DURATION => decode_duration(fields),
         _ => Err(StorageError::corrupt("invalid temporal property type tag")),
     }
 }
 
-fn decode_special_value(tag: u8, fields: &[&[u8]]) -> StorageResult<PropertyValue> {
+fn decode_special_value(
+    tag: u8,
+    fields: &[&[u8]],
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<PropertyValue> {
     match tag {
-        POINT => decode_point(fields),
-        VECTOR => decode_vector(fields),
+        POINT => decode_point(fields, check),
+        VECTOR => decode_vector(fields, check),
         UUID => decode_uuid(fields),
         _ => Err(StorageError::corrupt("invalid special property type tag")),
     }
 }
 
-fn decode_zoned_datetime(fields: &[&[u8]]) -> StorageResult<PropertyValue> {
+fn decode_zoned_datetime(
+    fields: &[&[u8]],
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<PropertyValue> {
     Ok(PropertyValue::ZonedDateTime(ZonedDateTimeValue {
         epoch_seconds: decode_i64(field(fields, 0)?)?,
         nanoseconds: decode_u32(field(fields, 1)?)?,
-        zone_id: utf8(field(fields, 2)?)?,
+        zone_id: utf8_checked(field(fields, 2)?, check)?,
     }))
 }
 
@@ -375,16 +439,25 @@ fn decode_duration(fields: &[&[u8]]) -> StorageResult<PropertyValue> {
     })
 }
 
-fn decode_list(fields: &[&[u8]]) -> StorageResult<PropertyValue> {
-    let items = decode_counted(field(fields, 0)?)?;
-    let values = items
-        .into_iter()
-        .map(PropertyValue::from_canonical_bytes)
-        .collect::<StorageResult<Vec<_>>>()?;
+fn decode_list(
+    fields: &[&[u8]],
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<PropertyValue> {
+    let mut items = borrowed_counted_fields(field(fields, 0)?)?;
+    check()?;
+    let mut values = Vec::with_capacity(items.len());
+    while let Some(item) = items.next_field()? {
+        check()?;
+        values.push(PropertyValue::from_canonical_bytes_checked(item, check)?);
+    }
+    items.finish()?;
     Ok(PropertyValue::List(values))
 }
 
-fn decode_point(fields: &[&[u8]]) -> StorageResult<PropertyValue> {
+fn decode_point(
+    fields: &[&[u8]],
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<PropertyValue> {
     let crs = decode_i64(field(fields, 0)?)?;
     let count = usize::try_from(decode_uleb_field(field(fields, 1)?)?)
         .map_err(|_| StorageError::corrupt("Point coordinate count exceeds addressable size"))?;
@@ -397,14 +470,19 @@ fn decode_point(fields: &[&[u8]]) -> StorageResult<PropertyValue> {
             "Point coordinate payload has invalid length",
         ));
     }
+    check()?;
     let mut coordinates = Vec::with_capacity(count);
     for chunk in bytes.as_chunks::<8>().0 {
+        check()?;
         coordinates.push(f64::from_bits(u64::from_le_bytes(*chunk)));
     }
     Ok(PropertyValue::Point(PointValue { crs, coordinates }))
 }
 
-fn decode_vector(fields: &[&[u8]]) -> StorageResult<PropertyValue> {
+fn decode_vector(
+    fields: &[&[u8]],
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<PropertyValue> {
     let coordinate_type = match one_byte(fields, 0)? {
         1 => VectorCoordinateType::I8,
         2 => VectorCoordinateType::I16,
@@ -421,15 +499,16 @@ fn decode_vector(fields: &[&[u8]]) -> StorageResult<PropertyValue> {
     let dimension = decode_uleb_field(field(fields, 1)?)?;
     let dimension_usize = usize::try_from(dimension)
         .map_err(|_| StorageError::corrupt("Vector dimension exceeds addressable size"))?;
-    let packed = field(fields, 2)?.to_vec();
+    let bytes = field(fields, 2)?;
     let expected = dimension_usize
         .checked_mul(coordinate_width(coordinate_type))
         .ok_or_else(|| StorageError::corrupt("Vector payload length overflows addressable size"))?;
-    if packed.len() != expected {
+    if bytes.len() != expected {
         return Err(StorageError::corrupt(
             "Vector payload length does not match dimension",
         ));
     }
+    let packed = copy_bytes_checked(bytes, check)?;
     Ok(PropertyValue::Vector(VectorValue {
         coordinate_type,
         dimension,
@@ -461,11 +540,51 @@ fn one_byte(fields: &[&[u8]], index: usize) -> StorageResult<u8> {
     Ok(bytes[0])
 }
 
-fn utf8(bytes: &[u8]) -> StorageResult<String> {
-    std::str::from_utf8(bytes)
-        .map(str::to_owned)
-        .map_err(|_| StorageError::corrupt("VALUE string is not valid UTF-8"))
+pub(super) fn borrowed_value_fields<'a>(
+    bytes: &'a [u8],
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<([&'a [u8]; 5], usize)> {
+    let mut input = borrowed_record_fields(bytes, "VALUE")?;
+    let count = input.len();
+    if count == 0 || count > 5 {
+        return Err(StorageError::corrupt(
+            "VALUE record has invalid field count",
+        ));
+    }
+    let mut fields = [&[][..]; 5];
+    for field in &mut fields[..count] {
+        check()?;
+        *field = input
+            .next_field()?
+            .ok_or_else(|| StorageError::corrupt("VALUE record is missing a field"))?;
+    }
+    input.finish()?;
+    Ok((fields, count))
 }
+
+fn utf8_checked(bytes: &[u8], check: &dyn Fn() -> StorageResult<()>) -> StorageResult<String> {
+    check()?;
+    let mut output = String::with_capacity(bytes.len());
+    let mut start = 0;
+    while start < bytes.len() {
+        check()?;
+        let end = start.saturating_add(64 * 1024).min(bytes.len());
+        let chunk = &bytes[start..end];
+        let valid = match std::str::from_utf8(chunk) {
+            Ok(value) => value,
+            Err(error) if error.error_len().is_none() && end < bytes.len() => {
+                std::str::from_utf8(&chunk[..error.valid_up_to()])
+                    .map_err(|_| StorageError::corrupt("VALUE string is not valid UTF-8"))?
+            }
+            Err(_) => return Err(StorageError::corrupt("VALUE string is not valid UTF-8")),
+        };
+        output.push_str(valid);
+        start += valid.len();
+    }
+    check()?;
+    Ok(output)
+}
+
 fn expected_field_count(tag: u8) -> StorageResult<usize> {
     match tag {
         BOOLEAN | INTEGER | FLOAT | STRING | LIST | DATE | LOCAL_TIME | UUID => Ok(2),
@@ -475,5 +594,66 @@ fn expected_field_count(tag: u8) -> StorageResult<usize> {
         _ => Err(StorageError::corrupt(format!(
             "unknown property type tag {tag}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::super::encoding::record;
+    use super::*;
+
+    #[test]
+    fn checked_list_decode_and_encode_observe_cancellation_during_actual_work() {
+        let value = PropertyValue::List(vec![PropertyValue::Integer(1); 10_000]);
+        let bytes = value.canonical_bytes().unwrap();
+        let calls = Cell::new(0);
+        let check = || {
+            calls.set(calls.get() + 1);
+            if calls.get() == 257 {
+                Err(StorageError::not_found("cancel actual canonical work"))
+            } else {
+                Ok(())
+            }
+        };
+        assert!(PropertyValue::from_canonical_bytes_checked(&bytes, &check).is_err());
+        assert_eq!(calls.get(), 257);
+        calls.set(0);
+        assert!(value.canonical_bytes_checked(&check).is_err());
+        assert_eq!(calls.get(), 257);
+    }
+
+    #[test]
+    fn checked_utf8_decode_preserves_multibyte_boundaries_and_rejects_invalid_bytes() {
+        let text = "人物🦀".repeat(20_000);
+        let value = PropertyValue::String(text.clone());
+        let bytes = value.canonical_bytes().unwrap();
+        assert_eq!(PropertyValue::from_canonical_bytes(&bytes).unwrap(), value);
+        assert_eq!(utf8_checked(text.as_bytes(), &|| Ok(())).unwrap(), text);
+        assert!(utf8_checked(&[0xf0, 0x90, 0x80], &|| Ok(())).is_err());
+        assert!(utf8_checked(&[0xff], &|| Ok(())).is_err());
+    }
+
+    #[test]
+    fn checked_encoding_matches_frozen_lce1_integer_and_list_bytes() {
+        let integer = record("VALUE", &[vec![INTEGER], 3_i64.to_le_bytes().to_vec()]);
+        assert_eq!(
+            PropertyValue::Integer(3).canonical_bytes().unwrap(),
+            integer
+        );
+        let encoded = record(
+            "VALUE",
+            &[
+                vec![LIST],
+                super::super::encoding::encode_counted(&[integer]),
+            ],
+        );
+        let value = PropertyValue::List(vec![PropertyValue::Integer(3)]);
+        assert_eq!(value.canonical_bytes_checked(&|| Ok(())).unwrap(), encoded);
+        assert_eq!(
+            PropertyValue::from_canonical_bytes_checked(&encoded, &|| Ok(())).unwrap(),
+            value
+        );
     }
 }

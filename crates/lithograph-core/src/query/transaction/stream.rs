@@ -1,6 +1,47 @@
 use super::*;
-use crate::query::spill::{RowSpill, SpillOutput, drop_temp_table, read_output_row};
+use crate::query::spill::{RowSpill, SpillOutput, drop_temp_table};
 use crate::query::stream::program;
+
+struct StreamExecution<'a, 'control> {
+    connection: &'a Connection,
+    program: &'a PreparedProgram,
+    params: &'a BTreeMap<String, Value>,
+    metrics: &'a mut QueryMetrics,
+    is_interrupted: &'a dyn Fn() -> bool,
+    control: &'a ExecutionControl<'control>,
+}
+
+impl<'a> StreamExecution<'a, '_> {
+    fn runtime<'scope>(
+        &'scope mut self,
+        owner: &TransactionProgramStream,
+    ) -> QueryResult<TransactionRuntime<'scope>> {
+        Ok(TransactionRuntime {
+            connection: self.connection,
+            program: self.program,
+            options: transaction_options(self.program)?,
+            params: self.params,
+            metrics: self.metrics,
+            resources: self.control.resources(),
+            is_interrupted: self.is_interrupted,
+            commit: owner.commit,
+            counters: owner.counters.clone(),
+            next_batch_id: owner.next_batch_id,
+        })
+    }
+
+    fn graph(&self, commit: HashId) -> QueryResult<(Snapshot<'a>, ResolvedGraphView)> {
+        let snapshot = crate::query::graph::resolve_snapshot_with_control(
+            self.connection,
+            commit,
+            self.control,
+        )?;
+        let options = transaction_options(self.program)?;
+        let graph_view = ResolvedGraphView::resolve(self.connection, &options.graph_view)?
+            .with_query_access(options.access.read.query.clone());
+        Ok((snapshot, graph_view))
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct TransactionProgramStream {
@@ -15,6 +56,8 @@ pub(crate) struct TransactionProgramStream {
     batch_size: Option<usize>,
     concurrency_validated: bool,
     pending_input: Vec<BindingRow>,
+    pending_input_memory: Option<crate::query::resources::MemoryReservation>,
+    output_memory: Option<crate::query::resources::MemoryReservation>,
     current_output: Option<(Connection, SpillOutput)>,
     deferred_bindings: Option<(Connection, BindingSpill)>,
     final_stream: Option<program::ProgramStream>,
@@ -30,6 +73,7 @@ pub(crate) struct TransactionProgramStream {
 #[derive(Debug)]
 pub(crate) struct TransactionStreamBatch {
     pub(crate) rows: Vec<Vec<Value>>,
+    pub(crate) memory: Option<crate::query::resources::MemoryReservation>,
     pub(crate) done: bool,
     pub(crate) commit: HashId,
     pub(crate) counters: QueryCounters,
@@ -100,9 +144,10 @@ fn transaction_stream_output_policy(
     initial_commit: HashId,
     params: &BTreeMap<String, Value>,
     call_columns: &[String],
-    subquery: &AstNode,
-    suffix: &[AstNode],
+    shape: &TransactionStreamShape,
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<Option<TransactionOutputPolicy>> {
+    let suffix = &shape.suffix;
     if let Some(write_index) = suffix.iter().position(is_basic_outer_write_clause) {
         if program.public_result
             || !outer_write_suffix_supported(&suffix[write_index..])
@@ -113,6 +158,7 @@ fn transaction_stream_output_policy(
                 params,
                 call_columns,
                 &suffix[..write_index],
+                control,
             )?
         {
             return Ok(None);
@@ -133,12 +179,13 @@ fn transaction_stream_output_policy(
             params,
             call_columns,
             suffix,
+            control,
         )?
     {
         return Ok(None);
     }
     let defer_output = !incremental_suffix_is_safe(suffix)
-        || transaction_result_requires_final_snapshot(subquery, suffix);
+        || transaction_result_requires_final_snapshot(&shape.subquery, suffix);
     Ok(Some(if defer_output {
         TransactionOutputPolicy::DeferredRead
     } else {
@@ -190,19 +237,25 @@ fn suffix_prefix_streamable(
     params: &BTreeMap<String, Value>,
     call_columns: &[String],
     prefix: &[AstNode],
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<bool> {
     if prefix.is_empty() {
         return Ok(true);
     }
-    let snapshot = Snapshot::resolve(connection, initial_commit)?;
+    let snapshot =
+        crate::query::graph::resolve_snapshot_with_control(connection, initial_commit, control)?;
     Ok(program::build_program_suffix_stream(
         connection,
         program,
         &snapshot,
         params,
-        call_columns.to_vec(),
-        Vec::new(),
+        RowSet {
+            columns: call_columns.to_vec(),
+            rows: Vec::new(),
+            memory: None,
+        },
         prefix,
+        control,
     )?
     .is_some())
 }
@@ -214,16 +267,22 @@ fn suffix_stream_matches_program(
     params: &BTreeMap<String, Value>,
     call_columns: &[String],
     suffix: &[AstNode],
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<bool> {
-    let snapshot = Snapshot::resolve(connection, initial_commit)?;
+    let snapshot =
+        crate::query::graph::resolve_snapshot_with_control(connection, initial_commit, control)?;
     let Some(stream) = program::build_program_suffix_stream(
         connection,
         program,
         &snapshot,
         params,
-        call_columns.to_vec(),
-        Vec::new(),
+        RowSet {
+            columns: call_columns.to_vec(),
+            rows: Vec::new(),
+            memory: None,
+        },
         suffix,
+        control,
     )?
     else {
         return Ok(false);
@@ -237,6 +296,7 @@ impl TransactionProgramStream {
         program: &PreparedProgram,
         initial_commit: HashId,
         params: &BTreeMap<String, Value>,
+        control: &ExecutionControl<'_>,
     ) -> QueryResult<Option<Self>> {
         if !connection.is_autocommit() {
             return Err(QueryError::transaction_boundary_required(
@@ -250,7 +310,11 @@ impl TransactionProgramStream {
             return Ok(None);
         };
 
-        let prefix_snapshot = Snapshot::resolve(connection, initial_commit)?;
+        let prefix_snapshot = crate::query::graph::resolve_snapshot_with_control(
+            connection,
+            initial_commit,
+            control,
+        )?;
         let prefix_graph_view = ResolvedGraphView::resolve(connection, &options.graph_view)?
             .with_query_access(options.access.read.query.clone());
         let Some(prefix) = program::build_program_prefix_stream(
@@ -259,6 +323,7 @@ impl TransactionProgramStream {
             &prefix_snapshot,
             params,
             &shape.prefix_clauses,
+            control,
         )?
         else {
             return Ok(None);
@@ -272,8 +337,8 @@ impl TransactionProgramStream {
             initial_commit,
             params,
             &call_columns,
-            &shape.subquery,
-            &shape.suffix,
+            &shape,
+            control,
         )?
         else {
             return Ok(None);
@@ -291,6 +356,8 @@ impl TransactionProgramStream {
             batch_size: None,
             concurrency_validated: false,
             pending_input: Vec::new(),
+            pending_input_memory: None,
+            output_memory: None,
             current_output: None,
             deferred_bindings: None,
             final_stream: None,
@@ -311,33 +378,43 @@ impl TransactionProgramStream {
         params: &BTreeMap<String, Value>,
         metrics: &mut QueryMetrics,
         max_rows: usize,
-        is_interrupted: &dyn Fn() -> bool,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<TransactionStreamBatch> {
+        let is_interrupted = || control.check().is_err();
+        let mut execution = StreamExecution {
+            connection,
+            program,
+            params,
+            metrics,
+            is_interrupted: &is_interrupted,
+            control,
+        };
+        self.next_batch_in(max_rows, &mut execution)
+    }
+
+    fn next_batch_in(
+        &mut self,
+        max_rows: usize,
+        execution: &mut StreamExecution<'_, '_>,
     ) -> QueryResult<TransactionStreamBatch> {
         let max_rows = max_rows.clamp(1, 4_096);
         loop {
-            let rows = self.drain_output(max_rows)?;
+            let rows = self.drain_output(max_rows, execution.control)?;
             if !rows.is_empty() {
                 return Ok(self.batch(rows, false));
             }
-            let (rows, final_done) = self.drain_final_stream(
-                connection,
-                program,
-                params,
-                metrics,
-                max_rows,
-                is_interrupted,
-            )?;
+            let (rows, final_done) = self.drain_final_stream(max_rows, execution)?;
             if !rows.is_empty() || final_done {
                 return Ok(self.batch(rows, final_done));
             }
             if self.finished {
                 return Ok(self.batch(Vec::new(), true));
             }
-            check_interrupted(is_interrupted)?;
+            check_interrupted(execution.is_interrupted)?;
             if self.broken {
-                self.produce_unstarted_rows(connection, program, params, metrics, is_interrupted)?;
+                self.produce_unstarted_rows(execution)?;
             } else {
-                self.execute_next_batch(connection, program, params, metrics, is_interrupted)?;
+                self.execute_next_batch(execution)?;
             }
         }
     }
@@ -351,13 +428,16 @@ impl TransactionProgramStream {
         }
         self.final_stream = None;
         self.pending_input.clear();
+        self.pending_input_memory = None;
+        self.output_memory = None;
         self.finished = true;
         Ok(())
     }
 
-    fn batch(&self, rows: Vec<Vec<Value>>, done: bool) -> TransactionStreamBatch {
+    fn batch(&mut self, rows: Vec<Vec<Value>>, done: bool) -> TransactionStreamBatch {
         TransactionStreamBatch {
             rows,
+            memory: self.output_memory.take(),
             done,
             commit: self.commit,
             counters: self.counters.clone(),
@@ -366,78 +446,70 @@ impl TransactionProgramStream {
 
     fn pull_prefix_row(
         &mut self,
-        connection: &Connection,
-        program: &PreparedProgram,
-        params: &BTreeMap<String, Value>,
-        metrics: &mut QueryMetrics,
-        is_interrupted: &dyn Fn() -> bool,
+        execution: &mut StreamExecution<'_, '_>,
     ) -> QueryResult<Option<BindingRow>> {
         if self.upstream_done {
             return Ok(None);
         }
-        let snapshot = Snapshot::resolve(connection, self.prefix_commit)?;
+        let snapshot = crate::query::graph::resolve_snapshot_with_control(
+            execution.connection,
+            self.prefix_commit,
+            execution.control,
+        )?;
         let next = self.prefix.next_binding(
-            connection,
+            execution.connection,
             &snapshot,
             &self.prefix_graph_view,
-            params,
-            metrics,
-            is_interrupted,
+            execution.params,
+            execution.metrics,
+            execution.control,
         )?;
         if next.is_none() {
             self.upstream_done = true;
         }
-        let _ = program;
+        let _ = execution.program;
         Ok(next)
     }
 
-    fn execute_next_batch(
-        &mut self,
-        connection: &Connection,
-        program: &PreparedProgram,
-        params: &BTreeMap<String, Value>,
-        metrics: &mut QueryMetrics,
-        is_interrupted: &dyn Fn() -> bool,
-    ) -> QueryResult<()> {
-        if !self.ensure_batch_started(connection, program, params, metrics, is_interrupted)? {
+    fn retain_prefix_memory(&mut self, control: &ExecutionControl<'_>) -> QueryResult<()> {
+        let memory = self.pending_input_memory.get_or_insert(control.reserve(0)?);
+        if let Some(row_memory) = self.prefix.take_output_memory() {
+            memory.merge(row_memory)?;
+        }
+        if self.pending_input.len() == self.pending_input.capacity() {
+            let capacity = self.pending_input.capacity().saturating_mul(2).max(4);
+            memory.grow(crate::query::resources::allocation_bytes::<BindingRow>(
+                capacity - self.pending_input.capacity(),
+            )?)?;
+            self.pending_input
+                .reserve_exact(capacity - self.pending_input.len());
+        }
+        Ok(())
+    }
+
+    fn execute_next_batch(&mut self, execution: &mut StreamExecution<'_, '_>) -> QueryResult<()> {
+        if !self.ensure_batch_started(execution)? {
             return Ok(());
         }
-        self.fill_pending_batch(connection, program, params, metrics, is_interrupted)?;
+        self.fill_pending_batch(execution)?;
         if self.pending_input.is_empty() {
-            return self.finish_input(connection, program, params, metrics, is_interrupted);
+            return self.finish_input(execution);
         }
-        self.execute_pending_batch(connection, program, params, metrics, is_interrupted)
+        self.execute_pending_batch(execution)
     }
 
     fn ensure_batch_started(
         &mut self,
-        connection: &Connection,
-        program: &PreparedProgram,
-        params: &BTreeMap<String, Value>,
-        metrics: &mut QueryMetrics,
-        is_interrupted: &dyn Fn() -> bool,
+        execution: &mut StreamExecution<'_, '_>,
     ) -> QueryResult<bool> {
         if !self.pending_input.is_empty() {
             return Ok(true);
         }
-        let Some(first) =
-            self.pull_prefix_row(connection, program, params, metrics, is_interrupted)?
-        else {
-            self.finish_input(connection, program, params, metrics, is_interrupted)?;
+        let Some(first) = self.pull_prefix_row(execution)? else {
+            self.finish_input(execution)?;
             return Ok(false);
         };
-        let options = transaction_options(program)?;
-        let runtime = TransactionRuntime {
-            connection,
-            program,
-            options,
-            params,
-            metrics,
-            is_interrupted,
-            commit: self.commit,
-            counters: self.counters.clone(),
-            next_batch_id: self.next_batch_id,
-        };
+        let runtime = execution.runtime(self)?;
         if !self.concurrency_validated {
             validate_concurrency(&runtime, &self.spec, &first)?;
             self.concurrency_validated = true;
@@ -448,27 +520,20 @@ impl TransactionProgramStream {
         self.commit = runtime.commit;
         self.counters = runtime.counters;
         self.next_batch_id = runtime.next_batch_id;
+        self.retain_prefix_memory(execution.control)?;
         self.pending_input.push(first);
         Ok(true)
     }
 
-    fn fill_pending_batch(
-        &mut self,
-        connection: &Connection,
-        program: &PreparedProgram,
-        params: &BTreeMap<String, Value>,
-        metrics: &mut QueryMetrics,
-        is_interrupted: &dyn Fn() -> bool,
-    ) -> QueryResult<()> {
+    fn fill_pending_batch(&mut self, execution: &mut StreamExecution<'_, '_>) -> QueryResult<()> {
         let batch_size = self
             .batch_size
             .ok_or_else(|| QueryError::internal("transaction stream lost its batch size"))?;
         while self.pending_input.len() < batch_size && !self.upstream_done {
-            let Some(row) =
-                self.pull_prefix_row(connection, program, params, metrics, is_interrupted)?
-            else {
+            let Some(row) = self.pull_prefix_row(execution)? else {
                 break;
             };
+            self.retain_prefix_memory(execution.control)?;
             self.pending_input.push(row);
         }
         Ok(())
@@ -476,38 +541,30 @@ impl TransactionProgramStream {
 
     fn execute_pending_batch(
         &mut self,
-        connection: &Connection,
-        program: &PreparedProgram,
-        params: &BTreeMap<String, Value>,
-        metrics: &mut QueryMetrics,
-        is_interrupted: &dyn Fn() -> bool,
+        execution: &mut StreamExecution<'_, '_>,
     ) -> QueryResult<()> {
         let batch_rows = std::mem::take(&mut self.pending_input);
-        let options = transaction_options(program)?;
-        let mut runtime = TransactionRuntime {
-            connection,
-            program,
-            options,
-            params,
-            metrics,
-            is_interrupted,
-            commit: self.commit,
-            counters: self.counters.clone(),
-            next_batch_id: self.next_batch_id,
+        let batch = RowSet {
+            columns: self.input_columns.clone(),
+            rows: batch_rows,
+            memory: self.pending_input_memory.take(),
         };
-        validate_disjoint_expressions(&runtime, &self.spec, &batch_rows)?;
+        let control = execution.control;
+        let mut runtime = execution.runtime(self)?;
+        validate_disjoint_expressions(&runtime, &self.spec, &batch.rows)?;
         let transaction_id = next_transaction_id(&mut runtime);
         let result = execute_batch_with_retry(
             &mut runtime,
             &self.subquery,
-            RowSet {
-                columns: self.input_columns.clone(),
-                rows: batch_rows.clone(),
-            },
+            batch.try_clone(control)?,
             &self.spec,
             &transaction_id,
         )?;
-        let mut output = Vec::new();
+        let mut output = RowSet {
+            columns: self.call_columns.clone(),
+            rows: Vec::new(),
+            memory: Some(control.reserve(0)?),
+        };
         match result {
             Ok(successful) => {
                 append_successful_batch(
@@ -516,79 +573,74 @@ impl TransactionProgramStream {
                     &transaction_id,
                     successful,
                     &mut output,
-                );
+                )?;
             }
             Err(failure) => {
                 self.broken = append_failed_batch(
                     &self.spec,
                     failure,
-                    &batch_rows,
+                    &batch.rows,
                     &[],
                     &self.call_columns,
                     &mut output,
+                    control,
                 )?;
             }
         }
         self.commit = runtime.commit;
         self.counters = runtime.counters;
         self.next_batch_id = runtime.next_batch_id;
-        self.install_output(connection, program, params, metrics, output, is_interrupted)
+        self.install_output(output, execution)
     }
 
     fn produce_unstarted_rows(
         &mut self,
-        connection: &Connection,
-        program: &PreparedProgram,
-        params: &BTreeMap<String, Value>,
-        metrics: &mut QueryMetrics,
-        is_interrupted: &dyn Fn() -> bool,
+        execution: &mut StreamExecution<'_, '_>,
     ) -> QueryResult<()> {
-        let mut inputs = Vec::new();
+        let mut input_memory =
+            execution
+                .control
+                .reserve(crate::query::resources::allocation_bytes::<BindingRow>(
+                    256,
+                )?)?;
+        let mut inputs = Vec::with_capacity(256);
         while inputs.len() < 256 {
-            let Some(row) =
-                self.pull_prefix_row(connection, program, params, metrics, is_interrupted)?
-            else {
+            let Some(row) = self.pull_prefix_row(execution)? else {
                 break;
             };
+            if let Some(row_memory) = self.prefix.take_output_memory() {
+                input_memory.merge(row_memory)?;
+            }
             inputs.push(row);
         }
         if inputs.is_empty() {
-            return self.finish_input(connection, program, params, metrics, is_interrupted);
+            return self.finish_input(execution);
         }
         let output = failed_rows(
             &inputs,
             &self.call_columns,
             self.spec.status_alias.as_deref(),
             transaction_status(false, false, None, None),
-        );
-        self.install_output(connection, program, params, metrics, output, is_interrupted)
+            execution.control,
+        )?;
+        self.install_output(output, execution)
     }
 
     fn install_output(
         &mut self,
-        connection: &Connection,
-        program: &PreparedProgram,
-        params: &BTreeMap<String, Value>,
-        metrics: &mut QueryMetrics,
-        rows: Vec<BindingRow>,
-        is_interrupted: &dyn Fn() -> bool,
+        mut input: RowSet,
+        execution: &mut StreamExecution<'_, '_>,
     ) -> QueryResult<()> {
-        if rows.is_empty() {
+        if input.rows.is_empty() {
             return Ok(());
         }
+        input.track(execution.control)?;
         match self.output_policy {
             TransactionOutputPolicy::Discard => Ok(()),
             TransactionOutputPolicy::DeferredRead | TransactionOutputPolicy::OuterWrite { .. } => {
-                self.defer_rows(&rows, is_interrupted)
+                self.defer_rows(&input.rows, execution.is_interrupted, execution.control)
             }
-            TransactionOutputPolicy::Immediate => self.install_immediate_output(
-                connection,
-                program,
-                params,
-                metrics,
-                rows,
-                is_interrupted,
-            ),
+            TransactionOutputPolicy::Immediate => self.install_immediate_output(input, execution),
         }
     }
 
@@ -596,10 +648,14 @@ impl TransactionProgramStream {
         &mut self,
         rows: &[BindingRow],
         is_interrupted: &dyn Fn() -> bool,
+        control: &ExecutionControl<'_>,
     ) -> QueryResult<()> {
         if self.deferred_bindings.is_none() {
             let spill_connection = open_spill_connection()?;
-            let spill = BindingSpill::create(&spill_connection)?;
+            let spill = BindingSpill::create_with_resources(
+                &spill_connection,
+                control.resources().clone(),
+            )?;
             self.deferred_bindings = Some((spill_connection, spill));
         }
         let (spill_connection, spill) = self
@@ -608,44 +664,41 @@ impl TransactionProgramStream {
             .ok_or_else(|| QueryError::internal("transaction deferred output spill disappeared"))?;
         for row in rows {
             check_interrupted(is_interrupted)?;
-            spill.push(spill_connection, row)?;
+            spill.push(spill_connection, row, control)?;
         }
         Ok(())
     }
 
     fn install_immediate_output(
         &mut self,
-        connection: &Connection,
-        program: &PreparedProgram,
-        params: &BTreeMap<String, Value>,
-        metrics: &mut QueryMetrics,
-        rows: Vec<BindingRow>,
-        is_interrupted: &dyn Fn() -> bool,
+        input: RowSet,
+        execution: &mut StreamExecution<'_, '_>,
     ) -> QueryResult<()> {
-        let snapshot = Snapshot::resolve(connection, self.commit)?;
-        let graph_view =
-            ResolvedGraphView::resolve(connection, &transaction_options(program)?.graph_view)?
-                .with_query_access(transaction_options(program)?.access.read.query.clone());
+        let (snapshot, graph_view) = execution.graph(self.commit)?;
         let spill_connection = open_spill_connection()?;
-        let mut spill = RowSpill::create(&spill_connection)?;
+        let mut spill = RowSpill::create_with_resources(
+            &spill_connection,
+            execution.control.resources().clone(),
+        )?;
         if self.suffix.is_empty() {
+            let _input_memory = input.memory;
             self.materialize_rows_without_suffix(
                 &snapshot,
-                rows,
+                input.rows,
                 &spill_connection,
                 &mut spill,
-                is_interrupted,
                 &graph_view.query_access,
+                execution.control,
             )?;
         } else {
             let Some(mut suffix) = program::build_program_suffix_stream(
-                connection,
-                program,
+                execution.connection,
+                execution.program,
                 &snapshot,
-                params,
-                self.call_columns.clone(),
-                rows,
+                execution.params,
+                input,
                 &self.suffix,
+                execution.control,
             )?
             else {
                 return Err(QueryError::internal(
@@ -653,14 +706,14 @@ impl TransactionProgramStream {
                 ));
             };
             while let Some(row) = suffix.next(
-                connection,
+                execution.connection,
                 &snapshot,
                 &graph_view,
-                params,
-                metrics,
-                is_interrupted,
+                execution.params,
+                execution.metrics,
+                execution.control,
             )? {
-                spill.push(&spill_connection, &row)?;
+                spill.push(&spill_connection, &row, execution.control)?;
             }
         }
         self.current_output = Some((spill_connection, spill.output()));
@@ -673,63 +726,48 @@ impl TransactionProgramStream {
         rows: Vec<BindingRow>,
         spill_connection: &Connection,
         spill: &mut RowSpill,
-        is_interrupted: &dyn Fn() -> bool,
         query_access: &crate::query::access::PropertyRules,
+        control: &ExecutionControl<'_>,
     ) -> QueryResult<()> {
         for row in rows {
-            check_interrupted(is_interrupted)?;
-            spill.push(
-                spill_connection,
-                &materialize_binding_row(snapshot, &self.call_columns, &row, query_access)?,
-            )?;
+            control.check()?;
+            let (values, _memory) =
+                materialize_binding_row(snapshot, &self.call_columns, &row, query_access, control)?;
+            spill.push(spill_connection, &values, control)?;
         }
         Ok(())
     }
 
-    fn finish_input(
-        &mut self,
-        connection: &Connection,
-        program: &PreparedProgram,
-        params: &BTreeMap<String, Value>,
-        metrics: &mut QueryMetrics,
-        is_interrupted: &dyn Fn() -> bool,
-    ) -> QueryResult<()> {
+    fn finish_input(&mut self, execution: &mut StreamExecution<'_, '_>) -> QueryResult<()> {
         match self.output_policy {
             TransactionOutputPolicy::Immediate | TransactionOutputPolicy::Discard => {
                 self.finished = true;
                 Ok(())
             }
-            TransactionOutputPolicy::DeferredRead => {
-                self.finish_deferred_read(connection, program, params)
+            TransactionOutputPolicy::DeferredRead => self.finish_deferred_read(execution),
+            TransactionOutputPolicy::OuterWrite { write_index } => {
+                self.finish_outer_write(write_index, execution)
             }
-            TransactionOutputPolicy::OuterWrite { write_index } => self.finish_outer_write(
-                connection,
-                program,
-                params,
-                metrics,
-                is_interrupted,
-                write_index,
-            ),
         }
     }
 
-    fn finish_deferred_read(
-        &mut self,
-        connection: &Connection,
-        program: &PreparedProgram,
-        params: &BTreeMap<String, Value>,
-    ) -> QueryResult<()> {
-        let (spill_connection, spill) = self.take_deferred_bindings()?;
-        let snapshot = Snapshot::resolve(connection, self.commit)?;
+    fn finish_deferred_read(&mut self, execution: &mut StreamExecution<'_, '_>) -> QueryResult<()> {
+        let (spill_connection, spill) = self.take_deferred_bindings(execution.control)?;
+        let snapshot = crate::query::graph::resolve_snapshot_with_control(
+            execution.connection,
+            self.commit,
+            execution.control,
+        )?;
         let Some(stream) = program::build_program_spilled_suffix_stream(
-            connection,
-            program,
+            execution.connection,
+            execution.program,
             &snapshot,
-            params,
+            execution.params,
             self.call_columns.clone(),
             spill_connection,
             spill,
             &self.suffix,
+            execution.control,
         )?
         else {
             return Err(QueryError::internal(
@@ -742,42 +780,30 @@ impl TransactionProgramStream {
 
     fn finish_outer_write(
         &mut self,
-        connection: &Connection,
-        program: &PreparedProgram,
-        params: &BTreeMap<String, Value>,
-        metrics: &mut QueryMetrics,
-        is_interrupted: &dyn Fn() -> bool,
         write_index: usize,
+        execution: &mut StreamExecution<'_, '_>,
     ) -> QueryResult<()> {
-        let (spill_connection, spill) = self.take_deferred_bindings()?;
+        let (spill_connection, spill) = self.take_deferred_bindings(execution.control)?;
         let (write_spill_connection, write_spill) = if write_index == 0 {
             (spill_connection, spill)
         } else {
-            self.materialize_outer_write_prefix(
-                connection,
-                program,
-                params,
-                metrics,
-                is_interrupted,
-                write_index,
-                spill_connection,
-                spill,
-            )?
+            self.materialize_outer_write_prefix(write_index, spill_connection, spill, execution)?
         };
-        let options = transaction_options(program)?;
-        let base_commit = storage::branch_head(connection, &options.branch)?;
+        let options = transaction_options(execution.program)?;
+        let base_commit = storage::branch_head(execution.connection, &options.branch)?;
         let mut transaction = TransactionMutationContext {
-            connection,
-            program,
+            connection: execution.connection,
+            program: execution.program,
             base_commit,
             branch: &options.branch,
             graph_view: &options.graph_view,
             access: &options.access,
             author: options.author.as_deref(),
             message: options.message.as_deref(),
-            params,
-            metrics,
-            is_interrupted,
+            params: execution.params,
+            metrics: execution.metrics,
+            resources: execution.control.resources(),
+            is_interrupted: execution.is_interrupted,
         };
         let outcome = execute_spilled_outer_write_transaction(
             &mut transaction,
@@ -797,28 +823,22 @@ impl TransactionProgramStream {
     )]
     fn materialize_outer_write_prefix(
         &self,
-        connection: &Connection,
-        program: &PreparedProgram,
-        params: &BTreeMap<String, Value>,
-        metrics: &mut QueryMetrics,
-        is_interrupted: &dyn Fn() -> bool,
         write_index: usize,
         spill_connection: Connection,
         spill: BindingSpill,
+        execution: &mut StreamExecution<'_, '_>,
     ) -> QueryResult<(Connection, BindingSpill)> {
-        let snapshot = Snapshot::resolve(connection, self.commit)?;
-        let graph_view =
-            ResolvedGraphView::resolve(connection, &transaction_options(program)?.graph_view)?
-                .with_query_access(transaction_options(program)?.access.read.query.clone());
+        let (snapshot, graph_view) = execution.graph(self.commit)?;
         let Some(mut stream) = program::build_program_spilled_suffix_stream(
-            connection,
-            program,
+            execution.connection,
+            execution.program,
             &snapshot,
-            params,
+            execution.params,
             self.call_columns.clone(),
             spill_connection,
             spill,
             &self.suffix[..write_index],
+            execution.control,
         )?
         else {
             return Err(QueryError::internal(
@@ -826,53 +846,49 @@ impl TransactionProgramStream {
             ));
         };
         let output_connection = open_spill_connection()?;
-        let mut output = BindingSpill::create(&output_connection)?;
+        let mut output = BindingSpill::create_with_resources(
+            &output_connection,
+            execution.control.resources().clone(),
+        )?;
         while let Some(row) = stream.next_binding(
-            connection,
+            execution.connection,
             &snapshot,
             &graph_view,
-            params,
-            metrics,
-            is_interrupted,
+            execution.params,
+            execution.metrics,
+            execution.control,
         )? {
-            output.push(&output_connection, &row)?;
+            output.push(&output_connection, &row, execution.control)?;
         }
         Ok((output_connection, output))
     }
 
-    fn take_deferred_bindings(&mut self) -> QueryResult<(Connection, BindingSpill)> {
+    fn take_deferred_bindings(
+        &mut self,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<(Connection, BindingSpill)> {
         if let Some(deferred) = self.deferred_bindings.take() {
             return Ok(deferred);
         }
         let connection = open_spill_connection()?;
-        let spill = BindingSpill::create(&connection)?;
+        let spill = BindingSpill::create_with_resources(&connection, control.resources().clone())?;
         Ok((connection, spill))
     }
 
     fn drain_final_stream(
         &mut self,
-        connection: &Connection,
-        program: &PreparedProgram,
-        params: &BTreeMap<String, Value>,
-        metrics: &mut QueryMetrics,
         max_rows: usize,
-        is_interrupted: &dyn Fn() -> bool,
+        execution: &mut StreamExecution<'_, '_>,
     ) -> QueryResult<(Vec<Vec<Value>>, bool)> {
         if self.final_stream.is_none() {
             return Ok((Vec::new(), false));
         }
-        let snapshot = Snapshot::resolve(connection, self.commit)?;
-        let graph_view = ResolvedGraphView::resolve(
-            connection,
-            &program
-                .transaction_options
-                .as_ref()
-                .ok_or_else(|| {
-                    QueryError::internal("transaction program is missing transaction options")
-                })?
-                .graph_view,
-        )?
-        .with_query_access(transaction_options(program)?.access.read.query.clone());
+        let (snapshot, graph_view) = execution.graph(self.commit)?;
+        let mut memory = execution
+            .control
+            .reserve(crate::query::resources::allocation_bytes::<Vec<Value>>(
+                max_rows,
+            )?)?;
         let mut rows = Vec::with_capacity(max_rows);
         let mut ended = false;
         while rows.len() < max_rows {
@@ -881,19 +897,27 @@ impl TransactionProgramStream {
                 .as_mut()
                 .ok_or_else(|| QueryError::internal("transaction final stream disappeared"))?
                 .next(
-                    connection,
+                    execution.connection,
                     &snapshot,
                     &graph_view,
-                    params,
-                    metrics,
-                    is_interrupted,
+                    execution.params,
+                    execution.metrics,
+                    execution.control,
                 )?;
             let Some(row) = next else {
                 ended = true;
                 break;
             };
+            if let Some(row_memory) = self
+                .final_stream
+                .as_mut()
+                .and_then(program::ProgramStream::take_output_memory)
+            {
+                memory.merge(row_memory)?;
+            }
             rows.push(row);
         }
+        self.output_memory = Some(memory);
         if ended {
             self.final_stream = None;
             self.finished = true;
@@ -901,20 +925,36 @@ impl TransactionProgramStream {
         Ok((rows, ended))
     }
 
-    fn drain_output(&mut self, max_rows: usize) -> QueryResult<Vec<Vec<Value>>> {
+    fn drain_output(
+        &mut self,
+        max_rows: usize,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<Vec<Vec<Value>>> {
         let Some((connection, mut output)) = self.current_output.take() else {
             return Ok(Vec::new());
         };
+        let mut memory = control.reserve(
+            crate::query::resources::allocation_bytes::<Vec<Value>>(max_rows)?,
+        )?;
         let mut rows = Vec::with_capacity(max_rows);
         while rows.len() < max_rows {
-            let Some((sequence, row)) = read_output_row(&connection, &output.table, output.after)?
+            let Some((sequence, row, row_memory)) =
+                crate::query::spill::read_output_row_with_resources(
+                    &connection,
+                    &output.table,
+                    output.after,
+                    control,
+                )?
             else {
                 drop_temp_table(&connection, &output.table)?;
+                self.output_memory = Some(memory);
                 return Ok(rows);
             };
+            memory.merge(row_memory)?;
             output.after = sequence;
             rows.push(row);
         }
+        self.output_memory = Some(memory);
         self.current_output = Some((connection, output));
         Ok(rows)
     }
@@ -934,17 +974,21 @@ fn materialize_binding_row(
     columns: &[String],
     row: &BindingRow,
     query_access: &crate::query::access::PropertyRules,
-) -> QueryResult<Vec<Value>> {
-    columns
-        .iter()
-        .map(|column| {
-            expression::binding_value_with_access(
-                snapshot,
-                row.values.get(column).unwrap_or(&BindingValue::Null),
-                query_access,
-            )
-        })
-        .collect()
+    control: &ExecutionControl<'_>,
+) -> QueryResult<(Vec<Value>, crate::query::resources::MemoryReservation)> {
+    let mut memory = control.reserve(0)?;
+    let mut values = Vec::with_capacity(columns.len());
+    for column in columns {
+        let evaluated = expression::binding_value_with_memory(
+            snapshot,
+            row.values.get(column).unwrap_or(&BindingValue::Null),
+            query_access,
+            control,
+        )?;
+        memory.merge(evaluated.reservation)?;
+        values.push(evaluated.value);
+    }
+    Ok((values, memory))
 }
 
 fn incremental_suffix_is_safe(clauses: &[AstNode]) -> bool {

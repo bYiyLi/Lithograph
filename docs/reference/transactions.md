@@ -39,6 +39,8 @@
 
 v0.3.1 execution options 只接受 `graphView` 与 `readOnlyNoExternalIO`；v0.3.2 还接受每次独立指定的 `readAccess` / `writeAccess`；begin 确定的 Branch、base 和 metadata 固定。每个安全读取都必须独立传 `readOnlyNoExternalIO:true`；一次成功不会自动把后续 execution 变成安全读取。
 
+Unreleased / Phase 19 另接受每次独立指定的 `memoryLimitBytes`，不在 begin 中设置，详见[执行内存预算](#execution-memory-budget)。
+
 Graph/Schema/Index 查询与写入可组合。普通 LOAD CSV、Managed Semantic query 可执行并占用当前 writer；它们失败时整体 abort。Version/ref/checkout/GC、需要 committed target 的维护操作、transaction-owning subquery 等不能嵌套，返回 `TRANSACTION_BOUNDARY_REQUIRED`。具体 Procedure 的限制见各自条目。
 
 execution 在 finalize-success 前发生 parse、semantic、type、constraint、options、I/O、编码、interrupt 或安全拒绝失败时，整个 explicit transaction fail closed：先前成功的 staged writes 一起 rollback。之后 `tx_commit()` / `tx_abort()` 返回 no-active-transaction 的 `INVALID_ARGUMENT`，不能靠重试 commit 恢复已回滚内容。已经 finalize-success 的 statement 不因后续 SQLite summary handoff 失败而重新 abort，详见下文 cursor 生命周期。
@@ -107,6 +109,10 @@ SQLite 交付 summary 时的分配或宿主处理失败，可能使应用没有�
 
 取消使用宿主的 `sqlite3_interrupt()` 或 binding 的对应 API。错误 category 为 `INTERRUPTED`，SQLite code 为 `SQLITE_INTERRUPT`；消费线程应检查真实返回码并 finalize。取消与完成可能竞争，收到取消请求并不证明 execution 尚未完成，先检查实际结果和版本状态。
 
+Unreleased / Phase 19 将检查传播到长表达式/函数循环；不可拆分第三方调用前后检查，调用进行中不保证异步抢占。该改进不改变 SQLite threading mode 或取消与完成竞争的结果确认规则。
+
+Phase 19 同时确认真实 SQLite interrupt 后的事务恢复。普通潜在写或 active explicit execution 只有实际恢复到 autocommit 才算 cleanup 成功；无法确认时返回 `INTERNAL_ERROR` 并 quarantine，关闭丢弃 connection。取消 caller-owned SQLite transaction 中的 mutating execution 可能使 **整个 SQLite transaction 回滚**，包括此前尚未提交的宿主业务写入。不要假设只回滚了 Lithograph 内部 SAVEPOINT；finalize/close 后检查 driver transaction 状态或 `sqlite3_get_autocommit()`。纯 read execution 不为 caller-owned transaction 增加整体回滚保证。实现边界见 [Runtime](../design/runtime.md#sqlite-interrupt-recovery)。
+
 把连接归还池前必须证明：
 
 1. 所有 scalar statement 和 rows cursor 已 finalize/close。
@@ -116,3 +122,11 @@ SQLite 交付 summary 时的分配或宿主处理失败，可能使应用没有�
 5. 清理无错误、连接未 quarantine；无法证明时关闭丢弃。
 
 `BUSY` 可按宿主有限退避重试；write/transaction-subquery/版本操作失败后先核对实际 head、结果和 durable batches，不能把 SQL error 一概当成“未执行”而重放。可运行的 stream 提前关闭与失败清理示例见 [Integration](../guide/integration.md) 和 [Streaming 示例](../guide/examples/streaming.py)。
+
+<a id="execution-memory-budget"></a>
+
+## Execution 内存预算（Unreleased）
+
+`memoryLimitBytes` 属于每次普通 execution 的 query options，active explicit transaction 也可使用；`tx_begin` 不接受该字段。嵌套查询、分支和 concurrent batch 共享一次预算，不同 execution/cursor 独立；一次 execution 成功不把额度或消耗传给下一次 execution。完整配置/计账范围见 [Execution Options](execution-options.md#memory-limit)。
+
+预算拒绝返回 `RESOURCE_ERROR` / `SQLITE_TOOBIG`，不产生成功 summary。普通未发布 write 回滚，active explicit transaction 整体 abort；transaction-subquery 已 durable batch 保留。成功、错误、取消与 early-close 都回收本 execution 的预留和 TEMP 资源。预算检查不能在已完成 finalize-success 后制造“已回滚”的假象；结果不确定时继续按既有 Branch/history 核对规则确认实际状态。

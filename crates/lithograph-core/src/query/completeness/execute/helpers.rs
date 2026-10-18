@@ -61,132 +61,8 @@ pub(super) fn yield_items(clause: &AstNode) -> Vec<(String, String)> {
         .collect()
 }
 
-pub(super) fn single_column_rows(
-    column: &str,
-    values: impl IntoIterator<Item = String>,
-) -> Vec<BTreeMap<String, Value>> {
-    values
-        .into_iter()
-        .map(|value| BTreeMap::from([(column.to_owned(), Value::String(value))]))
-        .collect()
-}
-
-pub(super) fn function_registry_rows() -> QueryResult<Vec<BindingRow>> {
-    let mut definitions = crate::query::registry::functions().collect::<Vec<_>>();
-    definitions.sort_by_key(|definition| definition.name.to_ascii_lowercase());
-    definitions
-        .into_iter()
-        .map(|definition| {
-            let arguments = definition.arguments().ok_or_else(|| {
-                QueryError::internal(format!(
-                    "registered function {} is missing frozen argument metadata",
-                    definition.display_name()
-                ))
-            })?;
-            let arguments = arguments
-                .into_iter()
-                .map(|argument| {
-                    Value::Map(BTreeMap::from([
-                        ("name".to_owned(), Value::String(argument.name)),
-                        (
-                            "type".to_owned(),
-                            Value::String(argument.value_type.to_owned()),
-                        ),
-                        ("default".to_owned(), Value::Null),
-                        ("isDeprecated".to_owned(), Value::Boolean(false)),
-                        (
-                            "description".to_owned(),
-                            Value::String(argument.description.to_owned()),
-                        ),
-                    ]))
-                })
-                .collect();
-            let signature = definition.signature().ok_or_else(|| {
-                QueryError::internal(format!(
-                    "registered function {} is missing frozen signature metadata",
-                    definition.display_name()
-                ))
-            })?;
-            let return_description = definition.return_description().ok_or_else(|| {
-                QueryError::internal(format!(
-                    "registered function {} is missing frozen return metadata",
-                    definition.display_name()
-                ))
-            })?;
-            Ok(registry_binding([
-                ("name", Value::String(definition.display_name().to_owned())),
-                ("category", Value::String(definition.category.to_owned())),
-                (
-                    "description",
-                    Value::String(definition.description.to_owned()),
-                ),
-                ("signature", Value::String(signature)),
-                ("isBuiltIn", Value::Boolean(true)),
-                ("argumentDescription", Value::List(arguments)),
-                (
-                    "returnDescription",
-                    Value::String(return_description.to_owned()),
-                ),
-                ("aggregating", Value::Boolean(definition.aggregating)),
-                ("rolesExecution", Value::Null),
-                ("rolesBoostedExecution", Value::Null),
-                ("isDeprecated", Value::Boolean(definition.is_deprecated())),
-                (
-                    "deprecatedBy",
-                    definition
-                        .deprecated_by()
-                        .map_or(Value::Null, |name| Value::String(name.to_owned())),
-                ),
-            ]))
-        })
-        .collect()
-}
-
-pub(super) fn procedure_registry_rows() -> Vec<BindingRow> {
-    crate::query::registry::procedures()
-        .map(|definition| {
-            let returned = definition
-                .outputs
-                .iter()
-                .map(|name| {
-                    Value::Map(BTreeMap::from([
-                        ("name".to_owned(), Value::String((*name).to_owned())),
-                        ("type".to_owned(), Value::String("STRING".to_owned())),
-                        ("isDeprecated".to_owned(), Value::Boolean(false)),
-                        (
-                            "description".to_owned(),
-                            Value::String("Procedure output field.".to_owned()),
-                        ),
-                    ]))
-                })
-                .collect();
-            registry_binding([
-                ("name", Value::String(definition.name.to_owned())),
-                (
-                    "description",
-                    Value::String(definition.description.to_owned()),
-                ),
-                ("mode", Value::String(definition.mode.to_owned())),
-                ("worksOnSystem", Value::Boolean(definition.works_on_system)),
-                ("signature", Value::String(definition.signature.to_owned())),
-                ("argumentDescription", Value::List(Vec::new())),
-                ("returnDescription", Value::List(returned)),
-                ("admin", Value::Boolean(definition.admin)),
-                ("rolesExecution", Value::Null),
-                ("rolesBoostedExecution", Value::Null),
-                ("isDeprecated", Value::Boolean(false)),
-                ("deprecatedBy", Value::Null),
-                (
-                    "option",
-                    Value::Map(BTreeMap::from([(
-                        "deprecated".to_owned(),
-                        Value::Boolean(false),
-                    )])),
-                ),
-            ])
-        })
-        .collect()
-}
+mod registry;
+pub(super) use registry::{function_registry_rows, procedure_registry_rows};
 
 pub(super) fn registry_binding<const N: usize>(values: [(&str, Value); N]) -> BindingRow {
     let mut row = BindingRow::default();
@@ -200,33 +76,6 @@ pub(super) fn project_named_columns(mut row: BindingRow, columns: &[String]) -> 
     row.values.retain(|name, _| columns.contains(name));
     row.order.retain(|name| columns.contains(name));
     row
-}
-
-pub(super) fn cross_join_registry(input: RowSet, registry: RowSet) -> RowSet {
-    let mut columns = input.columns.clone();
-    for column in &registry.columns {
-        if !columns.contains(column) {
-            columns.push(column.clone());
-        }
-    }
-    let mut rows = Vec::new();
-    for outer in input.rows {
-        for shown in &registry.rows {
-            let mut combined = outer.clone();
-            for column in &registry.columns {
-                combined.insert(
-                    column.clone(),
-                    shown
-                        .values
-                        .get(column)
-                        .cloned()
-                        .unwrap_or(BindingValue::Null),
-                );
-            }
-            rows.push(combined);
-        }
-    }
-    RowSet { columns, rows }
 }
 
 #[derive(Debug)]
@@ -360,14 +209,18 @@ fn aggregate_in_reduction(
         || predicate.is_some_and(expr_contains_aggregate)
 }
 
-pub(super) fn aggregate_sum(values: &[Value]) -> QueryResult<Value> {
+pub(super) fn aggregate_sum(
+    values: &[Value],
+    control: &ExecutionControl<'_>,
+) -> QueryResult<Value> {
     if matches!(values.first(), Some(Value::Duration(_))) {
-        return aggregate_duration(values, None).map(Value::Duration);
+        return aggregate_duration(values, None, control).map(Value::Duration);
     }
     let mut integer = 0_i64;
     let mut floating = 0.0_f64;
     let mut has_float = false;
     for value in values {
+        control.work(1)?;
         match value {
             Value::Integer(value) if !has_float => {
                 integer = integer.checked_add(*value).ok_or_else(|| {
@@ -397,22 +250,46 @@ pub(super) fn aggregate_sum(values: &[Value]) -> QueryResult<Value> {
     })
 }
 
-pub(super) fn aggregate_average(values: &[Value]) -> QueryResult<Value> {
+pub(super) fn aggregate_average(
+    values: &[Value],
+    control: &ExecutionControl<'_>,
+) -> QueryResult<Value> {
     if values.is_empty() {
         return Ok(Value::Null);
     }
     if matches!(values.first(), Some(Value::Duration(_))) {
-        return aggregate_duration(values, Some(values.len())).map(Value::Duration);
+        return aggregate_duration(values, Some(values.len()), control).map(Value::Duration);
     }
-    let total = numeric_values(values)?.into_iter().sum::<f64>();
+    let total = numeric_total(values, control)?;
     Ok(Value::Float(total / values.len() as f64))
+}
+
+fn numeric_value(value: &Value) -> QueryResult<f64> {
+    match value {
+        Value::Integer(value) => Ok(*value as f64),
+        Value::Float(value) => Ok(*value),
+        _ => Err(QueryError::new(
+            QueryErrorKind::Type,
+            "aggregate requires numeric values",
+        )),
+    }
+}
+
+fn numeric_total(values: &[Value], control: &ExecutionControl<'_>) -> QueryResult<f64> {
+    let mut total = 0.0;
+    for value in values {
+        control.work(1)?;
+        total += numeric_value(value)?;
+    }
+    Ok(total)
 }
 
 pub(super) fn aggregate_duration(
     values: &[Value],
     divisor: Option<usize>,
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<crate::cypher::DurationValue> {
-    let mut total = collect_duration_components(values)?;
+    let mut total = collect_duration_components(values, control)?;
     match divisor {
         Some(divisor) => average_duration_components(&mut total, divisor)?,
         None => normalize_duration_components(&mut total)?,
@@ -428,9 +305,13 @@ struct DurationAggregate {
     nanoseconds: i128,
 }
 
-fn collect_duration_components(values: &[Value]) -> QueryResult<DurationAggregate> {
+fn collect_duration_components(
+    values: &[Value],
+    control: &ExecutionControl<'_>,
+) -> QueryResult<DurationAggregate> {
     let mut total = DurationAggregate::default();
     for value in values {
+        control.work(1)?;
         let Value::Duration(value) = value else {
             return Err(QueryError::new(
                 QueryErrorKind::Type,
@@ -516,15 +397,20 @@ pub(super) fn duration_aggregate_overflow() -> QueryError {
     QueryError::new(QueryErrorKind::Type, "duration aggregation overflow")
 }
 
-pub(super) fn aggregate_extreme(values: &[Value], maximum: bool) -> QueryResult<Value> {
+pub(super) fn aggregate_extreme(
+    values: &[Value],
+    maximum: bool,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<Value> {
     let Some(first) = values.first() else {
         return Ok(Value::Null);
     };
-    let mut result = first.clone();
+    let mut result = expression::clone_value_unreserved_controlled(first, Some(control))?;
     for value in values.iter().skip(1) {
-        let ordering = crate::cypher::cypher_order_compare(value, &result)?;
+        control.work(1)?;
+        let ordering = expression::cypher_order_compare_controlled(value, &result, Some(control))?;
         if (maximum && ordering == Ordering::Greater) || (!maximum && ordering == Ordering::Less) {
-            result = value.clone();
+            result = expression::clone_value_unreserved_controlled(value, Some(control))?;
         }
     }
     Ok(result)
@@ -534,7 +420,45 @@ pub(super) fn aggregate_percentile(
     values: &[Value],
     percentile: Value,
     continuous: bool,
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<Value> {
+    let percentile = percentile_number(percentile)?;
+    if values.is_empty() {
+        return Ok(Value::Null);
+    }
+    let _memory = control.reserve(crate::query::resources::allocation_bytes::<(f64, usize)>(
+        values.len(),
+    )?)?;
+    let mut numbers = Vec::with_capacity(values.len());
+    for (index, value) in values.iter().enumerate() {
+        control.work(1)?;
+        let number = numeric_value(value).map_err(|_| {
+            QueryError::new(
+                QueryErrorKind::Type,
+                "percentile aggregate requires numeric values",
+            )
+        })?;
+        numbers.push((number, index));
+    }
+    sort_numeric_values(&mut numbers, control)?;
+    if continuous {
+        let position = percentile * numbers.len().saturating_sub(1) as f64;
+        let lower = position.floor() as usize;
+        let upper = position.ceil() as usize;
+        let fraction = position - lower as f64;
+        Ok(Value::Float(
+            numbers[lower].0 + (numbers[upper].0 - numbers[lower].0) * fraction,
+        ))
+    } else {
+        let index = (percentile * numbers.len() as f64).ceil() as usize;
+        expression::clone_value_unreserved_controlled(
+            &values[numbers[index.saturating_sub(1)].1],
+            Some(control),
+        )
+    }
+}
+
+fn percentile_number(percentile: Value) -> QueryResult<f64> {
     let percentile = match percentile {
         Value::Integer(value) => value as f64,
         Value::Float(value) => value,
@@ -551,81 +475,84 @@ pub(super) fn aggregate_percentile(
             "percentile must be between 0.0 and 1.0",
         ));
     }
-    if values.is_empty() {
-        return Ok(Value::Null);
+    Ok(percentile)
+}
+
+fn sort_numeric_values(
+    values: &mut [(f64, usize)],
+    control: &ExecutionControl<'_>,
+) -> QueryResult<()> {
+    for root in (0..values.len() / 2).rev() {
+        sift_numeric_values(values, root, control)?;
     }
-    let mut numbers = values
-        .iter()
-        .cloned()
-        .map(|value| {
-            let number = match value {
-                Value::Integer(number) => number as f64,
-                Value::Float(number) => number,
-                _ => {
-                    return Err(QueryError::new(
-                        QueryErrorKind::Type,
-                        "percentile aggregate requires numeric values",
-                    ));
-                }
-            };
-            Ok((number, value))
-        })
-        .collect::<QueryResult<Vec<_>>>()?;
-    numbers.sort_by(|left, right| left.0.total_cmp(&right.0));
-    if continuous {
-        let position = percentile * numbers.len().saturating_sub(1) as f64;
-        let lower = position.floor() as usize;
-        let upper = position.ceil() as usize;
-        let fraction = position - lower as f64;
-        Ok(Value::Float(
-            numbers[lower].0 + (numbers[upper].0 - numbers[lower].0) * fraction,
-        ))
-    } else {
-        let index = (percentile * numbers.len() as f64).ceil() as usize;
-        Ok(numbers[index.saturating_sub(1)].1.clone())
+    for end in (1..values.len()).rev() {
+        control.work(1)?;
+        values.swap(0, end);
+        sift_numeric_values(&mut values[..end], 0, control)?;
+    }
+    Ok(())
+}
+
+fn sift_numeric_values(
+    values: &mut [(f64, usize)],
+    mut root: usize,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<()> {
+    loop {
+        control.work(1)?;
+        let left = root.saturating_mul(2).saturating_add(1);
+        if left >= values.len() {
+            return Ok(());
+        }
+        let right = left + 1;
+        let child = if right < values.len()
+            && compare_numeric(&values[left], &values[right]) == Ordering::Less
+        {
+            right
+        } else {
+            left
+        };
+        if compare_numeric(&values[root], &values[child]) != Ordering::Less {
+            return Ok(());
+        }
+        values.swap(root, child);
+        root = child;
     }
 }
 
-pub(super) fn aggregate_deviation(values: &[Value], sample: bool) -> QueryResult<Value> {
-    let numbers = numeric_values(values)?;
-    if numbers.is_empty() {
+fn compare_numeric(left: &(f64, usize), right: &(f64, usize)) -> Ordering {
+    left.0
+        .total_cmp(&right.0)
+        .then_with(|| left.1.cmp(&right.1))
+}
+
+pub(super) fn aggregate_deviation(
+    values: &[Value],
+    sample: bool,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<Value> {
+    if values.is_empty() {
         return Ok(Value::Null);
     }
-    if sample && numbers.len() == 1 {
+    let mean = numeric_total(values, control)? / values.len() as f64;
+    if sample && values.len() == 1 {
         return Ok(Value::Float(0.0));
     }
-    let mean = numbers.iter().sum::<f64>() / numbers.len() as f64;
-    let sum = numbers
-        .iter()
-        .map(|value| (value - mean).powi(2))
-        .sum::<f64>();
+    let mut sum = 0.0;
+    for value in values {
+        control.work(1)?;
+        sum += (numeric_value(value)? - mean).powi(2);
+    }
     let divisor = if sample {
-        numbers.len().saturating_sub(1)
+        values.len().saturating_sub(1)
     } else {
-        numbers.len()
+        values.len()
     };
     Ok(Value::Float((sum / divisor as f64).sqrt()))
 }
 
-pub(super) fn numeric_values(values: &[Value]) -> QueryResult<Vec<f64>> {
-    values
-        .iter()
-        .map(|value| match value {
-            Value::Integer(value) => Ok(*value as f64),
-            Value::Float(value) => Ok(*value),
-            _ => Err(QueryError::new(
-                QueryErrorKind::Type,
-                "aggregate requires numeric values",
-            )),
-        })
-        .collect()
-}
-
-pub(super) fn clone_row_set(input: &RowSet) -> RowSet {
-    RowSet {
-        columns: input.columns.clone(),
-        rows: input.rows.clone(),
-    }
+pub(super) fn clone_row_set(input: &RowSet, control: &ExecutionControl<'_>) -> QueryResult<RowSet> {
+    input.try_clone(control)
 }
 
 pub(super) fn union_rows(
@@ -634,20 +561,28 @@ pub(super) fn union_rows(
     distinct: bool,
     snapshot: &Snapshot<'_>,
     rules: &PropertyRules,
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<RowSet> {
     let mut left = merge_union_rows(left, right)?;
     if distinct {
-        left.rows = distinct_bindings(left.rows, &left.columns, snapshot, rules)?;
+        left.rows = distinct_bindings(left.rows, &left.columns, snapshot, rules, control)?;
     }
     Ok(left)
 }
 
-pub(crate) fn merge_union_rows(mut left: RowSet, right: RowSet) -> QueryResult<RowSet> {
+pub(crate) fn merge_union_rows(mut left: RowSet, mut right: RowSet) -> QueryResult<RowSet> {
     if left.columns != right.columns {
         return Err(QueryError::semantic(format!(
             "UNION column mismatch: left {:?}, right {:?}",
             left.columns, right.columns
         )));
+    }
+    if let Some(memory) = right.memory.take() {
+        if let Some(left_memory) = left.memory.as_mut() {
+            left_memory.merge(memory)?;
+        } else {
+            left.memory = Some(memory);
+        }
     }
     left.rows.extend(right.rows);
     Ok(left)
@@ -658,8 +593,9 @@ pub(crate) fn distinct_bindings(
     columns: &[String],
     snapshot: &Snapshot<'_>,
     rules: &PropertyRules,
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<Vec<BindingRow>> {
-    distinct_rows(rows, columns, snapshot, rules, |row| row)
+    distinct_rows(rows, columns, snapshot, rules, control, |row| row)
 }
 
 pub(super) fn distinct_projected(
@@ -667,8 +603,9 @@ pub(super) fn distinct_projected(
     columns: &[String],
     snapshot: &Snapshot<'_>,
     rules: &PropertyRules,
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<Vec<ProjectedRow>> {
-    distinct_rows(rows, columns, snapshot, rules, |row| &row.output)
+    distinct_rows(rows, columns, snapshot, rules, control, |row| &row.output)
 }
 
 fn distinct_rows<T>(
@@ -676,29 +613,65 @@ fn distinct_rows<T>(
     columns: &[String],
     snapshot: &Snapshot<'_>,
     rules: &PropertyRules,
+    control: &ExecutionControl<'_>,
     binding: impl Fn(&T) -> &BindingRow,
 ) -> QueryResult<Vec<T>> {
     let mut seen = BTreeSet::new();
-    let mut output = Vec::new();
+    let mut seen_memory = control.reserve(0)?;
+    let _output_memory =
+        control.reserve(crate::query::resources::allocation_bytes::<T>(rows.len())?)?;
+    let mut output = Vec::with_capacity(rows.len());
     for row in rows {
-        let values = columns
-            .iter()
-            .map(|column| {
-                binding_value_with_access(
-                    snapshot,
-                    binding(&row)
-                        .values
-                        .get(column)
-                        .unwrap_or(&BindingValue::Null),
-                    rules,
-                )
-            })
-            .collect::<QueryResult<Vec<_>>>()?;
-        if seen.insert(distinct_row_key(&values)?) {
+        control.work(1)?;
+        let (key, key_memory) =
+            binding_distinct_key(binding(&row), columns, snapshot, rules, control)?;
+        if seen.insert(key) {
+            seen_memory.merge(key_memory)?;
             output.push(row);
         }
     }
     Ok(output)
+}
+
+fn binding_distinct_key(
+    row: &BindingRow,
+    columns: &[String],
+    snapshot: &Snapshot<'_>,
+    rules: &PropertyRules,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<(String, MemoryReservation)> {
+    let mut value_memory = control.reserve(0)?;
+    let values = columns
+        .iter()
+        .map(|column| {
+            let value = expression::binding_value_with_memory(
+                snapshot,
+                row.values.get(column).unwrap_or(&BindingValue::Null),
+                rules,
+                control,
+            )?;
+            value_memory.merge(value.reservation)?;
+            Ok(value.value)
+        })
+        .collect::<QueryResult<Vec<_>>>()?;
+    let mut key_memory = reserve_distinct_key(&values, control)?;
+    let key = distinct_row_key(&values, Some(control))?;
+    key_memory.resize(crate::query::resources::checked_add(
+        key.capacity() as u64,
+        128,
+    )?)?;
+    Ok((key, key_memory))
+}
+
+pub(super) fn reserve_distinct_key(
+    values: &[Value],
+    control: &ExecutionControl<'_>,
+) -> QueryResult<MemoryReservation> {
+    let bytes = crate::query::resources::checked_add(
+        crate::query::resources::checked_mul(crate::query::resources::row_bytes(values)?, 16)?,
+        1024,
+    )?;
+    control.reserve(bytes)
 }
 
 pub(super) fn compare_keys(
@@ -706,10 +679,11 @@ pub(super) fn compare_keys(
     right: &[Value],
     directions: &[(usize, crate::cypher::OrderDirectionKind)],
     order_node: &AstNode,
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<Ordering> {
     let expression_nodes = surface_expressions(order_node);
     for (index, (left, right)) in left.iter().zip(right).enumerate() {
-        let mut ordering = crate::cypher::cypher_order_compare(left, right)?;
+        let mut ordering = expression::cypher_order_compare_controlled(left, right, Some(control))?;
         let descending = expression_nodes.get(index).is_some_and(|expression| {
             let end = expression_nodes
                 .get(index + 1)
@@ -737,6 +711,7 @@ pub(super) fn pagination(
     snapshot: &Snapshot<'_>,
     params: &BTreeMap<String, Value>,
     rules: &PropertyRules,
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<Option<usize>> {
     let Some(node) = body.children.iter().find(|node| node.kind == kind) else {
         return Ok(None);
@@ -745,14 +720,15 @@ pub(super) fn pagination(
         .into_iter()
         .next()
         .ok_or_else(|| QueryError::semantic(format!("{name} is missing its expression")))?;
-    let value = expression::evaluate_with_access(
+    let value = expression::evaluate_with_access_control(
         &compile_expression(expression)?,
         snapshot,
         &BindingRow::default(),
         params,
         rules,
+        control,
     )?;
-    let Value::Integer(value) = value else {
+    let Value::Integer(value) = value.value else {
         return Err(QueryError::new(
             QueryErrorKind::Type,
             format!("{name} must evaluate to an Integer"),

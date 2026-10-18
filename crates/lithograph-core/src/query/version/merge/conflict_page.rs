@@ -39,6 +39,10 @@ impl ConflictPageBuilder {
         true
     }
 
+    pub(super) fn retained(&self) -> usize {
+        self.conflicts.len()
+    }
+
     pub(super) fn finish(self) -> QueryResult<ConflictPage> {
         if self.seen < self.offset {
             return Err(QueryError::invalid_argument(

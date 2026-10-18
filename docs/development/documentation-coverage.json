@@ -2886,6 +2886,12 @@
       "examples": [
         "access-write-protected"
       ]
+    },
+    {
+      "kind": "option",
+      "name": "options.memoryLimitBytes",
+      "path": "docs/reference/execution-options.md",
+      "anchor": "memory-limit"
     }
   ],
   "inventories": [

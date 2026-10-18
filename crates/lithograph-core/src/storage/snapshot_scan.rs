@@ -6,7 +6,7 @@ use std::ops::Bound;
 use rusqlite::{params, params_from_iter, types::Value as SqlValue};
 
 use super::layer::{DeltaOp, RelationshipRecord};
-use super::snapshot::Snapshot;
+use super::snapshot::{Snapshot, relationship_from_checkpoint_row};
 use super::{HashId, LabelId, NodeId, RelationshipId, RelationshipTypeId, ScanPage, StorageResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +89,7 @@ impl Snapshot<'_> {
         let limit = normalized_limit(limit);
         let base = self.base_relationship_type_page(type_id, after, limit)?;
         let overlay = self
+            .state
             .overlay
             .relationships
             .range(after.saturating_add(1)..)
@@ -139,7 +140,7 @@ impl Snapshot<'_> {
             IncidentPhase::Incoming => AdjacencyKind::Incoming,
         };
         let directed_cursor = after.map(|after| AdjacencyCursor {
-            cache_identity: self.cache_identity,
+            cache_identity: self.state.cache_identity,
             kind: directed_kind,
             node_id,
             type_id,
@@ -198,7 +199,8 @@ impl Snapshot<'_> {
     }
 
     fn overlay_relationship_ids(&self, after: RelationshipId, limit: usize) -> Vec<RelationshipId> {
-        self.overlay
+        self.state
+            .overlay
             .relationships
             .range(after.saturating_add(1)..)
             .take(limit)
@@ -238,7 +240,7 @@ impl Snapshot<'_> {
         cursor: Option<AdjacencyCursor>,
     ) -> StorageResult<()> {
         if let Some(cursor) = cursor
-            && (cursor.cache_identity != self.cache_identity
+            && (cursor.cache_identity != self.state.cache_identity
                 || cursor.kind != kind
                 || cursor.node_id != node_id
                 || cursor.type_id != type_id)
@@ -278,7 +280,7 @@ impl Snapshot<'_> {
                 break;
             }
             consumed = id;
-            if let Some(delta) = self.overlay.relationships.get(&id) {
+            if let Some(delta) = self.state.overlay.relationships.get(&id) {
                 if delta.op == DeltaOp::Add && accept_overlay(delta.record) {
                     items.push(delta.record);
                 }
@@ -305,7 +307,7 @@ impl Snapshot<'_> {
         let AdjacencyMergeSources { base, overlay } = sources;
         let base_last = base.last().map(|record| adjacency_key(kind, *record));
         let overlay_last = overlay.last().map(|(key, _, _)| *key);
-        let horizon = scan_key_horizon(
+        let horizon = scan_horizon(
             base_last,
             base.len() == limit,
             overlay_last,
@@ -333,7 +335,7 @@ impl Snapshot<'_> {
         }
         let next_cursor = ((horizon.is_some() || items.len() == limit) && consumed != after)
             .then_some(AdjacencyCursor {
-                cache_identity: self.cache_identity,
+                cache_identity: self.state.cache_identity,
                 kind,
                 node_id,
                 type_id,
@@ -355,8 +357,8 @@ impl Snapshot<'_> {
         limit: usize,
     ) -> Vec<(AdjacencyKey, RelationshipRecord, DeltaOp)> {
         let map = match kind {
-            AdjacencyKind::Outgoing => &self.overlay.outgoing,
-            AdjacencyKind::Incoming => &self.overlay.incoming,
+            AdjacencyKind::Outgoing => &self.state.overlay.outgoing,
+            AdjacencyKind::Incoming => &self.state.overlay.incoming,
             AdjacencyKind::Incident => unreachable!("incident scans use two directed streams"),
         };
         let lower = match after {
@@ -431,7 +433,8 @@ impl Snapshot<'_> {
         base: &[NodeId],
     ) -> bool {
         if let Some(label_id) = label_id {
-            self.overlay
+            self.state
+                .overlay
                 .labels_by_label
                 .get(&(label_id, node_id))
                 .map_or_else(
@@ -439,7 +442,7 @@ impl Snapshot<'_> {
                     |op| *op == DeltaOp::Add,
                 )
         } else {
-            self.overlay.nodes.get(&node_id).map_or_else(
+            self.state.overlay.nodes.get(&node_id).map_or_else(
                 || base.binary_search(&node_id).is_ok(),
                 |op| *op == DeltaOp::Add,
             )
@@ -454,6 +457,7 @@ impl Snapshot<'_> {
     ) -> Vec<NodeId> {
         match label_id {
             Some(label_id) => self
+                .state
                 .overlay
                 .labels_by_label
                 .range((label_id, after.saturating_add(1))..=(label_id, i64::MAX))
@@ -461,6 +465,7 @@ impl Snapshot<'_> {
                 .map(|((_, node_id), _)| *node_id)
                 .collect(),
             None => self
+                .state
                 .overlay
                 .nodes
                 .range(after.saturating_add(1)..)
@@ -476,7 +481,7 @@ impl Snapshot<'_> {
         limit: usize,
         label_id: Option<LabelId>,
     ) -> StorageResult<Vec<NodeId>> {
-        let Some(checkpoint) = self.checkpoint else {
+        let Some(checkpoint) = self.state.checkpoint else {
             return Ok(Vec::new());
         };
         let mut values = Vec::with_capacity(limit);
@@ -519,7 +524,7 @@ impl Snapshot<'_> {
         after: Option<AdjacencyKey>,
         limit: usize,
     ) -> StorageResult<Vec<RelationshipRecord>> {
-        let Some(checkpoint) = self.checkpoint else {
+        let Some(checkpoint) = self.state.checkpoint else {
             return Ok(Vec::new());
         };
         #[cfg(feature = "test-support")]
@@ -576,7 +581,10 @@ impl Snapshot<'_> {
         }
         parameters.push(SqlValue::Integer(limit));
         let mut statement = self.connection.prepare(&sql)?;
-        let rows = statement.query_map(params_from_iter(parameters), relationship_from_row)?;
+        let rows = statement.query_map(
+            params_from_iter(parameters),
+            relationship_from_checkpoint_row,
+        )?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -585,24 +593,7 @@ impl Snapshot<'_> {
         after: RelationshipId,
         limit: usize,
     ) -> StorageResult<Vec<RelationshipRecord>> {
-        let Some(checkpoint) = self.checkpoint else {
-            return Ok(Vec::new());
-        };
-        let mut statement = self.connection.prepare(
-            "SELECT relationship_id, source_id, type_id, target_id FROM main._lithograph_cp_relationships WHERE commit_id = ?1 AND relationship_id > ?2 ORDER BY relationship_id LIMIT ?3",
-        )?;
-        let rows = statement.query_map(
-            params![checkpoint.as_bytes().as_slice(), after, limit as i64],
-            |row| {
-                Ok(RelationshipRecord {
-                    id: row.get(0)?,
-                    source: row.get(1)?,
-                    type_id: row.get(2)?,
-                    target: row.get(3)?,
-                })
-            },
-        )?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        self.checkpoint_relationship_page(None, after, limit)
     }
 
     fn base_relationship_type_page(
@@ -611,22 +602,48 @@ impl Snapshot<'_> {
         after: RelationshipId,
         limit: usize,
     ) -> StorageResult<Vec<RelationshipRecord>> {
-        let Some(checkpoint) = self.checkpoint else {
+        self.checkpoint_relationship_page(Some(type_id), after, limit)
+    }
+
+    fn checkpoint_relationship_page(
+        &self,
+        type_id: Option<RelationshipTypeId>,
+        after: RelationshipId,
+        limit: usize,
+    ) -> StorageResult<Vec<RelationshipRecord>> {
+        let Some(checkpoint) = self.state.checkpoint else {
             return Ok(Vec::new());
         };
-        let mut statement = self.connection.prepare(
-            "SELECT relationship_id, source_id, type_id, target_id FROM main._lithograph_cp_relationships WHERE commit_id = ?1 AND type_id = ?2 AND relationship_id > ?3 ORDER BY relationship_id LIMIT ?4",
-        )?;
-        let rows = statement.query_map(
-            params![
-                checkpoint.as_bytes().as_slice(),
-                type_id,
-                after,
-                limit as i64
-            ],
-            relationship_from_row,
-        )?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let type_filter = if type_id.is_some() {
+            " AND type_id = ?4"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "SELECT relationship_id, source_id, type_id, target_id FROM main._lithograph_cp_relationships WHERE commit_id = ?1 AND relationship_id > ?2{type_filter} ORDER BY relationship_id LIMIT ?3"
+        );
+        let mut statement = self.connection.prepare(&sql)?;
+        match type_id {
+            Some(type_id) => statement
+                .query_map(
+                    params![
+                        checkpoint.as_bytes().as_slice(),
+                        after,
+                        limit as i64,
+                        type_id
+                    ],
+                    relationship_from_checkpoint_row,
+                )?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(Into::into),
+            None => statement
+                .query_map(
+                    params![checkpoint.as_bytes().as_slice(), after, limit as i64],
+                    relationship_from_checkpoint_row,
+                )?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(Into::into),
+        }
     }
 }
 
@@ -634,29 +651,12 @@ fn normalized_limit(limit: usize) -> usize {
     limit.clamp(1, 4_096)
 }
 
-fn scan_horizon(
-    base_last: Option<i64>,
+fn scan_horizon<T: Ord>(
+    base_last: Option<T>,
     base_full: bool,
-    overlay_last: Option<i64>,
+    overlay_last: Option<T>,
     overlay_full: bool,
-) -> Option<i64> {
-    match (
-        base_full.then_some(base_last).flatten(),
-        overlay_full.then_some(overlay_last).flatten(),
-    ) {
-        (Some(base), Some(overlay)) => Some(base.min(overlay)),
-        (Some(base), None) => Some(base),
-        (None, Some(overlay)) => Some(overlay),
-        (None, None) => None,
-    }
-}
-
-fn scan_key_horizon(
-    base_last: Option<AdjacencyKey>,
-    base_full: bool,
-    overlay_last: Option<AdjacencyKey>,
-    overlay_full: bool,
-) -> Option<AdjacencyKey> {
+) -> Option<T> {
     match (
         base_full.then_some(base_last).flatten(),
         overlay_full.then_some(overlay_last).flatten(),
@@ -707,13 +707,4 @@ fn adjacency_matches(
         AdjacencyKind::Incident => record.source == node_id || record.target == node_id,
     };
     endpoint_matches && type_id.is_none_or(|value| record.type_id == value)
-}
-
-fn relationship_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RelationshipRecord> {
-    Ok(RelationshipRecord {
-        id: row.get(0)?,
-        source: row.get(1)?,
-        type_id: row.get(2)?,
-        target: row.get(3)?,
-    })
 }

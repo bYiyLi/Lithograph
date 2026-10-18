@@ -1,4 +1,5 @@
 use super::*;
+use crate::query::resources::{allocation_bytes, checked_add};
 
 pub(super) struct SearchSpec {
     pub(super) variable: String,
@@ -18,32 +19,82 @@ pub(super) fn execute_search_match_row(
     predicate: Option<&expression::Expr>,
     input: BindingRow,
 ) -> QueryResult<Vec<BindingRow>> {
+    let previous = executor.expression_reservation.bytes();
     let (spec, index, query, limit) = prepare_search(executor, clause, search, &input)?;
     if limit == 0 || query == Value::Null {
-        return Ok(optional_search_row(optional, input, columns));
+        let rows = optional_search_row(executor, optional, input, columns)?;
+        return finish_search_rows(executor, previous, rows);
     }
-    let mut candidate_limit = vector_initial_candidate_limit(&index, limit)?;
-    let selected = loop {
-        let result = vector_candidates(
+    let selected = search_candidates(executor, &spec, &index, &query, &input, limit)?;
+    drop(spec);
+    drop(index);
+    drop(query);
+    let matched = execute_search_patterns(executor, clause, selected)?;
+    let rows = finish_search_match(executor, matched, predicate, optional, input, columns)?;
+    finish_search_rows(executor, previous, rows)
+}
+
+fn search_candidates(
+    executor: &mut ReadExecutor<'_, '_>,
+    spec: &SearchSpec,
+    index: &IndexDefinition,
+    query: &Value,
+    input: &BindingRow,
+    limit: usize,
+) -> QueryResult<Vec<BindingRow>> {
+    let mut candidate_limit = vector_initial_candidate_limit(index, limit)?;
+    loop {
+        executor.control.check()?;
+        let result = super::super::super::semantic_index::vector_candidates_controlled(
             executor.connection,
             &executor.snapshot,
             executor.graph_view,
-            &index,
-            &query,
+            index,
+            query,
             candidate_limit,
-            executor.is_interrupted,
+            executor.control,
         )?;
+        let _candidate_memory = result.memory;
         let exhaustive = result.exhaustive;
-        let selected = select_search_hits(executor, &spec, &input, result.hits, limit)?;
+        let previous = executor.expression_reservation.bytes();
+        let selected = select_search_hits(executor, spec, input, result.hits, limit)?;
         if selected.len() >= limit || exhaustive {
-            break selected;
+            return Ok(selected);
         }
+        drop(selected);
+        executor.expression_reservation.resize(previous)?;
         candidate_limit = candidate_limit
             .saturating_mul(2)
             .max(candidate_limit.saturating_add(1));
-    };
-    let matched = execute_search_patterns(executor, clause, selected)?;
-    finish_search_match(executor, matched, predicate, optional, input, columns)
+    }
+}
+
+fn retain_search_rows(
+    executor: &mut ReadExecutor<'_, '_>,
+    previous: u64,
+    rows: &[BindingRow],
+) -> QueryResult<()> {
+    let bytes =
+        rows.iter()
+            .try_fold(allocation_bytes::<BindingRow>(rows.len())?, |bytes, row| {
+                executor.control.checkpoint(1)?;
+                checked_add(
+                    bytes,
+                    expression::binding_row_bytes_controlled(row, Some(executor.control))?,
+                )
+            })?;
+    executor
+        .expression_reservation
+        .resize(checked_add(previous, bytes)?)
+}
+
+fn finish_search_rows(
+    executor: &mut ReadExecutor<'_, '_>,
+    previous: u64,
+    rows: Vec<BindingRow>,
+) -> QueryResult<Vec<BindingRow>> {
+    retain_search_rows(executor, previous, &rows)?;
+    Ok(rows)
 }
 
 fn prepare_search(
@@ -112,7 +163,7 @@ fn materialize_search_filter_value_expression(
         }
         Expr::Binary(BinaryOp::In, left, right) if search_property(left, variable).is_some() => {
             let value = executor.evaluate(right, input)?;
-            validate_search_in_value(value.clone())?;
+            validate_search_in_value(&value, executor.control)?;
             **right = Expr::Literal(value);
             Ok(())
         }
@@ -133,7 +184,7 @@ fn materialize_search_filter_value_expression(
                 return Ok(());
             };
             let value = executor.evaluate(value_target, input)?;
-            validate_search_comparison_value(value.clone())?;
+            validate_search_comparison_value(&value)?;
             **value_target = Expr::Literal(value);
             Ok(())
         }
@@ -141,8 +192,8 @@ fn materialize_search_filter_value_expression(
     }
 }
 
-fn validate_search_comparison_value(value: Value) -> QueryResult<()> {
-    if search_filter_scalar_value(&value) {
+fn validate_search_comparison_value(value: &Value) -> QueryResult<()> {
+    if search_filter_scalar_value(value) {
         return Ok(());
     }
     Err(QueryError::new(
@@ -151,28 +202,27 @@ fn validate_search_comparison_value(value: Value) -> QueryResult<()> {
     ))
 }
 
-fn validate_search_in_value(value: Value) -> QueryResult<()> {
+fn validate_search_in_value(value: &Value, control: &ExecutionControl<'_>) -> QueryResult<()> {
     let Value::List(values) = value else {
         return Err(QueryError::new(
             QueryErrorKind::Type,
             "SEARCH filter IN value must be a List",
         ));
     };
-    if values
-        .iter()
-        .any(|value| !search_filter_scalar_value(value))
-    {
-        return Err(QueryError::new(
-            QueryErrorKind::Type,
-            "SEARCH filter IN list contains an unsupported value",
-        ));
-    }
-    let unrestricted = values.iter().all(|value| {
-        matches!(
+    let mut unrestricted = true;
+    for value in values {
+        control.checkpoint(1)?;
+        if !search_filter_scalar_value(value) {
+            return Err(QueryError::new(
+                QueryErrorKind::Type,
+                "SEARCH filter IN list contains an unsupported value",
+            ));
+        }
+        unrestricted &= matches!(
             value,
             Value::Null | Value::Integer(_) | Value::Float(_) | Value::String(_)
-        )
-    });
+        );
+    }
     if !unrestricted && values.len() > 256 {
         return Err(QueryError::invalid_argument(
             "SEARCH filter IN list is limited to 256 values for non-numeric/non-string types",
@@ -209,12 +259,36 @@ fn validate_search_expressions(spec: &SearchSpec, index: &IndexDefinition) -> Qu
     Ok(())
 }
 
-fn optional_search_row(optional: bool, input: BindingRow, columns: &[String]) -> Vec<BindingRow> {
+fn optional_search_row(
+    executor: &mut ReadExecutor<'_, '_>,
+    optional: bool,
+    input: BindingRow,
+    columns: &[String],
+) -> QueryResult<Vec<BindingRow>> {
     if optional {
-        vec![null_extend_row(input, columns)]
+        reserve_search_row(executor, &input, columns)?;
+        Ok(vec![null_extend_row(input, columns)])
     } else {
-        Vec::new()
+        Ok(Vec::new())
     }
+}
+
+fn reserve_search_row(
+    executor: &mut ReadExecutor<'_, '_>,
+    input: &BindingRow,
+    columns: &[String],
+) -> QueryResult<()> {
+    let mut bytes = checked_add(
+        expression::binding_row_bytes_controlled(input, Some(executor.control))?,
+        allocation_bytes::<BindingRow>(1)?,
+    )?;
+    for column in columns {
+        executor.control.checkpoint(1)?;
+        if !input.values.contains_key(column) {
+            bytes = checked_add(bytes, 256 + column.len() as u64)?;
+        }
+    }
+    executor.expression_reservation.grow(bytes)
 }
 
 fn select_search_hits(
@@ -226,11 +300,16 @@ fn select_search_hits(
 ) -> QueryResult<Vec<BindingRow>> {
     let mut rows = Vec::new();
     for hit in hits {
+        executor.control.checkpoint(1)?;
+        let previous = executor.expression_reservation.bytes();
         if let Some(row) = search_hit_row(executor, spec, input, hit)? {
+            retain_search_rows(executor, previous, std::slice::from_ref(&row))?;
             rows.push(row);
             if rows.len() >= limit {
                 break;
             }
+        } else {
+            executor.expression_reservation.resize(previous)?;
         }
     }
     Ok(rows)
@@ -250,7 +329,13 @@ fn search_hit_row(
     {
         return Ok(None);
     }
-    let mut row = input.clone();
+    let mut columns = vec![spec.variable.clone()];
+    if let Some(alias) = &spec.score_alias {
+        columns.push(alias.clone());
+    }
+    reserve_search_row(executor, input, &columns)?;
+    let mut row =
+        expression::clone_binding_row_unreserved_controlled(input, Some(executor.control))?;
     row.insert(spec.variable.clone(), binding);
     if let Some(filter) = &spec.filter
         && !expression::predicate(executor.evaluate(filter, &row)?)?
@@ -270,15 +355,18 @@ fn execute_search_patterns(
 ) -> QueryResult<Vec<BindingRow>> {
     let mut matched = Vec::new();
     for row in selected {
-        matched.extend(super::super::path::execute_match(
+        executor.control.checkpoint(1)?;
+        let (matches, memory) = super::super::path::execute_match(
             &executor.snapshot,
             executor.graph_view,
             executor.params,
             clause,
             vec![row],
             executor.metrics,
-            executor.is_interrupted,
-        )?);
+            executor.control,
+        )?;
+        executor.expression_reservation.merge(memory)?;
+        matched.extend(matches);
     }
     Ok(matched)
 }
@@ -295,24 +383,16 @@ fn finish_search_match(
         matched = executor.filter_rows(predicate, matched)?;
     }
     if optional && matched.is_empty() {
-        Ok(vec![null_extend_row(input, columns)])
+        optional_search_row(executor, true, input, columns)
     } else {
         Ok(matched)
     }
 }
 
 pub(super) fn compile_search_spec(search: &AstNode) -> QueryResult<SearchSpec> {
-    let variable = search
-        .descendants()
-        .find(|node| node.kind == AstKind::Variable)
-        .and_then(|node| node.text.as_deref())
-        .map(crate::cypher::unescape_identifier)
+    let variable = super::super::decoded_descendant_name(search, AstKind::Variable)
         .ok_or_else(|| QueryError::semantic("SEARCH is missing its binding variable"))?;
-    let index = search
-        .descendants()
-        .find(|node| node.kind == AstKind::IndexName)
-        .and_then(|node| node.text.as_deref())
-        .map(crate::cypher::unescape_identifier)
+    let index = super::super::decoded_descendant_name(search, AstKind::IndexName)
         .ok_or_else(|| QueryError::semantic("SEARCH is missing its VECTOR Index name"))?;
     let expressions = surface_expressions(search);
     if !(2..=3).contains(&expressions.len()) {

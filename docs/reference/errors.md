@@ -42,11 +42,13 @@ v0.3.2 的 `ACCESS_DENIED` 对应 `SQLITE_AUTH` (23)。query 属性不可见本�
 
 资源失败可能是 NOMEM (7)、TOOBIG (18)、FULL (13)；I/O 类还包括 READONLY 等 code。不要假定某个 category 永远只对应一个 code；使用实际返回值。
 
+**Unreleased / Phase 19：** `memoryLimitBytes` 配置类型或范围错误返回 `INVALID_ARGUMENT`；合法预算被本次执行用尽返回 `RESOURCE_ERROR` + `SQLITE_TOOBIG` (18)，这是引擎在分配前拒绝的策略限制，不应当报告为系统实际 OOM。参数解码、中间值、semantic barrier 和结果编码/收集都可能触发预算错误。不要自动移除预算重试；宿主先检查工作量及自己的配额策略。配置合同和发布边界见 [Execution Options](execution-options.md#memory-limit)。
+
 <a id="atomicity-after-error"></a>
 
 ## 错误后的原子性
 
-普通 mutating execution 的失败不留下该 invocation 的未发布图写入。active Lithograph explicit transaction 中任一普通 `lithograph()` execution failure、`lithograph_rows()` failure/interrupt/cancel 或 summary 前 close 会自动 abort 整体；之后必须重新 begin。外层 caller-owned SQL transaction 的后续 COMMIT/ROLLBACK 仍由宿主决定。
+普通 mutating execution 的失败不留下该 invocation 的未发布图写入。active Lithograph explicit transaction 中，execution 在 finalize-success 前失败、中断或取消，以及 incomplete rows cursor 被关闭，都会自动 abort 整体；之后必须重新 begin。已经 finalize-success 后的宿主结果交付错误不反向撤销成功边界，精确规则见 [cursor 生命周期](transactions.md#stream-lifecycle)。外层 caller-owned SQL transaction 仍 active 时，其后续 COMMIT/ROLLBACK 由宿主决定；真实 SQLite interrupt 可能已经整体回滚该 transaction，包含宿主先前尚未提交的写入。Phase 19 的恢复改进与状态确认见 [取消与连接池](transactions.md#cancellation)。
 
 独立 `IN TRANSACTIONS` 的已成功 batch 仍然持久化；错误不意味着整次导入没有副作用。已经向调用方发送的 ROW 也不等于整个操作成功，必须检查最终返回码/事务提交。
 

@@ -1,7 +1,9 @@
 use super::*;
+use crate::query::resources::{ExecutionControl, QueryResources};
 
 mod context;
 mod delete;
+mod delete_targets;
 mod delta;
 mod matcher;
 mod program;
@@ -12,16 +14,22 @@ pub(crate) use program::{
     execute_program_suffix_transaction, execute_spilled_outer_write_transaction,
     execute_transaction_batch,
 };
-pub(crate) use value::{materialize_binding_rows_to_spill, property_from_value, spill_value_rows};
+pub(crate) use value::{
+    materialize_binding_rows_to_spill, property_from_value_controlled, spill_value_rows,
+};
 
 use super::super::spill::{BINDING_SPILL_BATCH_ROWS, BindingSpill, open_spill_connection};
 use delete::apply_delete;
-use delta::{property_states_equal, staged_snapshot};
+use delete_targets::{delete_target_variables, evaluate_delete_targets};
+use delta::property_states_equal;
 use matcher::match_pattern;
 use value::{
-    binding_node, binding_owner, evaluate_map, project_spilled_rows, require_visible_owner,
-    set_property_map, validate_clause_view,
+    binding_node, evaluate_map, project_spilled_rows, require_visible_owner, resolve_property_key,
+    set_property_map, validate_clause_view, visible_owner,
 };
+
+#[cfg(test)]
+mod tests;
 
 struct MutationContext<'connection, 'query> {
     connection: &'connection Connection,
@@ -33,6 +41,10 @@ struct MutationContext<'connection, 'query> {
     access: &'query super::super::access::AccessPolicy,
     delta: DeltaBuilder,
     global_bindings: BindingRow,
+    control: ExecutionControl<'query>,
+    mutation_memory: MemoryReservation,
+    merge_memory: MemoryReservation,
+    property_memory: BTreeMap<(OwnerKind, i64, i64), MemoryReservation>,
 }
 
 pub(crate) fn execute_write(
@@ -41,6 +53,7 @@ pub(crate) fn execute_write(
     base_commit: HashId,
     params: &BTreeMap<String, Value>,
     metrics: &mut QueryMetrics,
+    resources: &QueryResources,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<WriteOutcome> {
     let mut context = MutationContext::new(
@@ -49,9 +62,16 @@ pub(crate) fn execute_write(
         params,
         &prepared.graph_view,
         &prepared.access,
+        resources,
+        is_interrupted,
     )?;
     let spill_connection = open_spill_connection()?;
-    let mut rows = BindingSpill::from_rows(&spill_connection, &[BindingRow::default()])?;
+    let mut rows = BindingSpill::from_rows_with_resources(
+        &spill_connection,
+        &[BindingRow::default()],
+        resources.clone(),
+        &context.control,
+    )?;
     for clause in &prepared.clauses {
         check_interrupted(is_interrupted)?;
         rows = execute_clause_spilled(
@@ -75,16 +95,7 @@ fn finish_spilled_write(
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<WriteOutcome> {
     check_interrupted(is_interrupted)?;
-    let final_layer = context.delta.layer()?;
-    let counters = context.delta.counters()?;
-    let final_snapshot =
-        Snapshot::resolve_with_layer(context.connection, context.base_commit, &final_layer)?;
-    crate::query::schema::validate_layer_against_commit_schema(
-        context.connection,
-        context.base_commit,
-        &final_snapshot,
-        &final_layer,
-    )?;
+    let (final_layer, counters, final_snapshot) = context.validated_layer()?;
     let result_state = prepared
         .projection
         .as_ref()
@@ -95,14 +106,7 @@ fn finish_spilled_write(
         message: prepared.message.clone(),
         committed_at: now_micros()?,
     };
-    let commit = storage::commit_layer(
-        context.connection,
-        &prepared.branch,
-        context.base_commit,
-        None,
-        &final_layer,
-        &metadata,
-    )?;
+    let commit = context.commit_layer(&prepared.branch, &final_layer, &metadata)?;
     let output = match &prepared.projection {
         Some(projection) => project_spilled_rows(
             context.connection,
@@ -114,6 +118,7 @@ fn finish_spilled_write(
             projection,
             is_interrupted,
             &context.access.read.query,
+            &context.control,
         )?,
         None => {
             rows.abort(&spill_connection)?;
@@ -189,23 +194,30 @@ fn execute_match_clause_spilled(
     metrics: &mut QueryMetrics,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<BindingSpill> {
+    check_interrupted(is_interrupted)?;
     let snapshot = context.staged_snapshot()?;
     let graph_view = context.graph_view()?;
     let step = lower_match(context.connection, clause, optional)?;
-    let mut output = BindingSpill::create(spill_connection)?;
-    input.for_each_batch(spill_connection, BINDING_SPILL_BATCH_ROWS, |rows| {
-        crate::query::stream::spill_match_step(
-            &snapshot,
-            &graph_view,
-            context.params,
-            rows,
-            &step,
-            metrics,
-            is_interrupted,
-            spill_connection,
-            &mut output,
-        )
-    })?;
+    let mut output =
+        BindingSpill::create_with_resources(spill_connection, context.control.resources().clone())?;
+    input.for_each_batch(
+        spill_connection,
+        BINDING_SPILL_BATCH_ROWS,
+        &context.control,
+        |rows| {
+            crate::query::stream::spill_match_step(
+                &snapshot,
+                &graph_view,
+                context.params,
+                rows,
+                &step,
+                metrics,
+                &context.control,
+                spill_connection,
+                &mut output,
+            )
+        },
+    )?;
     input.abort(spill_connection)?;
     Ok(output)
 }
@@ -238,10 +250,15 @@ fn execute_delete_clause_spilled(
 ) -> QueryResult<BindingSpill> {
     // DELETE owns a clause-wide target barrier: evaluate every target before
     // applying removals so repeated/connected target semantics stay identical.
-    let rows = input.collect(spill_connection)?;
+    let (rows, _rows_memory) = input.collect_reserved(spill_connection, &context.control)?;
     input.abort(spill_connection)?;
     let rows = execute_delete_clause(context, expressions, detach, rows, is_interrupted)?;
-    BindingSpill::from_rows(spill_connection, &rows)
+    BindingSpill::from_rows_with_resources(
+        spill_connection,
+        &rows,
+        context.control.resources().clone(),
+        &context.control,
+    )
 }
 
 fn execute_merge_clause_spilled(
@@ -293,11 +310,20 @@ fn execute_spilled_mutation_batches<'connection, 'query>(
     ) -> QueryResult<Vec<BindingRow>>,
 ) -> QueryResult<BindingSpill> {
     let mut state = begin_mutation_clause(context)?;
-    let mut output = BindingSpill::create(spill_connection)?;
-    input.for_each_batch(spill_connection, BINDING_SPILL_BATCH_ROWS, |rows| {
-        let rows = transform(context, rows, &mut state, is_interrupted)?;
-        output.push_all(spill_connection, &rows)
-    })?;
+    let resources = context.control.resources().clone();
+    let control = ExecutionControl::new(&resources, is_interrupted);
+    let mut output =
+        BindingSpill::create_with_resources(spill_connection, context.control.resources().clone())?;
+    input.for_each_batch(
+        spill_connection,
+        BINDING_SPILL_BATCH_ROWS,
+        &control,
+        |rows| {
+            let rows = transform(context, rows, &mut state, is_interrupted)?;
+            output.push_all(spill_connection, &rows, &control)?;
+            context.merge_memory.resize(0)
+        },
+    )?;
     finish_mutation_clause(context, &state)?;
     input.abort(spill_connection)?;
     Ok(output)
@@ -464,7 +490,8 @@ fn execute_delete_clause(
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<Vec<BindingRow>> {
     let state = begin_mutation_clause(context)?;
-    let (variables, targets) = evaluate_delete_targets(context, expressions, &rows, &state)?;
+    let (variables, targets, _targets_memory) =
+        evaluate_delete_targets(context, expressions, &rows, &state)?;
     apply_delete(
         context,
         &targets,
@@ -475,42 +502,6 @@ fn execute_delete_clause(
         is_interrupted,
     )?;
     Ok(rows)
-}
-
-fn delete_target_variables(expressions: &[Expr]) -> Vec<String> {
-    (0..expressions.len())
-        .map(|index| format!("__lithograph_delete_{index}"))
-        .collect()
-}
-
-fn evaluate_delete_targets(
-    context: &MutationContext<'_, '_>,
-    expressions: &[Expr],
-    rows: &[BindingRow],
-    state: &MutationClauseState<'_>,
-) -> QueryResult<(Vec<String>, Vec<BindingRow>)> {
-    let variables = delete_target_variables(expressions);
-    let targets = rows
-        .iter()
-        .map(|row| {
-            let mut targets = BindingRow::default();
-            for (variable, expression) in variables.iter().zip(expressions) {
-                let value = expression::evaluate_with_access(
-                    expression,
-                    &state.clause_input,
-                    row,
-                    context.params,
-                    &context.access.read.query,
-                )?;
-                targets.insert(
-                    variable.clone(),
-                    expression::binding_from_value(&state.clause_input, value)?,
-                );
-            }
-            Ok(targets)
-        })
-        .collect::<QueryResult<Vec<_>>>()?;
-    Ok((variables, targets))
 }
 
 fn execute_merge_clause(
@@ -684,7 +675,14 @@ fn bound_node(
         ));
     };
     let staged = context.staged_snapshot()?;
-    require_visible_owner(graph_view, clause_input, &staged, row, variable)?;
+    require_visible_owner(
+        graph_view,
+        clause_input,
+        &staged,
+        row,
+        variable,
+        &context.control,
+    )?;
     Ok(Some(*id))
 }
 
@@ -727,12 +725,13 @@ fn apply_create_properties(
     let Some(properties) = properties else {
         return Ok(());
     };
-    let map = evaluate_map(
+    let (map, _map_memory) = evaluate_map(
         properties,
         clause_input,
         row,
         context.params,
         &context.access.read.query,
+        &context.control,
     )?;
     set_new_property_map(context, owner_kind, owner_id, &map)
 }
@@ -745,7 +744,17 @@ fn set_new_property_map(
 ) -> QueryResult<()> {
     for (key, value) in map {
         context.access.check_write_property(key)?;
-        let Some(value) = property_from_value(value.clone())? else {
+        let _conversion_memory = context
+            .control
+            .reserve(crate::query::resources::checked_mul(
+                crate::query::resources::value_bytes(value)?,
+                2,
+            )?)?;
+        let Some(value) = property_from_value_controlled(
+            expression::clone_value_unreserved_controlled(value, Some(&context.control))?,
+            &context.control,
+        )?
+        else {
             continue;
         };
         let key_id = storage::intern_property_key(context.connection, key)?;
@@ -761,26 +770,14 @@ fn add_node_labels(
     labels: &[WriteName],
     clause_input: &Snapshot<'_>,
 ) -> QueryResult<()> {
-    let resolved = if labels
-        .iter()
-        .all(|label| matches!(label, WriteName::Static(_)))
-    {
-        labels
-            .iter()
-            .filter_map(|label| match label {
-                WriteName::Static(label) => Some(label.clone()),
-                WriteName::Dynamic(_) => None,
-            })
-            .collect()
-    } else {
-        resolve_write_names(
-            labels,
-            clause_input,
-            row,
-            context.params,
-            &context.access.read.query,
-        )?
-    };
+    let (resolved, _names_memory) = resolve_write_names(
+        labels,
+        clause_input,
+        row,
+        context.params,
+        &context.access.read.query,
+        &context.control,
+    )?;
     if !resolved.is_empty() {
         context.require_label_changes()?;
     }
@@ -807,12 +804,13 @@ fn create_relationship(
             "CREATE cannot reuse bound Relationship variable {variable}"
         )));
     }
-    let relationship_types = resolve_write_names(
+    let (relationship_types, _names_memory) = resolve_write_names(
         std::slice::from_ref(&spec.relationship_type),
         clause_input,
         row,
         context.params,
         &context.access.read.query,
+        &context.control,
     )?;
     if relationship_types.len() != 1 {
         return Err(QueryError::semantic(
@@ -942,35 +940,70 @@ fn set_single_property(
     graph_view: &ResolvedGraphView,
     touched: &mut TouchedElements,
 ) -> QueryResult<()> {
-    let (owner_kind, id) = visible_owner(&context.staged, clause_input, row, variable, graph_view)?;
-    let key = resolve_property_key(
+    let (owner_kind, id) = visible_owner(
+        &context.staged,
+        clause_input,
+        row,
+        variable,
+        graph_view,
+        &context.control,
+    )?;
+    let (key, _key_memory) = resolve_property_key(
         key,
         &context.staged,
         row,
         context.params,
         &context.access.read.query,
+        &context.control,
     )?;
     context.access.check_write_property(&key)?;
-    let value = expression::evaluate_with_access(
+    let evaluated = expression::evaluate_with_access_control(
         value,
         &context.staged,
         row,
         context.params,
         &context.access.read.query,
+        &context.control,
     )?;
-    let next = property_from_value(value)?;
+    let _conversion_memory = context
+        .control
+        .reserve(crate::query::resources::value_bytes(&evaluated.value)?)?;
+    let next = property_from_value_controlled(evaluated.value, &context.control)?;
+    let _value_memory = evaluated.reservation;
+    apply_single_property(context, owner_kind, id, &key, next)?;
+    touched.insert(owner_kind, id);
+    Ok(())
+}
+
+fn apply_single_property(
+    context: &mut MutationContext<'_, '_>,
+    owner_kind: OwnerKind,
+    id: i64,
+    key: &str,
+    next: Option<PropertyValue>,
+) -> QueryResult<()> {
     let key_id = match &next {
-        Some(_) => storage::intern_property_key(context.connection, &key)?,
-        None => match storage::find_property_key(context.connection, &key)? {
+        Some(_) => storage::intern_property_key(context.connection, key)?,
+        None => match storage::find_property_key(context.connection, key)? {
             Some(key_id) => key_id,
             None => return Ok(()),
         },
     };
-    let previous = context.staged.property(owner_kind, id, key_id)?;
-    if !property_states_equal(&previous, &next)? {
-        context.set_property(owner_kind, id, key_id, next.clone())?;
+    let equal = context.staged.with_property_checked(
+        owner_kind,
+        id,
+        key_id,
+        &|| {
+            context
+                .control
+                .check()
+                .map_err(QueryError::into_storage_error)
+        },
+        |previous| property_states_equal(previous, next.as_ref(), &context.control),
+    )?;
+    if !equal {
+        context.set_property(owner_kind, id, key_id, next)?;
     }
-    touched.insert(owner_kind, id);
     Ok(())
 }
 
@@ -989,13 +1022,21 @@ fn set_property_map_item(
     graph_view: &ResolvedGraphView,
     touched: &mut TouchedElements,
 ) -> QueryResult<()> {
-    let (owner_kind, id) = visible_owner(staged, clause_input, row, variable, graph_view)?;
-    let map = evaluate_map(
+    let (owner_kind, id) = visible_owner(
+        staged,
+        clause_input,
+        row,
+        variable,
+        graph_view,
+        &context.control,
+    )?;
+    let (map, _map_memory) = evaluate_map(
         value,
         staged,
         row,
         context.params,
         &context.access.read.query,
+        &context.control,
     )?;
     set_property_map(
         context,
@@ -1031,15 +1072,24 @@ fn mutate_labels(
     mutation: LabelMutation,
 ) -> QueryResult<()> {
     let id = binding_node(row, variable)?;
-    require_visible_owner(graph_view, clause_input, staged, row, variable)?;
+    require_visible_owner(
+        graph_view,
+        clause_input,
+        staged,
+        row,
+        variable,
+        &context.control,
+    )?;
     let existing = staged.labels(id)?;
-    for label in resolve_write_names(
+    let (labels, _names_memory) = resolve_write_names(
         labels,
         staged,
         row,
         context.params,
         &context.access.read.query,
-    )? {
+        &context.control,
+    )?;
+    for label in labels {
         let label_id = match mutation {
             LabelMutation::Add => storage::intern_label(context.connection, &label)?,
             LabelMutation::Remove => {
@@ -1128,54 +1178,43 @@ fn remove_property(
     graph_view: &ResolvedGraphView,
     touched: &mut TouchedElements,
 ) -> QueryResult<()> {
-    let (owner_kind, id) = visible_owner(staged, clause_input, row, variable, graph_view)?;
-    let key = resolve_property_key(key, staged, row, context.params, &context.access.read.query)?;
+    let (owner_kind, id) = visible_owner(
+        staged,
+        clause_input,
+        row,
+        variable,
+        graph_view,
+        &context.control,
+    )?;
+    let (key, _key_memory) = resolve_property_key(
+        key,
+        staged,
+        row,
+        context.params,
+        &context.access.read.query,
+        &context.control,
+    )?;
     context.access.check_write_property(&key)?;
     let Some(key_id) = storage::find_property_key(context.connection, &key)? else {
         return Ok(());
     };
-    if staged.property(owner_kind, id, key_id)?.is_some() {
+    let exists = staged.with_property_checked(
+        owner_kind,
+        id,
+        key_id,
+        &|| {
+            context
+                .control
+                .check()
+                .map_err(QueryError::into_storage_error)
+        },
+        |value| -> QueryResult<bool> { Ok(value.is_some()) },
+    )?;
+    if exists {
         context.set_property(owner_kind, id, key_id, None)?;
     }
     touched.insert(owner_kind, id);
     Ok(())
-}
-
-fn resolve_property_key(
-    key: &WritePropertyKey,
-    snapshot: &Snapshot<'_>,
-    row: &BindingRow,
-    params: &BTreeMap<String, Value>,
-    query_access: &super::super::access::PropertyRules,
-) -> QueryResult<String> {
-    match key {
-        WritePropertyKey::Static(key) => Ok(key.clone()),
-        WritePropertyKey::Dynamic(expression) => {
-            match expression::evaluate_with_access(expression, snapshot, row, params, query_access)?
-            {
-                Value::String(key) if !key.is_empty() => Ok(key),
-                Value::String(_) => {
-                    Err(QueryError::semantic("dynamic property key cannot be empty"))
-                }
-                _ => Err(QueryError::new(
-                    QueryErrorKind::Type,
-                    "dynamic property key must evaluate to a non-null String",
-                )),
-            }
-        }
-    }
-}
-
-fn visible_owner(
-    staged: &Snapshot<'_>,
-    clause_input: &Snapshot<'_>,
-    row: &BindingRow,
-    variable: &str,
-    graph_view: &ResolvedGraphView,
-) -> QueryResult<(OwnerKind, i64)> {
-    let owner = binding_owner(row, variable)?;
-    require_visible_owner(graph_view, clause_input, staged, row, variable)?;
-    Ok(owner)
 }
 
 fn merge_one(
@@ -1194,17 +1233,19 @@ fn merge_one(
         &merge.pattern,
         context.params,
         &context.access.read.query,
+        &context.control,
     )?;
     let match_graph_view = context.graph_view()?;
-    let matches = match_pattern(
+    let (matches, matches_memory) = match_pattern(
         context.connection,
         &staged,
         &match_graph_view,
         &row,
         &merge.pattern,
         context.params,
-        is_interrupted,
+        &context.control,
     )?;
+    context.merge_memory.merge(matches_memory)?;
     if !matches.is_empty() {
         return merge_existing(
             context,
@@ -1233,6 +1274,7 @@ fn validate_merge_pattern_properties(
     pattern: &WritePatternPart,
     params: &BTreeMap<String, Value>,
     query_access: &super::super::access::PropertyRules,
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<()> {
     let expressions = pattern
         .nodes
@@ -1245,13 +1287,17 @@ fn validate_merge_pattern_properties(
                 .filter_map(|relationship| relationship.properties.as_ref()),
         );
     for expression in expressions {
-        for (key, value) in evaluate_map(expression, snapshot, row, params, query_access)? {
+        let (map, _map_memory) =
+            evaluate_map(expression, snapshot, row, params, query_access, control)?;
+        for (key, value) in map {
             if matches!(value, Value::Null) {
                 return Err(QueryError::semantic(format!(
                     "MERGE property {key:?} cannot be null"
                 )));
             }
-            property_from_value(value)?;
+            let _conversion_memory =
+                control.reserve(expression::value_bytes_with_control(&value, Some(control))?)?;
+            property_from_value_controlled(value, control)?;
         }
     }
     Ok(())

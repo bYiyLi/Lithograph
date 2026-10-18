@@ -58,10 +58,12 @@ fn unary_numeric(
     operation: impl FnOnce(Value) -> QueryResult<Value>,
 ) -> QueryResult<Value> {
     require_arity(values, 1)?;
-    if matches!(values[0], Value::Null) {
-        return Ok(Value::Null);
+    match &values[0] {
+        Value::Null => Ok(Value::Null),
+        Value::Integer(value) => operation(Value::Integer(*value)),
+        Value::Float(value) => operation(Value::Float(*value)),
+        _ => numeric_type_error(),
     }
-    operation(values[0].clone())
 }
 
 fn abs(value: Value) -> QueryResult<Value> {
@@ -159,14 +161,25 @@ fn round(values: &[Value]) -> QueryResult<Value> {
     let rounded = match values.get(2) {
         None if values.len() == 1 || precision == 0 => round_ties_positive(scaled),
         None => round_half(scaled, HalfMode::AwayFromZero),
-        Some(Value::String(mode)) => match mode.to_ascii_uppercase().as_str() {
-            "UP" => round_away_from_zero(scaled),
-            "DOWN" => scaled.trunc(),
-            "CEILING" => scaled.ceil(),
-            "FLOOR" => scaled.floor(),
-            "HALF_UP" => round_half(scaled, HalfMode::AwayFromZero),
-            "HALF_DOWN" => round_half(scaled, HalfMode::TowardZero),
-            "HALF_EVEN" => round_half(scaled, HalfMode::Even),
+        Some(Value::String(mode)) => match [
+            "UP",
+            "DOWN",
+            "CEILING",
+            "FLOOR",
+            "HALF_UP",
+            "HALF_DOWN",
+            "HALF_EVEN",
+        ]
+        .iter()
+        .position(|candidate| mode.eq_ignore_ascii_case(candidate))
+        {
+            Some(0) => round_away_from_zero(scaled),
+            Some(1) => scaled.trunc(),
+            Some(2) => scaled.ceil(),
+            Some(3) => scaled.floor(),
+            Some(4) => round_half(scaled, HalfMode::AwayFromZero),
+            Some(5) => round_half(scaled, HalfMode::TowardZero),
+            Some(6) => round_half(scaled, HalfMode::Even),
             _ => {
                 return Err(QueryError::new(
                     QueryErrorKind::Type,
@@ -243,4 +256,40 @@ fn numeric_type_error<T>() -> QueryResult<T> {
         QueryErrorKind::Type,
         "numeric function requires Integer or Float",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round_modes_preserve_ascii_case_and_invalid_mode_errors() {
+        for (mode, expected) in [
+            ("uP", 2.0),
+            ("dOwN", 1.0),
+            ("CeIlInG", 2.0),
+            ("fLoOr", 1.0),
+            ("half_UP", 2.0),
+            ("half_DOWN", 1.0),
+            ("half_EVEN", 2.0),
+        ] {
+            assert_eq!(
+                round(&[
+                    Value::Float(1.5),
+                    Value::Integer(0),
+                    Value::String(mode.into())
+                ])
+                .unwrap(),
+                Value::Float(expected),
+            );
+        }
+        for mode in ["x".repeat(1024 * 1024), "ＵＰ".into(), String::new()] {
+            assert_eq!(
+                round(&[Value::Float(1.5), Value::Integer(0), Value::String(mode)])
+                    .unwrap_err()
+                    .kind,
+                QueryErrorKind::Type,
+            );
+        }
+    }
 }

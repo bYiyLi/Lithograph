@@ -43,6 +43,9 @@ fn normalize_compact_time(value: String) -> String {
 }
 
 pub(super) fn offset_text(value: &str) -> String {
+    if !value.is_ascii() {
+        return value.to_owned();
+    }
     if value.len() == 5 && !value.contains(':') {
         format!("{}:{}", &value[..3], &value[3..])
     } else if value.len() == 3 {
@@ -79,4 +82,39 @@ pub(super) fn zoned_time_text(value: &str) -> String {
         local_time_text(&value[..offset]),
         offset_text(&value[offset..])
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn offset_normalization_preserves_supported_ascii_formats() {
+        for (input, expected) in [
+            ("Z", "Z"),
+            ("+08", "+08:00"),
+            ("-08", "-08:00"),
+            ("+0830", "+08:30"),
+            ("-0830", "-08:30"),
+            ("+083045", "+083045"),
+            ("+08:30", "+08:30"),
+            ("-08:30:45", "-08:30:45"),
+        ] {
+            assert_eq!(offset_text(input), expected);
+            let time = zoned_time_text(&format!("12:34:56{input}"));
+            assert!(TimeValue::parse(&time).is_ok(), "offset: {input}");
+        }
+    }
+
+    #[test]
+    fn unicode_offsets_reach_the_existing_type_error_without_slicing_panics() {
+        for offset in ["+€x", "-€x", "+é", "+界x", "+é00", "-界abc"] {
+            assert_eq!(offset_text(offset), offset);
+            let input = format!("12:34:56{offset}");
+            assert_eq!(zoned_time_text(&input), input);
+            let error = super::super::time(&[Value::String(input)], false, false)
+                .expect_err("non-ASCII offset");
+            assert_eq!(error.kind, QueryErrorKind::Type);
+        }
+    }
 }

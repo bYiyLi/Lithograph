@@ -2,10 +2,12 @@
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::layer::{LayerBuilder, persist_layer};
+use super::layer::{LayerBuilder, persist_layer_observed};
 use super::schema::commit_hash;
 use super::snapshot::Snapshot;
+use super::snapshot_read::SnapshotReadObserver;
 use super::{CommitMetadata, HashId, StorageError, StorageResult};
+use std::rc::Rc;
 
 /// Returns the current Commit referenced by a branch.
 pub fn branch_head(connection: &Connection, branch: &str) -> StorageResult<HashId> {
@@ -56,16 +58,60 @@ pub fn commit_layer(
     layer: &LayerBuilder,
     metadata: &CommitMetadata,
 ) -> StorageResult<HashId> {
+    commit_layer_checked(
+        connection,
+        branch,
+        expected_head,
+        second_parent,
+        layer,
+        metadata,
+        &|| Ok(()),
+    )
+}
+
+pub(crate) fn commit_layer_checked(
+    connection: &Connection,
+    branch: &str,
+    expected_head: HashId,
+    second_parent: Option<HashId>,
+    layer: &LayerBuilder,
+    metadata: &CommitMetadata,
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<HashId> {
+    commit_layer_observed(
+        connection,
+        branch,
+        expected_head,
+        second_parent,
+        layer,
+        metadata,
+        CommitRead {
+            observer: None,
+            check,
+        },
+    )
+}
+
+pub(crate) fn commit_layer_observed(
+    connection: &Connection,
+    branch: &str,
+    expected_head: HashId,
+    second_parent: Option<HashId>,
+    layer: &LayerBuilder,
+    metadata: &CommitMetadata,
+    read: CommitRead<'_>,
+) -> StorageResult<HashId> {
     with_savepoint(connection, |connection| {
+        (read.check)()?;
         let schema_hash = super::schema::schema_hash_for_commit(connection, expected_head)?;
         commit_change_inner(
             connection,
             branch,
             expected_head,
             second_parent,
-            layer,
-            schema_hash,
+            (layer, schema_hash),
             metadata,
+            &read,
         )
     })
 }
@@ -81,16 +127,78 @@ pub fn commit_layer_with_schema(
     schema_hash: HashId,
     metadata: &CommitMetadata,
 ) -> StorageResult<HashId> {
+    commit_layer_with_schema_checked(
+        connection,
+        branch,
+        expected_head,
+        second_parent,
+        (layer, schema_hash),
+        metadata,
+        &|| Ok(()),
+    )
+}
+
+pub(crate) fn commit_layer_with_schema_checked(
+    connection: &Connection,
+    branch: &str,
+    expected_head: HashId,
+    second_parent: Option<HashId>,
+    input: (&LayerBuilder, HashId),
+    metadata: &CommitMetadata,
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<HashId> {
+    commit_layer_with_schema_observed(
+        connection,
+        branch,
+        expected_head,
+        second_parent,
+        input,
+        metadata,
+        CommitRead {
+            observer: None,
+            check,
+        },
+    )
+}
+
+pub(crate) struct CommitRead<'a> {
+    observer: Option<Rc<dyn SnapshotReadObserver>>,
+    check: &'a dyn Fn() -> StorageResult<()>,
+}
+
+impl<'a> CommitRead<'a> {
+    pub(crate) fn observed(
+        observer: Rc<dyn SnapshotReadObserver>,
+        check: &'a dyn Fn() -> StorageResult<()>,
+    ) -> Self {
+        Self {
+            observer: Some(observer),
+            check,
+        }
+    }
+}
+
+pub(crate) fn commit_layer_with_schema_observed(
+    connection: &Connection,
+    branch: &str,
+    expected_head: HashId,
+    second_parent: Option<HashId>,
+    input: (&LayerBuilder, HashId),
+    metadata: &CommitMetadata,
+    read: CommitRead<'_>,
+) -> StorageResult<HashId> {
+    let (layer, schema_hash) = input;
     with_savepoint(connection, |connection| {
+        (read.check)()?;
         require_schema(connection, schema_hash)?;
         commit_change_inner(
             connection,
             branch,
             expected_head,
             second_parent,
-            layer,
-            schema_hash,
+            (layer, schema_hash),
             metadata,
+            &read,
         )
     })
 }
@@ -102,18 +210,15 @@ pub fn commit_schema(
     schema_hash: HashId,
     metadata: &CommitMetadata,
 ) -> StorageResult<HashId> {
-    with_savepoint(connection, |connection| {
-        require_schema(connection, schema_hash)?;
-        commit_change_inner(
-            connection,
-            branch,
-            expected_head,
-            None,
-            &LayerBuilder::default(),
-            schema_hash,
-            metadata,
-        )
-    })
+    commit_layer_with_schema(
+        connection,
+        branch,
+        expected_head,
+        None,
+        &LayerBuilder::default(),
+        schema_hash,
+        metadata,
+    )
 }
 
 fn commit_change_inner(
@@ -121,10 +226,12 @@ fn commit_change_inner(
     branch: &str,
     expected_head: HashId,
     second_parent: Option<HashId>,
-    layer: &LayerBuilder,
-    schema_hash: HashId,
+    input: (&LayerBuilder, HashId),
     metadata: &CommitMetadata,
+    read: &CommitRead<'_>,
 ) -> StorageResult<HashId> {
+    let (layer, schema_hash) = input;
+    (read.check)()?;
     if branch_head(connection, branch)? != expected_head {
         return Err(StorageError::BranchHeadMoved);
     }
@@ -132,10 +239,9 @@ fn commit_change_inner(
         require_commit(connection, parent)?;
     }
     require_schema(connection, schema_hash)?;
-    if !layer.is_empty() {
-        Snapshot::resolve(connection, expected_head)?.validate_layer_invariants(layer)?;
-    }
-    let (layer_id, layer_hash) = persist_layer(connection, layer)?;
+    validate_candidate_layer(connection, expected_head, layer, read)?;
+    let (layer_id, layer_hash) =
+        persist_layer_observed(connection, layer, read.observer.as_deref(), read.check)?;
     let commit = commit_hash(
         super::STORAGE_FORMAT,
         Some(expected_head),
@@ -152,9 +258,32 @@ fn commit_change_inner(
         schema_hash,
         metadata,
     };
+    (read.check)()?;
     insert_commit(connection, &row)?;
+    (read.check)()?;
     compare_and_move_branch(connection, branch, expected_head, commit)?;
+    (read.check)()?;
     Ok(commit)
+}
+
+fn validate_candidate_layer(
+    connection: &Connection,
+    expected_head: HashId,
+    layer: &LayerBuilder,
+    read: &CommitRead<'_>,
+) -> StorageResult<()> {
+    if !layer.is_empty() {
+        let state = Snapshot::resolve_state_with_checkpoint_skip(
+            connection,
+            expected_head,
+            None,
+            read.observer.clone(),
+            read.check,
+        )?;
+        Snapshot::from_resolved_state(connection, &state)
+            .validate_layer_invariants_checked(layer, read.check)?;
+    }
+    Ok(())
 }
 
 struct CommitRow<'a> {
@@ -324,4 +453,134 @@ fn rollback_savepoint(connection: &Connection) -> StorageResult<()> {
     connection
         .execute_batch("ROLLBACK TO lithograph_storage_write; RELEASE lithograph_storage_write")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::{
+        OwnerKind, PropertyValue, allocate_node_id, create_storage_schema, initialize_root,
+        intern_property_key,
+    };
+
+    fn fixture() -> (Connection, HashId) {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE main._lithograph_meta(id INTEGER PRIMARY KEY CHECK(id=1), magic TEXT NOT NULL, database_id TEXT NOT NULL, storage_format INTEGER NOT NULL);").unwrap();
+        create_storage_schema(&connection).unwrap();
+        let root = initialize_root(&connection).unwrap().root;
+        (connection, root)
+    }
+
+    fn property_layer(connection: &Connection) -> LayerBuilder {
+        let node = allocate_node_id(connection).unwrap();
+        let key = intern_property_key(connection, "value").unwrap();
+        let mut layer = LayerBuilder::default();
+        layer.add_node(node).unwrap();
+        layer
+            .set_property(
+                OwnerKind::Node,
+                node,
+                key,
+                PropertyValue::String("人物".repeat(25_000)),
+            )
+            .unwrap();
+        layer
+    }
+
+    fn metadata() -> CommitMetadata {
+        CommitMetadata {
+            author: None,
+            message: None,
+            committed_at: 123_456,
+        }
+    }
+
+    fn counts(connection: &Connection) -> (i64, i64, i64, i64) {
+        connection.query_row("SELECT (SELECT count(*) FROM _lithograph_commits), (SELECT count(*) FROM _lithograph_layers), (SELECT count(*) FROM _lithograph_node_delta), (SELECT next_id FROM _lithograph_sequences WHERE kind=6)", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap()
+    }
+
+    #[test]
+    fn checked_commit_interrupt_after_first_persisted_slot_rolls_back_atomically() {
+        let (connection, root) = fixture();
+        let layer = property_layer(&connection);
+        let baseline = counts(&connection);
+        let error = commit_layer_checked(
+            &connection,
+            "main",
+            root,
+            None,
+            &layer,
+            &metadata(),
+            &|| {
+                let nodes: i64 = connection.query_row(
+                    "SELECT count(*) FROM _lithograph_node_delta",
+                    [],
+                    |row| row.get(0),
+                )?;
+                if nodes != 0 {
+                    Err(StorageError::Sqlite(rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_INTERRUPT),
+                        None,
+                    )))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, StorageError::Sqlite(rusqlite::Error::SqliteFailure(code, _)) if code.extended_code == rusqlite::ffi::SQLITE_INTERRUPT)
+        );
+        assert_eq!(branch_head(&connection, "main").unwrap(), root);
+        assert_eq!(counts(&connection), baseline);
+        assert!(connection.is_autocommit());
+    }
+
+    #[derive(Debug)]
+    struct SmallReadBudget;
+    impl SnapshotReadObserver for SmallReadBudget {
+        fn reserve(&self, bytes: u64) -> StorageResult<Box<dyn std::fmt::Debug>> {
+            if bytes > 64 * 1024 {
+                return Err(StorageError::Sqlite(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_TOOBIG),
+                    None,
+                )));
+            }
+            Ok(Box::new(()))
+        }
+    }
+
+    #[test]
+    fn observed_commit_preflights_parent_values_before_validation_decode() {
+        let (connection, root) = fixture();
+        let first = commit_layer(
+            &connection,
+            "main",
+            root,
+            None,
+            &property_layer(&connection),
+            &metadata(),
+        )
+        .unwrap();
+        let mut candidate = LayerBuilder::default();
+        candidate
+            .add_node(allocate_node_id(&connection).unwrap())
+            .unwrap();
+        let baseline = counts(&connection);
+        let error = commit_layer_observed(
+            &connection,
+            "main",
+            first,
+            None,
+            &candidate,
+            &metadata(),
+            CommitRead::observed(Rc::new(SmallReadBudget), &|| Ok(())),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, StorageError::Sqlite(rusqlite::Error::SqliteFailure(code, _)) if code.extended_code == rusqlite::ffi::SQLITE_TOOBIG)
+        );
+        assert_eq!(branch_head(&connection, "main").unwrap(), first);
+        assert_eq!(counts(&connection), baseline);
+    }
 }

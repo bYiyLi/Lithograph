@@ -55,6 +55,28 @@ impl AstNode {
             .find_map(AstNode::surface_projection_alias)
     }
 
+    /// The clause's explicit matching mode or Cypher's default mode.
+    pub(crate) fn match_mode(&self) -> MatchModeKind {
+        self.children
+            .iter()
+            .find_map(|node| match node.kind {
+                AstKind::MatchMode(mode) => Some(mode),
+                _ => None,
+            })
+            .unwrap_or(MatchModeKind::DifferentRelationships)
+    }
+
+    /// Raw path-variable token owned by this PatternPart's PathAssignment.
+    pub(crate) fn path_assignment_variable(&self) -> Option<&str> {
+        self.children
+            .iter()
+            .find(|node| node.kind == AstKind::PathAssignment)?
+            .descendants()
+            .find(|node| node.kind == AstKind::PatternVariable)?
+            .text
+            .as_deref()
+    }
+
     pub fn descendants(&self) -> impl Iterator<Item = &AstNode> {
         let mut stack = vec![self];
         std::iter::from_fn(move || {

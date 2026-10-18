@@ -65,6 +65,7 @@ fn sqlite_error_mapping_preserves_stable_primary_categories() {
         (ffi::SQLITE_IOERR, ErrorCategory::Io),
         (ffi::SQLITE_CANTOPEN, ErrorCategory::Io),
         (ffi::SQLITE_READONLY, ErrorCategory::Io),
+        (ffi::SQLITE_INTERRUPT, ErrorCategory::Interrupted),
         (ffi::SQLITE_ERROR, ErrorCategory::Storage),
     ];
     for (code, expected) in cases {
@@ -187,6 +188,7 @@ fn explicit_transaction_forwards_per_execution_access_rules() {
         "readOnlyNoExternalIO": false,
         "readAccess": {"result": {"denyProperties": ["secret"]}},
         "writeAccess": {"allowDelete": false},
+        "memoryLimitBytes": 67108864,
     });
     let forwarded: Value = serde_json::from_str(
         &transaction::execution_options(&options.to_string(), "main").expect("valid options"),
@@ -198,6 +200,7 @@ fn explicit_transaction_forwards_per_execution_access_rules() {
         "readOnlyNoExternalIO",
         "readAccess",
         "writeAccess",
+        "memoryLimitBytes",
     ] {
         assert_eq!(forwarded[key], options[key]);
     }

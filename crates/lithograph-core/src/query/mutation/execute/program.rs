@@ -2,15 +2,16 @@ use std::collections::BTreeMap;
 
 use crate::cypher::{AstKind, AstNode, ClauseKind, QueryConnector, SubqueryKind, Value};
 use crate::query::completeness::execute::{
-    ConditionalBranchQuery, RowSet, conditional_branch_query, distinct_bindings,
-    execute_read_clause, merge_union_rows, restore_global_bindings, rows_for_next,
+    ConditionalBranchQuery, RowSet, append_call_columns, conditional_branch_query,
+    distinct_bindings, execute_read_clause, merge_call_result, merge_union_rows,
+    project_call_bindings, restore_global_bindings, rows_for_next,
     select_conditional_branch as select_branch, validate_executed_columns,
 };
 use crate::query::completeness::{
-    PreparedProgram, composed_query_parts, executable_query, explicit_imports, project_bindings,
-    required_query_body,
+    PreparedProgram, composed_query_parts, executable_query, explicit_imports, required_query_body,
 };
 use crate::query::expression::{self, BindingRow, BindingValue, compile_expression};
+use crate::query::resources::{allocation_bytes, checked_add, checked_mul, map_entry_bytes};
 use crate::query::spill::BindingSpill;
 
 use super::value::materialize_binding_rows_to_spill;
@@ -37,7 +38,23 @@ pub(crate) struct TransactionMutationContext<'a> {
     pub(crate) message: Option<&'a str>,
     pub(crate) params: &'a BTreeMap<String, Value>,
     pub(crate) metrics: &'a mut QueryMetrics,
+    pub(crate) resources: &'a QueryResources,
     pub(crate) is_interrupted: &'a dyn Fn() -> bool,
+}
+
+impl<'a> TransactionMutationContext<'a> {
+    fn mutation_context(&self) -> QueryResult<MutationContext<'a, 'a>> {
+        check_interrupted(self.is_interrupted)?;
+        MutationContext::new(
+            self.connection,
+            self.base_commit,
+            self.params,
+            self.graph_view,
+            self.access,
+            self.resources,
+            self.is_interrupted,
+        )
+    }
 }
 
 pub(crate) fn execute_program(
@@ -46,6 +63,7 @@ pub(crate) fn execute_program(
     base_commit: HashId,
     params: &BTreeMap<String, Value>,
     metrics: &mut QueryMetrics,
+    resources: &QueryResources,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<WriteOutcome> {
     let options = program
@@ -58,6 +76,8 @@ pub(crate) fn execute_program(
         params,
         &options.graph_view,
         &options.access,
+        resources,
+        is_interrupted,
     )?;
     let result = execute_query_body(
         &mut context,
@@ -133,9 +153,14 @@ fn execute_owned_sqlite_transaction(
         Err(error) => {
             let rollback = context.connection.execute_batch("ROLLBACK");
             if let Err(rollback_error) = rollback {
-                return Err(QueryError::internal(format!(
-                    "{failure_label} failed ({error}); rollback also failed ({rollback_error})"
-                )));
+                let mut cleanup = QueryError::from(rollback_error);
+                let diagnostic =
+                    format!("{failure_label} failed ({error}); rollback also failed ({cleanup})");
+                if cleanup.kind == QueryErrorKind::Interrupted {
+                    cleanup.message = diagnostic;
+                    return Err(cleanup);
+                }
+                return Err(QueryError::internal(diagnostic));
             }
             Err(error)
         }
@@ -148,14 +173,7 @@ fn execute_program_suffix_inner(
     start: usize,
     input: RowSet,
 ) -> QueryResult<TransactionBatchOutcome> {
-    check_interrupted(transaction.is_interrupted)?;
-    let mut context = MutationContext::new(
-        transaction.connection,
-        transaction.base_commit,
-        transaction.params,
-        transaction.graph_view,
-        transaction.access,
-    )?;
+    let mut context = transaction.mutation_context()?;
     let rows = execute_single_from(
         &mut context,
         transaction.program,
@@ -174,14 +192,7 @@ fn execute_spilled_outer_write_inner(
     spill_connection: Connection,
     mut rows: BindingSpill,
 ) -> QueryResult<TransactionBatchOutcome> {
-    check_interrupted(transaction.is_interrupted)?;
-    let mut context = MutationContext::new(
-        transaction.connection,
-        transaction.base_commit,
-        transaction.params,
-        transaction.graph_view,
-        transaction.access,
-    )?;
+    let mut context = transaction.mutation_context()?;
     for clause in clauses {
         let AstKind::Clause(kind) = clause.kind else {
             continue;
@@ -217,6 +228,7 @@ fn execute_spilled_outer_write_inner(
         transaction,
         context,
         RowSet {
+            memory: None,
             columns: Vec::new(),
             rows: Vec::new(),
         },
@@ -238,6 +250,8 @@ fn execute_transaction_batch_inner(
         transaction.params,
         transaction.graph_view,
         transaction.access,
+        transaction.resources,
+        transaction.is_interrupted,
     )?;
     let rows = execute_call_subquery_rows(
         &mut context,
@@ -257,19 +271,7 @@ fn finish_transaction_mutation(
     rows: RowSet,
     commit_mutation: bool,
 ) -> QueryResult<TransactionBatchOutcome> {
-    let final_layer = context.delta.layer()?;
-    let counters = context.delta.counters()?;
-    let final_snapshot = Snapshot::resolve_with_layer(
-        transaction.connection,
-        transaction.base_commit,
-        &final_layer,
-    )?;
-    crate::query::schema::validate_layer_against_commit_schema(
-        transaction.connection,
-        transaction.base_commit,
-        &final_snapshot,
-        &final_layer,
-    )?;
+    let (final_layer, counters, _final_snapshot) = context.validated_layer()?;
     check_interrupted(transaction.is_interrupted)?;
     let commit = if commit_mutation {
         let metadata = CommitMetadata {
@@ -277,14 +279,7 @@ fn finish_transaction_mutation(
             message: transaction.message.map(str::to_owned),
             committed_at: now_micros()?,
         };
-        storage::commit_layer(
-            transaction.connection,
-            transaction.branch,
-            transaction.base_commit,
-            None,
-            &final_layer,
-            &metadata,
-        )?
+        context.commit_layer(transaction.branch, &final_layer, &metadata)?
     } else {
         transaction.base_commit
     };
@@ -314,29 +309,15 @@ fn execute_call_subquery_rows(
         .find(|node| node.kind == AstKind::SubqueryScope);
     let imports = explicit_imports(scope, &input.columns);
     let returns_rows = crate::cypher::query_body_returns_columns(body);
-    let mut columns = input.columns.clone();
+    let mut columns = input.columns;
+    let _input_memory = input.memory;
     let mut output = Vec::new();
+    let mut memory = context.control.reserve(0)?;
     for outer in input.rows {
-        check_interrupted(is_interrupted)?;
-        let imported = project_bindings(&outer, &imports);
-        let globals = if scope.is_some() {
-            imported.clone()
-        } else {
-            BindingRow::default()
-        };
-        let previous_globals = std::mem::replace(&mut context.global_bindings, globals);
+        context.control.work(1)?;
         let inner = if scope.is_some() {
-            execute_query_body(
-                context,
-                program,
-                body,
-                RowSet {
-                    columns: imported.order.clone(),
-                    rows: vec![imported],
-                },
-                metrics,
-                is_interrupted,
-            )
+            let imported = project_call_bindings(&outer, &imports, &context.control)?;
+            execute_imported_call(context, program, body, imported, metrics, is_interrupted)?
         } else {
             execute_call_body_with_importing_with(
                 context,
@@ -345,16 +326,72 @@ fn execute_call_subquery_rows(
                 &outer,
                 metrics,
                 is_interrupted,
-            )
+            )?
         };
-        context.global_bindings = previous_globals;
-        let inner = inner?;
-        merge_call_result(outer, inner, returns_rows, &mut columns, &mut output);
+        let mut merged = merge_call_result(&outer, inner, returns_rows, &context.control)?;
+        append_call_columns(&mut columns, &merged.columns, &mut memory, &context.control)?;
+        if let Some(merged_memory) = merged.memory.take() {
+            memory.merge(merged_memory)?;
+        }
+        extend_call_rows(&mut output, merged.rows, &mut memory, &context.control)?;
     }
-    Ok(RowSet {
+    let mut result = RowSet {
         columns,
         rows: output,
-    })
+        memory: Some(memory),
+    };
+    result.track(&context.control)?;
+    Ok(result)
+}
+
+fn execute_imported_call(
+    context: &mut MutationContext<'_, '_>,
+    program: &PreparedProgram,
+    body: &AstNode,
+    imported: RowSet,
+    metrics: &mut QueryMetrics,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<RowSet> {
+    let mut globals = imported.try_clone(&context.control)?;
+    let global_row = globals
+        .rows
+        .pop()
+        .ok_or_else(|| QueryError::internal("CALL globals lost their imported row"))?;
+    let previous_globals = std::mem::replace(&mut context.global_bindings, global_row);
+    let result = execute_query_body(context, program, body, imported, metrics, is_interrupted);
+    context.global_bindings = previous_globals;
+    drop(globals);
+    result
+}
+
+fn extend_call_rows(
+    output: &mut Vec<BindingRow>,
+    rows: Vec<BindingRow>,
+    memory: &mut MemoryReservation,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<()> {
+    let required = output
+        .len()
+        .checked_add(rows.len())
+        .ok_or_else(|| crate::query::resources::memory_error("CALL output capacity overflow"))?;
+    if required > output.capacity() {
+        let capacity = output
+            .capacity()
+            .checked_mul(2)
+            .ok_or_else(|| crate::query::resources::memory_error("CALL output capacity overflow"))?
+            .max(required);
+        memory.grow(allocation_bytes::<BindingRow>(
+            capacity - output.capacity(),
+        )?)?;
+        output
+            .try_reserve_exact(capacity - output.len())
+            .map_err(|_| crate::query::resources::memory_error("unable to allocate CALL output"))?;
+    }
+    for row in rows {
+        control.work(1)?;
+        output.push(row);
+    }
+    Ok(())
 }
 
 fn execute_query_body(
@@ -390,11 +427,11 @@ fn execute_composed(
         context,
         program,
         parts.first,
-        clone_rows(&input),
+        input.try_clone(&context.control)?,
         metrics,
         is_interrupted,
     )?;
-    let mut segment_input = clone_rows(&input);
+    let mut segment_input = input.try_clone(&context.control)?;
     let mut previous_operand = parts.first;
     for (connector, operand) in parts.rest {
         check_interrupted(is_interrupted)?;
@@ -405,7 +442,7 @@ fn execute_composed(
                     context,
                     program,
                     operand,
-                    clone_rows(&segment_input),
+                    segment_input.try_clone(&context.control)?,
                     metrics,
                     is_interrupted,
                 )?;
@@ -415,7 +452,7 @@ fn execute_composed(
                     context,
                     program,
                     operand,
-                    clone_rows(&segment_input),
+                    segment_input.try_clone(&context.control)?,
                     metrics,
                     is_interrupted,
                 )?;
@@ -469,13 +506,17 @@ fn execute_conditional(
         let selected = {
             let snapshot = context.staged_snapshot()?;
             select_branch(query, |expression| {
-                expression::predicate(expression::evaluate_with_access(
-                    &compile_expression(expression)?,
-                    &snapshot,
-                    &row,
-                    context.params,
-                    &context.access.read.query,
-                )?)
+                expression::predicate(
+                    expression::evaluate_with_access_control(
+                        &compile_expression(expression)?,
+                        &snapshot,
+                        &row,
+                        context.params,
+                        &context.access.read.query,
+                        &context.control,
+                    )?
+                    .value,
+                )
             })?
         };
         let Some(branch) = selected else {
@@ -489,6 +530,7 @@ fn execute_conditional(
         });
     }
     Ok(output.unwrap_or(RowSet {
+        memory: None,
         columns: crate::query::completeness::infer_columns(query, &input_columns, &program.source)?,
         rows: Vec::new(),
     }))
@@ -503,6 +545,7 @@ fn execute_conditional_branch(
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<RowSet> {
     let input = RowSet {
+        memory: None,
         columns: row.order.clone(),
         rows: vec![row],
     };
@@ -565,6 +608,8 @@ fn execute_single_from(
             metrics,
             is_interrupted,
         )?;
+        rows.track(&context.control)?;
+        context.merge_memory.resize(0)?;
     }
     Ok(rows)
 }
@@ -598,7 +643,7 @@ fn execute_single_clause(
         ClauseKind::Call => execute_call(context, program, clause, rows, metrics, is_interrupted),
         ClauseKind::With => {
             let projected = execute_read(context, program, clause, rows, metrics, is_interrupted)?;
-            Ok(restore_global_bindings(projected, &context.global_bindings))
+            restore_global_bindings(projected, &context.global_bindings, &context.control)
         }
         _ => execute_read(context, program, clause, rows, metrics, is_interrupted),
     }
@@ -612,6 +657,7 @@ fn execute_basic_write_clause(
     rows: RowSet,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<RowSet> {
+    let memory = rows.memory;
     let columns = rows.columns;
     let rows = match kind {
         ClauseKind::Create | ClauseKind::Insert => execute_create_clause(
@@ -656,7 +702,11 @@ fn execute_basic_write_clause(
     } else {
         columns
     };
-    Ok(RowSet { columns, rows })
+    Ok(RowSet {
+        memory,
+        columns,
+        rows,
+    })
 }
 
 fn inferred_clause_columns(
@@ -687,6 +737,7 @@ fn execute_read(
         rows,
         metrics,
         is_interrupted,
+        &context.control,
     )
 }
 
@@ -717,43 +768,6 @@ fn execute_call(
     )
 }
 
-fn merge_call_result(
-    outer: BindingRow,
-    inner: RowSet,
-    returns_rows: bool,
-    columns: &mut Vec<String>,
-    output: &mut Vec<BindingRow>,
-) {
-    for column in &inner.columns {
-        if !columns.contains(column) {
-            columns.push(column.clone());
-        }
-    }
-    if !returns_rows {
-        output.push(outer);
-        return;
-    }
-    for inner_row in inner.rows {
-        let mut combined = outer.clone();
-        for column in &inner.columns {
-            combined.insert(
-                column.clone(),
-                inner_row
-                    .values
-                    .get(column)
-                    .cloned()
-                    .unwrap_or(BindingValue::Null),
-            );
-        }
-        if inner_row.load_csv_context.is_some() {
-            combined
-                .load_csv_context
-                .clone_from(&inner_row.load_csv_context);
-        }
-        output.push(combined);
-    }
-}
-
 fn execute_call_body_with_importing_with(
     context: &mut MutationContext<'_, '_>,
     program: &PreparedProgram,
@@ -779,7 +793,7 @@ fn execute_call_query_with_importing_with(
             context,
             program,
             query,
-            importing_with_seed(query, outer),
+            importing_with_seed(query, outer, &context.control)?,
             metrics,
             is_interrupted,
         ),
@@ -837,7 +851,7 @@ fn execute_call_composed(
                     context,
                     program,
                     operand,
-                    clone_rows(&next_input),
+                    next_input.try_clone(&context.control)?,
                     metrics,
                     is_interrupted,
                 )?;
@@ -849,7 +863,7 @@ fn execute_call_composed(
                         context,
                         program,
                         operand,
-                        clone_rows(input),
+                        input.try_clone(&context.control)?,
                         metrics,
                         is_interrupted,
                     )?
@@ -876,13 +890,13 @@ fn execute_call_composed(
     Ok(result)
 }
 
-fn importing_with_seed(single: &AstNode, outer: &BindingRow) -> RowSet {
+fn importing_with_seed(
+    single: &AstNode,
+    outer: &BindingRow,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<RowSet> {
     let columns = crate::query::completeness::importing_with_columns(single, &outer.order);
-    let row = project_bindings(outer, &columns);
-    RowSet {
-        columns,
-        rows: vec![row],
-    }
+    project_call_bindings(outer, &columns, control)
 }
 
 fn execute_foreach(
@@ -894,9 +908,11 @@ fn execute_foreach(
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<RowSet> {
     let spec = lower_foreach(clause)?;
+    let memory = input.memory;
     let output_rows = input.rows;
     for outer in &output_rows {
-        for value in foreach_values(context, &spec.expression, outer)? {
+        let (values, _values_memory) = foreach_values(context, &spec.expression, outer)?;
+        for value in values {
             check_interrupted(is_interrupted)?;
             execute_foreach_value(
                 context,
@@ -912,6 +928,7 @@ fn execute_foreach(
     Ok(RowSet {
         columns: input.columns,
         rows: output_rows,
+        memory,
     })
 }
 
@@ -946,17 +963,19 @@ fn foreach_values(
     context: &MutationContext<'_, '_>,
     expression: &expression::Expr,
     outer: &BindingRow,
-) -> QueryResult<Vec<Value>> {
+) -> QueryResult<(Vec<Value>, MemoryReservation)> {
     let snapshot = context.staged_snapshot()?;
-    match expression::evaluate_with_access(
+    let evaluated = expression::evaluate_with_access_control(
         expression,
         &snapshot,
         outer,
         context.params,
         &context.access.read.query,
-    )? {
-        Value::Null => Ok(Vec::new()),
-        Value::List(values) => Ok(values),
+        &context.control,
+    )?;
+    match evaluated.value {
+        Value::Null => Ok((Vec::new(), evaluated.reservation)),
+        Value::List(values) => Ok((values, evaluated.reservation)),
         _ => Err(QueryError::new(
             QueryErrorKind::Type,
             "FOREACH input must be a List or null",
@@ -977,16 +996,7 @@ fn execute_foreach_value(
     metrics: &mut QueryMetrics,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<()> {
-    let snapshot = context.staged_snapshot()?;
-    let mut local = outer.clone();
-    local.insert(
-        spec.variable.clone(),
-        expression::binding_from_value(&snapshot, value)?,
-    );
-    let mut rows = RowSet {
-        columns: local.order.clone(),
-        rows: vec![local],
-    };
+    let mut rows = foreach_seed(context, spec, outer, value)?;
     for update in &spec.updates {
         validate_foreach_update(update)?;
         rows = execute_single(
@@ -1004,6 +1014,56 @@ fn execute_foreach_value(
         )?;
     }
     Ok(())
+}
+
+fn foreach_seed(
+    context: &MutationContext<'_, '_>,
+    spec: &ForeachSpec,
+    outer: &BindingRow,
+    value: Value,
+) -> QueryResult<RowSet> {
+    let snapshot = context.staged_snapshot()?;
+    let mut rows =
+        RowSet::try_clone_rows(&outer.order, std::slice::from_ref(outer), &context.control)?;
+    let extra = foreach_binding_bytes(spec, &value, &context.control)?;
+    rows.memory
+        .as_mut()
+        .ok_or_else(|| QueryError::internal("FOREACH local row lost its reservation"))?
+        .grow(extra)?;
+    let local = rows
+        .rows
+        .first_mut()
+        .ok_or_else(|| QueryError::internal("FOREACH local row is missing"))?;
+    local.insert(
+        expression::clone_string_controlled(&spec.variable, Some(&context.control))?,
+        expression::binding_from_value_controlled(&snapshot, value, &context.control)?,
+    );
+    if !rows.columns.contains(&spec.variable) {
+        rows.columns.push(expression::clone_string_controlled(
+            &spec.variable,
+            Some(&context.control),
+        )?);
+    }
+    rows.track(&context.control)?;
+    Ok(rows)
+}
+
+fn foreach_binding_bytes(
+    spec: &ForeachSpec,
+    value: &Value,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<u64> {
+    let extra = checked_add(
+        checked_add(
+            map_entry_bytes::<BindingValue>()?,
+            checked_mul(spec.variable.len() as u64, 3)?,
+        )?,
+        checked_add(
+            allocation_bytes::<String>(8)?,
+            expression::value_bytes_with_control(value, Some(control))?,
+        )?,
+    )?;
+    Ok(extra)
 }
 
 fn validate_foreach_update(update: &AstNode) -> QueryResult<()> {
@@ -1043,8 +1103,10 @@ fn union_rows(
             &left.columns,
             &snapshot,
             &context.access.read.query,
+            &context.control,
         )?;
     }
+    left.track(&context.control)?;
     Ok(left)
 }
 
@@ -1055,16 +1117,7 @@ fn finish_program(
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<WriteOutcome> {
     check_interrupted(is_interrupted)?;
-    let final_layer = context.delta.layer()?;
-    let counters = context.delta.counters()?;
-    let final_snapshot =
-        Snapshot::resolve_with_layer(context.connection, context.base_commit, &final_layer)?;
-    crate::query::schema::validate_layer_against_commit_schema(
-        context.connection,
-        context.base_commit,
-        &final_snapshot,
-        &final_layer,
-    )?;
+    let (final_layer, counters, final_snapshot) = context.validated_layer()?;
     let rows = if program.public_result {
         validate_executed_columns(&program.columns, &result.columns)?;
         materialize_binding_rows_to_spill(
@@ -1073,6 +1126,7 @@ fn finish_program(
             result.rows,
             is_interrupted,
             &context.access.read.query,
+            &context.control,
         )?
     } else {
         None
@@ -1087,26 +1141,12 @@ fn finish_program(
         message: options.message.clone(),
         committed_at: now_micros()?,
     };
-    let commit = storage::commit_layer(
-        context.connection,
-        &options.branch,
-        context.base_commit,
-        None,
-        &final_layer,
-        &metadata,
-    )?;
+    let commit = context.commit_layer(&options.branch, &final_layer, &metadata)?;
     Ok(WriteOutcome {
         rows,
         commit,
         counters,
     })
-}
-
-fn clone_rows(input: &RowSet) -> RowSet {
-    RowSet {
-        columns: input.columns.clone(),
-        rows: input.rows.clone(),
-    }
 }
 
 fn first_surface_expression(node: &AstNode) -> QueryResult<&AstNode> {

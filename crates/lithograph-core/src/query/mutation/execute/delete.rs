@@ -213,7 +213,7 @@ fn delete_bound_node(
     graph_view: &ResolvedGraphView,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<()> {
-    require_visible_delete_node(clause_input, staged, id, graph_view)?;
+    require_visible_delete_node(clause_input, staged, id, graph_view, &context.control)?;
     if !staged.node_exists(id)? {
         return Ok(());
     }
@@ -234,13 +234,16 @@ fn require_visible_delete_node(
     staged: &Snapshot<'_>,
     id: i64,
     graph_view: &ResolvedGraphView,
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<()> {
-    if clause_input.node_exists(id)? && !graph_view.visible_node(clause_input, id)? {
+    if clause_input.node_exists(id)?
+        && !graph_view.visible_node_controlled(clause_input, id, control)?
+    {
         return Err(QueryError::graph_view_violation(format!(
             "DELETE cannot target Node {id} outside the active Graph View"
         )));
     }
-    if !clause_input.node_exists(id)? && !graph_view.visible_node(staged, id)? {
+    if !clause_input.node_exists(id)? && !graph_view.visible_node_controlled(staged, id, control)? {
         return Err(QueryError::graph_view_violation(format!(
             "DELETE cannot target Node {id} outside the active Graph View"
         )));
@@ -266,8 +269,16 @@ fn delete_incident_relationships(
     for relationship in incident {
         check_interrupted(is_interrupted)?;
         let visible = match clause_input.relationship(relationship.id)? {
-            Some(input_record) => graph_view.visible_relationship(clause_input, input_record)?,
-            None => graph_view.visible_relationship(staged, relationship)?,
+            Some(input_record) => graph_view.visible_relationship_controlled(
+                clause_input,
+                input_record,
+                &context.control,
+            )?,
+            None => graph_view.visible_relationship_controlled(
+                staged,
+                relationship,
+                &context.control,
+            )?,
         };
         if !visible {
             return Err(QueryError::graph_view_violation(format!(
@@ -289,7 +300,11 @@ fn delete_bound_relationship(
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<()> {
     if let Some(input_record) = clause_input.relationship(record.id)?
-        && !graph_view.visible_relationship(clause_input, input_record)?
+        && !graph_view.visible_relationship_controlled(
+            clause_input,
+            input_record,
+            &context.control,
+        )?
     {
         return Err(QueryError::graph_view_violation(format!(
             "DELETE cannot target Relationship {} outside the active Graph View",
@@ -300,7 +315,7 @@ fn delete_bound_relationship(
         return Ok(());
     };
     if clause_input.relationship(record.id)?.is_none()
-        && !graph_view.visible_relationship(staged, current)?
+        && !graph_view.visible_relationship_controlled(staged, current, &context.control)?
     {
         return Err(QueryError::graph_view_violation(format!(
             "DELETE cannot target Relationship {} outside the active Graph View",

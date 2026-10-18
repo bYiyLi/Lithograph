@@ -96,7 +96,9 @@ SELECT lithograph('MATCH (d:StagedSafe) RETURN count(d) AS count');
 
 ## 5. 明确宿主仍负责的边界
 
-该选项限制本次 Lithograph Cypher execution；SQLite 读取当前数据库、TEMP/spill 和可重建 derived-state 工作仍允许。它不隔离任意 SQL、本机扩展、OS 文件权限、其它 connection，也不约束单独的 init/transaction lifecycle SQL。它没有内置 CPU、耗时、结果行数或内存配额；宿主仍需适当的查询/结果预算、取消和并发管理。
+该选项限制本次 Lithograph Cypher execution；SQLite 读取当前数据库、TEMP/spill 和可重建 derived-state 工作仍允许。它不隔离任意 SQL、本机扩展、OS 文件权限、其它 connection，也不约束单独的 init/transaction lifecycle SQL。`readOnlyNoExternalIO` 本身没有 CPU、耗时、结果行数或内存配额；宿主仍需适当的查询/结果预算、取消和并发管理。
+
+Unreleased / Phase 19 增加独立的 `memoryLimitBytes`，可与本页安全选项组合，用来限制受控 execution 工作内存。v0.3.2 发行库不接受该字段；新构建的设置方式、资源错误和不能覆盖的进程内存边界见 [应用集成](integration.md#execution-memory-budget)。只读和限制返回行数不会自动限制表达式中间值的开销。
 
 Graph View 限制可见图，`readOnlyNoExternalIO` 限制本次操作能力；需要二者时由宿主同时强制设置。完整 option 合同及允许的 Procedure 名称见 [Execution Options](../reference/execution-options.md)，连接清理见 [Transactions Reference](../reference/transactions.md)。
 

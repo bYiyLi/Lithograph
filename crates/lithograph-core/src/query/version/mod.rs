@@ -1,7 +1,13 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 
-use rusqlite::Connection;
+use rusqlite::Connection as SqliteConnection;
+
+use execution::VersionExecution as Connection;
+pub(crate) use execution::{
+    VersionExecution, VersionLayer, VersionOwned, VersionOwnedMemory, VersionRows, VersionSchema,
+    VersionState, VersionValue, VersionValues,
+};
 
 use crate::cypher::Value;
 use crate::storage::{self, CommitMetadata, HashId};
@@ -11,7 +17,9 @@ use super::{QueryError, QueryErrorKind, QueryResult, now_micros};
 
 mod access;
 mod canonical;
+mod execution;
 mod merge;
+mod metadata;
 mod operations;
 mod patch;
 
@@ -20,6 +28,7 @@ pub(crate) type ProcedureRow = BTreeMap<String, Value>;
 pub(crate) struct ProcedureOutcome {
     pub(crate) rows: Vec<ProcedureRow>,
     pub(crate) summary_commit: HashId,
+    pub(crate) _memory: super::MemoryReservation,
 }
 
 #[derive(Debug)]
@@ -29,20 +38,33 @@ struct LogTraversal {
     pending_children: BTreeMap<HashId, usize>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct CandidateContext {
     pub(crate) base_commit: HashId,
     pub(crate) layer: storage::LayerBuilder,
     pub(crate) schema: storage::SchemaState,
     pub(crate) session_id: String,
     pub(crate) revision: i64,
+    _layer_memory: Option<VersionOwnedMemory>,
+    _schema_memory: Option<VersionOwnedMemory>,
+}
+
+impl CandidateContext {
+    pub(crate) fn release_working_memory(&mut self) {
+        self.layer = storage::LayerBuilder::default();
+        self.schema = storage::SchemaState::default();
+        self._layer_memory = None;
+        self._schema_memory = None;
+    }
 }
 
 pub(crate) fn resolve_candidate_context(
-    connection: &Connection,
+    connection: &SqliteConnection,
     selector: &MergeSessionSelector,
+    control: &super::ExecutionControl<'_>,
 ) -> QueryResult<CandidateContext> {
-    with_read_snapshot(connection, |connection| {
+    let connection = Connection::new(connection, control);
+    with_read_snapshot(&connection, |connection| {
         resolve_candidate_context_snapshot(connection, selector)
     })
 }
@@ -93,12 +115,16 @@ fn sparse_candidate_context(
                 "Merge Session has unresolved conflicts",
             ));
         }
+        let (layer, layer_memory) = layer.into_parts();
+        let (schema, schema_memory) = schema.into_parts();
         return Ok(Some(CandidateContext {
             base_commit: session.ours,
             layer,
             schema,
             session_id: selector.id.clone(),
             revision: selector.revision,
+            _layer_memory: Some(layer_memory),
+            _schema_memory: Some(schema_memory),
         }));
     }
     Ok(None)
@@ -130,14 +156,19 @@ fn candidate_context_from_computation(
             )));
         }
     };
-    let base = storage::load_snapshot_state(connection, base_commit)?;
-    let layer = storage::layer_between(&base, &candidate)?;
+    let base = connection.load_state(base_commit)?;
+    let layer = connection.layer_between(&base, &candidate)?;
+    let schema = connection.clone_schema(&candidate.schema)?;
+    let (layer, layer_memory) = layer.into_parts();
+    let (schema, schema_memory) = schema.into_parts();
     Ok(CandidateContext {
         base_commit,
         layer,
-        schema: candidate.schema,
+        schema,
         session_id: selector.id.clone(),
         revision: selector.revision,
+        _layer_memory: Some(layer_memory),
+        _schema_memory: Some(schema_memory),
     })
 }
 
@@ -166,39 +197,52 @@ pub(super) fn with_read_snapshot<T>(
 
 #[doc(hidden)]
 pub fn validate_candidate_state(
-    connection: &Connection,
+    connection: &SqliteConnection,
     base_commit: HashId,
     state: &storage::SnapshotState,
 ) -> QueryResult<()> {
-    let base = storage::load_snapshot_state(connection, base_commit)?;
-    let layer = storage::layer_between(&base, state)?;
-    patch::validate_candidate(connection, base_commit, &layer, &state.schema)
+    let resources = super::QueryResources::default();
+    let never = || false;
+    let control = super::ExecutionControl::new(&resources, &never);
+    let connection = Connection::new(connection, &control);
+    let base = connection.load_state(base_commit)?;
+    let layer = connection.layer_between(&base, state)?;
+    patch::validate_candidate(&connection, base_commit, &layer, &state.schema)
 }
 
 pub(crate) fn execute_procedure(
-    connection: &Connection,
+    connection: &SqliteConnection,
     name: &str,
     args: Vec<Value>,
     options: &ExecutionOptions,
     pinned_commit: HashId,
     is_interrupted: &dyn Fn() -> bool,
+    control: &super::ExecutionControl<'_>,
 ) -> QueryResult<ProcedureOutcome> {
+    let execution = Connection::new(connection, control);
+    let connection = &execution;
     validate_options(name, options)?;
     let normalized = name.to_ascii_lowercase();
+    let metadata_memory = metadata::reserve_metadata(connection, &normalized, &args, options)?;
+    let legacy = |rows: QueryResult<Vec<ProcedureRow>>| {
+        metadata::guard_rows(connection, metadata_memory, rows?)
+    };
     let rows = match normalized.as_str() {
-        "lithograph.branch.create" => branch_create(connection, args, pinned_commit),
-        "lithograph.branch.checkout" => branch_checkout(connection, args),
-        "lithograph.branch.list" => branch_list(connection),
-        "lithograph.branch.delete" => branch_delete(connection, args),
-        "lithograph.commit.get" => commit_get(connection, args),
-        "lithograph.commit.create" => commit_create(connection, args, options, pinned_commit),
-        "lithograph.commit.data.set" => commit_data_set(connection, args),
-        "lithograph.commit.data.clear" => commit_data_clear(connection, args),
-        "lithograph.tag.create" => tag_create(connection, args),
-        "lithograph.tag.list" => tag_list(connection),
-        "lithograph.tag.move" => tag_move(connection, args),
-        "lithograph.tag.delete" => tag_delete(connection, args),
-        "lithograph.log" => log(connection, args),
+        "lithograph.branch.create" => legacy(branch_create(connection, args, pinned_commit)),
+        "lithograph.branch.checkout" => legacy(branch_checkout(connection, args)),
+        "lithograph.branch.list" => legacy(branch_list(connection)),
+        "lithograph.branch.delete" => legacy(branch_delete(connection, args)),
+        "lithograph.commit.get" => legacy(commit_get(connection, args)),
+        "lithograph.commit.create" => {
+            legacy(commit_create(connection, args, options, pinned_commit))
+        }
+        "lithograph.commit.data.set" => legacy(commit_data_set(connection, args)),
+        "lithograph.commit.data.clear" => legacy(commit_data_clear(connection, args)),
+        "lithograph.tag.create" => legacy(tag_create(connection, args)),
+        "lithograph.tag.list" => legacy(tag_list(connection)),
+        "lithograph.tag.move" => legacy(tag_move(connection, args)),
+        "lithograph.tag.delete" => legacy(tag_delete(connection, args)),
+        "lithograph.log" => legacy(log(connection, args)),
         "lithograph.diff" => patch::diff(connection, args, options),
         "lithograph.patch.apply" => patch::apply(connection, args, options, pinned_commit),
         "lithograph.merge.start" => merge::start(connection, args, options, pinned_commit),
@@ -212,7 +256,7 @@ pub(crate) fn execute_procedure(
         "lithograph.squash" => operations::squash(connection, args, options, pinned_commit),
         "lithograph.reset" => operations::reset(connection, args, options, pinned_commit),
         "lithograph.revert" => operations::revert(connection, args, options, pinned_commit),
-        "lithograph.index.rebuild" => index_rebuild(connection, args, is_interrupted),
+        "lithograph.index.rebuild" => legacy(index_rebuild(connection, args, is_interrupted)),
         "lithograph.gc" => operations::gc(connection),
         _ => Err(QueryError::internal(format!(
             "Version Procedure {name} is registered but not implemented"
@@ -224,7 +268,8 @@ pub(crate) fn execute_procedure(
         pinned_commit
     };
     Ok(ProcedureOutcome {
-        rows,
+        rows: rows.value,
+        _memory: rows.memory,
         summary_commit,
     })
 }
@@ -286,7 +331,7 @@ fn procedure_commit_field(rows: &[ProcedureRow], field: &str) -> QueryResult<Opt
 fn index_rebuild(
     connection: &Connection,
     args: Vec<Value>,
-    is_interrupted: &dyn Fn() -> bool,
+    _is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<Vec<ProcedureRow>> {
     if args.len() != 2 {
         return Err(QueryError::invalid_argument(
@@ -301,7 +346,7 @@ fn index_rebuild(
         ));
     }
     let target = storage::resolve_version_descriptor(connection, version)?;
-    let schema = storage::SchemaState::load(connection, target)?;
+    let schema = connection.load_schema(target)?;
     let index = schema.indexes.get(name).ok_or_else(|| {
         QueryError::invalid_argument(format!(
             "Standard Index {name:?} was not found at {version}"
@@ -318,9 +363,10 @@ fn index_rebuild(
             "Standard Index {name:?} does not support persistent rebuild"
         )));
     }
-    let snapshot = storage::Snapshot::resolve(connection, target)?;
+    let snapshot =
+        super::graph::resolve_snapshot_with_control(connection, target, connection.control())?;
     let (_, indexed_entities) =
-        super::schema::build_persistent_generation(&snapshot, index, is_interrupted)?;
+        super::schema::build_persistent_generation(&snapshot, index, connection.control())?;
     Ok(vec![row([
         ("name", Value::String(name.to_owned())),
         ("commit", commit_value(target)),
@@ -411,6 +457,7 @@ fn branch_list(connection: &Connection) -> QueryResult<Vec<ProcedureRow>> {
     storage::list_branches(connection)?
         .into_iter()
         .map(|item| {
+            connection.checkpoint()?;
             Ok(row([
                 ("name", Value::String(item.name.clone())),
                 ("commit", commit_value(item.commit)),
@@ -457,6 +504,7 @@ fn tag_list(connection: &Connection) -> QueryResult<Vec<ProcedureRow>> {
     storage::list_tags(connection)?
         .into_iter()
         .map(|item| {
+            connection.checkpoint()?;
             Ok(row([
                 ("name", Value::String(item.name)),
                 ("commit", commit_value(item.commit)),
@@ -503,24 +551,32 @@ fn commit_get(connection: &Connection, args: Vec<Value>) -> QueryResult<Vec<Proc
     let (has_data, data_value) = match data {
         Some(text) => (
             true,
-            json_to_value(serde_json::from_str(&text).map_err(|_| {
-                QueryError::new(
-                    QueryErrorKind::Storage,
-                    "persisted Commit Data is invalid JSON",
-                )
-            })?)?,
+            json_to_value_controlled(
+                serde_json::from_str(&text).map_err(|_| {
+                    QueryError::new(
+                        QueryErrorKind::Storage,
+                        "persisted Commit Data is invalid JSON",
+                    )
+                })?,
+                Some(connection.control()),
+            )?,
         ),
         None => (false, Value::Null),
     };
-    Ok(vec![row([
-        ("commit", commit_value(commit)),
+    let mut result = commit_record_row(record);
+    result.insert("hasData".to_owned(), Value::Boolean(has_data));
+    result.insert("data".to_owned(), data_value);
+    Ok(vec![result])
+}
+
+fn commit_record_row(record: storage::CommitRecord) -> ProcedureRow {
+    row([
+        ("commit", commit_value(record.id)),
         ("parents", parents_value(record.parent1, record.parent2)),
         ("author", nullable_string(record.metadata.author)),
         ("message", nullable_string(record.metadata.message)),
         ("committedAt", Value::Integer(record.metadata.committed_at)),
-        ("hasData", Value::Boolean(has_data)),
-        ("data", data_value),
-    ])])
+    ])
 }
 
 fn commit_create(
@@ -532,19 +588,30 @@ fn commit_create(
     let branch = target_branch(connection, options)?;
     ensure_target_branch_head(connection, &branch, pinned_commit)?;
     let metadata = CommitMetadata {
-        author: options.author.clone(),
-        message: options.message.clone(),
+        author: options
+            .author
+            .as_deref()
+            .map(|value| {
+                super::expression::clone_string_controlled(value, Some(connection.control()))
+            })
+            .transpose()?,
+        message: options
+            .message
+            .as_deref()
+            .map(|value| {
+                super::expression::clone_string_controlled(value, Some(connection.control()))
+            })
+            .transpose()?,
         committed_at: now_micros()?,
     };
     let commit = storage::create_empty_commit(connection, &branch, pinned_commit, &metadata)
         .map_err(|error| map_target_branch_error(error, &branch))?;
     if let Some(data) = args.first() {
-        let data = value_to_json(data)?;
+        let data = value_to_json_controlled(data, Some(connection.control()))?;
         storage::set_commit_data(
             connection,
             commit,
-            &serde_json::to_string(&data)
-                .map_err(|_| QueryError::internal("failed to serialize Commit Data"))?,
+            &metadata::serialize_json(connection, &data)?,
         )?;
     }
     Ok(vec![row([("commit", commit_value(commit))])])
@@ -555,13 +622,15 @@ fn commit_data_set(connection: &Connection, args: Vec<Value>) -> QueryResult<Vec
     let data = args
         .get(1)
         .ok_or_else(|| QueryError::invalid_argument("missing data"))?;
-    let json = value_to_json(data)?;
-    let text = serde_json::to_string(&json)
-        .map_err(|_| QueryError::internal("failed to serialize Commit Data"))?;
+    let json = value_to_json_controlled(data, Some(connection.control()))?;
+    let text = metadata::serialize_json(connection, &json)?;
     storage::set_commit_data(connection, commit, &text)?;
     Ok(vec![row([
         ("commit", commit_value(commit)),
-        ("data", data.clone()),
+        (
+            "data",
+            super::expression::clone_value_unreserved_controlled(data, Some(connection.control()))?,
+        ),
     ])])
 }
 
@@ -590,17 +659,19 @@ fn log_request(connection: &Connection, args: &[Value]) -> QueryResult<(LogTrave
         };
         new_log_traversal(connection, start)?
     };
-    let limit = match args.get(1) {
-        None => 100_usize,
-        Some(Value::Integer(value)) if *value > 0 => usize::try_from(*value)
-            .map_err(|_| QueryError::invalid_argument("log limit is too large"))?,
-        Some(_) => {
-            return Err(QueryError::invalid_argument(
-                "log limit must be a positive Integer",
-            ));
-        }
-    };
+    let limit = log_limit(args)?;
     Ok((traversal, limit))
+}
+
+fn log_limit(args: &[Value]) -> QueryResult<usize> {
+    match args.get(1) {
+        None => Ok(100),
+        Some(Value::Integer(value)) if *value > 0 => usize::try_from(*value)
+            .map_err(|_| QueryError::invalid_argument("log limit is too large")),
+        Some(_) => Err(QueryError::invalid_argument(
+            "log limit must be a positive Integer",
+        )),
+    }
 }
 
 fn collect_log_rows(
@@ -610,22 +681,18 @@ fn collect_log_rows(
 ) -> QueryResult<Vec<ProcedureRow>> {
     let mut rows = Vec::with_capacity(limit.min(100));
     for _ in 0..limit {
+        connection.checkpoint()?;
         let Some(record) = next_log_commit(connection, traversal)? else {
             break;
         };
         let cursor = if traversal.ready.is_empty() && traversal.pending_children.is_empty() {
             Value::Null
         } else {
-            Value::String(encode_log_cursor(traversal)?)
+            Value::String(encode_log_cursor(connection, traversal)?)
         };
-        rows.push(row([
-            ("commit", commit_value(record.id)),
-            ("parents", parents_value(record.parent1, record.parent2)),
-            ("author", nullable_string(record.metadata.author)),
-            ("message", nullable_string(record.metadata.message)),
-            ("committedAt", Value::Integer(record.metadata.committed_at)),
-            ("cursor", cursor),
-        ]));
+        let mut result = commit_record_row(record);
+        result.insert("cursor".to_owned(), cursor);
+        rows.push(result);
     }
     Ok(rows)
 }
@@ -643,6 +710,7 @@ fn next_log_commit(
     connection: &Connection,
     traversal: &mut LogTraversal,
 ) -> QueryResult<Option<storage::CommitRecord>> {
+    connection.checkpoint()?;
     let Some((_, commit)) = traversal.ready.pop_first() else {
         if traversal.pending_children.is_empty() {
             return Ok(None);
@@ -658,46 +726,55 @@ fn next_log_commit(
         .flatten()
         .collect::<BTreeSet<_>>();
     for parent in parents {
-        if traversal
-            .ready
-            .iter()
-            .any(|(_, ready_commit)| *ready_commit == parent)
-        {
-            return Err(QueryError::new(
-                QueryErrorKind::Storage,
-                "Commit DAG traversal observed a parent that was already ready",
-            ));
-        }
-        if !traversal.pending_children.contains_key(&parent) {
-            let count = storage::reachable_child_count(connection, traversal.start, parent)?;
-            if count == 0 {
-                return Err(QueryError::new(
-                    QueryErrorKind::Storage,
-                    "Commit DAG traversal found a parent with no reachable child",
-                ));
-            }
-            traversal.pending_children.insert(parent, count);
-        }
-        let remaining = traversal
-            .pending_children
-            .get_mut(&parent)
-            .ok_or_else(|| QueryError::internal("log traversal lost parent state"))?;
-        *remaining = remaining.checked_sub(1).ok_or_else(|| {
-            QueryError::new(
-                QueryErrorKind::Storage,
-                "Commit DAG traversal child count underflowed",
-            )
-        })?;
-        if *remaining == 0 {
-            traversal.pending_children.remove(&parent);
-            let parent_record =
-                storage::load_commit(connection, parent).map_err(map_version_error)?;
-            traversal
-                .ready
-                .insert((Reverse(parent_record.metadata.committed_at), parent));
-        }
+        advance_log_parent(connection, traversal, parent)?;
     }
     Ok(Some(record))
+}
+
+fn advance_log_parent(
+    connection: &Connection,
+    traversal: &mut LogTraversal,
+    parent: HashId,
+) -> QueryResult<()> {
+    connection.checkpoint()?;
+    if traversal
+        .ready
+        .iter()
+        .any(|(_, ready_commit)| *ready_commit == parent)
+    {
+        return Err(QueryError::new(
+            QueryErrorKind::Storage,
+            "Commit DAG traversal observed a parent that was already ready",
+        ));
+    }
+    if !traversal.pending_children.contains_key(&parent) {
+        let count = storage::reachable_child_count(connection, traversal.start, parent)?;
+        if count == 0 {
+            return Err(QueryError::new(
+                QueryErrorKind::Storage,
+                "Commit DAG traversal found a parent with no reachable child",
+            ));
+        }
+        traversal.pending_children.insert(parent, count);
+    }
+    let remaining = traversal
+        .pending_children
+        .get_mut(&parent)
+        .ok_or_else(|| QueryError::internal("log traversal lost parent state"))?;
+    *remaining = remaining.checked_sub(1).ok_or_else(|| {
+        QueryError::new(
+            QueryErrorKind::Storage,
+            "Commit DAG traversal child count underflowed",
+        )
+    })?;
+    if *remaining == 0 {
+        traversal.pending_children.remove(&parent);
+        let parent_record = storage::load_commit(connection, parent).map_err(map_version_error)?;
+        traversal
+            .ready
+            .insert((Reverse(parent_record.metadata.committed_at), parent));
+    }
+    Ok(())
 }
 
 fn target_branch(connection: &Connection, options: &ExecutionOptions) -> QueryResult<String> {
@@ -705,10 +782,13 @@ fn target_branch(connection: &Connection, options: &ExecutionOptions) -> QueryRe
 }
 
 pub(crate) fn current_operation_commit(
-    connection: &Connection,
+    connection: &SqliteConnection,
     options: &ExecutionOptions,
 ) -> QueryResult<HashId> {
-    let branch = target_branch(connection, options)?;
+    let branch = match options.write_branch.as_ref() {
+        Some(branch) => branch.clone(),
+        None => storage::active_branch(connection)?,
+    };
     storage::branch_head(connection, &branch)
         .map_err(|error| map_target_branch_error(error, &branch))
 }
@@ -893,7 +973,13 @@ fn row<const N: usize>(values: [(&str, Value); N]) -> ProcedureRow {
         .collect()
 }
 
-pub(crate) fn value_to_json(value: &Value) -> QueryResult<serde_json::Value> {
+pub(crate) fn value_to_json_controlled(
+    value: &Value,
+    control: Option<&super::ExecutionControl<'_>>,
+) -> QueryResult<serde_json::Value> {
+    if let Some(control) = control {
+        control.work(1)?;
+    }
     match value {
         Value::Null => Ok(serde_json::Value::Null),
         Value::Boolean(value) => Ok((*value).into()),
@@ -901,15 +987,22 @@ pub(crate) fn value_to_json(value: &Value) -> QueryResult<serde_json::Value> {
         Value::Float(value) if value.is_finite() => serde_json::Number::from_f64(*value)
             .map(serde_json::Value::Number)
             .ok_or_else(|| QueryError::invalid_argument("JSON number is not finite")),
-        Value::String(value) => Ok(value.clone().into()),
+        Value::String(value) => {
+            Ok(super::expression::clone_string_controlled(value, control)?.into())
+        }
         Value::List(values) => values
             .iter()
-            .map(value_to_json)
+            .map(|value| value_to_json_controlled(value, control))
             .collect::<QueryResult<Vec<_>>>()
             .map(serde_json::Value::Array),
         Value::Map(values) => values
             .iter()
-            .map(|(key, value)| Ok((key.clone(), value_to_json(value)?)))
+            .map(|(key, value)| {
+                Ok((
+                    super::expression::clone_string_controlled(key, control)?,
+                    value_to_json_controlled(value, control)?,
+                ))
+            })
             .collect::<QueryResult<serde_json::Map<_, _>>>()
             .map(serde_json::Value::Object),
         _ => Err(QueryError::invalid_argument(
@@ -919,6 +1012,16 @@ pub(crate) fn value_to_json(value: &Value) -> QueryResult<serde_json::Value> {
 }
 
 pub(crate) fn json_to_value(value: serde_json::Value) -> QueryResult<Value> {
+    json_to_value_controlled(value, None)
+}
+
+pub(crate) fn json_to_value_controlled(
+    value: serde_json::Value,
+    control: Option<&super::ExecutionControl<'_>>,
+) -> QueryResult<Value> {
+    if let Some(control) = control {
+        control.work(1)?;
+    }
     match value {
         serde_json::Value::Null => Ok(Value::Null),
         serde_json::Value::Bool(value) => Ok(Value::Boolean(value)),
@@ -937,37 +1040,43 @@ pub(crate) fn json_to_value(value: serde_json::Value) -> QueryResult<Value> {
         serde_json::Value::String(value) => Ok(Value::String(value)),
         serde_json::Value::Array(values) => values
             .into_iter()
-            .map(json_to_value)
+            .map(|value| json_to_value_controlled(value, control))
             .collect::<QueryResult<Vec<_>>>()
             .map(Value::List),
         serde_json::Value::Object(values) => values
             .into_iter()
-            .map(|(key, value)| Ok((key, json_to_value(value)?)))
+            .map(|(key, value)| Ok((key, json_to_value_controlled(value, control)?)))
             .collect::<QueryResult<BTreeMap<_, _>>>()
             .map(Value::Map),
     }
 }
 
-fn encode_log_cursor(traversal: &LogTraversal) -> QueryResult<String> {
+fn encode_log_cursor(connection: &Connection, traversal: &LogTraversal) -> QueryResult<String> {
     let ready = traversal
         .ready
         .iter()
-        .map(|(_, commit)| commit.to_hex())
-        .collect::<Vec<_>>()
+        .map(|(_, commit)| {
+            connection.checkpoint()?;
+            Ok(commit.to_hex())
+        })
+        .collect::<QueryResult<Vec<_>>>()?
         .join(",");
     let pending = traversal
         .pending_children
         .iter()
-        .map(|(commit, count)| format!("{},{count}", commit.to_hex()))
-        .collect::<Vec<_>>()
+        .map(|(commit, count)| {
+            connection.checkpoint()?;
+            Ok(format!("{},{count}", commit.to_hex()))
+        })
+        .collect::<QueryResult<Vec<_>>>()?
         .join(";");
     let payload = format!("log2:{}:{ready}:{pending}", traversal.start.to_hex());
-    let checksum = blake3::hash(payload.as_bytes()).to_hex();
+    let checksum = log_checksum(&payload, Some(connection.control()))?.to_hex();
     Ok(format!("{payload}:{}", &checksum.as_str()[..16]))
 }
 
 fn decode_log_cursor(connection: &Connection, cursor: &str) -> QueryResult<LogTraversal> {
-    let parts = validated_log_cursor_parts(cursor)?;
+    let parts = validated_log_cursor_parts_controlled(connection, cursor)?;
     let start = HashId::from_hex(parts[1])
         .map_err(|_| QueryError::invalid_argument("invalid log cursor"))?;
     storage::load_commit(connection, start).map_err(map_version_error)?;
@@ -983,17 +1092,44 @@ fn decode_log_cursor(connection: &Connection, cursor: &str) -> QueryResult<LogTr
     })
 }
 
-fn validated_log_cursor_parts(cursor: &str) -> QueryResult<Vec<&str>> {
-    let parts = cursor.split(':').collect::<Vec<_>>();
+fn validated_log_cursor_parts_controlled<'a>(
+    connection: &Connection,
+    cursor: &'a str,
+) -> QueryResult<Vec<&'a str>> {
+    log_cursor_parts(cursor, Some(connection.control()))
+}
+
+fn log_cursor_parts<'a>(
+    cursor: &'a str,
+    control: Option<&super::ExecutionControl<'_>>,
+) -> QueryResult<Vec<&'a str>> {
+    let parts = cursor.split(':').take(6).collect::<Vec<_>>();
     if parts.len() != 5 || parts[0] != "log2" {
         return Err(QueryError::invalid_argument("invalid log cursor"));
     }
-    let payload = format!("{}:{}:{}:{}", parts[0], parts[1], parts[2], parts[3]);
-    let checksum = blake3::hash(payload.as_bytes()).to_hex();
+    let payload = cursor
+        .rsplit_once(':')
+        .ok_or_else(|| QueryError::invalid_argument("invalid log cursor"))?
+        .0;
+    let checksum = log_checksum(payload, control)?.to_hex();
     if parts[4] != &checksum.as_str()[..16] {
         return Err(QueryError::invalid_argument("invalid log cursor"));
     }
     Ok(parts)
+}
+
+fn log_checksum(
+    payload: &str,
+    control: Option<&super::ExecutionControl<'_>>,
+) -> QueryResult<blake3::Hash> {
+    let mut hasher = blake3::Hasher::new();
+    for chunk in payload.as_bytes().chunks(64 * 1024) {
+        if let Some(control) = control {
+            control.bytes(chunk.len() as u64)?;
+        }
+        hasher.update(chunk);
+    }
+    Ok(hasher.finalize())
 }
 
 fn decode_log_ready(
@@ -1002,6 +1138,7 @@ fn decode_log_ready(
 ) -> QueryResult<BTreeSet<(Reverse<i64>, HashId)>> {
     let mut ready = BTreeSet::new();
     for encoded in encoded_ready.split(',').filter(|value| !value.is_empty()) {
+        connection.checkpoint()?;
         let commit = HashId::from_hex(encoded)
             .map_err(|_| QueryError::invalid_argument("invalid log cursor"))?;
         let record = storage::load_commit(connection, commit).map_err(map_version_error)?;
@@ -1019,6 +1156,7 @@ fn decode_log_pending(
 ) -> QueryResult<BTreeMap<HashId, usize>> {
     let mut pending_children = BTreeMap::new();
     for encoded in encoded_pending.split(';').filter(|value| !value.is_empty()) {
+        connection.checkpoint()?;
         let fields = encoded.split(',').collect::<Vec<_>>();
         if fields.len() != 2 {
             return Err(QueryError::invalid_argument("invalid log cursor"));

@@ -15,6 +15,7 @@ mod name_expression;
 mod options;
 mod plan;
 pub(crate) mod registry;
+pub mod resources;
 mod safety;
 mod schema;
 mod semantic_index;
@@ -29,7 +30,9 @@ pub use error::{QueryError, QueryErrorKind, QueryResult};
 pub use options::{ExecutionOptions, GraphViewSelector, MergeSessionSelector, SnapshotSelector};
 pub use plan::{
     LogicalOperator, LogicalPlan, PhysicalOperator, PhysicalPlan, PreparedQuery, prepare,
+    prepare_with_resources, prepare_with_resources_and_interrupt,
 };
+pub use resources::{ExecutionControl, MemoryReservation, QueryResources};
 pub use stats::PlannerStatistics;
 pub use stream::{
     OperatorRuntimeMetrics, QueryBatch, QueryCounters, QueryCursor, QueryMetrics, QuerySummary,

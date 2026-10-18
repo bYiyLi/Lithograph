@@ -120,7 +120,15 @@ fn interpolation_version_procedures_keep_write_and_lifecycle_classification() {
         ExecutionOptions::default(),
     )
     .expect("valid Version interpolation");
-    let mut cursor = QueryCursor::new(prepared.clone());
+    let mut cursor = QueryCursor::new(prepared);
+    assert!(
+        cursor.has_version_operation(),
+        "actual Version mutation must retain its lifecycle flag"
+    );
+    assert!(
+        cursor.is_write(),
+        "actual Branch creation must be classified as a write"
+    );
     let batch = cursor
         .next_batch(&connection, 16)
         .expect("actual branch creation");
@@ -130,15 +138,6 @@ fn interpolation_version_procedures_keep_write_and_lifecycle_classification() {
     assert_eq!(
         branch_head(&connection, "interpolated").expect("new Branch"),
         branch_head(&connection, "main").expect("main")
-    );
-    let cursor = QueryCursor::new(prepared);
-    assert!(
-        cursor.has_version_operation(),
-        "actual Version mutation must retain its lifecycle flag"
-    );
-    assert!(
-        cursor.is_write(),
-        "actual Branch creation must be classified as a write"
     );
 }
 

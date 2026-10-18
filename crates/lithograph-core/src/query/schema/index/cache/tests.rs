@@ -1,4 +1,3 @@
-use super::super::persistent::build_persistent_generation;
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
@@ -11,6 +10,27 @@ use crate::storage::{
     LayerBuilder, OwnerKind, PropertyValue, SchemaState, branch_head, create_storage_schema,
     initialize_root,
 };
+
+fn scan_node_index_page(
+    snapshot: &Snapshot<'_>,
+    seek: &StandardIndexSeek,
+    cursor: Option<&StandardIndexCursor>,
+    limit: usize,
+) -> QueryResult<StandardIndexPage> {
+    let resources = crate::query::QueryResources::default();
+    let control = ExecutionControl::new(&resources, &|| false);
+    super::scan_node_index_page(snapshot, seek, cursor, limit, &control)
+}
+
+fn build_persistent_generation(
+    snapshot: &Snapshot<'_>,
+    index: &storage::IndexDefinition,
+    interrupted: &dyn Fn() -> bool,
+) -> QueryResult<(i64, i64)> {
+    let resources = crate::query::QueryResources::default();
+    let control = ExecutionControl::new(&resources, interrupted);
+    super::super::persistent::build_persistent_generation(snapshot, index, &control)
+}
 
 fn current_storage() -> Connection {
     let connection = Connection::open_in_memory().expect("in-memory database");
@@ -318,4 +338,47 @@ fn interrupted_persistent_publish_rolls_back_incomplete_generation() {
         )
         .expect("incomplete generations");
     assert_eq!(incomplete, 0);
+}
+
+#[test]
+fn controlled_text_predicates_preserve_repeated_suffix_and_unicode() {
+    let resources = crate::query::QueryResources::default();
+    let control = ExecutionControl::new(&resources, &|| false);
+    for (actual, expected, matches) in [
+        ("abcabc", "abc", true),
+        ("人物人物", "人物", true),
+        ("é", "e", false),
+        ("abc", "abcd", false),
+        ("", "", true),
+    ] {
+        assert_eq!(
+            text_predicate_matches(
+                &Value::String(actual.to_owned()),
+                &StandardIndexPredicate::EndsWith(expected.to_owned()),
+                &control
+            )
+            .unwrap(),
+            matches
+        );
+    }
+}
+
+#[test]
+fn warm_candidate_collection_reserves_each_owner_and_releases_page_workspace() {
+    let connection = current_storage();
+    let commit = branch_head(&connection, "main").unwrap();
+    let snapshot = Snapshot::resolve(&connection, commit).unwrap();
+    let seek = StandardIndexSeek {
+        index_name: "synthetic".to_owned(),
+        kind: StandardIndexKind::Range,
+        predicates: Vec::new(),
+    };
+    let resources = crate::query::QueryResources::new(Some(32 * 1024));
+    let control = ExecutionControl::new(&resources, &|| false);
+    let scan = IndexScan::new(&snapshot, &seek, &control).unwrap();
+    let error = scan_owner_id_candidates(&scan, "WITH RECURSIVE ids(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM ids WHERE id<10000) SELECT id FROM ids", &[]).unwrap_err();
+    assert_eq!(error.kind, crate::query::QueryErrorKind::Resource);
+    assert!(resources.peak() <= 32 * 1024);
+    drop(scan);
+    assert_eq!(resources.used(), 0);
 }

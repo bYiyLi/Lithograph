@@ -48,8 +48,9 @@ pub(crate) use builtins::{
     AGGREGATING_FUNCTIONS, SCALAR_FUNCTIONS, is_aggregating_function, is_builtin_function,
 };
 pub use json::{
-    decode_json, decode_json_text, decode_parameters, decode_parameters_text, encode_json,
-    encode_json_text,
+    decode_json, decode_json_checked, decode_json_text, decode_parameters,
+    decode_parameters_checked, decode_parameters_text, encode_json, encode_json_checked,
+    encode_json_filtered_checked, encode_json_text,
 };
 pub use temporal::{
     DateValue, DurationValue, LocalDateTimeValue, LocalTimeValue, TimeValue, ZonedDateTimeValue,
@@ -64,3 +65,4 @@ pub use value::{
     ValueError, VectorCoordinateType, VectorValue, VectorValues, cypher_compare, cypher_equals,
 };
 pub use value_order::cypher_order_compare;
+pub(crate) use value_order::{sort_float, vector_type_rank};

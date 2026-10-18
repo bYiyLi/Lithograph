@@ -1,11 +1,16 @@
 //! Canonical versioned Schema state stored inside immutable Schema objects.
 
-use super::encoding::{parse_record, record};
 use super::{HashId, PropertyValue, StorageError, StorageResult, VectorCoordinateType};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, BTreeSet};
+
+#[path = "schema_state_clone.rs"]
+mod checked_clone;
+#[path = "schema_state_resources.rs"]
+mod resources;
+pub(crate) use resources::schema_state_memory_bytes;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SchemaState {
@@ -176,35 +181,11 @@ impl SchemaState {
     }
 
     pub fn canonical_blob(&self) -> StorageResult<Vec<u8>> {
-        let objects = self.logical_objects()?;
-        Ok(record("SCHEMA", &objects.into_values().collect::<Vec<_>>()))
+        self.canonical_blob_checked(&|| Ok(()))
     }
 
     pub fn from_canonical_blob(blob: &[u8]) -> StorageResult<Self> {
-        let mut state = Self::default();
-        let mut previous_slot: Option<String> = None;
-        for field in parse_record(blob, "SCHEMA")? {
-            let object: SchemaObject = serde_json::from_slice(field).map_err(|error| {
-                StorageError::corrupt(format!("invalid Schema object JSON: {error}"))
-            })?;
-            let slot = object.slot();
-            if previous_slot
-                .as_ref()
-                .is_some_and(|previous| previous >= &slot)
-            {
-                return Err(StorageError::corrupt(
-                    "Schema objects are not ordered by unique canonical slot",
-                ));
-            }
-            previous_slot = Some(slot);
-            state.insert_object(object)?;
-        }
-        if state.canonical_blob()? != blob {
-            return Err(StorageError::corrupt(
-                "Schema object is not in canonical LCE1 form",
-            ));
-        }
-        Ok(state)
+        Self::from_canonical_blob_checked(blob, &|| Ok(()))
     }
 
     pub fn logical_slots(&self) -> StorageResult<BTreeMap<String, Vec<u8>>> {
@@ -232,44 +213,7 @@ impl SchemaState {
     }
 
     fn logical_objects(&self) -> StorageResult<BTreeMap<String, Vec<u8>>> {
-        let mut objects = BTreeMap::new();
-        for definition in self.graph_nodes.values() {
-            insert_logical_object(
-                &mut objects,
-                graph_node_slot(&definition.label),
-                SchemaObject::GraphNode {
-                    definition: definition.clone(),
-                },
-            )?;
-        }
-        for definition in self.graph_relationships.values() {
-            insert_logical_object(
-                &mut objects,
-                graph_relationship_slot(&definition.relationship_type),
-                SchemaObject::GraphRelationship {
-                    definition: definition.clone(),
-                },
-            )?;
-        }
-        for definition in self.constraints.values() {
-            insert_logical_object(
-                &mut objects,
-                constraint_slot(&definition.name),
-                SchemaObject::Constraint {
-                    definition: definition.clone(),
-                },
-            )?;
-        }
-        for definition in self.indexes.values() {
-            insert_logical_object(
-                &mut objects,
-                index_slot(&definition.name),
-                SchemaObject::Index {
-                    definition: definition.clone(),
-                },
-            )?;
-        }
-        Ok(objects)
+        self.logical_objects_checked(&|| Ok(()))
     }
 
     fn insert_object(&mut self, object: SchemaObject) -> StorageResult<()> {
@@ -444,20 +388,6 @@ pub fn index_slot(name: &str) -> String {
     format!("index/{name}")
 }
 
-fn insert_logical_object(
-    objects: &mut BTreeMap<String, Vec<u8>>,
-    slot: String,
-    object: SchemaObject,
-) -> StorageResult<()> {
-    let bytes = encode_schema_object(object)?;
-    if objects.insert(slot.clone(), bytes).is_some() {
-        return Err(StorageError::corrupt(format!(
-            "duplicate canonical Schema slot {slot:?}"
-        )));
-    }
-    Ok(())
-}
-
 fn encode_schema_object(object: SchemaObject) -> StorageResult<Vec<u8>> {
     let value = serde_json::to_value(object).map_err(|error| {
         StorageError::corrupt(format!("failed to encode Schema object: {error}"))
@@ -496,6 +426,7 @@ fn vector_coordinate_name(value: VectorCoordinateType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::encoding::record;
 
     #[test]
     fn empty_schema_keeps_frozen_root_encoding() {

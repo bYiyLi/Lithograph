@@ -1,16 +1,20 @@
-use std::collections::BTreeMap;
-
 use chrono::{Offset, TimeZone, Utc};
 use rusqlite::Connection;
 
-use crate::cypher::{
-    NodeValue, RelationshipValue, Value, format_date_from_days, format_local_time, format_offset,
-};
+use crate::cypher::{Value, format_date_from_days, format_local_time, format_offset};
 use crate::storage::{self, HashId, LabelId, OwnerKind, RelationshipRecord, Snapshot};
 
 use super::access::PropertyRules;
 use super::options::{GraphViewSelector, SnapshotSelector};
-use super::{QueryError, QueryErrorKind, QueryResult};
+use super::{ExecutionControl, QueryError, QueryErrorKind, QueryResult};
+
+mod controlled;
+pub(crate) use controlled::{
+    borrowed_property as borrowed_property_with_control, materialize_node_with_control,
+    materialize_relationship_with_control, node_property_with_control,
+    relationship_property_with_control, resolve_snapshot_with_control,
+    resolve_snapshot_with_layer_and_schema_controlled, snapshot_observer,
+};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ResolvedGraphView {
@@ -59,11 +63,45 @@ impl ResolvedGraphView {
         self.visible_existing_node(snapshot, node_id, None)
     }
 
+    pub(crate) fn visible_node_controlled(
+        &self,
+        snapshot: &Snapshot<'_>,
+        node_id: i64,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<bool> {
+        control.check()?;
+        if self.required_unknown || !snapshot.node_exists(node_id)? {
+            return Ok(false);
+        }
+        self.visible_existing_node_inner(snapshot, node_id, None, Some(control))
+    }
+
     pub(crate) fn visible_existing_node(
         &self,
         snapshot: &Snapshot<'_>,
         node_id: i64,
         known_label: Option<LabelId>,
+    ) -> QueryResult<bool> {
+        self.visible_existing_node_inner(snapshot, node_id, known_label, None)
+    }
+
+    pub(crate) fn visible_existing_node_controlled(
+        &self,
+        snapshot: &Snapshot<'_>,
+        node_id: i64,
+        known_label: Option<LabelId>,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<bool> {
+        control.check()?;
+        self.visible_existing_node_inner(snapshot, node_id, known_label, Some(control))
+    }
+
+    fn visible_existing_node_inner(
+        &self,
+        snapshot: &Snapshot<'_>,
+        node_id: i64,
+        known_label: Option<LabelId>,
+        control: Option<&ExecutionControl<'_>>,
     ) -> QueryResult<bool> {
         if self.required_unknown {
             return Ok(false);
@@ -72,22 +110,38 @@ impl ResolvedGraphView {
             return Ok(true);
         }
         if let Some(label) = known_label {
-            if self.excluded.contains(&label) {
+            if contains_label(&self.excluded, label, control)? {
                 return Ok(false);
             }
-            if self.excluded.is_empty() && self.required.iter().all(|required| *required == label) {
+            if self.excluded.is_empty() && only_known_label(&self.required, label, control)? {
                 return Ok(true);
             }
         }
-        let labels = snapshot.labels(node_id)?;
-        Ok(self
-            .required
-            .iter()
-            .all(|id| labels.binary_search(id).is_ok())
-            && self
-                .excluded
-                .iter()
-                .all(|id| labels.binary_search(id).is_err()))
+        self.visible_labels(snapshot, node_id, control)
+    }
+
+    fn visible_labels(
+        &self,
+        snapshot: &Snapshot<'_>,
+        node_id: i64,
+        control: Option<&ExecutionControl<'_>>,
+    ) -> QueryResult<bool> {
+        let mut required_matches = 0;
+        let mut excluded = false;
+        let check = || {
+            control
+                .map_or(Ok(()), ExecutionControl::check)
+                .map_err(QueryError::into_storage_error)
+        };
+        snapshot.visit_node_labels_checked(node_id, &check, |id| {
+            if let Some(control) = control {
+                control.work(1)?;
+            }
+            required_matches += usize::from(contains_label(&self.required, id, control)?);
+            excluded |= contains_label(&self.excluded, id, control)?;
+            Ok::<_, QueryError>(())
+        })?;
+        Ok(required_matches == self.required.len() && !excluded)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -114,6 +168,50 @@ impl ResolvedGraphView {
         Ok(self.visible_node(snapshot, relationship.source)?
             && self.visible_node(snapshot, relationship.target)?)
     }
+
+    pub(crate) fn visible_relationship_controlled(
+        &self,
+        snapshot: &Snapshot<'_>,
+        relationship: RelationshipRecord,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<bool> {
+        Ok(
+            self.visible_node_controlled(snapshot, relationship.source, control)?
+                && self.visible_node_controlled(snapshot, relationship.target, control)?,
+        )
+    }
+}
+
+fn contains_label(
+    labels: &[LabelId],
+    label: LabelId,
+    control: Option<&ExecutionControl<'_>>,
+) -> QueryResult<bool> {
+    for candidate in labels {
+        if let Some(control) = control {
+            control.work(1)?;
+        }
+        if *candidate == label {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn only_known_label(
+    labels: &[LabelId],
+    label: LabelId,
+    control: Option<&ExecutionControl<'_>>,
+) -> QueryResult<bool> {
+    for required in labels {
+        if let Some(control) = control {
+            control.work(1)?;
+        }
+        if *required != label {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 pub(crate) fn resolve_commit(
@@ -179,66 +277,6 @@ fn validate_ref_selector(name: &str) -> QueryResult<()> {
     })
 }
 
-pub(crate) fn materialize_node_with_access(
-    snapshot: &Snapshot<'_>,
-    node_id: i64,
-    query_access: &PropertyRules,
-) -> QueryResult<NodeValue> {
-    if !snapshot.node_exists(node_id)? {
-        return Err(QueryError::semantic(format!(
-            "Node n:{node_id} is no longer present in the active graph state"
-        )));
-    }
-    let mut labels = Vec::new();
-    for label_id in snapshot.labels(node_id)? {
-        let name =
-            storage::label_name(snapshot_connection(snapshot), label_id)?.ok_or_else(|| {
-                QueryError::internal(format!("Label dictionary id {label_id} is missing"))
-            })?;
-        labels.push(name);
-    }
-    let properties = materialize_properties(snapshot, OwnerKind::Node, node_id, query_access)?;
-    Ok(NodeValue {
-        element_id: format!("n:{node_id}"),
-        labels,
-        properties,
-    })
-}
-
-pub(crate) fn materialize_relationship_with_access(
-    snapshot: &Snapshot<'_>,
-    relationship: RelationshipRecord,
-    query_access: &PropertyRules,
-) -> QueryResult<RelationshipValue> {
-    if snapshot.relationship(relationship.id)?.is_none() {
-        return Err(QueryError::semantic(format!(
-            "Relationship r:{} is no longer present in the active graph state",
-            relationship.id
-        )));
-    }
-    let relationship_type =
-        storage::relationship_type_name(snapshot_connection(snapshot), relationship.type_id)?
-            .ok_or_else(|| {
-                QueryError::internal(format!(
-                    "Relationship Type id {} is missing",
-                    relationship.type_id
-                ))
-            })?;
-    let properties = materialize_properties(
-        snapshot,
-        OwnerKind::Relationship,
-        relationship.id,
-        query_access,
-    )?;
-    Ok(RelationshipValue {
-        element_id: format!("r:{}", relationship.id),
-        relationship_type,
-        start: format!("n:{}", relationship.source),
-        end: format!("n:{}", relationship.target),
-        properties,
-    })
-}
-
 pub(crate) fn node_property(
     snapshot: &Snapshot<'_>,
     node_id: i64,
@@ -281,24 +319,6 @@ pub(crate) fn relationship_property_with_access(
         )));
     }
     element_property(snapshot, OwnerKind::Relationship, id, key, query_access)
-}
-
-fn materialize_properties(
-    snapshot: &Snapshot<'_>,
-    owner_kind: OwnerKind,
-    owner_id: i64,
-    query_access: &PropertyRules,
-) -> QueryResult<BTreeMap<String, Value>> {
-    let mut properties = BTreeMap::new();
-    for (key_id, value) in snapshot.properties(owner_kind, owner_id)? {
-        let name = storage::property_key_name(snapshot_connection(snapshot), key_id)?.ok_or_else(
-            || QueryError::internal(format!("Property dictionary id {key_id} is missing")),
-        )?;
-        if !query_access.denies(&name) {
-            properties.insert(name, property_value(value)?);
-        }
-    }
-    Ok(properties)
 }
 
 fn element_property(

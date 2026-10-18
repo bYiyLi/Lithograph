@@ -110,6 +110,8 @@ Cypher text + parameters              execution options
 
 Frontend 的 AST 与 Cypher semantic model 是 Lithograph 自己的内部合同。可以参考或依法复用 GraphQLite/openCypher grammar，但 GraphQLite 的 parser AST、SQL transformer 或 clause dispatcher 不作为 Lithograph core interface。
 
+静态标识符的 AST 保留 source text 和 position；名称进入 planner/executor 的执行结构时统一解码一次：去掉外围反引号，将双反引号还原为名称内的单个反引号。Node Label、Relationship Type、Label predicate、Schema/Index 和 mutation 共享实际名称语义，不按中文或英文特判。普通形式与合法反引号形式必须指向同一名称；动态 Label/Type 表达式已经返回实际 String，不再进行静态标识符解码。
+
 <a id="planning-and-execution"></a>
 
 ## Query Planning 与 Execution
@@ -176,11 +178,23 @@ caller-owned outer SQLite transaction 可以把多个普通 Lithograph execution
 
 ### Cancellation 与 Connection State
 
-Executor 在 batch/operator boundary 与长路径/搜索循环中检查 SQLite interrupt state；host 调用 `sqlite3_interrupt()` 后 query 尽快停止并返回 `SQLITE_INTERRUPT`。`lithograph_rows()` 的 SQL cursor 在 `xClose`、outer SQL early-stop 或 connection teardown 时也必须取消未完成 execution；尚未 durable 的普通 write rollback，active explicit transaction 则按 fail-closed contract 整体 abort。
+Executor 在 batch/operator boundary 与长路径/搜索循环中检查 SQLite interrupt state；host 调用 `sqlite3_interrupt()` 后 query 尽快停止并返回 `SQLITE_INTERRUPT`。`lithograph_rows()` 的 SQL cursor 在 `xClose`、outer SQL early-stop 或 connection teardown 时也必须取消未完成 execution；尚未 durable 的普通 write rollback，active explicit transaction 则按 fail-closed contract 整体 abort。真实 SQLite interrupt 的恢复、实际 transaction 状态确认与 caller-owned whole-transaction rollback 边界见 [Runtime](runtime.md#sqlite-interrupt-recovery)。
+
+中断回调必须传入表达式和函数求值，覆盖 `range()`、列表推导/谓词、`reduce()` / `allReduce()`、flatten、集合/长值遍历及字符串构造，不能只在两条结果行之间检查。表达式求值与循环累计工作量，每至多 256 个工作单元检查一次；可分块的长文本处理每至多 64 KiB 检查一次。大规模分配、复制和不可拆分的第三方调用前后另行检查。第三方调用或单次系统调用进行中不保证异步抢占，其已有 timeout/取消合同仍生效；不新增 query timeout option。取消返回现有 `INTERRUPTED` / `SQLITE_INTERRUPT`，并复用失败清理和 transaction-subquery 已 durable batch 的保留语义。
 
 Active Branch、explicit transaction state、temporary query options、prepared-plan/cache handle、current error/cancellation state 全部属于单个 `sqlite3*` connection 或单个 query。禁止使用 process-global mutable query/branch/parser/transaction state。跨线程使用同一 `sqlite3*` 是否允许完全遵循 host SQLite threading mode；Lithograph 不为一个不允许并发使用的 connection 增加第二套线程安全保证。
 
 所有 application-facing execution 都发生在 host SQLite SQL callback / virtual-table cursor lifecycle 中，connection serialization 直接服从 host SQLite threading mode 与其 `sqlite3*` 使用规则；Lithograph 不另建 process-global mutex 扩大 SQLite 自己的线程安全承诺。`sqlite3_get_clientdata()` / `sqlite3_set_clientdata()` 只负责 Embedding Provider 与 connection-local state ownership/lifetime，不单独承担 invocation serialization。
+
+<a id="execution-resources"></a>
+
+### Execution Resource State
+
+每次 execution 由其 cursor 持有内部资源状态，基础执行、复杂 program、子查询、分支、mutation 和 concurrent batch 共享同一次 execution 的内存预算；不同 execution 独立。各次推进或 worker 累计自己的中断检查工作量，保持每条运行路径的检查间隔有界。每次推进借用宿主中断回调，不保存失效 callback，不使用进程级可变 query 状态。execution option 和错误形状由 [Interfaces](interfaces.md#query-options) 拥有，预算的外部边界由 [Runtime](runtime.md#execution-memory-boundary) 拥有。
+
+在参数解码前解析 options 并建立预算，参数解码的临时对象与生成的 Cypher Value 都计账。受控分配在分配/扩容前预留容量，计算使用 checked arithmetic，溢出按资源拒绝处理；使用拥有生命周期的预留对象，在释放时归还，移动转移预留，复制新增预留。需要同时存活的输入、输出和序列化副本同时计账，不能在创建输出副本前提前释放仍存活的输入费用。
+
+计账覆盖执行阶段参数、表达式中间值、List/Map/String/Vector/图值、row/batch、排序/聚合/去重工作缓冲、公开结果编码和 scalar collector，按容器容量及必要的保守开销计算。`range()` 先检查元素数和容量再分配，并保留原有 200 万元素上限；不能只优化 `size(range(...))` 替代通用预算。semantic barrier 在达到字节预算前向既有 TEMP spill 路径 flush，无法容纳的单值或必要工作状态明确失败；结果释放时归还预算，streaming 不能按累计消费行数永久扣减。取消、错误、early-close 和成功结束都释放预留与 TEMP 状态；不改变既有 finalize-success、回滚或 durable batch 边界。
 
 <a id="graph-view"></a>
 

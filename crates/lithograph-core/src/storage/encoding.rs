@@ -15,6 +15,70 @@ pub(crate) fn record(domain: &str, fields: &[Vec<u8>]) -> Vec<u8> {
     output
 }
 
+pub(crate) fn record_checked(
+    domain: &str,
+    fields: &[Vec<u8>],
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<Vec<u8>> {
+    check()?;
+    let mut len =
+        MAGIC.len() + uleb_len(domain.len() as u64) + domain.len() + uleb_len(fields.len() as u64);
+    for field in fields {
+        check()?;
+        len = encoded_field_len(len, field.len())?;
+    }
+    let mut output = Vec::with_capacity(len);
+    output.extend_from_slice(MAGIC);
+    put_uleb(domain.len() as u64, &mut output);
+    append_checked(&mut output, domain.as_bytes(), check)?;
+    put_uleb(fields.len() as u64, &mut output);
+    for field in fields {
+        check()?;
+        put_uleb(field.len() as u64, &mut output);
+        append_checked(&mut output, field, check)?;
+    }
+    check()?;
+    Ok(output)
+}
+
+pub(crate) fn equal_bytes_checked(
+    left: &[u8],
+    right: &[u8],
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<bool> {
+    check()?;
+    if left.len() != right.len() {
+        return Ok(false);
+    }
+    for (left, right) in left.chunks(64 * 1024).zip(right.chunks(64 * 1024)) {
+        check()?;
+        if left != right {
+            return Ok(false);
+        }
+    }
+    check()?;
+    Ok(true)
+}
+
+fn encoded_field_len(prefix: usize, field: usize) -> StorageResult<usize> {
+    prefix
+        .checked_add(uleb_len(field as u64))
+        .and_then(|len| len.checked_add(field))
+        .ok_or_else(|| StorageError::corrupt("LCE1 encoded field size overflow"))
+}
+
+fn append_checked(
+    output: &mut Vec<u8>,
+    bytes: &[u8],
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<()> {
+    for chunk in bytes.chunks(64 * 1024) {
+        check()?;
+        output.extend_from_slice(chunk);
+    }
+    Ok(())
+}
+
 pub(crate) struct RecordHasher {
     hasher: blake3::Hasher,
 }
@@ -32,6 +96,19 @@ impl RecordHasher {
     pub(crate) fn field(&mut self, field: &[u8]) {
         hash_uleb(field.len() as u64, &mut self.hasher);
         self.hasher.update(field);
+    }
+
+    pub(crate) fn field_checked(
+        &mut self,
+        field: &[u8],
+        check: &dyn Fn() -> StorageResult<()>,
+    ) -> StorageResult<()> {
+        hash_uleb(field.len() as u64, &mut self.hasher);
+        for chunk in field.chunks(64 * 1024) {
+            check()?;
+            self.hasher.update(chunk);
+        }
+        Ok(())
     }
 
     #[cfg(feature = "test-support")]
@@ -149,10 +226,58 @@ pub(crate) fn canonical_f32_bits(value: f32) -> u32 {
     }
 }
 
-pub(crate) fn parse_record<'a>(
+pub(crate) fn copy_bytes_checked(
+    bytes: &[u8],
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<Vec<u8>> {
+    check()?;
+    let mut output = Vec::with_capacity(bytes.len());
+    append_checked(&mut output, bytes, check)?;
+    check()?;
+    Ok(output)
+}
+
+/// A non-allocating view of a record's length-delimited fields or counted items.
+/// Call `finish()` after consuming the expected fields to reject trailing bytes.
+pub(crate) struct BorrowedFields<'a> {
+    bytes: &'a [u8],
+    cursor: usize,
+    remaining: usize,
+}
+
+impl<'a> BorrowedFields<'a> {
+    pub(crate) fn len(&self) -> usize {
+        self.remaining
+    }
+
+    pub(crate) fn next_field(&mut self) -> StorageResult<Option<&'a [u8]>> {
+        if self.remaining == 0 {
+            self.finish()?;
+            return Ok(None);
+        }
+        let len = usize_from_u64(
+            read_uleb(self.bytes, &mut self.cursor)?,
+            "LCE1 field length",
+        )?;
+        let field = take(self.bytes, &mut self.cursor, len)?;
+        self.remaining -= 1;
+        Ok(Some(field))
+    }
+
+    pub(crate) fn finish(&self) -> StorageResult<()> {
+        if self.remaining != 0 || self.cursor != self.bytes.len() {
+            return Err(StorageError::corrupt(
+                "LCE1 fields have missing items or trailing bytes",
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn borrowed_record_fields<'a>(
     bytes: &'a [u8],
     expected_domain: &str,
-) -> StorageResult<Vec<&'a [u8]>> {
+) -> StorageResult<BorrowedFields<'a>> {
     if bytes.get(..MAGIC.len()) != Some(MAGIC.as_slice()) {
         return Err(StorageError::corrupt(
             "LCE1 record is missing its magic prefix",
@@ -160,27 +285,39 @@ pub(crate) fn parse_record<'a>(
     }
     let mut cursor = MAGIC.len();
     let domain_len = usize_from_u64(read_uleb(bytes, &mut cursor)?, "LCE1 domain length")?;
-    let domain = take(bytes, &mut cursor, domain_len)?;
-    if domain != expected_domain.as_bytes() {
+    if take(bytes, &mut cursor, domain_len)? != expected_domain.as_bytes() {
         return Err(StorageError::corrupt(format!(
             "expected LCE1 {expected_domain} record"
         )));
     }
-    let field_count = usize_from_u64(read_uleb(bytes, &mut cursor)?, "LCE1 field count")?;
-    if field_count > bytes.len().saturating_sub(cursor) {
+    borrowed_fields_after_count(bytes, cursor)
+}
+
+pub(crate) fn borrowed_counted_fields(bytes: &[u8]) -> StorageResult<BorrowedFields<'_>> {
+    borrowed_fields_after_count(bytes, 0)
+}
+
+fn borrowed_fields_after_count(
+    bytes: &[u8],
+    mut cursor: usize,
+) -> StorageResult<BorrowedFields<'_>> {
+    let remaining = usize_from_u64(read_uleb(bytes, &mut cursor)?, "LCE1 field count")?;
+    if remaining > bytes.len().saturating_sub(cursor) {
         return Err(StorageError::corrupt(
             "LCE1 field count exceeds remaining encoded bytes",
         ));
     }
-    let mut fields = Vec::with_capacity(field_count);
-    for _ in 0..field_count {
-        let field_len = usize_from_u64(read_uleb(bytes, &mut cursor)?, "LCE1 field length")?;
-        fields.push(take(bytes, &mut cursor, field_len)?);
-    }
-    if cursor != bytes.len() {
-        return Err(StorageError::corrupt("LCE1 record has trailing bytes"));
-    }
-    Ok(fields)
+    Ok(BorrowedFields {
+        bytes,
+        cursor,
+        remaining,
+    })
+}
+
+pub(crate) fn borrowed_length_prefixed_field(bytes: &[u8]) -> StorageResult<&[u8]> {
+    let mut cursor = 0;
+    let len = usize_from_u64(read_uleb(bytes, &mut cursor)?, "LCE1 field length")?;
+    take(bytes, &mut cursor, len)
 }
 
 pub(crate) fn decode_i64(bytes: &[u8]) -> StorageResult<i64> {
@@ -199,6 +336,7 @@ pub(crate) fn decode_u32(bytes: &[u8]) -> StorageResult<u32> {
     Ok(u32::from_le_bytes(fixed(bytes)?))
 }
 
+#[cfg(test)]
 pub(crate) fn encode_counted(items: &[Vec<u8>]) -> Vec<u8> {
     let mut output = Vec::new();
     put_uleb(items.len() as u64, &mut output);
@@ -209,24 +347,24 @@ pub(crate) fn encode_counted(items: &[Vec<u8>]) -> Vec<u8> {
     output
 }
 
-pub(crate) fn decode_counted(bytes: &[u8]) -> StorageResult<Vec<&[u8]>> {
-    let mut cursor = 0;
-    let count = usize_from_u64(read_uleb(bytes, &mut cursor)?, "counted LCE1 item count")?;
-    if count > bytes.len().saturating_sub(cursor) {
-        return Err(StorageError::corrupt(
-            "counted LCE1 item count exceeds remaining encoded bytes",
-        ));
+pub(crate) fn encode_counted_checked(
+    items: &[Vec<u8>],
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<Vec<u8>> {
+    check()?;
+    let mut len = uleb_len(items.len() as u64);
+    for item in items {
+        check()?;
+        len = encoded_field_len(len, item.len())?;
     }
-    let mut output = Vec::with_capacity(count);
-    for _ in 0..count {
-        let len = usize_from_u64(read_uleb(bytes, &mut cursor)?, "counted LCE1 item length")?;
-        output.push(take(bytes, &mut cursor, len)?);
+    let mut output = Vec::with_capacity(len);
+    put_uleb(items.len() as u64, &mut output);
+    for item in items {
+        check()?;
+        put_uleb(item.len() as u64, &mut output);
+        append_checked(&mut output, item, check)?;
     }
-    if cursor != bytes.len() {
-        return Err(StorageError::corrupt(
-            "counted LCE1 payload has trailing bytes",
-        ));
-    }
+    check()?;
     Ok(output)
 }
 

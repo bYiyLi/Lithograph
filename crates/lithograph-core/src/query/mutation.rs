@@ -13,12 +13,13 @@ use crate::storage::{
 };
 
 use super::expression::{self, BindingRow, BindingValue, Expr, compile_expression, is_count};
-use super::graph::{ResolvedGraphView, property_value};
+use super::graph::ResolvedGraphView;
 use super::options::{ExecutionOptions, GraphViewSelector, writable_branch};
 use super::plan::{
     Direction, LogicalOperator, LogicalPlan, MatchStep, OrderItem, Projection, ProjectionPlan,
     append_pattern_operators, lower_match, lower_projection,
 };
+use super::resources::{ExecutionControl, MemoryReservation};
 use super::stream::QueryMetrics;
 use super::{QueryError, QueryErrorKind, QueryResult, check_interrupted, now_micros};
 use crate::cypher::unescape_identifier;
@@ -30,7 +31,7 @@ pub(crate) use execute::{
     TransactionBatchOutcome, TransactionMutationContext, execute_program,
     execute_program_suffix_transaction, execute_spilled_outer_write_transaction,
     execute_transaction_batch, execute_write, materialize_binding_rows_to_spill,
-    property_from_value, spill_value_rows,
+    property_from_value_controlled, spill_value_rows,
 };
 
 #[derive(Debug, Clone)]
@@ -157,6 +158,7 @@ pub(crate) struct MutationCounters {
 
 #[derive(Debug)]
 pub(crate) struct WriteRows {
+    batch_memory: Option<MemoryReservation>,
     kind: WriteRowsKind,
 }
 
@@ -180,6 +182,7 @@ struct ProjectedWriteRows {
     total: usize,
     snapshot_state: Box<storage::ResolvedSnapshotState>,
     params: BTreeMap<String, Value>,
+    _params_memory: MemoryReservation,
     projection: WriteProjection,
     query_access: Box<super::access::PropertyRules>,
     seen: usize,
@@ -465,16 +468,7 @@ fn lower_pattern_part(part: &AstNode) -> QueryResult<WritePatternPart> {
             "Phase 05 mutation patterns require a linear Node/Relationship path",
         ));
     }
-    let path_variable = part
-        .children
-        .iter()
-        .find(|node| node.kind == AstKind::PathAssignment)
-        .and_then(|node| {
-            node.descendants()
-                .find(|child| child.kind == AstKind::PatternVariable)
-        })
-        .and_then(|node| node.text.as_deref())
-        .map(unescape_identifier);
+    let path_variable = part.path_assignment_variable().map(unescape_identifier);
     Ok(WritePatternPart {
         path_variable,
         nodes,
@@ -761,49 +755,127 @@ fn resolve_write_names(
     row: &BindingRow,
     params: &BTreeMap<String, Value>,
     query_access: &super::access::PropertyRules,
-) -> QueryResult<Vec<String>> {
+    control: &ExecutionControl<'_>,
+) -> QueryResult<(Vec<String>, MemoryReservation)> {
     let mut output = Vec::new();
+    let mut memory = control.reserve(0)?;
     for name in names {
+        control.work(1)?;
         match name {
-            WriteName::Static(name) => output.push(name.clone()),
+            WriteName::Static(name) => {
+                push_static_write_name(&mut output, name, &mut memory, control)?
+            }
             WriteName::Dynamic(expression) => {
-                match expression::evaluate_with_access(
+                let evaluated = expression::evaluate_with_access_control(
                     expression,
                     snapshot,
                     row,
                     params,
                     query_access,
-                )? {
-                    Value::String(value) => output.push(value),
-                    Value::List(values) => {
-                        for value in values {
-                            let Value::String(value) = value else {
-                                return Err(QueryError::new(
-                                    QueryErrorKind::Type,
-                                    "dynamic label/type list must contain only non-null Strings",
-                                ));
-                            };
-                            output.push(value);
-                        }
-                    }
-                    _ => {
-                        return Err(QueryError::new(
-                            QueryErrorKind::Type,
-                            "dynamic label/type expression must be a non-null String or List<String>",
-                        ));
-                    }
-                }
+                    control,
+                )?;
+                memory.merge(evaluated.reservation)?;
+                append_dynamic_names(&mut output, evaluated.value, &mut memory, control)?;
             }
         }
     }
-    if output.iter().any(String::is_empty) {
+    deduplicate_write_names(&mut output, control)?;
+    let bytes = output.iter().try_fold(
+        super::resources::allocation_bytes::<String>(output.capacity())?,
+        |bytes, name| {
+            control.work(1)?;
+            super::resources::checked_add(bytes, name.capacity() as u64)
+        },
+    )?;
+    memory.resize(bytes)?;
+    Ok((output, memory))
+}
+
+fn push_static_write_name(
+    output: &mut Vec<String>,
+    name: &str,
+    memory: &mut MemoryReservation,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<()> {
+    memory.grow(name.len() as u64)?;
+    push_write_name(
+        output,
+        expression::clone_string_controlled(name, Some(control))?,
+        memory,
+    )
+}
+
+fn push_write_name(
+    output: &mut Vec<String>,
+    name: String,
+    memory: &mut MemoryReservation,
+) -> QueryResult<()> {
+    if name.is_empty() {
         return Err(QueryError::semantic(
             "dynamic label/type expression cannot produce an empty name",
         ));
     }
+    if output.len() == output.capacity() {
+        let capacity = output.capacity().saturating_mul(2).max(4);
+        memory.grow(super::resources::allocation_bytes::<String>(
+            capacity - output.capacity(),
+        )?)?;
+        output.reserve_exact(capacity - output.len());
+    }
+    output.push(name);
+    Ok(())
+}
+
+fn append_dynamic_names(
+    output: &mut Vec<String>,
+    value: Value,
+    memory: &mut MemoryReservation,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<()> {
+    match value {
+        Value::String(name) => push_write_name(output, name, memory),
+        Value::List(values) => {
+            for value in values {
+                control.work(1)?;
+                let Value::String(name) = value else {
+                    return Err(QueryError::new(
+                        QueryErrorKind::Type,
+                        "dynamic label/type list must contain only non-null Strings",
+                    ));
+                };
+                push_write_name(output, name, memory)?;
+            }
+            Ok(())
+        }
+        _ => Err(QueryError::new(
+            QueryErrorKind::Type,
+            "dynamic label/type expression must be a non-null String or List<String>",
+        )),
+    }
+}
+
+fn deduplicate_write_names(
+    output: &mut Vec<String>,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<()> {
+    let bytes = output.iter().try_fold(
+        super::resources::allocation_bytes::<String>(output.capacity())?,
+        |bytes, name| {
+            control.work(1)?;
+            super::resources::checked_add(bytes, name.capacity() as u64 + 192)
+        },
+    )?;
+    let _seen_memory = control.reserve(bytes)?;
     let mut seen = BTreeSet::new();
-    output.retain(|name| seen.insert(name.clone()));
-    Ok(output)
+    let original = std::mem::take(output);
+    *output = Vec::with_capacity(original.capacity());
+    for name in original {
+        control.work(1)?;
+        if seen.insert(expression::clone_string_controlled(&name, Some(control))?) {
+            output.push(name);
+        }
+    }
+    Ok(())
 }
 
 fn direct_property_target(

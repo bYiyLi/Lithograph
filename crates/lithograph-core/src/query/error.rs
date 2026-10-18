@@ -93,6 +93,13 @@ impl QueryError {
         error.sqlite_code = Some(rusqlite::ffi::SQLITE_INTERRUPT);
         error
     }
+
+    pub(crate) fn into_storage_error(self) -> StorageError {
+        StorageError::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(self.sqlite_code.unwrap_or(rusqlite::ffi::SQLITE_ERROR)),
+            Some(self.message),
+        ))
+    }
 }
 
 impl fmt::Display for QueryError {

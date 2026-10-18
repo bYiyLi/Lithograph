@@ -4,6 +4,8 @@
 
 本手册面向将 Lithograph 嵌入自己产品的开发者，适用版本为 **v0.3.2**。从安装、图查询到版本管理、搜索与维护，公开能力的使用说明均可在本手册内查到。旧版本行为见对应 [Release Notes](../releases/) 和 tag。readAccess/writeAccess 与本轮审计修复从 v0.3.2 提供，不能用于推断 v0.3.1 二进制已支持；版本变化见 [v0.3.2 发布说明](../releases/v0.3.2.md)，实际发布进度见 [Phase 18](https://github.com/bYiyLi/Lithograph/blob/main/docs/development/phases/18-query-access-controls.md#v032-release-delivery)。
 
+主分支另含明确标为 **Unreleased / Phase 19** 的查询正确性、表达式取消和 `memoryLimitBytes` 内容。新 option 不受 v0.3.2 发行库支持；开发/验收状态见 [Phase 19](../development/phases/19-query-correctness-resources.md)，固定 v0.3.2 文档仍以该 tag 为准。
+
 <a id="v030-基线"></a>
 
 ## 版本与运行要求
@@ -38,6 +40,7 @@ Lithograph 是嵌入式 SQLite extension。一个 SQLite connection 的 `main` d
 | 从空数据库创建图并读取历史 | [快速入门](getting-started.md) |
 | 学习图模型和基本 Cypher | [Graph 与 Cypher](graph-and-cypher.md) |
 | 参数绑定、流式消费、取消、连接池、Python/C | [应用集成](integration.md) |
+| 显式限制 execution 工作内存（Unreleased） | [内存预算接入](integration.md#execution-memory-budget) |
 | 普通执行、外层 SQL、多 execution 单 Commit 与 batch 的选择 | [事务与并发](transactions.md) |
 | 限定查询和修改可见子图 | [Graph View](graph-views.md) |
 | 强制只读并阻止外部 I/O | [安全执行](safe-execution.md) |

@@ -126,6 +126,10 @@ impl PointValue {
     pub fn srid(&self) -> u32 {
         self.srid
     }
+
+    pub(crate) fn accounted_heap_bytes(&self) -> usize {
+        self.crs.capacity() + self.coordinates.capacity() * std::mem::size_of::<f64>()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -139,6 +143,14 @@ impl VectorValue {
         coordinate_type: VectorCoordinateType,
         values: VectorValues,
     ) -> Result<Self, ValueError> {
+        Self::new_with_checkpoint(coordinate_type, values, |_| Ok(()))
+    }
+
+    pub(crate) fn new_with_checkpoint<E: From<ValueError>>(
+        coordinate_type: VectorCoordinateType,
+        values: VectorValues,
+        mut checkpoint: impl FnMut(usize) -> Result<(), E>,
+    ) -> Result<Self, E> {
         let matches_type = matches!(
             (coordinate_type, &values),
             (VectorCoordinateType::I8, VectorValues::I8(_))
@@ -149,25 +161,25 @@ impl VectorValue {
                 | (VectorCoordinateType::F64, VectorValues::F64(_))
         );
         if !matches_type {
-            return Err(ValueError::new(
-                "Vector values do not match their coordinateType",
-            ));
+            return Err(ValueError::new("Vector values do not match their coordinateType").into());
         }
         let dimension = values.len();
         if !(1..=4_096).contains(&dimension) {
-            return Err(ValueError::new(
-                "Vector dimension must be between 1 and 4096",
-            ));
+            return Err(ValueError::new("Vector dimension must be between 1 and 4096").into());
         }
         let finite = match &values {
-            VectorValues::F32(values) => values.iter().all(|value| value.is_finite()),
-            VectorValues::F64(values) => values.iter().all(|value| value.is_finite()),
+            VectorValues::F32(values) => {
+                vector_coordinates_finite(values.iter().copied().map(f64::from), &mut checkpoint)?
+            }
+            VectorValues::F64(values) => {
+                vector_coordinates_finite(values.iter().copied(), &mut checkpoint)?
+            }
             _ => true,
         };
         if !finite {
-            return Err(ValueError::new(
-                "Vector coordinates cannot contain NaN or Infinity",
-            ));
+            return Err(
+                ValueError::new("Vector coordinates cannot contain NaN or Infinity").into(),
+            );
         }
         Ok(Self {
             coordinate_type,
@@ -186,6 +198,19 @@ impl VectorValue {
     pub fn values(&self) -> &VectorValues {
         &self.values
     }
+}
+
+fn vector_coordinates_finite<E>(
+    values: impl Iterator<Item = f64>,
+    checkpoint: &mut impl FnMut(usize) -> Result<(), E>,
+) -> Result<bool, E> {
+    for value in values {
+        checkpoint(1)?;
+        if !value.is_finite() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

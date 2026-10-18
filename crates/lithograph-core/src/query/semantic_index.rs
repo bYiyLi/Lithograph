@@ -13,17 +13,37 @@ use crate::storage::{
 };
 
 use super::graph::{self, ResolvedGraphView};
+use super::resources::{
+    ExecutionControl, MemoryReservation, allocation_bytes, checked_add, checked_mul, memory_error,
+};
 use super::{QueryError, QueryErrorKind, QueryResult};
 
+mod execution_resources;
 mod hnsw;
+use execution_resources::{
+    fulltext_metadata_memory, fulltext_text_controlled, reserve_search_slot,
+    reserve_vector_workspace, stored_vector_valid_controlled, try_vector_numbers_controlled,
+    validate_query_vector_controlled,
+};
+pub(crate) use execution_resources::{
+    reserve_managed_hnsw_workspace, search_index_metadata_bytes, sort_semantic_hits_controlled,
+};
+mod fulltext_translation;
 mod similarity;
+use fulltext_translation::translate_fulltext_query;
+mod vector_search;
+pub(crate) use vector_search::{vector_candidates_controlled, vector_initial_candidate_limit};
 #[cfg(test)]
 mod tests;
 use hnsw::{
-    ManagedHnswEntry, build_managed_vector_cache, build_vector_cache,
-    invalidate_managed_vector_cache, query_managed_vector_cache, query_vector_cache,
+    ManagedHnswEntry, build_managed_vector_cache_controlled, invalidate_managed_vector_cache,
+    query_managed_vector_cache_controlled,
 };
-pub(crate) use similarity::{has_finite_nonzero_norm, vector_similarity_numbers};
+#[cfg(test)]
+use similarity::{has_finite_nonzero_norm, vector_similarity_numbers};
+pub(crate) use similarity::{
+    has_finite_nonzero_norm_controlled, vector_similarity_numbers_controlled,
+};
 
 const SEMANTIC_SCAN_PAGE_SIZE: usize = 4_096;
 
@@ -42,6 +62,7 @@ pub(crate) struct SemanticHit {
 pub(crate) struct VectorCandidateResult {
     pub(crate) hits: Vec<SemanticHit>,
     pub(crate) exhaustive: bool,
+    pub(crate) memory: Option<MemoryReservation>,
 }
 
 pub(crate) fn build_managed_hnsw_cache(
@@ -50,8 +71,9 @@ pub(crate) fn build_managed_hnsw_cache(
     similarity: &str,
     entries: Vec<(i64, Vec<f32>)>,
     is_interrupted: &dyn Fn() -> bool,
+    resources: &crate::query::resources::QueryResources,
 ) -> QueryResult<bool> {
-    build_managed_vector_cache(
+    build_managed_vector_cache_controlled(
         connection,
         cache_key,
         similarity,
@@ -60,6 +82,7 @@ pub(crate) fn build_managed_hnsw_cache(
             .map(|(owner_id, vector)| ManagedHnswEntry { owner_id, vector })
             .collect(),
         is_interrupted,
+        Some(resources),
     )
 }
 
@@ -72,16 +95,16 @@ pub(crate) fn invalidate_managed_hnsw_cache(
 
 pub(crate) fn query_managed_hnsw_cache(
     connection: &Connection,
-    cache_key: &str,
+    cache: (&str, &crate::query::resources::QueryResources),
     query: &[f32],
     similarity: &str,
     candidate_limit: usize,
     is_interrupted: &dyn Fn() -> bool,
     resolve_entity: impl FnMut(i64) -> QueryResult<Option<SemanticEntity>>,
 ) -> QueryResult<Option<VectorCandidateResult>> {
-    query_managed_vector_cache(
+    query_managed_vector_cache_controlled(
         connection,
-        cache_key,
+        (cache.0, Some(cache.1)),
         query,
         similarity,
         candidate_limit,
@@ -147,133 +170,41 @@ pub(crate) fn validate_query_index_access(
     Ok(())
 }
 
-pub(crate) fn vector_candidates(
-    connection: &Connection,
-    snapshot: &Snapshot<'_>,
-    graph_view: &ResolvedGraphView,
-    index: &IndexDefinition,
-    query: &Value,
-    candidate_limit: usize,
+fn sort_semantic_hits_with_interrupt(
+    hits: &mut [SemanticHit],
     is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<VectorCandidateResult> {
-    validate_query_index_access(index, graph_view)?;
-    let query_vector = vector_numbers(query)?;
-    let similarity = validate_vector_search_input(index, &query_vector)?;
-    let input = VectorSearchInput {
-        query: &query_vector,
-        similarity,
-    };
-    if let Some(mut result) = query_vector_cache(
-        snapshot,
-        graph_view,
-        index,
-        query,
-        candidate_limit,
-        is_interrupted,
-    )? {
-        sort_semantic_hits(&mut result.hits);
-        return Ok(result);
-    }
-    let mut hits = scan_vector_candidates(
-        connection,
-        snapshot,
-        graph_view,
-        index,
-        &input,
-        is_interrupted,
-    )?;
-    sort_semantic_hits(&mut hits);
-    build_vector_cache(
-        connection,
-        snapshot,
-        index,
-        query_vector.len(),
-        is_interrupted,
-    )?;
-    Ok(VectorCandidateResult {
-        hits,
-        exhaustive: true,
-    })
+) -> QueryResult<()> {
+    let mut work = 0_u16;
+    sort_semantic_hits_checked(hits, &mut || {
+        work += 1;
+        if work == 256 {
+            work = 0;
+            super::check_interrupted(is_interrupted)?;
+        }
+        Ok(())
+    })?;
+    super::check_interrupted(is_interrupted)
 }
 
-pub(crate) fn vector_initial_candidate_limit(
-    index: &IndexDefinition,
-    requested: usize,
-) -> QueryResult<usize> {
-    let Some(IndexConfiguration::Vector {
-        default_search_expansion_factor,
-        ..
-    }) = &index.configuration
-    else {
-        return Err(QueryError::internal(
-            "VECTOR Index is missing its versioned configuration",
-        ));
-    };
-    let expansion = default_search_expansion_factor
-        .parse::<f64>()
-        .map_err(|_| {
-            QueryError::internal("VECTOR Index has an invalid persisted search expansion factor")
-        })?;
-    let expanded = (requested as f64 * expansion).ceil();
-    if !expanded.is_finite() || expanded > usize::MAX as f64 {
-        return Ok(usize::MAX);
-    }
-    Ok(requested.max(expanded as usize).max(1))
-}
-
-fn validate_vector_search_input<'a>(
-    index: &'a IndexDefinition,
-    query_vector: &[f32],
-) -> QueryResult<&'a str> {
-    let (dimensions, similarity) = vector_configuration(index)?;
-    if let Some(dimensions) = dimensions
-        && query_vector.len() != dimensions
-    {
-        return Err(QueryError::semantic(format!(
-            "SEARCH vector dimension {} does not match Index dimension {dimensions}",
-            query_vector.len()
-        )));
-    }
-    validate_query_vector(query_vector, similarity)?;
-    Ok(similarity)
-}
-
-fn scan_vector_candidates(
-    connection: &Connection,
-    snapshot: &Snapshot<'_>,
-    graph_view: &ResolvedGraphView,
-    index: &IndexDefinition,
-    input: &VectorSearchInput<'_>,
-    is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<Vec<SemanticHit>> {
-    let property = index_properties(index)?
-        .first()
-        .ok_or_else(|| QueryError::internal("VECTOR Index is missing its indexed property"))?;
-    let mut hits = Vec::new();
-    visit_indexed_entities(
-        connection,
-        snapshot,
-        index,
-        Some(graph_view),
-        is_interrupted,
-        |entity| {
-            let value = semantic_property(snapshot, entity, property)?;
-            if let Some(hit) = vector_hit(index, input, entity, value)? {
-                hits.push(hit);
-            }
-            Ok(())
-        },
-    )?;
-    Ok(hits)
-}
-
-pub(crate) fn sort_semantic_hits(hits: &mut [SemanticHit]) {
+fn sort_semantic_hits_checked(
+    hits: &mut [SemanticHit],
+    checkpoint: &mut dyn FnMut() -> QueryResult<()>,
+) -> QueryResult<()> {
+    let mut error = None;
     hits.sort_by(|left, right| {
+        if error.is_some() {
+            return std::cmp::Ordering::Equal;
+        }
+        if let Err(failure) = checkpoint() {
+            error = Some(failure);
+            return std::cmp::Ordering::Equal;
+        }
         right
             .score
             .total_cmp(&left.score)
             .then_with(|| entity_id(left.entity).cmp(&entity_id(right.entity)))
     });
+    error.map_or(Ok(()), Err)
 }
 
 fn vector_configuration(index: &IndexDefinition) -> QueryResult<(Option<usize>, &str)> {
@@ -294,21 +225,30 @@ fn vector_configuration(index: &IndexDefinition) -> QueryResult<(Option<usize>, 
     Ok((dimensions, similarity_function))
 }
 
-fn vector_hit(
+fn vector_hit_controlled(
     index: &IndexDefinition,
     input: &VectorSearchInput<'_>,
     entity: SemanticEntity,
     value: Value,
+    control: Option<&ExecutionControl<'_>>,
 ) -> QueryResult<Option<SemanticHit>> {
-    let Some(vector) = try_vector_numbers(&value)? else {
+    let (vector, _vector_memory) = try_vector_numbers_controlled(&value, control)?;
+    let Some(vector) = vector else {
         return Ok(None);
     };
-    if !stored_vector_valid(&vector, index)? || vector.len() != input.query.len() {
+    if !stored_vector_valid_controlled(&vector, index, control)?
+        || vector.len() != input.query.len()
+    {
         return Ok(None);
     }
     Ok(Some(SemanticHit {
         entity,
-        score: vector_similarity_numbers(&vector, input.query, input.similarity)?,
+        score: similarity::vector_similarity_numbers_controlled(
+            &vector,
+            input.query,
+            input.similarity,
+            &|| control.is_some_and(|control| control.check().is_err()),
+        )?,
     }))
 }
 
@@ -318,16 +258,27 @@ pub(crate) fn visit_indexed_entities(
     index: &IndexDefinition,
     graph_view: Option<&ResolvedGraphView>,
     is_interrupted: &dyn Fn() -> bool,
+    control: Option<&ExecutionControl<'_>>,
     mut visit: impl FnMut(SemanticEntity) -> QueryResult<()>,
 ) -> QueryResult<()> {
     let membership = semantic_membership(connection, index)?;
     match membership {
-        SemanticMembership::NodeLabels(labels) => {
-            visit_semantic_nodes(snapshot, &labels, graph_view, is_interrupted, &mut visit)
-        }
-        SemanticMembership::RelationshipTypes(types) => {
-            visit_semantic_relationships(snapshot, &types, graph_view, is_interrupted, &mut visit)
-        }
+        SemanticMembership::NodeLabels(labels) => visit_semantic_nodes(
+            snapshot,
+            &labels,
+            graph_view,
+            is_interrupted,
+            control,
+            &mut visit,
+        ),
+        SemanticMembership::RelationshipTypes(types) => visit_semantic_relationships(
+            snapshot,
+            &types,
+            graph_view,
+            is_interrupted,
+            control,
+            &mut visit,
+        ),
     }
 }
 
@@ -358,6 +309,7 @@ fn visit_semantic_nodes(
     labels: &BTreeSet<i64>,
     graph_view: Option<&ResolvedGraphView>,
     is_interrupted: &dyn Fn() -> bool,
+    control: Option<&ExecutionControl<'_>>,
     visit: &mut impl FnMut(SemanticEntity) -> QueryResult<()>,
 ) -> QueryResult<()> {
     for label_id in labels {
@@ -373,7 +325,13 @@ fn visit_semantic_nodes(
                 {
                     continue;
                 }
-                visit_visible_entity(snapshot, graph_view, SemanticEntity::Node(node), visit)?;
+                visit_visible_entity(
+                    snapshot,
+                    graph_view,
+                    SemanticEntity::Node(node),
+                    control,
+                    visit,
+                )?;
             }
             let Some(next_after) = page.next_after else {
                 break;
@@ -389,6 +347,7 @@ fn visit_semantic_relationships(
     types: &BTreeSet<i64>,
     graph_view: Option<&ResolvedGraphView>,
     is_interrupted: &dyn Fn() -> bool,
+    control: Option<&ExecutionControl<'_>>,
     visit: &mut impl FnMut(SemanticEntity) -> QueryResult<()>,
 ) -> QueryResult<()> {
     for type_id in types {
@@ -404,6 +363,7 @@ fn visit_semantic_relationships(
                     snapshot,
                     graph_view,
                     SemanticEntity::Relationship(relationship),
+                    control,
                     visit,
                 )?;
             }
@@ -432,10 +392,11 @@ fn visit_visible_entity(
     snapshot: &Snapshot<'_>,
     graph_view: Option<&ResolvedGraphView>,
     entity: SemanticEntity,
+    control: Option<&ExecutionControl<'_>>,
     visit: &mut impl FnMut(SemanticEntity) -> QueryResult<()>,
 ) -> QueryResult<()> {
     if let Some(view) = graph_view
-        && !semantic_entity_visible(snapshot, view, entity)?
+        && !semantic_entity_visible(snapshot, view, entity, control)?
     {
         return Ok(());
     }
@@ -464,10 +425,17 @@ pub(crate) fn semantic_entity_visible(
     snapshot: &Snapshot<'_>,
     graph_view: &ResolvedGraphView,
     entity: SemanticEntity,
+    control: Option<&ExecutionControl<'_>>,
 ) -> QueryResult<bool> {
-    match entity {
-        SemanticEntity::Node(node) => graph_view.visible_node(snapshot, node),
-        SemanticEntity::Relationship(relationship) => {
+    match (entity, control) {
+        (SemanticEntity::Node(node), Some(control)) => {
+            graph_view.visible_node_controlled(snapshot, node, control)
+        }
+        (SemanticEntity::Relationship(relationship), Some(control)) => {
+            graph_view.visible_relationship_controlled(snapshot, relationship, control)
+        }
+        (SemanticEntity::Node(node), None) => graph_view.visible_node(snapshot, node),
+        (SemanticEntity::Relationship(relationship), None) => {
             graph_view.visible_relationship(snapshot, relationship)
         }
     }
@@ -484,6 +452,31 @@ pub(crate) fn semantic_property(
             graph::relationship_property(snapshot, relationship.id, property)
         }
     }
+}
+
+pub(crate) fn semantic_property_controlled(
+    snapshot: &Snapshot<'_>,
+    entity: SemanticEntity,
+    property: &str,
+    control: Option<&ExecutionControl<'_>>,
+) -> QueryResult<(Value, Option<MemoryReservation>)> {
+    let Some(control) = control else {
+        return semantic_property(snapshot, entity, property).map(|value| (value, None));
+    };
+    let access = super::access::PropertyRules::default();
+    let (value, memory) = match entity {
+        SemanticEntity::Node(node) => {
+            graph::node_property_with_control(snapshot, node, property, &access, control)?
+        }
+        SemanticEntity::Relationship(relationship) => graph::relationship_property_with_control(
+            snapshot,
+            relationship.id,
+            property,
+            &access,
+            control,
+        )?,
+    };
+    Ok((value, Some(memory)))
 }
 
 fn resolve_label_ids(connection: &Connection, names: &[String]) -> QueryResult<BTreeSet<i64>> {
@@ -518,14 +511,36 @@ pub(crate) fn entity_id(entity: SemanticEntity) -> i64 {
     }
 }
 
-pub(crate) fn fulltext_query(
+pub(crate) fn fulltext_query_controlled(
     connection: &Connection,
     snapshot: &Snapshot<'_>,
     graph_view: &ResolvedGraphView,
     index: &IndexDefinition,
     input: &FullTextQueryInput<'_>,
     is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<Vec<SemanticHit>> {
+    control: &ExecutionControl<'_>,
+) -> QueryResult<VectorCandidateResult> {
+    fulltext_query_inner(
+        connection,
+        snapshot,
+        graph_view,
+        index,
+        input,
+        is_interrupted,
+        Some(control),
+    )
+}
+
+fn fulltext_query_inner(
+    connection: &Connection,
+    snapshot: &Snapshot<'_>,
+    graph_view: &ResolvedGraphView,
+    index: &IndexDefinition,
+    input: &FullTextQueryInput<'_>,
+    is_interrupted: &dyn Fn() -> bool,
+    control: Option<&ExecutionControl<'_>>,
+) -> QueryResult<VectorCandidateResult> {
+    let _metadata_memory = fulltext_metadata_memory(index, input.query, control)?;
     validate_query_index_access(index, graph_view)?;
     validate_fulltext_target(index, input.relationship_query)?;
     let configured_analyzer = fulltext_configuration(index)?;
@@ -539,11 +554,20 @@ pub(crate) fn fulltext_query(
             index,
             input,
             is_interrupted,
+            control,
         );
     }
-    let table = ensure_fulltext_cache(connection, snapshot, index, is_interrupted)?;
-    let candidates = default_fulltext_candidates(connection, index, input.query, &table)?;
-    visible_fulltext_hits(snapshot, graph_view, input, candidates, is_interrupted)
+    let table = ensure_fulltext_cache(connection, snapshot, index, is_interrupted, control)?;
+    let (candidates, _candidates_memory) =
+        default_fulltext_candidates(connection, index, input.query, &table, control)?;
+    visible_fulltext_hits(
+        snapshot,
+        graph_view,
+        input,
+        candidates,
+        is_interrupted,
+        control,
+    )
 }
 
 fn fulltext_query_with_analyzer_override(
@@ -553,7 +577,8 @@ fn fulltext_query_with_analyzer_override(
     index: &IndexDefinition,
     input: &FullTextQueryInput<'_>,
     is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<Vec<SemanticHit>> {
+    control: Option<&ExecutionControl<'_>>,
+) -> QueryResult<VectorCandidateResult> {
     let analyzer = input
         .analyzer
         .ok_or_else(|| QueryError::internal("full-text analyzer override is missing"))?;
@@ -566,8 +591,14 @@ fn fulltext_query_with_analyzer_override(
             error,
         )
     })?;
-    let table =
-        ensure_fulltext_override_cache(connection, snapshot, index, configured, is_interrupted)?;
+    let table = ensure_fulltext_override_cache(
+        connection,
+        snapshot,
+        index,
+        configured,
+        is_interrupted,
+        control,
+    )?;
     let _override_guard =
         override_query_tokenizer(connection, &table, analyzer).map_err(|error| {
             map_fts5_provider_error(
@@ -577,8 +608,16 @@ fn fulltext_query_with_analyzer_override(
                 error,
             )
         })?;
-    let candidates = default_fulltext_candidates(connection, index, input.query, &table)?;
-    visible_fulltext_hits(snapshot, graph_view, input, candidates, is_interrupted)
+    let (candidates, _candidates_memory) =
+        default_fulltext_candidates(connection, index, input.query, &table, control)?;
+    visible_fulltext_hits(
+        snapshot,
+        graph_view,
+        input,
+        candidates,
+        is_interrupted,
+        control,
+    )
 }
 
 fn default_fulltext_candidates(
@@ -586,10 +625,11 @@ fn default_fulltext_candidates(
     index: &IndexDefinition,
     query: &str,
     table: &str,
-) -> QueryResult<Vec<FullTextCandidate>> {
-    let translated = translate_fulltext_query(index, query);
+    control: Option<&ExecutionControl<'_>>,
+) -> QueryResult<(Vec<FullTextCandidate>, Option<MemoryReservation>)> {
+    let translated = translate_fulltext_query(index, query, control)?;
     if translated.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     }
     let sql = format!(
         "SELECT owner_id, bm25({table}) FROM temp.{table} WHERE {table} MATCH ?1 ORDER BY bm25({table}), owner_id"
@@ -617,16 +657,25 @@ fn default_fulltext_candidates(
                 QueryErrorKind::Semantic,
                 error,
             )
-        })?
-        .collect::<Result<Vec<_>, _>>();
-    rows.map_err(|error| {
-        map_fulltext_sqlite_error(
-            &index.name,
-            "query expression",
-            QueryErrorKind::Semantic,
-            error,
-        )
-    })
+        })?;
+    let mut output = Vec::new();
+    let mut memory = control.map(|control| control.reserve(0)).transpose()?;
+    for row in rows {
+        if let Some(control) = control {
+            control.work(1)?;
+        }
+        let row = row.map_err(|error| {
+            map_fulltext_sqlite_error(
+                &index.name,
+                "query expression",
+                QueryErrorKind::Semantic,
+                error,
+            )
+        })?;
+        reserve_search_slot(&mut output, &mut memory)?;
+        output.push(row);
+    }
+    Ok((output, memory))
 }
 
 fn normalize_fulltext_score(raw_score: f64) -> f64 {
@@ -643,9 +692,11 @@ fn visible_fulltext_hits(
     input: &FullTextQueryInput<'_>,
     candidates: Vec<FullTextCandidate>,
     is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<Vec<SemanticHit>> {
+    control: Option<&ExecutionControl<'_>>,
+) -> QueryResult<VectorCandidateResult> {
     let mut visible_seen = 0_usize;
     let mut hits = Vec::new();
+    let mut memory = control.map(|control| control.reserve(0)).transpose()?;
     for candidate in candidates {
         if is_interrupted() {
             return Err(QueryError::interrupted());
@@ -655,6 +706,7 @@ fn visible_fulltext_hits(
             graph_view,
             input.relationship_query,
             candidate.owner_id,
+            control,
         )?
         else {
             continue;
@@ -666,12 +718,17 @@ fn visible_fulltext_hits(
         if input.limit.is_some_and(|limit| hits.len() >= limit) {
             break;
         }
+        reserve_search_slot(&mut hits, &mut memory)?;
         hits.push(SemanticHit {
             entity,
             score: candidate.score,
         });
     }
-    Ok(hits)
+    Ok(VectorCandidateResult {
+        hits,
+        exhaustive: true,
+        memory,
+    })
 }
 
 fn visible_fulltext_entity(
@@ -679,21 +736,17 @@ fn visible_fulltext_entity(
     graph_view: &ResolvedGraphView,
     relationship_query: bool,
     owner_id: i64,
+    control: Option<&ExecutionControl<'_>>,
 ) -> QueryResult<Option<SemanticEntity>> {
-    if relationship_query {
+    let entity = if relationship_query {
         let Some(relationship) = snapshot.relationship(owner_id)? else {
             return Ok(None);
         };
-        if graph_view.visible_relationship(snapshot, relationship)? {
-            Ok(Some(SemanticEntity::Relationship(relationship)))
-        } else {
-            Ok(None)
-        }
-    } else if graph_view.visible_node(snapshot, owner_id)? {
-        Ok(Some(SemanticEntity::Node(owner_id)))
+        SemanticEntity::Relationship(relationship)
     } else {
-        Ok(None)
-    }
+        SemanticEntity::Node(owner_id)
+    };
+    Ok(semantic_entity_visible(snapshot, graph_view, entity, control)?.then_some(entity))
 }
 
 pub(crate) fn validate_fulltext_schema_specification(analyzer: &str) -> QueryResult<()> {
@@ -745,17 +798,21 @@ fn fulltext_configuration(index: &IndexDefinition) -> QueryResult<&str> {
     }
 }
 
-pub(crate) fn validate_fulltext_transition(
+pub(crate) fn validate_fulltext_transition_controlled(
     connection: &Connection,
     previous: &SchemaState,
     next: &SchemaState,
+    is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<()> {
+    let check = || super::check_interrupted(is_interrupted).map_err(QueryError::into_storage_error);
+    super::check_interrupted(is_interrupted)?;
     for (name, index) in &next.indexes {
+        super::check_interrupted(is_interrupted)?;
         if index.kind != StandardIndexKind::FullText
             || previous
                 .indexes
                 .get(name)
-                .map(|previous| previous.canonical_eq(index))
+                .map(|previous| previous.canonical_eq_checked(index, &check))
                 .transpose()?
                 .unwrap_or(false)
         {
@@ -763,7 +820,9 @@ pub(crate) fn validate_fulltext_transition(
         }
         let analyzer = fulltext_configuration(index)?;
         validate_fulltext_schema_specification(analyzer)?;
+        super::check_interrupted(is_interrupted)?;
         probe_fulltext_specification(connection, index, analyzer)?;
+        super::check_interrupted(is_interrupted)?;
     }
     Ok(())
 }
@@ -788,6 +847,7 @@ fn ensure_fulltext_cache(
     snapshot: &Snapshot<'_>,
     index: &IndexDefinition,
     is_interrupted: &dyn Fn() -> bool,
+    control: Option<&ExecutionControl<'_>>,
 ) -> QueryResult<String> {
     let table = fulltext_cache_table(snapshot, index)?;
     let slot = prepare_fulltext_cache_slot(connection, &table, &index.name)?;
@@ -801,6 +861,7 @@ fn ensure_fulltext_cache(
         &table,
         slot == FullTextCacheSlot::Missing,
         is_interrupted,
+        control,
     )?;
     Ok(table)
 }
@@ -816,6 +877,7 @@ fn ensure_fulltext_override_cache(
     index: &IndexDefinition,
     configured_analyzer: &str,
     is_interrupted: &dyn Fn() -> bool,
+    control: Option<&ExecutionControl<'_>>,
 ) -> QueryResult<String> {
     let digest = semantic_cache_digest(snapshot, index, b"LITHOGRAPH_FTS5_OVERRIDE_V2")?;
     let table = format!("_lithograph_fts_override_{}", &digest[..24]);
@@ -828,10 +890,10 @@ fn ensure_fulltext_override_cache(
         connection,
         snapshot,
         index,
-        &table,
+        (&table, slot == FullTextCacheSlot::Missing),
         &tokenizer,
-        slot == FullTextCacheSlot::Missing,
         is_interrupted,
+        control,
     )?;
     Ok(table)
 }
@@ -843,16 +905,17 @@ fn build_fulltext_cache(
     table: &str,
     create_table: bool,
     is_interrupted: &dyn Fn() -> bool,
+    control: Option<&ExecutionControl<'_>>,
 ) -> QueryResult<()> {
     let analyzer = fulltext_configuration(index)?;
     build_fulltext_table(
         connection,
         snapshot,
         index,
-        table,
+        (table, create_table),
         analyzer,
-        create_table,
         is_interrupted,
+        control,
     )
 }
 
@@ -860,11 +923,12 @@ fn build_fulltext_table(
     connection: &Connection,
     snapshot: &Snapshot<'_>,
     index: &IndexDefinition,
-    table: &str,
+    table: (&str, bool),
     analyzer: &str,
-    create_table: bool,
     is_interrupted: &dyn Fn() -> bool,
+    control: Option<&ExecutionControl<'_>>,
 ) -> QueryResult<()> {
+    let (table, create_table) = table;
     let properties = index_properties(index)?;
     let columns = (0..properties.len())
         .map(|index| format!("c{index}"))
@@ -891,6 +955,7 @@ fn build_fulltext_table(
         table,
         properties,
         is_interrupted,
+        control,
     );
     if let Err(error) = result {
         return cleanup_failed_fulltext_build(connection, table, &index.name, error);
@@ -1074,6 +1139,7 @@ fn populate_fulltext_cache(
     table: &str,
     properties: &[String],
     is_interrupted: &dyn Fn() -> bool,
+    control: Option<&ExecutionControl<'_>>,
 ) -> QueryResult<()> {
     let columns = (0..properties.len())
         .map(|index| format!("c{index}"))
@@ -1092,6 +1158,7 @@ fn populate_fulltext_cache(
         index,
         None,
         is_interrupted,
+        control,
         |entity| {
             insert_fulltext_values(
                 connection,
@@ -1099,7 +1166,8 @@ fn populate_fulltext_cache(
                 &index.name,
                 entity_id(entity),
                 properties,
-                |property| semantic_property(snapshot, entity, property),
+                |property| semantic_property_controlled(snapshot, entity, property, control),
+                control,
             )?;
             Ok(())
         },
@@ -1112,13 +1180,36 @@ fn insert_fulltext_values(
     index_name: &str,
     owner_id: i64,
     properties: &[String],
-    mut property_value: impl FnMut(&str) -> QueryResult<Value>,
+    mut property_value: impl FnMut(&str) -> QueryResult<(Value, Option<MemoryReservation>)>,
+    control: Option<&ExecutionControl<'_>>,
 ) -> QueryResult<()> {
+    let mut memory = control
+        .map(|control| {
+            control.reserve(allocation_bytes::<rusqlite::types::Value>(
+                properties.len() + 1,
+            )?)
+        })
+        .transpose()?;
     let mut values = Vec::with_capacity(properties.len() + 1);
     let mut indexed = false;
     for property in properties {
-        let text = fulltext_text(property_value(property)?);
+        if let Some(control) = control {
+            control.work(1)?;
+        }
+        let (value, _property_memory) = property_value(property)?;
+        let _joining = control
+            .map(|control| {
+                control.reserve(checked_mul(
+                    super::resources::value_bytes_controlled(&value, control)?,
+                    4,
+                )?)
+            })
+            .transpose()?;
+        let text = fulltext_text_controlled(value, control)?;
         indexed |= text.is_some();
+        if let Some(memory) = &mut memory {
+            memory.grow(text.as_ref().map_or(0, |text| text.capacity() as u64))?;
+        }
         values.push(rusqlite::types::Value::Text(text.unwrap_or_default()));
     }
     if indexed {
@@ -1137,148 +1228,6 @@ fn insert_fulltext_values(
     Ok(())
 }
 
-fn fulltext_text(value: Value) -> Option<String> {
-    match value {
-        Value::String(value) => Some(value),
-        Value::List(values) => {
-            let strings = values
-                .into_iter()
-                .map(|value| match value {
-                    Value::String(value) => Some(value),
-                    _ => None,
-                })
-                .collect::<Option<Vec<_>>>()?;
-            Some(strings.join(" "))
-        }
-        _ => None,
-    }
-}
-
-fn translate_fulltext_query(index: &IndexDefinition, query: &str) -> String {
-    let Ok(properties) = index_properties(index) else {
-        return query.to_owned();
-    };
-    let query = translate_lucene_flat_boolean_query(query);
-    properties
-        .iter()
-        .enumerate()
-        .fold(query, |query, (ordinal, property)| {
-            query.replace(&format!("{property}:"), &format!("c{ordinal}:"))
-        })
-}
-
-#[derive(Clone, Copy)]
-enum LuceneClauseMode {
-    Optional,
-    Required,
-    Prohibited,
-}
-
-fn translate_lucene_flat_boolean_query(query: &str) -> String {
-    let Some(tokens) = split_lucene_flat_query(query) else {
-        return query.to_owned();
-    };
-    if tokens.iter().any(|token| {
-        matches!(
-            token.to_ascii_uppercase().as_str(),
-            "AND" | "OR" | "NOT" | "&&" | "||" | "!"
-        )
-    }) {
-        return query.to_owned();
-    }
-    let clauses = tokens
-        .into_iter()
-        .map(lucene_clause)
-        .collect::<Option<Vec<_>>>();
-    let Some(clauses) = clauses else {
-        return query.to_owned();
-    };
-    render_lucene_flat_clauses(&clauses)
-}
-
-fn split_lucene_flat_query(query: &str) -> Option<Vec<String>> {
-    let mut tokens = Vec::new();
-    let mut token = String::new();
-    let mut quoted = false;
-    let mut escaped = false;
-    for character in query.chars() {
-        if escaped {
-            token.push(character);
-            escaped = false;
-            continue;
-        }
-        if character == '\\' {
-            token.push(character);
-            escaped = true;
-            continue;
-        }
-        if character == '"' {
-            token.push(character);
-            quoted = !quoted;
-            continue;
-        }
-        if !quoted && matches!(character, '(' | ')') {
-            return None;
-        }
-        if !quoted && character.is_whitespace() {
-            if !token.is_empty() {
-                tokens.push(std::mem::take(&mut token));
-            }
-            continue;
-        }
-        token.push(character);
-    }
-    if quoted || escaped {
-        return None;
-    }
-    if !token.is_empty() {
-        tokens.push(token);
-    }
-    Some(tokens)
-}
-
-fn lucene_clause(token: String) -> Option<(LuceneClauseMode, String)> {
-    let (mode, clause) = match token.as_bytes().first().copied() {
-        Some(b'+') => (LuceneClauseMode::Required, token.get(1..)?),
-        Some(b'-') => (LuceneClauseMode::Prohibited, token.get(1..)?),
-        _ => (LuceneClauseMode::Optional, token.as_str()),
-    };
-    if clause.is_empty() {
-        return None;
-    }
-    Some((mode, clause.to_owned()))
-}
-
-fn render_lucene_flat_clauses(clauses: &[(LuceneClauseMode, String)]) -> String {
-    let required = clauses
-        .iter()
-        .filter(|(mode, _)| matches!(mode, LuceneClauseMode::Required))
-        .map(|(_, clause)| clause.as_str())
-        .collect::<Vec<_>>();
-    let optional = clauses
-        .iter()
-        .filter(|(mode, _)| matches!(mode, LuceneClauseMode::Optional))
-        .map(|(_, clause)| clause.as_str())
-        .collect::<Vec<_>>();
-    let prohibited = clauses
-        .iter()
-        .filter(|(mode, _)| matches!(mode, LuceneClauseMode::Prohibited))
-        .map(|(_, clause)| clause.as_str())
-        .collect::<Vec<_>>();
-    let mut rendered = if required.is_empty() {
-        optional.join(" OR ")
-    } else {
-        required.join(" AND ")
-    };
-    if rendered.is_empty() {
-        return String::new();
-    }
-    for clause in prohibited {
-        rendered = format!("({rendered}) NOT {clause}");
-    }
-    rendered
-}
-
 pub(crate) fn semantic_cache_digest(
     snapshot: &Snapshot<'_>,
     index: &IndexDefinition,
@@ -1292,66 +1241,4 @@ pub(crate) fn semantic_cache_digest(
     })?;
     hasher.update(&encoded);
     Ok(hasher.finalize().to_hex().to_string())
-}
-
-fn vector_numbers(value: &Value) -> QueryResult<Vec<f32>> {
-    try_vector_numbers(value)?
-        .ok_or_else(|| QueryError::semantic("SEARCH FOR requires VECTOR or LIST<INTEGER | FLOAT>"))
-}
-
-fn try_vector_numbers(value: &Value) -> QueryResult<Option<Vec<f32>>> {
-    let values = match value {
-        Value::Vector(vector) => match vector.values() {
-            VectorValues::I8(values) => values.iter().map(|value| f32::from(*value)).collect(),
-            VectorValues::I16(values) => values.iter().map(|value| f32::from(*value)).collect(),
-            VectorValues::I32(values) => values.iter().map(|value| *value as f32).collect(),
-            VectorValues::I64(values) => values.iter().map(|value| *value as f32).collect(),
-            VectorValues::F32(values) => values.clone(),
-            VectorValues::F64(values) => values.iter().map(|value| *value as f32).collect(),
-        },
-        Value::List(values) => {
-            let mut vector = Vec::with_capacity(values.len());
-            for value in values {
-                vector.push(match value {
-                    Value::Integer(value) => *value as f32,
-                    Value::Float(value) => *value as f32,
-                    _ => return Ok(None),
-                });
-            }
-            vector
-        }
-        _ => return Ok(None),
-    };
-    if values.is_empty() || values.iter().any(|value| !value.is_finite()) {
-        return Ok(None);
-    }
-    Ok(Some(values))
-}
-
-fn validate_query_vector(vector: &[f32], similarity: &str) -> QueryResult<()> {
-    if vector.is_empty() || vector.iter().any(|value| !value.is_finite()) {
-        return Err(QueryError::semantic(
-            "SEARCH query vector must contain finite numeric values",
-        ));
-    }
-    if similarity == "cosine" && !has_finite_nonzero_norm(vector) {
-        return Err(QueryError::semantic(
-            "cosine SEARCH query vector must have a finite non-zero norm",
-        ));
-    }
-    Ok(())
-}
-
-fn stored_vector_valid(vector: &[f32], index: &IndexDefinition) -> QueryResult<bool> {
-    let (dimensions, similarity) = vector_configuration(index)?;
-    if dimensions.is_some_and(|dimensions| vector.len() != dimensions) {
-        return Ok(false);
-    }
-    if vector.is_empty() || vector.iter().any(|value| !value.is_finite()) {
-        return Ok(false);
-    }
-    if similarity == "cosine" && !has_finite_nonzero_norm(vector) {
-        return Ok(false);
-    }
-    Ok(true)
 }

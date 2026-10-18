@@ -8,14 +8,20 @@ use crate::storage::{
 };
 
 use super::super::access::PropertyRules;
-use super::super::expression::{BinaryOp, Expr, UnaryOp};
+use super::super::expression::{BinaryOp, Expr};
 use super::super::plan::MatchStep;
+use super::super::{ExecutionControl, MemoryReservation, QueryResult};
+use crate::storage::Snapshot;
 
 mod cache;
+mod constant;
+use constant::SeekEvaluation;
 mod persistent;
 
 pub(crate) use cache::{StandardIndexCursor, scan_node_index_page, scan_relationship_index_page};
-pub(crate) use persistent::{build_persistent_generation, ensure_standard_indexes_for_commit};
+pub(crate) use persistent::{
+    build_persistent_generation, ensure_standard_indexes_for_commit_controlled,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct StandardIndexSeek {
@@ -55,25 +61,31 @@ pub(crate) fn select_standard_index_seeks(
     matches: &mut [MatchStep],
     params: &BTreeMap<String, Value>,
     query_access: &PropertyRules,
-) {
+    snapshot: &Snapshot<'_>,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<MemoryReservation> {
+    let mut evaluation = SeekEvaluation::new(snapshot, params, query_access, control)?;
     for step in matches {
         let candidates = step
             .predicate
             .as_ref()
             .map(|predicate| {
-                let mut candidates = predicate_candidates(predicate, params);
+                let mut candidates = predicate_candidates(predicate, &evaluation);
                 if !query_access.is_empty() {
                     candidates.retain(|(_, property, _)| !query_access.denies(property));
                 }
                 candidates
             })
             .unwrap_or_default();
+        evaluation.check()?;
         for part in &mut step.parts {
+            let _copy_memory = evaluation.copy_workspace(schema, &candidates)?;
             part.start.index_seek = choose_node_seek(
                 schema,
                 part.start.variable.as_deref(),
                 &part.start.label_names,
                 &candidates,
+                &evaluation,
             );
             if let Some(relationship) = part.relationship.as_mut() {
                 relationship.index_seek = choose_relationship_seek(
@@ -81,10 +93,20 @@ pub(crate) fn select_standard_index_seeks(
                     relationship.variable.as_deref(),
                     relationship.type_name.as_deref(),
                     &candidates,
+                    &evaluation,
                 );
             }
+            evaluation.retain(part.start.index_seek.as_ref())?;
+            evaluation.retain(
+                part.relationship
+                    .as_ref()
+                    .and_then(|relationship| relationship.index_seek.as_ref()),
+            )?;
         }
+        drop(candidates);
+        evaluation.release_folded()?;
     }
+    evaluation.finish()
 }
 
 fn choose_node_seek(
@@ -92,12 +114,14 @@ fn choose_node_seek(
     variable: Option<&str>,
     labels: &[String],
     candidates: &[(String, String, StandardIndexPredicate)],
+    evaluation: &SeekEvaluation<'_, '_>,
 ) -> Option<StandardIndexSeek> {
     if let Some(seek) = best_property_seek(
         schema,
         variable,
         candidates,
         PropertySeekScope::Node(labels),
+        evaluation,
     ) {
         return Some(seek);
     }
@@ -112,12 +136,14 @@ fn choose_relationship_seek(
     variable: Option<&str>,
     relationship_type: Option<&str>,
     candidates: &[(String, String, StandardIndexPredicate)],
+    evaluation: &SeekEvaluation<'_, '_>,
 ) -> Option<StandardIndexSeek> {
     if let Some(seek) = best_property_seek(
         schema,
         variable,
         candidates,
         PropertySeekScope::Relationship(relationship_type),
+        evaluation,
     ) {
         return Some(seek);
     }
@@ -138,6 +164,7 @@ fn best_property_seek(
     variable: Option<&str>,
     candidates: &[(String, String, StandardIndexPredicate)],
     scope: PropertySeekScope<'_>,
+    evaluation: &SeekEvaluation<'_, '_>,
 ) -> Option<StandardIndexSeek> {
     let mut selected = schema
         .indexes
@@ -149,6 +176,7 @@ fn best_property_seek(
                 variable,
                 scoped_index_properties(index, scope)?,
                 candidates,
+                evaluation,
             )
         })
         .collect::<Vec<_>>();
@@ -198,6 +226,7 @@ fn choose_property_seek(
     variable: Option<&str>,
     properties: &[String],
     candidates: &[(String, String, StandardIndexPredicate)],
+    evaluation: &SeekEvaluation<'_, '_>,
 ) -> Option<StandardIndexSeek> {
     let variable = variable?;
     let mut predicates = Vec::with_capacity(properties.len());
@@ -207,7 +236,7 @@ fn choose_property_seek(
             .filter(|(candidate_variable, candidate_property, predicate)| {
                 candidate_variable == variable
                     && candidate_property == property
-                    && predicate_supported(schema, index, property, predicate)
+                    && predicate_supported(schema, index, property, predicate, evaluation)
             })
             .map(|(_, _, predicate)| predicate.clone())
             .collect::<Vec<_>>();
@@ -301,16 +330,17 @@ fn predicate_supported(
     index: &IndexDefinition,
     property: &str,
     predicate: &StandardIndexPredicate,
+    evaluation: &SeekEvaluation<'_, '_>,
 ) -> bool {
     match (index.kind, predicate) {
         (StandardIndexKind::Range, StandardIndexPredicate::Equal(value)) => {
-            range_equality_value(schema, index, property, value)
+            range_equality_value(schema, index, property, value, evaluation)
         }
         (StandardIndexKind::Range, StandardIndexPredicate::In(values)) => {
             !values.is_empty()
                 && values
                     .iter()
-                    .all(|value| range_equality_value(schema, index, property, value))
+                    .all(|value| range_equality_value(schema, index, property, value, evaluation))
         }
         (
             StandardIndexKind::Range,
@@ -334,7 +364,9 @@ fn predicate_supported(
         }
         (StandardIndexKind::Point, StandardIndexPredicate::In(values)) => {
             !values.is_empty()
-                && values.iter().all(|value| matches!(value, Value::Point(_)))
+                && values
+                    .iter()
+                    .all(|value| evaluation.check_work() && matches!(value, Value::Point(_)))
                 && property_type_proves(schema, index, property, |property_type| {
                     matches!(property_type, PropertyType::Point)
                 })
@@ -367,7 +399,9 @@ fn predicate_supported(
         }),
         (StandardIndexKind::Text, StandardIndexPredicate::In(values)) => {
             !values.is_empty()
-                && values.iter().all(|value| matches!(value, Value::String(_)))
+                && values
+                    .iter()
+                    .all(|value| evaluation.check_work() && matches!(value, Value::String(_)))
                 && property_type_proves(schema, index, property, |property_type| {
                     matches!(property_type, PropertyType::String)
                 })
@@ -456,16 +490,24 @@ fn range_equality_value(
     index: &IndexDefinition,
     property: &str,
     value: &Value,
+    evaluation: &SeekEvaluation<'_, '_>,
 ) -> bool {
-    if !value.is_property_value() {
+    if !evaluation.is_property_value(value) {
         return false;
     }
     property_type_proves(schema, index, property, |property_type| {
-        property_type_equality_compatible(property_type, value)
+        property_type_equality_compatible(property_type, value, evaluation)
     })
 }
 
-fn property_type_equality_compatible(property_type: &PropertyType, value: &Value) -> bool {
+fn property_type_equality_compatible(
+    property_type: &PropertyType,
+    value: &Value,
+    evaluation: &SeekEvaluation<'_, '_>,
+) -> bool {
+    if !evaluation.check_work() {
+        return false;
+    }
     if let Some(compatible) = property_type_scalar_compatible(property_type, value) {
         return compatible;
     }
@@ -480,7 +522,7 @@ fn property_type_equality_compatible(property_type: &PropertyType, value: &Value
             PropertyType::List { element } if values.is_empty() => true,
             PropertyType::List { element } => values
                 .iter()
-                .all(|value| property_type_equality_compatible(element, value)),
+                .all(|value| property_type_equality_compatible(element, value, evaluation)),
             _ => false,
         },
         _ => false,
@@ -520,7 +562,7 @@ fn range_order_value(value: &Value) -> bool {
 
 fn predicate_candidates(
     expression: &Expr,
-    params: &BTreeMap<String, Value>,
+    params: &SeekEvaluation<'_, '_>,
 ) -> Vec<(String, String, StandardIndexPredicate)> {
     let mut candidates = Vec::new();
     collect_predicate_candidates(expression, params, &mut candidates);
@@ -529,7 +571,7 @@ fn predicate_candidates(
 
 fn collect_predicate_candidates(
     expression: &Expr,
-    params: &BTreeMap<String, Value>,
+    params: &SeekEvaluation<'_, '_>,
     output: &mut Vec<(String, String, StandardIndexPredicate)>,
 ) {
     if let Expr::Binary(BinaryOp::And, left, right) = expression {
@@ -548,7 +590,7 @@ fn collect_predicate_candidates(
 
 fn collect_special_predicate_candidate(
     expression: &Expr,
-    params: &BTreeMap<String, Value>,
+    params: &SeekEvaluation<'_, '_>,
     output: &mut Vec<(String, String, StandardIndexPredicate)>,
 ) -> bool {
     if let Expr::IsNull {
@@ -589,7 +631,7 @@ fn collect_binary_predicate_candidate(
     operator: BinaryOp,
     left: &Expr,
     right: &Expr,
-    params: &BTreeMap<String, Value>,
+    params: &SeekEvaluation<'_, '_>,
     output: &mut Vec<(String, String, StandardIndexPredicate)>,
 ) {
     match operator {
@@ -608,7 +650,7 @@ fn collect_binary_predicate_candidate(
 fn collect_equality_candidate(
     left: &Expr,
     right: &Expr,
-    params: &BTreeMap<String, Value>,
+    params: &SeekEvaluation<'_, '_>,
     output: &mut Vec<(String, String, StandardIndexPredicate)>,
 ) {
     let candidate =
@@ -621,7 +663,7 @@ fn collect_equality_candidate(
 fn collect_in_candidate(
     left: &Expr,
     right: &Expr,
-    params: &BTreeMap<String, Value>,
+    params: &SeekEvaluation<'_, '_>,
     output: &mut Vec<(String, String, StandardIndexPredicate)>,
 ) {
     if let Some((variable, property)) = property_name(left)
@@ -635,7 +677,7 @@ fn collect_order_candidate(
     operator: BinaryOp,
     left: &Expr,
     right: &Expr,
-    params: &BTreeMap<String, Value>,
+    params: &SeekEvaluation<'_, '_>,
     output: &mut Vec<(String, String, StandardIndexPredicate)>,
 ) {
     if let Some((property, value)) = property_constant(left, right, params) {
@@ -677,7 +719,7 @@ fn collect_text_candidate(
     operator: BinaryOp,
     left: &Expr,
     right: &Expr,
-    params: &BTreeMap<String, Value>,
+    params: &SeekEvaluation<'_, '_>,
     output: &mut Vec<(String, String, StandardIndexPredicate)>,
 ) {
     let Some((variable, property)) = property_name(left) else {
@@ -697,7 +739,7 @@ fn collect_text_candidate(
 
 fn point_bbox_candidate(
     expression: &Expr,
-    params: &BTreeMap<String, Value>,
+    params: &SeekEvaluation<'_, '_>,
 ) -> Option<(String, String, Value, Value)> {
     let Expr::Function { name, args, .. } = expression else {
         return None;
@@ -716,7 +758,7 @@ fn point_bbox_candidate(
 
 fn point_distance_candidate(
     expression: &Expr,
-    params: &BTreeMap<String, Value>,
+    params: &SeekEvaluation<'_, '_>,
 ) -> Option<(String, String, Value, Value, bool)> {
     let Expr::Binary(operator, left, right) = expression else {
         return None;
@@ -752,7 +794,7 @@ fn point_distance_candidate(
 fn property_constant(
     property: &Expr,
     constant: &Expr,
-    params: &BTreeMap<String, Value>,
+    params: &SeekEvaluation<'_, '_>,
 ) -> Option<((String, String), Value)> {
     Some((property_name(property)?, constant_value(constant, params)?))
 }
@@ -767,45 +809,163 @@ fn property_name(expression: &Expr) -> Option<(String, String)> {
     Some((variable.clone(), property.clone()))
 }
 
-fn constant_value(expression: &Expr, params: &BTreeMap<String, Value>) -> Option<Value> {
-    match expression {
-        Expr::Literal(value) => Some(value.clone()),
-        Expr::Parameter(name) => params.get(name).cloned(),
-        Expr::Unary(UnaryOp::Positive, value) => constant_value(value, params),
-        Expr::Unary(UnaryOp::Negative, value) => match constant_value(value, params)? {
-            Value::Integer(value) => value.checked_neg().map(Value::Integer),
-            Value::Float(value) => Some(Value::Float(-value)),
-            _ => None,
-        },
-        Expr::List(values) => values
-            .iter()
-            .map(|value| constant_value(value, params))
-            .collect::<Option<Vec<_>>>()
-            .map(Value::List),
-        Expr::Map(entries) => entries
-            .iter()
-            .map(|(key, value)| Some((key.clone(), constant_value(value, params)?)))
-            .collect::<Option<BTreeMap<_, _>>>()
-            .map(Value::Map),
-        Expr::Function {
-            name,
-            args,
-            distinct: false,
-            star: false,
-        } => {
-            let values = args
-                .iter()
-                .map(|argument| constant_value(argument, params))
-                .collect::<Option<Vec<_>>>()?;
-            super::super::functions::evaluate(name, &values)?.ok()
-        }
-        _ => None,
-    }
+fn constant_value(expression: &Expr, params: &SeekEvaluation<'_, '_>) -> Option<Value> {
+    params.value(expression)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
+
+    fn proof_connection() -> rusqlite::Connection {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE _lithograph_meta(id INTEGER PRIMARY KEY, magic TEXT, database_id TEXT, storage_format INTEGER);").unwrap();
+        crate::storage::create_storage_schema(&connection).unwrap();
+        crate::storage::initialize_root(&connection).unwrap();
+        connection
+    }
+
+    fn list_index_schema() -> SchemaState {
+        let index = IndexDefinition {
+            name: "values_range".into(),
+            kind: StandardIndexKind::Range,
+            target: IndexTarget::NodeProperties {
+                label: "Probe".into(),
+                properties: vec!["values".into()],
+            },
+            owning_constraint: None,
+            labels_or_types: Vec::new(),
+            additional_properties: Vec::new(),
+            configuration: None,
+        };
+        let constraint = crate::storage::ConstraintDefinition {
+            name: "values_type".into(),
+            target: SchemaTarget::Node {
+                label: "Probe".into(),
+            },
+            properties: vec!["values".into()],
+            kind: ConstraintDefinitionKind::Type {
+                rule: crate::storage::PropertyRule {
+                    property_type: PropertyType::List {
+                        element: Box::new(PropertyType::Integer),
+                    },
+                    required: false,
+                },
+            },
+            origin: None,
+        };
+        SchemaState {
+            indexes: BTreeMap::from([(index.name.clone(), index)]),
+            constraints: BTreeMap::from([(constraint.name.clone(), constraint)]),
+            ..SchemaState::default()
+        }
+    }
+
+    fn assert_list_proof_cancellation(fail_at: usize) {
+        let connection = proof_connection();
+        let commit = crate::storage::branch_head(&connection, "main").unwrap();
+        let snapshot = Snapshot::resolve(&connection, commit).unwrap();
+        let resources = crate::query::QueryResources::default();
+        let armed = Cell::new(false);
+        let calls = Cell::new(0);
+        let interrupted = || {
+            if !armed.get() {
+                return false;
+            }
+            calls.set(calls.get() + 1);
+            calls.get() >= fail_at
+        };
+        let control = ExecutionControl::new(&resources, &interrupted);
+        let params = BTreeMap::new();
+        let access = PropertyRules::default();
+        let evaluation = SeekEvaluation::new(&snapshot, &params, &access, &control).unwrap();
+        let schema = list_index_schema();
+        let index = &schema.indexes["values_range"];
+        let predicate =
+            StandardIndexPredicate::Equal(Value::List((0..1_024).map(Value::Integer).collect()));
+        // Constant folding and its copy preflight are deliberately absent:
+        // cancellation must occur inside the subsequent index proof itself.
+        armed.set(true);
+        assert!(!predicate_supported(
+            &schema,
+            index,
+            "values",
+            &predicate,
+            &evaluation
+        ));
+        let error = evaluation
+            .check()
+            .expect_err("proof cancellation must not become a scan fallback");
+        assert_eq!(error.kind, crate::query::QueryErrorKind::Interrupted);
+        assert_eq!(error.sqlite_code, Some(rusqlite::ffi::SQLITE_INTERRUPT));
+        assert_eq!(calls.get(), fail_at);
+        drop(evaluation);
+        assert_eq!(resources.used(), 0);
+    }
+
+    #[test]
+    fn index_list_property_eligibility_checks_current_cancellation() {
+        assert_list_proof_cancellation(1);
+    }
+
+    #[test]
+    fn index_known_list_type_proof_checks_cancellation_after_property_validation() {
+        // The first 1,024-member eligibility pass makes four interval polls.
+        // Poll six must therefore come from the later constraint-type proof.
+        assert_list_proof_cancellation(6);
+    }
+
+    #[test]
+    fn controlled_list_proof_keeps_index_and_scan_fallback_choices() {
+        let connection = proof_connection();
+        let commit = crate::storage::branch_head(&connection, "main").unwrap();
+        let snapshot = Snapshot::resolve(&connection, commit).unwrap();
+        let resources = crate::query::QueryResources::default();
+        let control = ExecutionControl::new(&resources, &|| false);
+        let params = BTreeMap::new();
+        let access = PropertyRules::default();
+        let evaluation = SeekEvaluation::new(&snapshot, &params, &access, &control).unwrap();
+        let mut schema = list_index_schema();
+        let labels = vec!["Probe".into()];
+        for (value, expected) in [
+            (Value::List(Vec::new()), true),
+            (Value::List(vec![Value::Integer(1); 1_024]), true),
+            (Value::List(vec![Value::Float(1.0)]), true),
+            (
+                Value::List(vec![Value::Integer(1), Value::Float(1.0)]),
+                false,
+            ),
+            (Value::List(vec![Value::String("x".into())]), false),
+            (Value::List(vec![Value::Null]), false),
+            (Value::List(vec![Value::List(Vec::new())]), false),
+            (Value::Null, false),
+        ] {
+            assert_eq!(
+                evaluation.is_property_value(&value),
+                value.is_property_value()
+            );
+            let candidates = vec![(
+                "n".into(),
+                "values".into(),
+                StandardIndexPredicate::Equal(value),
+            )];
+            let seek = choose_node_seek(&schema, Some("n"), &labels, &candidates, &evaluation);
+            assert_eq!(seek.is_some(), expected);
+            if let Some(seek) = seek {
+                assert_eq!(seek.index_name, "values_range");
+            }
+        }
+        schema.constraints.clear();
+        let candidates = vec![(
+            "n".into(),
+            "values".into(),
+            StandardIndexPredicate::Equal(Value::List(vec![Value::Integer(1); 1_024])),
+        )];
+        assert!(choose_node_seek(&schema, Some("n"), &labels, &candidates, &evaluation).is_none());
+        evaluation.check().unwrap();
+    }
 
     #[test]
     fn predicate_extraction_handles_equality_and_text_operations() {
@@ -817,8 +977,18 @@ mod tests {
             )),
             Box::new(Expr::Literal(Value::String("Alice".to_owned()))),
         );
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE _lithograph_meta(id INTEGER PRIMARY KEY, magic TEXT, database_id TEXT, storage_format INTEGER);").unwrap();
+        crate::storage::create_storage_schema(&connection).unwrap();
+        let commit = crate::storage::initialize_root(&connection).unwrap();
+        let snapshot = Snapshot::resolve(&connection, commit.root).unwrap();
+        let resources = crate::query::QueryResources::default();
+        let control = ExecutionControl::new(&resources, &|| false);
+        let params = BTreeMap::new();
+        let access = PropertyRules::default();
+        let evaluation = SeekEvaluation::new(&snapshot, &params, &access, &control).unwrap();
         assert_eq!(
-            predicate_candidates(&equality, &BTreeMap::new()),
+            predicate_candidates(&equality, &evaluation),
             vec![(
                 "n".to_owned(),
                 "name".to_owned(),

@@ -34,6 +34,7 @@ pub struct ExecutionOptions {
     pub snapshot: SnapshotSelector,
     pub graph_view: GraphViewSelector,
     pub read_only_no_external_io: bool,
+    pub memory_limit_bytes: Option<u64>,
     pub access: AccessPolicy,
     pub merge_session: Option<MergeSessionSelector>,
     pub(crate) write_branch: Option<String>,
@@ -48,6 +49,7 @@ impl Default for ExecutionOptions {
             snapshot: SnapshotSelector::Current,
             graph_view: GraphViewSelector::default(),
             read_only_no_external_io: false,
+            memory_limit_bytes: None,
             access: AccessPolicy::default(),
             merge_session: None,
             write_branch: None,
@@ -74,6 +76,7 @@ impl ExecutionOptions {
         let (snapshot, write_branch) = parse_snapshot_option(object)?;
         let graph_view = parse_graph_view_option(object)?;
         let read_only_no_external_io = parse_read_only_option(object)?;
+        let memory_limit_bytes = parse_memory_limit_option(object)?;
         let merge_session = parse_merge_session(object)?;
         let access = AccessPolicy::parse(object)?;
         validate_merge_session_context(object, merge_session.is_some())?;
@@ -81,6 +84,7 @@ impl ExecutionOptions {
             snapshot,
             graph_view,
             read_only_no_external_io,
+            memory_limit_bytes,
             access,
             merge_session,
             write_branch,
@@ -115,6 +119,21 @@ fn parse_read_only_option(object: &Map<String, JsonValue>) -> QueryResult<bool> 
         Some(_) => Err(QueryError::invalid_argument(
             "options.readOnlyNoExternalIO must be a Boolean",
         )),
+    }
+}
+
+fn parse_memory_limit_option(object: &Map<String, JsonValue>) -> QueryResult<Option<u64>> {
+    match object.get("memoryLimitBytes") {
+        None => Ok(None),
+        Some(value) => value
+            .as_i64()
+            .filter(|value| *value > 0)
+            .map(|value| Some(value as u64))
+            .ok_or_else(|| {
+                QueryError::invalid_argument(
+                    "options.memoryLimitBytes must be an integer between 1 and 9223372036854775807",
+                )
+            }),
     }
 }
 
@@ -230,6 +249,7 @@ fn validate_top_level_keys(object: &Map<String, JsonValue>) -> QueryResult<()> {
                 | "message"
                 | "graphView"
                 | "readOnlyNoExternalIO"
+                | "memoryLimitBytes"
                 | "mergeSession"
                 | "readAccess"
                 | "writeAccess"

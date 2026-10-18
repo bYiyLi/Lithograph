@@ -6,9 +6,11 @@ use super::encoding::{RecordHasher, i64_bytes, optional_bytes, record};
 use super::identity::allocate_layer_id;
 use super::layer_read::{
     load_label_deltas, load_node_deltas, load_property_deltas, load_relationship_deltas,
-    visit_label_deltas, visit_node_deltas, visit_property_deltas, visit_relationship_deltas,
+    visit_label_deltas, visit_node_deltas, visit_property_deltas, visit_property_deltas_observed,
+    visit_relationship_deltas,
 };
 use super::property::PropertyColumns;
+use super::snapshot_read::SnapshotReadObserver;
 use super::{
     HashId, LabelId, NodeId, OwnerKind, PropertyKeyId, PropertyValue, RelationshipId,
     RelationshipTypeId, StorageError, StorageResult,
@@ -241,38 +243,66 @@ impl LayerBuilder {
 
     /// Returns the storage-format-1 canonical LCE1 bytes for this Layer.
     pub fn canonical_lce1(&self) -> StorageResult<Vec<u8>> {
+        self.canonical_lce1_checked(&|| Ok(()))
+    }
+
+    pub(crate) fn canonical_lce1_checked(
+        &self,
+        check: &dyn Fn() -> StorageResult<()>,
+    ) -> StorageResult<Vec<u8>> {
+        check()?;
         let mut fields = Vec::with_capacity(self.slot_count());
-        fields.extend(self.nodes.iter().map(|(id, op)| node_record(*id, *op)));
-        fields.extend(
-            self.labels
-                .iter()
-                .map(|((node, label), op)| label_record(*node, *label, *op)),
-        );
-        fields.extend(
-            self.relationships
-                .values()
-                .map(|delta| relationship_record(*delta)),
-        );
-        for ((owner_kind, owner_id, key_id), delta) in &self.properties {
-            fields.push(property_record(*owner_kind, *owner_id, *key_id, delta)?);
+        for (id, op) in &self.nodes {
+            check()?;
+            fields.push(node_record(*id, *op));
         }
-        Ok(record("LAYER", &fields))
+        for ((node, label), op) in &self.labels {
+            check()?;
+            fields.push(label_record(*node, *label, *op));
+        }
+        for delta in self.relationships.values() {
+            check()?;
+            fields.push(relationship_record(*delta));
+        }
+        for ((owner_kind, owner_id, key_id), delta) in &self.properties {
+            fields.push(property_record_checked(
+                *owner_kind,
+                *owner_id,
+                *key_id,
+                delta,
+                check,
+            )?);
+        }
+        super::encoding::record_checked("LAYER", &fields, check)
     }
 
     /// Returns the BLAKE3 content hash of canonical LCE1 bytes.
     pub fn content_hash(&self) -> StorageResult<HashId> {
+        self.content_hash_checked(&|| Ok(()))
+    }
+
+    pub(crate) fn content_hash_checked(
+        &self,
+        check: &dyn Fn() -> StorageResult<()>,
+    ) -> StorageResult<HashId> {
         let mut hasher = RecordHasher::new("LAYER", self.slot_count());
         for (id, op) in &self.nodes {
+            check()?;
             hasher.field(&node_record(*id, *op));
         }
         for ((node, label), op) in &self.labels {
+            check()?;
             hasher.field(&label_record(*node, *label, *op));
         }
         for delta in self.relationships.values() {
+            check()?;
             hasher.field(&relationship_record(*delta));
         }
         for ((owner_kind, owner_id, key_id), delta) in &self.properties {
-            hasher.field(&property_record(*owner_kind, *owner_id, *key_id, delta)?);
+            hasher.field_checked(
+                &property_record_checked(*owner_kind, *owner_id, *key_id, delta, check)?,
+                check,
+            )?;
         }
         Ok(hasher.finish())
     }
@@ -286,9 +316,27 @@ pub(crate) fn persist_layer(
     connection: &Connection,
     layer: &LayerBuilder,
 ) -> StorageResult<(i64, HashId)> {
-    let content_hash = layer.content_hash()?;
+    persist_layer_checked(connection, layer, &|| Ok(()))
+}
+
+pub(crate) fn persist_layer_checked(
+    connection: &Connection,
+    layer: &LayerBuilder,
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<(i64, HashId)> {
+    persist_layer_observed(connection, layer, None, check)
+}
+
+pub(crate) fn persist_layer_observed(
+    connection: &Connection,
+    layer: &LayerBuilder,
+    observer: Option<&dyn SnapshotReadObserver>,
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<(i64, HashId)> {
+    check()?;
+    let content_hash = layer.content_hash_checked(check)?;
     if let Some(id) = existing_layer_id(connection, content_hash)? {
-        verify_existing_layer(connection, layer, id, content_hash)?;
+        verify_existing_layer_checked(connection, layer, id, observer, check)?;
         return Ok((id, content_hash));
     }
 
@@ -297,10 +345,11 @@ pub(crate) fn persist_layer(
         "INSERT INTO main._lithograph_layers(id, hash) VALUES(?1, ?2)",
         params![layer_id, content_hash.as_bytes().as_slice()],
     )?;
-    persist_node_deltas(connection, layer_id, layer)?;
-    persist_label_deltas(connection, layer_id, layer)?;
-    persist_relationship_deltas(connection, layer_id, layer)?;
-    persist_property_deltas(connection, layer_id, layer)?;
+    persist_node_deltas(connection, layer_id, layer, check)?;
+    persist_label_deltas(connection, layer_id, layer, check)?;
+    persist_relationship_deltas(connection, layer_id, layer, check)?;
+    persist_property_deltas(connection, layer_id, layer, check)?;
+    check()?;
     Ok((layer_id, content_hash))
 }
 
@@ -315,20 +364,134 @@ fn existing_layer_id(connection: &Connection, content_hash: HashId) -> StorageRe
         .map_err(Into::into)
 }
 
-fn verify_existing_layer(
+fn verify_existing_layer_checked(
     connection: &Connection,
     layer: &LayerBuilder,
     id: i64,
-    content_hash: HashId,
+    observer: Option<&dyn SnapshotReadObserver>,
+    check: &dyn Fn() -> StorageResult<()>,
 ) -> StorageResult<()> {
-    let canonical = layer.canonical_lce1()?;
-    let persisted = load_layer(connection, id)?;
-    if persisted.canonical_lce1()? != canonical || persisted.content_hash()? != content_hash {
-        return Err(StorageError::corrupt(format!(
-            "Layer {id} does not match its persisted content hash"
-        )));
+    verify_stored_nodes(connection, id, layer, check)?;
+    verify_stored_labels(connection, id, layer, check)?;
+    verify_stored_relationships(connection, id, layer, check)?;
+    verify_stored_properties(connection, id, layer, observer, check)
+}
+
+fn verify_stored_nodes(
+    connection: &Connection,
+    id: i64,
+    layer: &LayerBuilder,
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<()> {
+    let mut count = 0;
+    visit_node_deltas(connection, id, |node, op| {
+        check()?;
+        if layer.nodes.get(&node) != Some(&op) {
+            return Err(layer_mismatch(id));
+        }
+        count += 1;
+        Ok(())
+    })?;
+    require_slot_count(id, count, layer.nodes.len())
+}
+
+fn verify_stored_labels(
+    connection: &Connection,
+    id: i64,
+    layer: &LayerBuilder,
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<()> {
+    let mut count = 0;
+    visit_label_deltas(connection, id, |node, label, op| {
+        check()?;
+        if layer.labels.get(&(node, label)) != Some(&op) {
+            return Err(layer_mismatch(id));
+        }
+        count += 1;
+        Ok(())
+    })?;
+    require_slot_count(id, count, layer.labels.len())
+}
+
+fn verify_stored_relationships(
+    connection: &Connection,
+    id: i64,
+    layer: &LayerBuilder,
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<()> {
+    let mut count = 0;
+    visit_relationship_deltas(connection, id, |record, op| {
+        check()?;
+        if layer.relationships.get(&record.id) != Some(&RelationshipDelta { op, record }) {
+            return Err(layer_mismatch(id));
+        }
+        count += 1;
+        Ok(())
+    })?;
+    require_slot_count(id, count, layer.relationships.len())
+}
+
+fn verify_stored_properties(
+    connection: &Connection,
+    id: i64,
+    layer: &LayerBuilder,
+    observer: Option<&dyn SnapshotReadObserver>,
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<()> {
+    let mut count = 0;
+    visit_property_deltas_observed(
+        connection,
+        id,
+        observer,
+        check,
+        |kind, owner, key, delta, _memory| {
+            let expected = layer
+                .properties
+                .get(&(kind, owner, key))
+                .ok_or_else(|| layer_mismatch(id))?;
+            if delta.op != expected.op
+                || !property_values_equal_checked(
+                    delta.value.as_ref(),
+                    expected.value.as_ref(),
+                    check,
+                )?
+            {
+                return Err(layer_mismatch(id));
+            }
+            count += 1;
+            Ok(())
+        },
+    )?;
+    require_slot_count(id, count, layer.properties.len())
+}
+
+fn property_values_equal_checked(
+    left: Option<&PropertyValue>,
+    right: Option<&PropertyValue>,
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<bool> {
+    match (left, right) {
+        (Some(left), Some(right)) => super::encoding::equal_bytes_checked(
+            &left.canonical_bytes_checked(check)?,
+            &right.canonical_bytes_checked(check)?,
+            check,
+        ),
+        (None, None) => Ok(true),
+        _ => Ok(false),
+    }
+}
+
+fn require_slot_count(id: i64, actual: usize, expected: usize) -> StorageResult<()> {
+    if actual != expected {
+        return Err(layer_mismatch(id));
     }
     Ok(())
+}
+
+fn layer_mismatch(id: i64) -> StorageError {
+    StorageError::corrupt(format!(
+        "Layer {id} does not match its persisted content hash"
+    ))
 }
 
 pub(crate) fn load_layer(connection: &Connection, layer_id: i64) -> StorageResult<LayerBuilder> {
@@ -436,11 +599,13 @@ fn persist_node_deltas(
     connection: &Connection,
     layer_id: i64,
     layer: &LayerBuilder,
+    check: &dyn Fn() -> StorageResult<()>,
 ) -> StorageResult<()> {
     let mut statement = connection.prepare(
         "INSERT INTO main._lithograph_node_delta(layer_id, node_id, op) VALUES(?1, ?2, ?3)",
     )?;
     for (node_id, op) in &layer.nodes {
+        check()?;
         statement.execute(params![layer_id, node_id, *op as i64])?;
     }
     Ok(())
@@ -450,11 +615,13 @@ fn persist_label_deltas(
     connection: &Connection,
     layer_id: i64,
     layer: &LayerBuilder,
+    check: &dyn Fn() -> StorageResult<()>,
 ) -> StorageResult<()> {
     let mut statement = connection.prepare(
         "INSERT INTO main._lithograph_label_delta(layer_id, node_id, label_id, op) VALUES(?1, ?2, ?3, ?4)",
     )?;
     for ((node_id, label_id), op) in &layer.labels {
+        check()?;
         statement.execute(params![layer_id, node_id, label_id, *op as i64])?;
     }
     Ok(())
@@ -464,11 +631,13 @@ fn persist_relationship_deltas(
     connection: &Connection,
     layer_id: i64,
     layer: &LayerBuilder,
+    check: &dyn Fn() -> StorageResult<()>,
 ) -> StorageResult<()> {
     let mut statement = connection.prepare(
         "INSERT INTO main._lithograph_rel_delta(layer_id, relationship_id, source_id, type_id, target_id, op) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
     )?;
     for delta in layer.relationships.values() {
+        check()?;
         statement.execute(params![
             layer_id,
             delta.record.id,
@@ -485,15 +654,17 @@ fn persist_property_deltas(
     connection: &Connection,
     layer_id: i64,
     layer: &LayerBuilder,
+    check: &dyn Fn() -> StorageResult<()>,
 ) -> StorageResult<()> {
     let mut statement = connection.prepare(
         "INSERT INTO main._lithograph_property_delta(layer_id, owner_kind, owner_id, key_id, op, type_tag, int_value, real_value, text_value, blob_value, aux_value) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
     )?;
     for ((owner_kind, owner_id, key_id), delta) in &layer.properties {
+        check()?;
         let columns = delta
             .value
             .as_ref()
-            .map(PropertyColumns::from_value)
+            .map(|value| PropertyColumns::from_value_checked(value, check))
             .transpose()?;
         statement.execute(params![
             layer_id,
@@ -572,6 +743,57 @@ fn property_record(
             optional_bytes(value_bytes.as_deref()),
         ],
     ))
+}
+
+fn property_record_checked(
+    owner_kind: OwnerKind,
+    owner_id: i64,
+    key_id: PropertyKeyId,
+    delta: &PropertyDelta,
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<Vec<u8>> {
+    let type_bytes = delta
+        .value
+        .as_ref()
+        .map(|value| i64_bytes(value.type_tag()));
+    let value_bytes = delta
+        .value
+        .as_ref()
+        .map(|value| value.canonical_bytes_checked(check))
+        .transpose()?;
+    super::encoding::record_checked(
+        "PROPERTY",
+        &[
+            i64_bytes(owner_kind as i64),
+            i64_bytes(owner_id),
+            i64_bytes(key_id),
+            i64_bytes(delta.op as i64),
+            optional_bytes(type_bytes.as_deref()),
+            optional_bytes_checked(value_bytes.as_deref(), check)?,
+        ],
+        check,
+    )
+}
+
+fn optional_bytes_checked(
+    value: Option<&[u8]>,
+    check: &dyn Fn() -> StorageResult<()>,
+) -> StorageResult<Vec<u8>> {
+    let Some(value) = value else {
+        return Ok(vec![0]);
+    };
+    let mut output = Vec::with_capacity(
+        value
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| StorageError::corrupt("optional property size overflow"))?,
+    );
+    output.push(1);
+    for chunk in value.chunks(64 * 1024) {
+        check()?;
+        output.extend_from_slice(chunk);
+    }
+    Ok(output)
 }
 
 fn validate_relationship(relationship: RelationshipRecord) -> StorageResult<()> {

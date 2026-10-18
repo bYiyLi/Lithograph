@@ -3,6 +3,7 @@ use super::*;
 pub(super) struct AdapterExecution {
     cursor: query::QueryCursor,
     columns: Vec<String>,
+    _metadata_memory: query::MemoryReservation,
     access: query::AccessPolicy,
     read_guard: Option<MainReadGuard>,
     side_effect_guard: Option<SideEffectGuard>,
@@ -23,6 +24,8 @@ impl AdapterExecution {
         // SAFETY: the connection remains live for this synchronous prepare path.
         let db = unsafe { connection.handle() };
         let explicit_state = explicit_transaction_state(db);
+        // tx_begin creates the TEMP cleanup target before BEGIN, so even an
+        // interrupt during parameter decoding can abort the staged transaction.
         match prepare_adapter_execution(
             connection,
             query_text,
@@ -42,8 +45,16 @@ impl AdapterExecution {
         &self.columns
     }
 
-    pub(super) fn row_json(&self, row: &[cypher::Value]) -> Value {
-        row_json(row, &self.access)
+    pub(super) fn resources(&self) -> &query::QueryResources {
+        self.cursor.resources()
+    }
+
+    pub(super) fn budgeted_row_json(
+        &self,
+        row: &[cypher::Value],
+        is_interrupted: &dyn Fn() -> bool,
+    ) -> LithographResult<budget::BudgetedJson> {
+        budget::row_json(row, &self.access, self.resources(), is_interrupted)
     }
 
     pub(super) fn is_write(&self) -> bool {
@@ -76,9 +87,10 @@ impl AdapterExecution {
             .cursor
             .next_batch_with_interrupt(connection, max_rows, &is_interrupted)
             .map_err(map_query_error);
+        let result = self.recover_interrupt(connection, result);
         match result {
             Ok(batch) => Ok(batch),
-            Err(error) if self.explicit_transaction => {
+            Err(error) if self.explicit_transaction && !self.terminal => {
                 self.terminal = true;
                 self.read_guard.take();
                 transaction::fail_closed_sql_transaction(connection, error)
@@ -93,10 +105,11 @@ impl AdapterExecution {
             return Ok(());
         }
         let result = self.cursor.cancel(connection).map_err(map_query_error);
+        let result = self.recover_cancel_interrupt(connection, result);
         self.read_guard.take();
         self.side_effect_guard.take();
         self.terminal = true;
-        if self.explicit_transaction {
+        if self.explicit_transaction && require_connection_healthy(connection).is_ok() {
             let abort = transaction::abort_active_sql_transaction(connection);
             return match (result, abort) {
                 (Ok(()), Ok(())) => Ok(()),
@@ -123,6 +136,7 @@ impl AdapterExecution {
             .cursor
             .complete_with_interrupt(connection, &is_interrupted)
             .map_err(map_query_error);
+        let result = self.recover_interrupt(connection, result);
         self.read_guard.take();
         match result {
             Ok(summary) => {
@@ -137,11 +151,58 @@ impl AdapterExecution {
                 self.terminal = true;
                 Ok(summary)
             }
-            Err(error) if self.explicit_transaction => {
+            Err(error) if self.explicit_transaction && !self.terminal => {
                 self.terminal = true;
                 transaction::fail_closed_sql_transaction(connection, error)
             }
             Err(error) => Err(error),
+        }
+    }
+
+    fn recover_interrupt<T>(
+        &mut self,
+        connection: &Connection,
+        result: LithographResult<T>,
+    ) -> LithographResult<T> {
+        match result {
+            Err(error) if self.owns_interrupt_cleanup() => {
+                match interrupt_cleanup::recover(connection) {
+                    Ok(false) => {}
+                    Ok(true) => self.finish_interrupt_cleanup(),
+                    Err(cleanup) => {
+                        self.finish_interrupt_cleanup();
+                        return Err(cleanup);
+                    }
+                }
+                Err(error)
+            }
+            result => result,
+        }
+    }
+
+    fn owns_interrupt_cleanup(&self) -> bool {
+        self.mutating || self.explicit_transaction || self.side_effect_guard.is_some()
+    }
+
+    fn finish_interrupt_cleanup(&mut self) {
+        self.read_guard.take();
+        self.side_effect_guard.take();
+        self.terminal = true;
+    }
+
+    fn recover_cancel_interrupt(
+        &self,
+        connection: &Connection,
+        result: LithographResult<()>,
+    ) -> LithographResult<()> {
+        if self.owns_interrupt_cleanup() && interrupt_cleanup::recover(connection)? {
+            match result {
+                Ok(()) => Ok(()),
+                Err(error) if error.sqlite_code == ffi::SQLITE_INTERRUPT => Ok(()),
+                Err(error) => Err(error),
+            }
+        } else {
+            result
         }
     }
 }
@@ -154,7 +215,7 @@ fn prepare_adapter_execution(
     explicit_state: Option<&ExplicitTransactionState>,
 ) -> LithographResult<AdapterExecution> {
     let metadata = require_initialized(connection)?;
-    let (mut cursor, columns, semantic_maintenance, access) = prepare_cursor(
+    let (mut cursor, columns, semantic_maintenance, access, metadata_memory) = prepare_cursor(
         connection,
         query_text,
         params_text,
@@ -169,9 +230,13 @@ fn prepare_adapter_execution(
         || cursor.has_version_operation();
     let (read_guard, side_effect_guard) =
         acquire_execution_guards(connection, &metadata, side_effecting)?;
+    if side_effecting || explicit_state.is_some() {
+        interrupt_cleanup::prepare(connection)?;
+    }
     Ok(AdapterExecution {
         cursor,
         columns,
+        _metadata_memory: metadata_memory,
         access,
         read_guard,
         side_effect_guard,
@@ -187,19 +252,51 @@ fn prepare_cursor(
     params_text: &str,
     options_text: &str,
     explicit_state: Option<&ExplicitTransactionState>,
-) -> LithographResult<(query::QueryCursor, Vec<String>, bool, query::AccessPolicy)> {
-    let params = cypher::decode_parameters_text(params_text)
-        .map_err(|error| LithographError::invalid_argument(error.message))?;
+) -> LithographResult<(
+    query::QueryCursor,
+    Vec<String>,
+    bool,
+    query::AccessPolicy,
+    query::MemoryReservation,
+)> {
     let effective_options = match explicit_state {
         Some(state) => transaction::execution_options(options_text, &state.branch)?,
         None => options_text.to_owned(),
     };
     let options =
         query::ExecutionOptions::parse_text(&effective_options).map_err(map_query_error)?;
-    let prepared =
-        query::prepare(connection, query_text, params, options).map_err(map_query_error)?;
+    let resources = query::QueryResources::new(options.memory_limit_bytes);
+    // SAFETY: the connection remains live throughout prepare.
+    let db = unsafe { connection.handle() };
+    let (params, decode_reservation) =
+        budget::decode_parameters(params_text, &resources, &|| host_is_interrupted(db))?;
+    // Core adopts the decoded parameters into its own lease before cloning
+    // any values. The temporary serde tree has already been destroyed.
+    drop(decode_reservation);
+    let prepared = query::prepare_with_resources_and_interrupt(
+        connection,
+        query_text,
+        params,
+        options,
+        resources,
+        &|| host_is_interrupted(db),
+    )
+    .map_err(map_query_error)?;
     query::initialize_connection_state(connection).map_err(map_query_error)?;
     let semantic_maintenance = prepared.has_semantic_maintenance();
+    let columns_bytes = prepared
+        .columns
+        .iter()
+        .try_fold(
+            query::resources::allocation_bytes::<String>(prepared.columns.len())
+                .map_err(map_query_error)?,
+            |bytes, name| query::resources::checked_add(bytes, name.len() as u64),
+        )
+        .map_err(map_query_error)?;
+    let metadata_memory = prepared
+        .resources
+        .reserve(columns_bytes)
+        .map_err(map_query_error)?;
     let columns = prepared.columns.clone();
     let access = prepared.access_policy().clone();
     Ok((
@@ -207,6 +304,7 @@ fn prepare_cursor(
         columns,
         semantic_maintenance,
         access,
+        metadata_memory,
     ))
 }
 
@@ -273,31 +371,125 @@ fn collect_scalar_result(
     connection: &Connection,
     execution: &mut AdapterExecution,
 ) -> LithographResult<String> {
-    let columns = execution.columns().to_vec();
-    let mut rows = Vec::new();
-    let summary = loop {
-        let batch = execution.next_batch(connection, 256)?;
-        rows.extend(batch.rows.iter().map(|row| execution.row_json(row)));
-        if batch.done {
-            break batch.summary.ok_or_else(|| {
-                LithographError::internal("terminal execution batch is missing summary")
-            })?;
-        }
-    };
-    let result = json!({
-        "columns": columns,
-        "rows": rows,
-        "summary": summary_json(&summary),
-    })
-    .to_string();
-    if let Err(error) = ensure_scalar_result_fits(connection, &result) {
-        return match execution.cancel(connection) {
+    let result = collect_scalar_candidate(connection, execution);
+    match result {
+        Ok(result) => Ok(result),
+        Err(error) => match execution.cancel(connection) {
             Ok(()) => Err(error),
             Err(cleanup) => Err(cleanup),
-        };
+        },
     }
+}
+
+fn collect_scalar_candidate(
+    connection: &Connection,
+    execution: &mut AdapterExecution,
+) -> LithographResult<String> {
+    let resources = execution.resources().clone();
+    // SAFETY: scalar collection borrows the live connection synchronously.
+    let db = unsafe { connection.handle() };
+    let mut retained = resources.reserve(0).map_err(map_query_error)?;
+    let mut rows = Vec::new();
+    let summary = collect_scalar_rows(connection, execution, &mut rows, &mut retained)?;
+    let envelope = scalar_envelope(execution.columns(), &summary, rows, retained)?;
+    let result = budget::serialize_json(&envelope.value, &resources, &|| host_is_interrupted(db))?;
+    ensure_scalar_result_fits(connection, &result.text)?;
     execution.complete(connection)?;
-    Ok(result)
+    Ok(result.text)
+}
+
+fn collect_scalar_rows(
+    connection: &Connection,
+    execution: &mut AdapterExecution,
+    rows: &mut Vec<Value>,
+    retained: &mut query::MemoryReservation,
+) -> LithographResult<query::QuerySummary> {
+    // SAFETY: collection borrows this live connection synchronously.
+    let db = unsafe { connection.handle() };
+    loop {
+        let batch = execution.next_batch(connection, 256)?;
+        for row in &batch.rows {
+            let encoded = execution.budgeted_row_json(row, &|| host_is_interrupted(db))?;
+            append_scalar_row(rows, retained, encoded, execution.resources())?;
+        }
+        if batch.done {
+            return batch.summary.ok_or_else(|| {
+                LithographError::internal("terminal execution batch is missing summary")
+            });
+        }
+    }
+}
+
+fn append_scalar_row(
+    rows: &mut Vec<Value>,
+    retained: &mut query::MemoryReservation,
+    encoded: budget::BudgetedJson,
+    resources: &query::QueryResources,
+) -> LithographResult<()> {
+    if rows.len() == rows.capacity() {
+        let previous = query::resources::allocation_bytes::<Value>(rows.capacity())
+            .map_err(map_query_error)?;
+        let _growth_memory = resources.reserve(previous).map_err(map_query_error)?;
+        let capacity = rows.capacity().max(4);
+        let bytes =
+            query::resources::allocation_bytes::<Value>(capacity).map_err(map_query_error)?;
+        retained.grow(bytes).map_err(map_query_error)?;
+        rows.reserve_exact(capacity);
+    }
+    retained
+        .merge(encoded.reservation)
+        .map_err(map_query_error)?;
+    rows.push(encoded.value);
+    Ok(())
+}
+
+fn scalar_envelope(
+    columns: &[String],
+    summary: &query::QuerySummary,
+    rows: Vec<Value>,
+    mut retained: query::MemoryReservation,
+) -> LithographResult<budget::BudgetedJson> {
+    // Rows move into the envelope; no second full row collection is made.
+    // Keep the retained-row lease alive while the serialized String exists.
+    let metadata_bytes = adapter_metadata_bytes(columns, summary)?;
+    retained.grow(metadata_bytes).map_err(map_query_error)?;
+    let mut object = serde_json::Map::new();
+    object.insert("columns".to_owned(), json!(columns));
+    object.insert("rows".to_owned(), Value::Array(rows));
+    object.insert("summary".to_owned(), summary_json(summary));
+    let value = Value::Object(object);
+    retained
+        .resize(query::resources::json_bytes(&value).map_err(map_query_error)?)
+        .map_err(map_query_error)?;
+    Ok(budget::BudgetedJson {
+        value,
+        reservation: retained,
+    })
+}
+
+pub(super) fn adapter_metadata_bytes(
+    columns: &[String],
+    summary: &query::QuerySummary,
+) -> LithographResult<u64> {
+    let columns_bytes = columns
+        .iter()
+        .try_fold(0_u64, |bytes, name| {
+            query::resources::checked_add(bytes, name.len() as u64 + 256)
+        })
+        .map_err(map_query_error)?;
+    let profile_bytes = summary
+        .metrics
+        .operator_profile()
+        .map_or(Ok(0), |operators| {
+            operators.iter().try_fold(0_u64, |bytes, operator| {
+                query::resources::checked_add(operator.operator.len() as u64, 8192)
+                    .and_then(|additional| query::resources::checked_add(bytes, additional))
+            })
+        })
+        .map_err(map_query_error)?;
+    query::resources::checked_add(columns_bytes, profile_bytes)
+        .and_then(|bytes| query::resources::checked_add(bytes, 65536))
+        .map_err(map_query_error)
 }
 
 pub(super) fn ensure_scalar_result_fits(
@@ -327,22 +519,11 @@ pub(super) fn ensure_scalar_result_fits_handle(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn row_json(row: &[cypher::Value], access: &query::AccessPolicy) -> Value {
-    let query_rules = &access.read.query;
-    let result_rules = &access.read.result;
-    if query_rules.is_empty() && result_rules.is_empty() {
-        return Value::Array(row.iter().map(cypher::encode_json).collect());
-    }
-    Value::Array(
-        row.iter()
-            .map(|value| {
-                let mut filtered = value.clone();
-                query_rules.restrict_graph_properties(&mut filtered);
-                result_rules.restrict_graph_properties(&mut filtered);
-                cypher::encode_json(&filtered)
-            })
-            .collect(),
-    )
+    budget::row_json(row, access, &query::QueryResources::default(), &|| false)
+        .expect("unlimited test encoding")
+        .value
 }
 
 pub(super) fn summary_json(summary: &query::QuerySummary) -> Value {

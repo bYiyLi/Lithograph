@@ -13,7 +13,15 @@ use super::cache::{
     RangeOrderKey, range_order_key,
 };
 
-const INDEX_BUILD_PAGE_SIZE: usize = 4_096;
+mod controlled;
+use crate::query::resources::{
+    ExecutionControl, MemoryReservation, checked_add, checked_mul, map_entry_bytes,
+};
+pub(crate) use controlled::{
+    build_persistent_generation, ensure_standard_indexes_for_commit_controlled,
+};
+pub(super) use controlled::{definition_workspace, equality_key};
+
 #[cfg(not(test))]
 const GENERATION_COPY_PAGE_SIZE: i64 = 4_096;
 #[cfg(test)]
@@ -33,75 +41,43 @@ struct PersistentGeneration {
     anchor: HashId,
 }
 
-pub(crate) fn ensure_standard_indexes_for_commit(
-    connection: &Connection,
-    commit: HashId,
-    previous: &SchemaState,
-    schema: &SchemaState,
-    is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<()> {
-    let snapshot = Snapshot::resolve(connection, commit)?;
-    for (name, index) in &schema.indexes {
-        if previous
-            .indexes
-            .get(name)
-            .map(|previous| previous.canonical_eq(index))
-            .transpose()?
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        if is_interrupted() {
-            return Err(QueryError::interrupted());
-        }
-        if !matches!(
-            index.kind,
-            StandardIndexKind::FullText | StandardIndexKind::Vector | StandardIndexKind::Semantic
-        ) && !matches!(index.target, IndexTarget::NodeLookup)
-        {
-            if persistent_index_storage_available(connection)? {
-                build_persistent_generation(&snapshot, index, is_interrupted)?;
-            } else {
-                ensure_index_cache(&snapshot, index)?;
-            }
-        }
-    }
-    Ok(())
-}
-
 pub(super) fn ensure_index_cache(
     snapshot: &Snapshot<'_>,
     index: &IndexDefinition,
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<()> {
+    control.check()?;
+    let _definition = control.reserve(controlled::definition_workspace(index, control)?)?;
     let connection = snapshot.connection_for_query();
     ensure_cache_tables(connection)?;
-    if cached_index_binding_ready(snapshot, index)? {
+    if cached_index_binding_ready(snapshot, index, control)? {
         ensure_cache_indexes(connection, index.kind)?;
         return Ok(());
     }
-    if let Some(generation) = compatible_persistent_generation(snapshot, index)? {
-        bind_persistent_generation(snapshot, index, generation)?;
+    if let Some(generation) = compatible_persistent_generation(snapshot, index, control)? {
+        bind_persistent_generation(snapshot, index, generation, control)?;
         ensure_cache_indexes(connection, index.kind)?;
         return Ok(());
     }
-    rebuild_local_index_cache(snapshot, index, &|| false)
+    controlled::rebuild_local(snapshot, index, control)
 }
 
 fn cached_index_binding_ready(
     snapshot: &Snapshot<'_>,
     index: &IndexDefinition,
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<bool> {
     let connection = snapshot.connection_for_query();
     let cached = connection
         .query_row(
-            "SELECT generation_id, generation_anchor FROM temp._lithograph_standard_index_cache_meta \
+            "SELECT generation_id, CASE WHEN length(generation_anchor)=32 THEN generation_anchor END FROM temp._lithograph_standard_index_cache_meta \
              WHERE snapshot_hash = ?1 AND index_name = ?2 AND complete = 1",
             params![snapshot.cache_identity().as_bytes().as_slice(), index.name],
             |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<Vec<u8>>>(1)?)),
         )
         .optional()?;
     if let Some(binding) = cached.as_ref()
-        && cached_index_binding_valid(connection, index, binding)?
+        && cached_index_binding_valid(connection, index, binding, control)?
     {
         return Ok(true);
     }
@@ -115,8 +91,9 @@ fn bind_persistent_generation(
     snapshot: &Snapshot<'_>,
     index: &IndexDefinition,
     generation: PersistentGeneration,
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<()> {
-    prepare_persistent_generation_overlay(snapshot, index, generation)?;
+    prepare_persistent_generation_overlay(snapshot, index, generation, control)?;
     snapshot.connection_for_query().execute(
         "INSERT OR REPLACE INTO temp._lithograph_standard_index_cache_meta \
          (snapshot_hash, index_name, complete, generation_id, generation_anchor) \
@@ -135,22 +112,32 @@ fn cached_index_binding_valid(
     connection: &Connection,
     index: &IndexDefinition,
     binding: &(Option<i64>, Option<Vec<u8>>),
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<bool> {
     let (Some(generation_id), Some(cached_anchor)) = binding else {
         return Ok(binding.0.is_none() && binding.1.is_none());
     };
-    let manifest = connection
-        .query_row(
-            "SELECT anchor_commit, definition_blob FROM main._lithograph_index_generations \
-             WHERE generation_id = ?1 AND encoding_version = ?2 AND complete = 1",
-            params![generation_id, INDEX_ENCODING_VERSION],
-            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
-        )
-        .optional()?;
-    let Some((anchor, definition_blob)) = manifest else {
+    let expected = index.canonical_identity_blob()?;
+    let mut statement = connection.prepare(
+        "SELECT anchor_commit, definition_blob FROM main._lithograph_index_generations \
+         WHERE generation_id = ?1 AND encoding_version = ?2 AND complete = 1",
+    )?;
+    let mut rows = statement.query(params![generation_id, INDEX_ENCODING_VERSION])?;
+    let Some(row) = rows.next()? else {
         return Ok(false);
     };
-    Ok(anchor == *cached_anchor && definition_blob == index.canonical_identity_blob()?)
+    let anchor = row.get_ref(0)?.as_blob().map_err(rusqlite::Error::from)?;
+    let definition = row.get_ref(1)?.as_blob().map_err(rusqlite::Error::from)?;
+    if anchor != cached_anchor || definition.len() != expected.len() {
+        return Ok(false);
+    }
+    for (actual, expected) in definition.chunks(64 * 1024).zip(expected.chunks(64 * 1024)) {
+        control.check()?;
+        if actual != expected {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn clear_query_index_cache(snapshot: &Snapshot<'_>, index: &IndexDefinition) -> QueryResult<()> {
@@ -180,31 +167,11 @@ fn clear_query_index_tables(
     Ok(())
 }
 
-fn rebuild_local_index_cache(
-    snapshot: &Snapshot<'_>,
-    index: &IndexDefinition,
-    is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<()> {
-    let connection = snapshot.connection_for_query();
-    ensure_cache_tables(connection)?;
-    clear_query_index_cache(snapshot, index)?;
-    #[cfg(feature = "test-support")]
-    crate::performance::record_standard_index_build();
-    build_index_cache(snapshot, index, is_interrupted)?;
-    ensure_cache_indexes(connection, index.kind)?;
-    connection.execute(
-        "INSERT INTO temp._lithograph_standard_index_cache_meta \
-         (snapshot_hash, index_name, complete, generation_id, generation_anchor) \
-         VALUES(?1, ?2, 1, NULL, NULL)",
-        params![snapshot.cache_identity().as_bytes().as_slice(), index.name],
-    )?;
-    Ok(())
-}
-
 fn prepare_persistent_generation_overlay(
     snapshot: &Snapshot<'_>,
     index: &IndexDefinition,
     generation: PersistentGeneration,
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<()> {
     let connection = snapshot.connection_for_query();
     clear_query_index_tables(
@@ -218,18 +185,30 @@ fn prepare_persistent_generation_overlay(
     if generation.anchor == snapshot.commit() && snapshot.query_local_layer().is_none() {
         return Ok(());
     }
-    let mut changed = if generation.anchor == snapshot.commit() {
-        BTreeSet::new()
-    } else {
-        let delta = storage::touched_layer_between_commits(
-            connection,
-            generation.anchor,
-            snapshot.commit(),
+    let mut changed_memory = control.reserve(0)?;
+    let mut changed = BTreeSet::new();
+    if generation.anchor != snapshot.commit() {
+        let execution = crate::query::version::VersionExecution::new(connection, control);
+        let delta =
+            execution.touched_layer_between_commits(generation.anchor, snapshot.commit())?;
+        relevant_changed_owners(
+            snapshot,
+            index,
+            &delta,
+            &mut changed,
+            &mut changed_memory,
+            control,
         )?;
-        relevant_changed_owners(snapshot, index, &delta)?
-    };
+    }
     if let Some(local) = snapshot.query_local_layer() {
-        changed.extend(relevant_changed_owners(snapshot, index, local)?);
+        relevant_changed_owners(
+            snapshot,
+            index,
+            local,
+            &mut changed,
+            &mut changed_memory,
+            control,
+        )?;
     }
     #[cfg(feature = "test-support")]
     crate::performance::record_changed_owners(changed.len());
@@ -238,6 +217,7 @@ fn prepare_persistent_generation_overlay(
              snapshot_hash, index_name, owner_kind, owner_id) VALUES(?1, ?2, ?3, ?4)",
     )?;
     for (owner_kind, owner_id) in &changed {
+        control.work(1)?;
         insert.execute(params![
             snapshot.cache_identity().as_bytes().as_slice(),
             index.name,
@@ -246,96 +226,127 @@ fn prepare_persistent_generation_overlay(
         ])?;
     }
     drop(insert);
-    materialize_changed_owner_values(snapshot, index, &changed)
+    materialize_changed_owner_values(snapshot, index, &changed, control)
 }
 
 fn relevant_changed_owners(
     snapshot: &Snapshot<'_>,
     index: &IndexDefinition,
     delta: &storage::LayerBuilder,
-) -> QueryResult<BTreeSet<(i64, i64)>> {
-    let mut changed = BTreeSet::new();
-    match &index.target {
-        IndexTarget::NodeLookup => {}
+    changed: &mut BTreeSet<(i64, i64)>,
+    memory: &mut MemoryReservation,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<()> {
+    let mut insert = |owner| -> QueryResult<()> {
+        control.work(1)?;
+        if !changed.contains(&owner) {
+            memory.grow(map_entry_bytes::<(i64, i64)>()?)?;
+            changed.insert(owner);
+        }
+        Ok(())
+    };
+    let connection = snapshot.connection_for_query();
+    let (owner_kind, token, properties) = match &index.target {
+        IndexTarget::NodeLookup => return Ok(()),
         IndexTarget::RelationshipLookup => {
-            changed.extend(
-                delta
-                    .relationships
-                    .keys()
-                    .map(|relationship_id| (RELATIONSHIP_OWNER_KIND, *relationship_id)),
-            );
+            return changed_lookup_relationships(delta, &mut insert);
         }
-        IndexTarget::NodeProperties { label, properties } => {
-            let label_id = storage::find_label(snapshot.connection_for_query(), label)?;
-            let keys = property_key_ids(snapshot, properties)?.unwrap_or_default();
-            changed.extend(
-                delta
-                    .nodes
-                    .keys()
-                    .map(|node_id| (NODE_OWNER_KIND, *node_id)),
-            );
-            if let Some(label_id) = label_id {
-                changed.extend(
-                    delta
-                        .labels
-                        .keys()
-                        .filter(|(_, changed_label)| *changed_label == label_id)
-                        .map(|(node_id, _)| (NODE_OWNER_KIND, *node_id)),
-                );
-            }
-            changed.extend(
-                delta
-                    .properties
-                    .keys()
-                    .filter_map(|(kind, owner_id, key_id)| {
-                        (*kind == OwnerKind::Node && keys.contains(key_id))
-                            .then_some((NODE_OWNER_KIND, *owner_id))
-                    }),
-            );
-        }
+        IndexTarget::NodeProperties { label, properties } => (
+            OwnerKind::Node,
+            storage::find_label(connection, label)?,
+            properties,
+        ),
         IndexTarget::RelationshipProperties {
             relationship_type,
             properties,
-        } => {
-            let type_id = storage::find_relationship_type(
-                snapshot.connection_for_query(),
-                relationship_type,
-            )?;
-            let keys = property_key_ids(snapshot, properties)?.unwrap_or_default();
-            if let Some(type_id) = type_id {
-                changed.extend(delta.relationships.iter().filter_map(
-                    |(relationship_id, relationship)| {
-                        (relationship.record.type_id == type_id)
-                            .then_some((RELATIONSHIP_OWNER_KIND, *relationship_id))
-                    },
-                ));
-            }
-            changed.extend(
-                delta
-                    .properties
-                    .keys()
-                    .filter_map(|(kind, owner_id, key_id)| {
-                        (*kind == OwnerKind::Relationship && keys.contains(key_id))
-                            .then_some((RELATIONSHIP_OWNER_KIND, *owner_id))
-                    }),
-            );
+        } => (
+            OwnerKind::Relationship,
+            storage::find_relationship_type(connection, relationship_type)?,
+            properties,
+        ),
+    };
+    let _keys_memory = control.reserve(checked_mul(properties.len() as u64, 8)?)?;
+    let keys = property_key_ids(snapshot, properties)?.unwrap_or_default();
+    if owner_kind == OwnerKind::Node {
+        changed_nodes(delta, token, control, &mut insert)?;
+    } else {
+        changed_relationships(delta, token, control, &mut insert)?;
+    }
+    changed_properties(delta, owner_kind, &keys, control, &mut insert)
+}
+
+fn changed_lookup_relationships(
+    delta: &storage::LayerBuilder,
+    insert: &mut impl FnMut((i64, i64)) -> QueryResult<()>,
+) -> QueryResult<()> {
+    for (relationship, _) in delta.relationship_changes() {
+        insert((RELATIONSHIP_OWNER_KIND, relationship.id))?;
+    }
+    Ok(())
+}
+
+fn changed_nodes(
+    delta: &storage::LayerBuilder,
+    token: Option<i64>,
+    control: &ExecutionControl<'_>,
+    insert: &mut impl FnMut((i64, i64)) -> QueryResult<()>,
+) -> QueryResult<()> {
+    for (node, _) in delta.node_changes() {
+        insert((NODE_OWNER_KIND, node))?;
+    }
+    for (node, label, _) in delta.label_changes() {
+        control.work(1)?;
+        if token == Some(label) {
+            insert((NODE_OWNER_KIND, node))?;
         }
     }
-    Ok(changed)
+    Ok(())
+}
+
+fn changed_relationships(
+    delta: &storage::LayerBuilder,
+    token: Option<i64>,
+    control: &ExecutionControl<'_>,
+    insert: &mut impl FnMut((i64, i64)) -> QueryResult<()>,
+) -> QueryResult<()> {
+    for (relationship, _) in delta.relationship_changes() {
+        control.work(1)?;
+        if token == Some(relationship.type_id) {
+            insert((RELATIONSHIP_OWNER_KIND, relationship.id))?;
+        }
+    }
+    Ok(())
+}
+
+fn changed_properties(
+    delta: &storage::LayerBuilder,
+    owner_kind: OwnerKind,
+    keys: &[i64],
+    control: &ExecutionControl<'_>,
+    insert: &mut impl FnMut((i64, i64)) -> QueryResult<()>,
+) -> QueryResult<()> {
+    for (kind, owner, key, _) in delta.property_changes() {
+        control.work(1)?;
+        if kind == owner_kind && keys.contains(&key) {
+            insert((kind as i64, owner))?;
+        }
+    }
+    Ok(())
 }
 
 fn materialize_changed_owner_values(
     snapshot: &Snapshot<'_>,
     index: &IndexDefinition,
     changed: &BTreeSet<(i64, i64)>,
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<()> {
     match &index.target {
         IndexTarget::NodeLookup => Ok(()),
         IndexTarget::RelationshipLookup => {
-            materialize_relationship_lookup_values(snapshot, index, changed)
+            materialize_relationship_lookup_values(snapshot, index, changed, control)
         }
         IndexTarget::NodeProperties { label, properties } => {
-            materialize_node_property_values(snapshot, index, label, properties, changed)
+            materialize_node_property_values(snapshot, index, label, properties, changed, control)
         }
         IndexTarget::RelationshipProperties {
             relationship_type,
@@ -346,6 +357,7 @@ fn materialize_changed_owner_values(
             relationship_type,
             properties,
             changed,
+            control,
         ),
     }
 }
@@ -354,11 +366,13 @@ fn materialize_relationship_lookup_values(
     snapshot: &Snapshot<'_>,
     index: &IndexDefinition,
     changed: &BTreeSet<(i64, i64)>,
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<()> {
     let mut insert = snapshot
         .connection_for_query()
         .prepare(CACHE_LOOKUP_INSERT_SQL)?;
     for (owner_kind, owner_id) in changed {
+        control.work(1)?;
         if *owner_kind != RELATIONSHIP_OWNER_KIND {
             continue;
         }
@@ -381,10 +395,12 @@ fn materialize_node_property_values(
     label: &str,
     properties: &[String],
     changed: &BTreeSet<(i64, i64)>,
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<()> {
     let Some(label_id) = storage::find_label(snapshot.connection_for_query(), label)? else {
         return Ok(());
     };
+    let _keys = control.reserve(checked_mul(properties.len() as u64, 8)?)?;
     let Some(keys) = property_key_ids(snapshot, properties)? else {
         return Ok(());
     };
@@ -392,19 +408,21 @@ fn materialize_node_property_values(
         .connection_for_query()
         .prepare(CACHE_VALUE_INSERT_SQL)?;
     for (owner_kind, owner_id) in changed {
+        control.work(1)?;
         if *owner_kind != NODE_OWNER_KIND
             || !snapshot.node_exists(*owner_id)?
-            || !snapshot.labels(*owner_id)?.contains(&label_id)
+            || !has_label(snapshot, *owner_id, label_id, control)?
         {
             continue;
         }
-        insert_owner_values(
+        controlled::insert_owner(
             snapshot,
             index,
-            NODE_OWNER_KIND,
+            OwnerKind::Node,
             *owner_id,
             &keys,
             &mut insert,
+            control,
         )?;
     }
     Ok(())
@@ -416,7 +434,9 @@ fn materialize_relationship_property_values(
     relationship_type: &str,
     properties: &[String],
     changed: &BTreeSet<(i64, i64)>,
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<()> {
+    let _keys = control.reserve(checked_mul(properties.len() as u64, 8)?)?;
     let Some((type_id, keys)) =
         relationship_property_domain(snapshot, relationship_type, properties)?
     else {
@@ -426,6 +446,7 @@ fn materialize_relationship_property_values(
         .connection_for_query()
         .prepare(CACHE_VALUE_INSERT_SQL)?;
     for (owner_kind, owner_id) in changed {
+        control.work(1)?;
         if *owner_kind != RELATIONSHIP_OWNER_KIND {
             continue;
         }
@@ -433,42 +454,34 @@ fn materialize_relationship_property_values(
             continue;
         };
         if relationship.type_id == type_id {
-            insert_owner_values(
+            controlled::insert_owner(
                 snapshot,
                 index,
-                RELATIONSHIP_OWNER_KIND,
+                OwnerKind::Relationship,
                 *owner_id,
                 &keys,
                 &mut insert,
+                control,
             )?;
         }
     }
     Ok(())
 }
 
-pub(crate) fn build_persistent_generation(
+fn has_label(
     snapshot: &Snapshot<'_>,
-    index: &IndexDefinition,
-    is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<(i64, i64)> {
-    let connection = snapshot.connection_for_query();
-    require_persistent_index_storage(connection)?;
-    check_index_build_interrupted(is_interrupted)?;
-    rebuild_local_index_cache(snapshot, index, is_interrupted)?;
-    check_index_build_interrupted(is_interrupted)?;
-    let (generation_id, definition_hash) = create_generation_manifest(snapshot, index)?;
-    copy_local_generation_pages(snapshot, index, generation_id, is_interrupted)?;
-    check_index_build_interrupted(is_interrupted)?;
-    let (entry_count, indexed_entities) = generation_counts(connection, generation_id)?;
-    publish_generation(
-        snapshot,
-        index,
-        generation_id,
-        indexed_entities,
-        entry_count,
-    )?;
-    evict_old_generations(connection, definition_hash, generation_id)?;
-    Ok((generation_id, indexed_entities))
+    node: i64,
+    label: i64,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<bool> {
+    let mut found = false;
+    let check = || control.check().map_err(QueryError::into_storage_error);
+    snapshot.visit_node_labels_checked(node, &check, |candidate| {
+        control.work(1)?;
+        found |= candidate == label;
+        Ok::<_, QueryError>(())
+    })?;
+    Ok(found)
 }
 
 fn require_persistent_index_storage(connection: &Connection) -> QueryResult<()> {
@@ -700,25 +713,32 @@ fn evict_old_generations(
 fn compatible_persistent_generation(
     snapshot: &Snapshot<'_>,
     index: &IndexDefinition,
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<Option<PersistentGeneration>> {
     let connection = snapshot.connection_for_query();
     if !persistent_index_storage_available(connection)? {
         return Ok(None);
     }
     let (definition_blob, definition_hash) = index_definition_identity(index)?;
-    let candidates = load_generation_candidates(connection, definition_hash)?;
+    let (candidates, _candidates_memory) =
+        load_generation_candidates(connection, definition_hash, control)?;
     let mut current = snapshot.commit();
     loop {
+        control.work(1)?;
         if let Some(generation) =
             valid_generation_candidate(current, &definition_blob, candidates.get(&current))
         {
             return Ok(Some(generation));
         }
-        let record = storage::load_commit(connection, current)?;
-        let Some(parent) = record.parent1 else {
+        let parent: Option<Vec<u8>> = connection.query_row(
+            "SELECT parent1 FROM main._lithograph_commits WHERE id=?1",
+            [current.as_bytes().as_slice()],
+            |row| row.get(0),
+        )?;
+        let Some(parent) = parent else {
             return Ok(None);
         };
-        current = parent;
+        current = HashId::from_slice(&parent)?;
     }
 }
 
@@ -727,32 +747,44 @@ type GenerationCandidate = (i64, Vec<u8>);
 fn load_generation_candidates(
     connection: &Connection,
     definition_hash: HashId,
-) -> QueryResult<BTreeMap<HashId, GenerationCandidate>> {
+    control: &ExecutionControl<'_>,
+) -> QueryResult<(BTreeMap<HashId, GenerationCandidate>, MemoryReservation)> {
+    let mut memory = control.reserve(0)?;
     let mut statement = connection.prepare(
         "SELECT generation_id, anchor_commit, definition_blob \
          FROM main._lithograph_index_generations \
          WHERE definition_hash = ?1 AND encoding_version = ?2 AND complete = 1",
     )?;
-    let rows = statement.query_map(
-        params![
-            definition_hash.as_bytes().as_slice(),
-            INDEX_ENCODING_VERSION
-        ],
-        |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, Vec<u8>>(2)?,
-            ))
-        },
-    )?;
+    let mut rows = statement.query(params![
+        definition_hash.as_bytes().as_slice(),
+        INDEX_ENCODING_VERSION
+    ])?;
     let mut candidates = BTreeMap::new();
-    for row in rows {
-        let (generation_id, anchor, stored_definition) = row?;
-        let anchor = HashId::from_slice(&anchor)?;
-        candidates.insert(anchor, (generation_id, stored_definition));
+    while let Some(row) = rows.next()? {
+        control.work(1)?;
+        let (anchor, candidate) = read_generation_candidate(row, &mut memory, control)?;
+        candidates.insert(anchor, candidate);
     }
-    Ok(candidates)
+    Ok((candidates, memory))
+}
+
+fn read_generation_candidate(
+    row: &rusqlite::Row<'_>,
+    memory: &mut MemoryReservation,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<(HashId, GenerationCandidate)> {
+    let anchor = HashId::from_slice(row.get_ref(1)?.as_blob().map_err(rusqlite::Error::from)?)?;
+    let definition = row.get_ref(2)?.as_blob().map_err(rusqlite::Error::from)?;
+    memory.grow(checked_add(
+        map_entry_bytes::<GenerationCandidate>()?,
+        definition.len() as u64,
+    )?)?;
+    let mut blob = Vec::with_capacity(definition.len());
+    for chunk in definition.chunks(64 * 1024) {
+        control.check()?;
+        blob.extend_from_slice(chunk);
+    }
+    Ok((anchor, (row.get(0)?, blob)))
 }
 
 fn valid_generation_candidate(
@@ -915,135 +947,6 @@ fn ensure_cache_indexes(connection: &Connection, kind: StandardIndexKind) -> Que
     Ok(())
 }
 
-fn build_index_cache(
-    snapshot: &Snapshot<'_>,
-    index: &IndexDefinition,
-    is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<()> {
-    match &index.target {
-        IndexTarget::NodeLookup => Ok(()),
-        IndexTarget::RelationshipLookup => {
-            build_relationship_lookup_cache(snapshot, index, is_interrupted)
-        }
-        IndexTarget::NodeProperties { label, properties } => {
-            build_node_property_cache(snapshot, index, label, properties, is_interrupted)
-        }
-        IndexTarget::RelationshipProperties {
-            relationship_type,
-            properties,
-        } => build_relationship_property_cache(
-            snapshot,
-            index,
-            relationship_type,
-            properties,
-            is_interrupted,
-        ),
-    }
-}
-
-fn build_relationship_lookup_cache(
-    snapshot: &Snapshot<'_>,
-    index: &IndexDefinition,
-    is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<()> {
-    let mut insert = snapshot
-        .connection_for_query()
-        .prepare(CACHE_LOOKUP_INSERT_SQL)?;
-    let mut after = 0_i64;
-    loop {
-        check_index_build_interrupted(is_interrupted)?;
-        let page = snapshot.scan_relationships_after(after, INDEX_BUILD_PAGE_SIZE)?;
-        for relationship in page.items {
-            insert.execute(params![
-                snapshot.cache_identity().as_bytes().as_slice(),
-                index.name,
-                RELATIONSHIP_OWNER_KIND,
-                relationship.id,
-                relationship.type_id,
-            ])?;
-        }
-        let Some(next_after) = page.next_after else {
-            break;
-        };
-        after = next_after;
-    }
-    Ok(())
-}
-
-fn build_node_property_cache(
-    snapshot: &Snapshot<'_>,
-    index: &IndexDefinition,
-    label: &str,
-    properties: &[String],
-    is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<()> {
-    let Some(label_id) = storage::find_label(snapshot.connection_for_query(), label)? else {
-        return Ok(());
-    };
-    let Some(keys) = property_key_ids(snapshot, properties)? else {
-        return Ok(());
-    };
-    let mut insert = snapshot
-        .connection_for_query()
-        .prepare(CACHE_VALUE_INSERT_SQL)?;
-    let mut after = 0_i64;
-    loop {
-        check_index_build_interrupted(is_interrupted)?;
-        let page =
-            snapshot.label_property_values_after(label_id, &keys, after, INDEX_BUILD_PAGE_SIZE)?;
-        for (node, values) in page.items {
-            let Some(values) = values.into_iter().collect::<Option<Vec<_>>>() else {
-                continue;
-            };
-            insert_owner_cache_values(snapshot, index, NODE_OWNER_KIND, node, values, &mut insert)?;
-        }
-        let Some(next_after) = page.next_after else {
-            break;
-        };
-        after = next_after;
-    }
-    Ok(())
-}
-
-fn build_relationship_property_cache(
-    snapshot: &Snapshot<'_>,
-    index: &IndexDefinition,
-    relationship_type: &str,
-    properties: &[String],
-    is_interrupted: &dyn Fn() -> bool,
-) -> QueryResult<()> {
-    let Some((type_id, keys)) =
-        relationship_property_domain(snapshot, relationship_type, properties)?
-    else {
-        return Ok(());
-    };
-    let mut insert = snapshot
-        .connection_for_query()
-        .prepare(CACHE_VALUE_INSERT_SQL)?;
-    let mut after = 0_i64;
-    loop {
-        check_index_build_interrupted(is_interrupted)?;
-        let page = snapshot.scan_relationships_after(after, INDEX_BUILD_PAGE_SIZE)?;
-        for relationship in page.items {
-            if relationship.type_id == type_id {
-                insert_owner_values(
-                    snapshot,
-                    index,
-                    RELATIONSHIP_OWNER_KIND,
-                    relationship.id,
-                    &keys,
-                    &mut insert,
-                )?;
-            }
-        }
-        let Some(next_after) = page.next_after else {
-            break;
-        };
-        after = next_after;
-    }
-    Ok(())
-}
-
 fn relationship_property_domain(
     snapshot: &Snapshot<'_>,
     relationship_type: &str,
@@ -1081,131 +984,6 @@ fn property_key_ids(
         keys.push(key);
     }
     Ok(Some(keys))
-}
-
-fn insert_owner_values(
-    snapshot: &Snapshot<'_>,
-    index: &IndexDefinition,
-    owner_kind: i64,
-    owner_id: i64,
-    keys: &[i64],
-    insert: &mut Statement<'_>,
-) -> QueryResult<()> {
-    let storage_owner = if owner_kind == NODE_OWNER_KIND {
-        OwnerKind::Node
-    } else {
-        OwnerKind::Relationship
-    };
-    let mut values = Vec::with_capacity(keys.len());
-    for key in keys {
-        let Some(value) = snapshot.property(storage_owner, owner_id, *key)? else {
-            return Ok(());
-        };
-        values.push(value);
-    }
-    insert_owner_cache_values(snapshot, index, owner_kind, owner_id, values, insert)
-}
-
-fn insert_owner_cache_values(
-    snapshot: &Snapshot<'_>,
-    index: &IndexDefinition,
-    owner_kind: i64,
-    owner_id: i64,
-    values: Vec<storage::PropertyValue>,
-    insert: &mut Statement<'_>,
-) -> QueryResult<()> {
-    if values
-        .iter()
-        .any(|value| !cache_value_supported(index.kind, value))
-    {
-        return Ok(());
-    }
-    for (ordinal, value) in values.into_iter().enumerate() {
-        insert_cache_value(
-            snapshot, index, owner_kind, owner_id, ordinal, value, insert,
-        )?;
-    }
-    Ok(())
-}
-
-fn insert_cache_value(
-    snapshot: &Snapshot<'_>,
-    index: &IndexDefinition,
-    owner_kind: i64,
-    owner_id: i64,
-    ordinal: usize,
-    value: storage::PropertyValue,
-    insert: &mut Statement<'_>,
-) -> QueryResult<()> {
-    let value_blob = value.canonical_bytes()?;
-    let equality_blob = property_equality_key(&value)?;
-    let text_value = match &value {
-        storage::PropertyValue::String(value) => Some(value.as_str()),
-        _ => None,
-    };
-    let order_key = if index.kind == StandardIndexKind::Range {
-        Some(super::super::super::graph::property_value(value.clone())?)
-            .as_ref()
-            .and_then(range_order_key)
-    } else {
-        None
-    };
-    let (point_crs, point_x, point_y, point_z) = match &value {
-        storage::PropertyValue::Point(point) => (
-            Some(point.crs),
-            point.coordinates.first().copied(),
-            point.coordinates.get(1).copied(),
-            point.coordinates.get(2).copied(),
-        ),
-        _ => (None, None, None, None),
-    };
-    let (sort_family, sort_number, sort_a, sort_b, sort_c, sort_text) = match order_key {
-        Some(RangeOrderKey::Number(number)) => (
-            Some(RANGE_FAMILY_NUMBER),
-            Some(number),
-            None,
-            None,
-            None,
-            None,
-        ),
-        Some(RangeOrderKey::Text(text)) => (
-            Some(RANGE_FAMILY_STRING),
-            None,
-            None,
-            None,
-            None,
-            Some(text),
-        ),
-        Some(RangeOrderKey::Tuple {
-            family,
-            a,
-            b,
-            c,
-            text,
-        }) => (Some(family), None, Some(a), Some(b), Some(c), Some(text)),
-        None => (None, None, None, None, None, None),
-    };
-    insert.execute(params![
-        snapshot.cache_identity().as_bytes().as_slice(),
-        index.name,
-        owner_kind,
-        owner_id,
-        i64::try_from(ordinal).unwrap_or(i64::MAX),
-        value_blob,
-        equality_blob,
-        text_value,
-        sort_family,
-        sort_number,
-        sort_a,
-        sort_b,
-        sort_c,
-        sort_text,
-        point_crs,
-        point_x,
-        point_y,
-        point_z,
-    ])?;
-    Ok(())
 }
 
 fn cache_value_supported(kind: StandardIndexKind, value: &storage::PropertyValue) -> bool {

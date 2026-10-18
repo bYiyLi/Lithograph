@@ -2,6 +2,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
+use crate::query::QueryErrorKind;
 
 static NEXT_WRITE_SAVEPOINT: AtomicU64 = AtomicU64::new(1);
 
@@ -44,7 +45,8 @@ impl QueryCursor {
                 self.finished = true;
                 self.write_state = WriteState::None;
                 if let Some(savepoint) = savepoint
-                    && let Err(cleanup) = rollback_write_savepoint(connection, &savepoint)
+                    && let Err(cleanup) =
+                        rollback_failed_write_savepoint(connection, &savepoint, &error)
                 {
                     return Err(cleanup);
                 }
@@ -67,11 +69,9 @@ impl QueryCursor {
                 .program
                 .as_ref()
                 .is_some_and(super::super::completeness::retry_version_busy);
-        let original_metrics = self.metrics.clone();
+        let original_metrics = self.metrics.try_clone()?;
         for attempt in 0..2 {
-            if attempt != 0 {
-                self.metrics = original_metrics.clone();
-            }
+            self.restore_write_metrics(&original_metrics, attempt)?;
             let ordinal = NEXT_WRITE_SAVEPOINT.fetch_add(1, Ordering::Relaxed);
             let savepoint = format!("lithograph_write_{ordinal}");
             connection.execute_batch(&format!("SAVEPOINT {savepoint}"))?;
@@ -80,11 +80,12 @@ impl QueryCursor {
             }));
             match outcome {
                 Ok(Ok(outcome)) => {
-                    self.install_active_write(savepoint, outcome);
-                    return Ok(());
+                    return self.install_write_with_cleanup(connection, savepoint, outcome);
                 }
                 Ok(Err(error)) => {
-                    if let Err(cleanup) = rollback_write_savepoint(connection, &savepoint) {
+                    if let Err(cleanup) =
+                        rollback_failed_write_savepoint(connection, &savepoint, &error)
+                    {
                         self.finished = true;
                         self.write_state = WriteState::None;
                         return Err(cleanup);
@@ -113,6 +114,31 @@ impl QueryCursor {
         ))
     }
 
+    fn restore_write_metrics(
+        &mut self,
+        original: &QueryMetrics,
+        attempt: usize,
+    ) -> QueryResult<()> {
+        if attempt != 0 {
+            self.metrics = original.try_clone()?;
+        }
+        Ok(())
+    }
+
+    fn install_write_with_cleanup(
+        &mut self,
+        connection: &Connection,
+        savepoint: String,
+        outcome: CursorWriteOutcome,
+    ) -> QueryResult<()> {
+        if let Err(error) = self.install_active_write(savepoint.clone(), outcome) {
+            self.finished = true;
+            rollback_failed_write_savepoint(connection, &savepoint, &error)?;
+            return Err(error);
+        }
+        Ok(())
+    }
+
     fn execute_pending_write(
         &mut self,
         connection: &Connection,
@@ -125,6 +151,7 @@ impl QueryCursor {
                 self.prepared.commit,
                 &self.prepared.params,
                 &mut self.metrics,
+                &self.prepared.resources,
                 is_interrupted,
             )
             .map(write_cursor_outcome);
@@ -135,6 +162,7 @@ impl QueryCursor {
                 schema,
                 self.prepared.commit,
                 is_interrupted,
+                &self.prepared.resources,
             )
             .map(|outcome| CursorWriteOutcome {
                 rows: None,
@@ -150,17 +178,20 @@ impl QueryCursor {
             ));
         };
         if program.version_mutation && !program.writes {
-            let (rows, commit) = super::super::completeness::execute_version_program(
+            let (rows, commit, _memory) = super::super::completeness::execute_version_program(
                 connection,
                 program,
                 self.prepared.commit,
                 &self.prepared.graph_view,
                 &self.prepared.params,
                 &mut self.metrics,
-                is_interrupted,
+                &ExecutionControl::new(&self.prepared.resources, is_interrupted),
             )?;
             return Ok(CursorWriteOutcome {
-                rows: super::super::mutation::spill_value_rows(rows)?,
+                rows: super::super::mutation::spill_value_rows(
+                    rows,
+                    &ExecutionControl::new(&self.prepared.resources, is_interrupted),
+                )?,
                 commit,
                 counters: QueryCounters::default(),
                 query_type: QueryType::Version,
@@ -175,12 +206,17 @@ impl QueryCursor {
             self.prepared.commit,
             &self.prepared.params,
             &mut self.metrics,
+            &self.prepared.resources,
             is_interrupted,
         )
         .map(write_cursor_outcome)
     }
 
-    fn install_active_write(&mut self, savepoint: String, mut outcome: CursorWriteOutcome) {
+    fn install_active_write(
+        &mut self,
+        savepoint: String,
+        mut outcome: CursorWriteOutcome,
+    ) -> QueryResult<()> {
         if self.prepared.columns.is_empty() {
             outcome.rows = None;
         }
@@ -194,13 +230,14 @@ impl QueryCursor {
             outcome.counters,
             &self.metrics,
             self.suppress_summary_commit || outcome.suppress_commit,
-        );
+        )?;
         self.write_state = WriteState::Active {
             savepoint,
             rows: outcome.rows.map(Box::new),
             offset: 0,
             summary,
         };
+        Ok(())
     }
 
     fn cancel_interrupted_write(
@@ -220,9 +257,10 @@ impl QueryCursor {
             }
         };
         self.finished = true;
-        rollback_write_savepoint(connection, &savepoint)?;
+        let error = QueryError::interrupted();
+        rollback_failed_write_savepoint(connection, &savepoint, &error)?;
         self.write_state = WriteState::None;
-        Err(QueryError::interrupted())
+        Err(error)
     }
 
     fn next_active_write_batch(
@@ -246,31 +284,51 @@ impl QueryCursor {
             self.metrics.elapsed_micros =
                 self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
             self.metrics.finish_profile();
-            summary.metrics = self.metrics.clone();
+            summary.metrics = self.metrics.try_clone()?;
             return Ok(QueryBatch {
+                _memory: None,
                 rows: Vec::new(),
                 done: true,
-                summary: Some(summary.clone()),
+                summary: Some(summary.try_clone()?),
             });
         };
-        let batch_rows = rows.next_batch(connection, max_rows, is_interrupted)?;
+        let batch_rows = rows.next_batch(
+            connection,
+            max_rows,
+            is_interrupted,
+            &crate::query::resources::ExecutionControl::new(
+                &self.prepared.resources,
+                is_interrupted,
+            ),
+        )?;
+        self.batch_memory = rows.take_batch_memory();
         *offset = offset.saturating_add(batch_rows.len());
         let done = *offset >= rows.total();
         if done {
             self.metrics.elapsed_micros =
                 self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
             self.metrics.finish_profile();
-            summary.metrics = self.metrics.clone();
+            summary.metrics = self.metrics.try_clone()?;
         }
         Ok(QueryBatch {
+            _memory: None,
             rows: batch_rows,
             done,
-            summary: done.then(|| summary.clone()),
+            summary: if done {
+                Some(summary.try_clone()?)
+            } else {
+                None
+            },
         })
     }
 
     pub fn complete(&mut self, connection: &Connection) -> QueryResult<QuerySummary> {
-        if let Some(summary) = self.transaction_summary.clone() {
+        if let Some(summary) = self
+            .transaction_summary
+            .as_ref()
+            .map(QuerySummary::try_clone)
+            .transpose()?
+        {
             if self.transaction_stream.is_some() {
                 if !self.finished {
                     return Err(QueryError::internal(
@@ -289,6 +347,7 @@ impl QueryCursor {
                 }
             }
             self.finished = true;
+            self.release_write_inputs();
             return Ok(summary);
         }
         match std::mem::replace(&mut self.write_state, WriteState::None) {
@@ -297,32 +356,11 @@ impl QueryCursor {
                 rows,
                 offset,
                 summary,
-            } => {
-                let total = rows.as_ref().map_or(0, |rows| rows.total());
-                if offset < total {
-                    self.write_state = WriteState::Active {
-                        savepoint,
-                        rows,
-                        offset,
-                        summary,
-                    };
-                    return Err(QueryError::internal(
-                        "write cursor cannot complete before execution reaches a terminal batch",
-                    ));
-                }
-                if let Err(error) = connection.execute_batch(&format!("RELEASE {savepoint}")) {
-                    let release_error = QueryError::from(error);
-                    self.finished = true;
-                    rollback_write_savepoint(connection, &savepoint)?;
-                    return Err(release_error);
-                }
-                self.finished = true;
-                self.write_state = WriteState::Completed(summary.clone());
-                Ok(summary)
-            }
+            } => self.complete_active_write(connection, savepoint, rows, offset, summary),
             WriteState::Completed(summary) => {
-                self.write_state = WriteState::Completed(summary.clone());
-                Ok(summary)
+                let cloned = summary.try_clone();
+                self.write_state = WriteState::Completed(summary);
+                cloned
             }
             WriteState::Pending => {
                 self.write_state = WriteState::Pending;
@@ -337,9 +375,58 @@ impl QueryCursor {
                         "read cursor cannot complete before execution reaches a terminal batch",
                     ));
                 }
-                Ok(self.read_summary())
+                self.read_summary()
             }
         }
+    }
+
+    fn complete_active_write(
+        &mut self,
+        connection: &Connection,
+        savepoint: String,
+        rows: Option<Box<super::super::mutation::WriteRows>>,
+        offset: usize,
+        summary: QuerySummary,
+    ) -> QueryResult<QuerySummary> {
+        let total = rows.as_ref().map_or(0, |rows| rows.total());
+        if offset < total {
+            self.write_state = WriteState::Active {
+                savepoint,
+                rows,
+                offset,
+                summary,
+            };
+            return Err(QueryError::internal(
+                "write cursor cannot complete before execution reaches a terminal batch",
+            ));
+        }
+        let stored_summary = match summary.try_clone() {
+            Ok(cloned) => cloned,
+            Err(error) => {
+                self.finished = true;
+                rollback_failed_write_savepoint(connection, &savepoint, &error)?;
+                self.release_working_memory();
+                return Err(error);
+            }
+        };
+        if let Err(error) = connection.execute_batch(&format!("RELEASE {savepoint}")) {
+            let error = QueryError::from(error);
+            self.finished = true;
+            rollback_failed_write_savepoint(connection, &savepoint, &error)?;
+            self.release_working_memory();
+            return Err(error);
+        }
+        self.finished = true;
+        self.write_state = WriteState::Completed(stored_summary);
+        drop(rows);
+        self.release_write_inputs();
+        Ok(summary)
+    }
+
+    fn release_write_inputs(&mut self) {
+        let batch_memory = self.batch_memory.take();
+        self.release_working_memory();
+        self.batch_memory = batch_memory;
     }
 
     pub fn complete_with_interrupt(
@@ -361,13 +448,16 @@ impl QueryCursor {
         }
         if self.transaction_summary.is_some() {
             self.finished = true;
+            self.release_working_memory();
             return Ok(());
         }
         if let WriteState::Active { savepoint, .. } = &self.write_state {
             let savepoint = savepoint.clone();
             rollback_write_savepoint(connection, &savepoint)?;
         }
-        if let BarrierState::Ready(output) = &self.barrier {
+        if let BarrierState::Ready(output) =
+            std::mem::replace(&mut self.barrier, BarrierState::Direct)
+        {
             let spill_connection = self.spill_connection.take().ok_or_else(|| {
                 QueryError::internal("spill output is missing its SQLite connection")
             })?;
@@ -375,6 +465,7 @@ impl QueryCursor {
         }
         self.write_state = WriteState::None;
         self.finished = true;
+        self.release_working_memory();
         Ok(())
     }
 }
@@ -413,23 +504,50 @@ fn schema_query_counters(counters: super::super::schema::SchemaCounters) -> Quer
     }
 }
 
+fn rollback_failed_write_savepoint(
+    connection: &Connection,
+    savepoint: &str,
+    error: &QueryError,
+) -> QueryResult<()> {
+    if error.kind == QueryErrorKind::Interrupted && connection.is_autocommit() {
+        // SQLite may have already aborted the transaction when its own write
+        // VM returned SQLITE_INTERRUPT, closing every nested savepoint.
+        return Ok(());
+    }
+    rollback_write_savepoint(connection, savepoint)
+}
+
 fn rollback_write_savepoint(connection: &Connection, savepoint: &str) -> QueryResult<()> {
     if let Err(error) = connection.execute_batch(&format!("ROLLBACK TO {savepoint}")) {
         return fail_write_savepoint_cleanup(
             connection,
             format!("rollback-to-savepoint failed ({error})"),
+            error,
         );
     }
     if let Err(error) = connection.execute_batch(&format!("RELEASE {savepoint}")) {
         return fail_write_savepoint_cleanup(
             connection,
             format!("release-savepoint failed ({error})"),
+            error,
         );
     }
     Ok(())
 }
 
-fn fail_write_savepoint_cleanup(connection: &Connection, detail: String) -> QueryResult<()> {
+fn fail_write_savepoint_cleanup(
+    connection: &Connection,
+    detail: String,
+    error: rusqlite::Error,
+) -> QueryResult<()> {
+    let mut cleanup = QueryError::from(error);
+    if cleanup.kind == QueryErrorKind::Interrupted {
+        // An outer SQLite VM can keep the interrupt flag set while this
+        // cleanup runs. The SQL adapter must verify SQLite rollback recovery
+        // before exposing this structured interrupt to the host.
+        cleanup.message = format!("write savepoint cleanup was interrupted ({detail})");
+        return Err(cleanup);
+    }
     let suffix = if connection.execute_batch("ROLLBACK").is_ok() {
         "full SQLite rollback executed"
     } else {

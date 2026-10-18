@@ -7,7 +7,7 @@ impl QueryCursor {
         max_rows: usize,
         is_interrupted: &dyn Fn() -> bool,
     ) -> QueryResult<QueryBatch> {
-        self.ensure_transaction_stream(connection)?;
+        self.ensure_transaction_stream(connection, is_interrupted)?;
         if let Some(batch) =
             self.next_streaming_transaction(connection, max_rows, is_interrupted)?
         {
@@ -17,7 +17,11 @@ impl QueryCursor {
         self.next_materialized_transaction_batch(connection, max_rows, is_interrupted)
     }
 
-    fn ensure_transaction_stream(&mut self, connection: &Connection) -> QueryResult<()> {
+    fn ensure_transaction_stream(
+        &mut self,
+        connection: &Connection,
+        is_interrupted: &dyn Fn() -> bool,
+    ) -> QueryResult<()> {
         if !self.transaction_stream_checked {
             let program = prepared_program(&self.prepared, "transaction program is missing")?;
             self.transaction_stream = crate::query::transaction::TransactionProgramStream::try_new(
@@ -25,6 +29,7 @@ impl QueryCursor {
                 program,
                 self.prepared.commit,
                 &self.prepared.params,
+                &ExecutionControl::new(&self.prepared.resources, is_interrupted),
             )?;
             self.transaction_stream_checked = true;
         }
@@ -48,28 +53,34 @@ impl QueryCursor {
         } else {
             QueryType::Read
         };
-        let batch: crate::query::transaction::TransactionStreamBatch = stream.next_batch(
+        let mut batch: crate::query::transaction::TransactionStreamBatch = stream.next_batch(
             connection,
             program,
             &self.prepared.params,
             &mut self.metrics,
             max_rows,
-            is_interrupted,
+            &ExecutionControl::new(&self.prepared.resources, is_interrupted),
         )?;
+        self.batch_memory = batch.memory.take();
         self.metrics.rows = self
             .metrics
             .rows
             .saturating_add(batch.rows.len().try_into().unwrap_or(u64::MAX));
         if batch.done {
-            self.finish_streaming_transaction(query_type, &batch);
+            self.finish_streaming_transaction(query_type, &batch)?;
         }
         Ok(Some(QueryBatch {
+            _memory: None,
             rows: batch.rows,
             done: batch.done,
-            summary: batch
-                .done
-                .then(|| self.transaction_summary.clone())
-                .flatten(),
+            summary: if batch.done {
+                self.transaction_summary
+                    .as_ref()
+                    .map(QuerySummary::try_clone)
+                    .transpose()?
+            } else {
+                None
+            },
         }))
     }
 
@@ -77,7 +88,7 @@ impl QueryCursor {
         &mut self,
         query_type: QueryType,
         batch: &crate::query::transaction::TransactionStreamBatch,
-    ) {
+    ) -> QueryResult<()> {
         self.metrics.elapsed_micros =
             self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
         self.metrics.finish_profile();
@@ -88,7 +99,8 @@ impl QueryCursor {
             batch.counters.clone(),
             &self.metrics,
             self.suppress_summary_commit,
-        ));
+        )?);
+        Ok(())
     }
 
     fn ensure_materialized_transaction_rows(
@@ -104,6 +116,7 @@ impl QueryCursor {
                 self.prepared.commit,
                 &self.prepared.params,
                 &mut self.metrics,
+                &self.prepared.resources,
                 is_interrupted,
             )?;
             self.metrics.rows = outcome
@@ -120,7 +133,7 @@ impl QueryCursor {
                 outcome.counters,
                 &self.metrics,
                 self.suppress_summary_commit,
-            ));
+            )?);
             self.transaction_rows = outcome.rows;
         }
         Ok(())
@@ -139,13 +152,21 @@ impl QueryCursor {
                 self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
             self.metrics.finish_profile();
             if let Some(summary) = &mut self.transaction_summary {
-                summary.metrics = self.metrics.clone();
+                summary.metrics = self.metrics.try_clone()?;
             }
         }
         Ok(QueryBatch {
+            _memory: None,
             rows: batch_rows,
             done,
-            summary: done.then(|| self.transaction_summary.clone()).flatten(),
+            summary: if done {
+                self.transaction_summary
+                    .as_ref()
+                    .map(QuerySummary::try_clone)
+                    .transpose()?
+            } else {
+                None
+            },
         })
     }
 
@@ -158,7 +179,16 @@ impl QueryCursor {
         let Some(rows) = self.transaction_rows.as_mut() else {
             return Ok((Vec::new(), true));
         };
-        let batch_rows = rows.next_batch(connection, max_rows, is_interrupted)?;
+        let batch_rows = rows.next_batch(
+            connection,
+            max_rows,
+            is_interrupted,
+            &crate::query::resources::ExecutionControl::new(
+                &self.prepared.resources,
+                is_interrupted,
+            ),
+        )?;
+        self.batch_memory = rows.take_batch_memory();
         self.transaction_offset = self.transaction_offset.saturating_add(batch_rows.len());
         Ok((batch_rows, self.transaction_offset >= rows.total()))
     }

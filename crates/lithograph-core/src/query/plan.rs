@@ -252,8 +252,10 @@ pub(crate) struct ProjectionPlan {
     pub(crate) distinct: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PreparedQuery {
+    pub resources: super::QueryResources,
+    pub(crate) metrics: super::stream::QueryMetrics,
     pub(crate) access: AccessPolicy,
     pub(crate) commit: HashId,
     pub(crate) candidate: Option<super::version::CandidateContext>,
@@ -275,6 +277,8 @@ pub struct PreparedQuery {
     pub physical: PhysicalPlan,
     pub statistics: PlannerStatistics,
     pub columns: Vec<String>,
+    // Covers parameters and selected seeks; keep it until those fields drop.
+    pub(crate) params_memory: Option<super::MemoryReservation>,
 }
 
 impl PreparedQuery {
@@ -317,11 +321,70 @@ pub fn prepare(
     params: BTreeMap<String, Value>,
     options: ExecutionOptions,
 ) -> QueryResult<PreparedQuery> {
+    let resources = super::QueryResources::new(options.memory_limit_bytes);
+    prepare_with_resources(connection, query, params, options, resources)
+}
+
+/// Prepare an execution using a resource state shared with its SQL adapter.
+pub fn prepare_with_resources(
+    connection: &Connection,
+    query: &str,
+    params: BTreeMap<String, Value>,
+    options: ExecutionOptions,
+    resources: super::QueryResources,
+) -> QueryResult<PreparedQuery> {
+    prepare_with_resources_and_interrupt(connection, query, params, options, resources, &|| false)
+}
+
+/// Prepare using the same cancellation callback as execution advancement.
+pub fn prepare_with_resources_and_interrupt(
+    connection: &Connection,
+    query: &str,
+    params: BTreeMap<String, Value>,
+    options: ExecutionOptions,
+    resources: super::QueryResources,
+    is_interrupted: &dyn Fn() -> bool,
+) -> QueryResult<PreparedQuery> {
+    let control = super::ExecutionControl::new(&resources, is_interrupted);
+    control.check()?;
+    let mut bytes = super::resources::checked_mul(
+        super::resources::map_entry_bytes::<Value>()?,
+        params.len() as u64,
+    )?;
+    for (name, value) in &params {
+        bytes = super::resources::checked_add(bytes, name.capacity() as u64)?;
+        bytes = super::resources::checked_add(
+            bytes,
+            super::resources::value_bytes_controlled(value, &control)?,
+        )?;
+    }
+    let mut params_memory = resources.reserve(bytes)?;
+    let mut prepared = prepare_inner(connection, query, params, options, &control)?;
+    prepared.metrics = super::stream::QueryMetrics::for_execution_with_resources(
+        prepared.mode,
+        &prepared.physical,
+        &resources,
+    )?;
+    prepared.resources = resources;
+    if let Some(memory) = prepared.params_memory.take() {
+        params_memory.merge(memory)?;
+    }
+    prepared.params_memory = Some(params_memory);
+    Ok(prepared)
+}
+
+fn prepare_inner(
+    connection: &Connection,
+    query: &str,
+    params: BTreeMap<String, Value>,
+    options: ExecutionOptions,
+    control: &super::ExecutionControl<'_>,
+) -> QueryResult<PreparedQuery> {
     let ast = cypher::parse(query)?;
     cypher::analyze(&ast, query)?;
     validate_parameters(&ast.root, &params)?;
     super::safety::validate(&ast, &options)?;
-    let context = prepare_context(connection, &ast, params, &options)?;
+    let context = prepare_context(connection, &ast, params, &options, control)?;
     if let Some(schema) = super::schema::prepare_schema(
         connection,
         context.commit,
@@ -329,6 +392,7 @@ pub fn prepare(
         query,
         &context.params,
         &options,
+        control,
     )? {
         return prepare_schema_query(context, schema);
     }
@@ -342,7 +406,7 @@ pub fn prepare(
         reject_candidate_write(&context)?;
         return prepare_write_query(connection, single, query, &options, context);
     }
-    prepare_read_query(connection, single, query, context)
+    prepare_read_query(connection, single, query, context, control)
 }
 
 fn prepare_context(
@@ -350,11 +414,12 @@ fn prepare_context(
     ast: &QueryAst,
     params: BTreeMap<String, Value>,
     options: &ExecutionOptions,
+    control: &super::ExecutionControl<'_>,
 ) -> QueryResult<PrepareContext> {
     let candidate = options
         .merge_session
         .as_ref()
-        .map(|selector| super::version::resolve_candidate_context(connection, selector))
+        .map(|selector| super::version::resolve_candidate_context(connection, selector, control))
         .transpose()?;
     let commit = match candidate.as_ref() {
         Some(candidate) => candidate.base_commit,
@@ -453,6 +518,9 @@ fn prepare_write_query(
     let logical = write.logical.clone();
     let physical = build_physical(&logical, &write.matches_for_explain, false);
     Ok(PreparedQuery {
+        resources: super::QueryResources::default(),
+        metrics: super::stream::QueryMetrics::default(),
+        params_memory: None,
         access: context.access,
         commit: context.commit,
         candidate: context.candidate,
@@ -482,6 +550,7 @@ fn prepare_read_query(
     single: &AstNode,
     query: &str,
     context: PrepareContext,
+    control: &super::ExecutionControl<'_>,
 ) -> QueryResult<PreparedQuery> {
     let (mut matches, return_clause) = lower_clauses(connection, single)?;
     let ProjectionPlan {
@@ -492,14 +561,23 @@ fn prepare_read_query(
         distinct,
     } = lower_projection(return_clause, query, &context.params)?;
     let aggregate = validate_aggregation(&projections)?;
+    let observer = super::graph::snapshot_observer(control.resources());
+    let check = || control.check().map_err(QueryError::into_storage_error);
     let resolved_state = match context.candidate.as_ref() {
-        Some(candidate) => storage::Snapshot::resolve_query_state_with_layer_and_schema(
+        Some(candidate) => storage::Snapshot::resolve_query_state_with_layer_and_schema_observed(
             connection,
             context.commit,
             &candidate.layer,
             candidate.schema.clone(),
+            observer,
+            &check,
         )?,
-        None => storage::Snapshot::resolve_query_state(connection, context.commit)?,
+        None => storage::Snapshot::resolve_query_state_observed(
+            connection,
+            context.commit,
+            observer,
+            &check,
+        )?,
     };
     let snapshot = storage::Snapshot::from_resolved_state(connection, &resolved_state);
     let statistics = planner_statistics(&snapshot, &context.graph_view, &matches)?;
@@ -507,12 +585,14 @@ fn prepare_read_query(
     let schema = resolved_state.query_schema_state().ok_or_else(|| {
         QueryError::internal("read query resolved state is missing its versioned Schema")
     })?;
-    super::schema::select_standard_index_seeks(
+    let index_memory = super::schema::select_standard_index_seeks(
         schema,
         &mut matches,
         &context.params,
         &context.access.read.query,
-    );
+        &snapshot,
+        control,
+    )?;
     let columns = output_columns(context.mode, &projections);
     let logical = build_logical(
         &matches,
@@ -524,6 +604,9 @@ fn prepare_read_query(
     );
     let physical = build_physical(&logical, &matches, !order.is_empty());
     Ok(PreparedQuery {
+        resources: super::QueryResources::default(),
+        metrics: super::stream::QueryMetrics::default(),
+        params_memory: Some(index_memory),
         access: context.access,
         commit: context.commit,
         candidate: context.candidate,
@@ -615,6 +698,9 @@ fn empty_prepared_query(
     columns: Vec<String>,
 ) -> PreparedQuery {
     PreparedQuery {
+        resources: super::QueryResources::default(),
+        metrics: super::stream::QueryMetrics::default(),
+        params_memory: None,
         access,
         commit,
         candidate,
@@ -833,16 +919,7 @@ fn lower_pattern_part(connection: &Connection, part: &AstNode) -> QueryResult<Pa
             "Phase 04 fixed-path execution does not support path modes, selectors, or quantified patterns",
         ));
     }
-    let path_variable = part
-        .children
-        .iter()
-        .find(|node| matches!(node.kind, AstKind::PathAssignment))
-        .and_then(|assignment| {
-            assignment
-                .descendants()
-                .find(|node| matches!(node.kind, AstKind::PatternVariable))
-        })
-        .and_then(|node| node.text.clone());
+    let path_variable = part.path_assignment_variable().map(str::to_owned);
     let mut nodes = part
         .descendants()
         .filter(|node| matches!(node.kind, AstKind::NodePattern))
@@ -897,7 +974,8 @@ fn lower_node(connection: &Connection, node: &AstNode) -> QueryResult<NodeSpec> 
         .descendants()
         .skip(1)
         .filter(|child| matches!(child.kind, AstKind::LabelName))
-        .filter_map(|child| child.text.clone())
+        .filter_map(|child| child.text.as_deref())
+        .map(cypher::unescape_identifier)
         .collect::<Vec<_>>();
     let mut labels = Vec::new();
     let mut label_names = Vec::new();
@@ -947,7 +1025,8 @@ fn lower_relationship(connection: &Connection, node: &AstNode) -> QueryResult<Re
         .descendants()
         .skip(1)
         .filter(|child| matches!(child.kind, AstKind::RelationshipTypeName))
-        .filter_map(|child| child.text.clone())
+        .filter_map(|child| child.text.as_deref())
+        .map(cypher::unescape_identifier)
         .collect::<Vec<_>>();
     if types.len() > 1 {
         return Err(QueryError::semantic(

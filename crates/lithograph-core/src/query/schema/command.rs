@@ -40,6 +40,12 @@ pub(crate) struct PreparedSchema {
     pub(crate) kind: ClauseKind,
 }
 
+pub(super) struct SchemaExecution<'a> {
+    params: &'a BTreeMap<String, Value>,
+    query_access: &'a crate::query::PropertyRules,
+    control: &'a crate::query::ExecutionControl<'a>,
+}
+
 pub(crate) fn prepare_schema(
     connection: &Connection,
     base_commit: HashId,
@@ -47,6 +53,7 @@ pub(crate) fn prepare_schema(
     source: &str,
     params: &BTreeMap<String, Value>,
     options: &ExecutionOptions,
+    control: &crate::query::ExecutionControl<'_>,
 ) -> QueryResult<Option<PreparedSchema>> {
     let Some(command) = dispatch::find_schema_command(&ast.root)? else {
         return Ok(None);
@@ -62,14 +69,18 @@ pub(crate) fn prepare_schema(
     let branch = writable_branch(connection, options)?;
     let current = SchemaState::load(connection, base_commit)?;
     let mut state = current.clone();
+    let execution = SchemaExecution {
+        params,
+        query_access: &options.access.read.query,
+        control,
+    };
     let kind = dispatch::apply_schema_command(
         connection,
         base_commit,
         &mut state,
         command,
         source,
-        params,
-        &options.access.read.query,
+        &execution,
     )?;
     refresh_backing_indexes(&mut state)?;
     validate_schema_state(&state)?;

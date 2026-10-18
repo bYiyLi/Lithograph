@@ -999,6 +999,7 @@ fn with_savepoint<T>(
     operation: impl FnOnce(&Connection) -> LithographResult<T>,
 ) -> LithographResult<T> {
     require_no_active_readers(connection)?;
+    interrupt_cleanup::prepare(connection)?;
     let ordinal = NEXT_SAVEPOINT.fetch_add(1, Ordering::Relaxed);
     let savepoint = format!("lithograph_invocation_{ordinal}");
     connection
@@ -1029,6 +1030,9 @@ fn with_savepoint<T>(
 }
 
 fn rollback_savepoint(connection: &Connection, savepoint: &str) -> LithographResult<()> {
+    if interrupt_cleanup::recover(connection)? {
+        return Ok(());
+    }
     let rollback_error = connection
         .execute_batch(&format!("ROLLBACK TO {savepoint}"))
         .err();
@@ -1105,6 +1109,7 @@ fn map_sqlite_error(error: SqliteError, message: &str) -> LithographError {
         ffi::SQLITE_BUSY | ffi::SQLITE_LOCKED => ErrorCategory::Busy,
         ffi::SQLITE_NOMEM | ffi::SQLITE_TOOBIG | ffi::SQLITE_FULL => ErrorCategory::Resource,
         ffi::SQLITE_IOERR | ffi::SQLITE_CANTOPEN | ffi::SQLITE_READONLY => ErrorCategory::Io,
+        ffi::SQLITE_INTERRUPT => ErrorCategory::Interrupted,
         _ => ErrorCategory::Storage,
     };
     LithographError::new(category, message, primary)
@@ -1120,7 +1125,9 @@ fn catch_sqlite_boundary<T>(operation: impl FnOnce() -> SqliteResult<T>) -> Sqli
     }
 }
 
+mod budget;
 mod execution;
+mod interrupt_cleanup;
 mod metadata_integrity;
 mod rows;
 mod scalar;

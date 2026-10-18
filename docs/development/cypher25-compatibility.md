@@ -15,6 +15,10 @@ Phase 12 的 FTS5 provider binding 不是新增 Cypher grammar 或新的语言 P
 
 ## 2. Status Semantics
 
+[Phase 19](phases/19-query-correctness-resources.md) 为 `done` / Unreleased：本轮 review 修复与开发复验完成。最新 `target/phase19-review/` 的 quality / 本机 CI 均 exit 0、Phase 19 七组 **42/42**、三套 SQLite release SQL **24/24**、固定预算百万行与文档 **528×2 Cypher / 138 SQL** 通过；`target/phase19/` 只保留上一轮历史证据。实现与复审验证随本变更提交，推送和远端 CI 以 Git / Actions 的实际 ref 为准；正式发布不在本轮范围。名称问题修复既有 Profile 的语义，不增加 dialect；`memoryLimitBytes` 与取消边界不增加冻结语言 coverage 分母。Phase 18/v0.3.2 发布历史保持原证据，新能力仍未发布。
+
+上一轮 Phase 19 的完整 TCK 曾暴露删除 Relationship 后 `type(r)` 的 metadata 回退；受控 bound type / element-id 路径及普通/已删除 Path 的原有错误优先级修复与旧 metadata **88/88** 保留历史身份。本轮冻结源码的 `target/phase19-review/tck.json` 确认 **3897 total / 3777 applicable / 3777 passed / 0 failed / 120 not applicable**，`not_applicable_reasons` 与上一轮报告完全相等，没有改变原分类或分母。下表 family 状态已由本轮完整 quality / CI 复验；transaction batch 的预算拒绝与既有 provisional spill 差距不增加语言分母，准确边界、旧失败和当前证据见 [Phase 19](phases/19-query-correctness-resources.md)。
+
 | 状态 | 含义 |
 | --- | --- |
 | `planned` | Profile 已要求，尚无实现证据 |
@@ -44,10 +48,10 @@ Phase 03 已交付 parser/AST/scope/type/value frontend foundation；Phase 04/05
 
 | Family | Required coverage | 状态 | Owning Phase |
 | --- | --- | --- | --- |
-| Lexical / identifiers / parameters | keywords、escaped/unescaped identifiers、Unicode、parameter naming、comments、query options | `done` | 03, 06 |
+| Lexical / identifiers / parameters | keywords、escaped/unescaped identifiers、Unicode、parameter naming、comments、query options | `done` | 03, 06, 19 |
 | Literals / operators | boolean、numeric、string、list、map、temporal/spatial/vector/UUID literals/constructors、operator precedence | `done` | 03, 06 |
 | Null / equality / ordering | three-valued logic、comparison、ordering、NaN、type ordering where specified | `done` | 03, 06 |
-| MATCH | node/relationship pattern、labels/types/property predicates、multiple patterns | `done` | 04, 06 |
+| MATCH | node/relationship pattern、labels/types/property predicates、multiple patterns | `done` | 04, 06, 19 |
 | OPTIONAL MATCH | outer/null preservation、predicate placement/composition | `done` | 04, 06 |
 | FILTER / WHERE | predicate expressions、pattern predicates、scope | `done` | 04, 06 |
 | RETURN / WITH / LET | projection、alias/scope、star、aggregation boundary、ordering | `done` | 04, 06 |
@@ -64,7 +68,7 @@ Phase 03 已交付 parser/AST/scope/type/value frontend foundation；Phase 04/05
 | DELETE / DETACH DELETE | entity deletion、relationship integrity、row behavior | `done` | 05, 06 |
 | MERGE | match/create branches、ON MATCH/CREATE semantics、locking/concurrency | `done` | 05, 06 |
 | FOREACH | update-only iteration and variable scope | `done` | 06 |
-| Pattern semantics | directions、anonymous elements、label expressions、relationship type expressions | `done` | 04, 06 |
+| Pattern semantics | directions、anonymous elements、label expressions、relationship type expressions | `done` | 04, 06, 19 |
 | Quantified / variable-length patterns | group variables、bounds、predicates、result cardinality | `done` | 06 |
 | Match modes | repeatable/different relationship semantics | `done` | 06 |
 | Path modes | walk/trail/acyclic constraints as Profile specifies | `done` | 06 |
@@ -75,7 +79,7 @@ Phase 03 已交付 parser/AST/scope/type/value frontend foundation；Phase 04/05
 | VECTOR | coordinate types、dimension、storage、conversion、similarity/distance | `done` | 03, 06, 08 |
 | UUID | native type、constructors、bit helpers、storage/equality | `done` | 03, 06 |
 | String interpolation | `s"...{expr}..."` / `S"..."` semantics | `done` | 03, 06 |
-| Built-in functions | complete current-graph function inventory from frozen Manual | `done` | 06, 08 |
+| Built-in functions | complete current-graph function inventory from frozen Manual | `done` | 06, 08, 19 |
 | Aggregating functions | complete frozen Manual inventory and null/group semantics | `done` | 06 |
 | Procedure CALL | built-in current-graph procedures、Lithograph Version Procedures、YIELD、scope/result contract | `done` | 06–09 |
 | Graph Type | SET/EXTEND/ALTER/SHOW/DROP element semantics、open schema | `done` | 07 |

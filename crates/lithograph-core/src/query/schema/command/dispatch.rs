@@ -1,8 +1,6 @@
-use std::collections::BTreeMap;
-
 use rusqlite::Connection;
 
-use crate::cypher::{AstKind, AstNode, ClauseKind, Value};
+use crate::cypher::{AstKind, AstNode, ClauseKind};
 use crate::storage::{HashId, SchemaState};
 
 use super::super::super::QueryResult;
@@ -11,7 +9,6 @@ use super::{
     apply_graph_type, schema_error, semantic,
 };
 use crate::query::QueryError;
-use crate::query::access::PropertyRules;
 
 pub(super) enum SchemaCommand<'a> {
     Semantic(&'a AstNode, semantic::SemanticCreateKind),
@@ -47,8 +44,7 @@ pub(super) fn apply_schema_command(
     state: &mut SchemaState,
     command: SchemaCommand<'_>,
     source: &str,
-    params: &BTreeMap<String, Value>,
-    query_access: &PropertyRules,
+    execution: &super::SchemaExecution<'_>,
 ) -> QueryResult<ClauseKind> {
     match command {
         SchemaCommand::Semantic(clause, semantic_kind) => {
@@ -58,8 +54,7 @@ pub(super) fn apply_schema_command(
                 state,
                 clause,
                 semantic_kind,
-                params,
-                query_access,
+                execution,
             )?;
             Ok(ClauseKind::CreateIndex)
         }
