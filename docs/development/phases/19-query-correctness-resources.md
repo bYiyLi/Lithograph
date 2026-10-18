@@ -1,6 +1,6 @@
 # Phase 19：查询正确性、取消与执行内存限额
 
-**状态：`done`（本轮 review 修复与开发复验完成；Unreleased）**
+**状态：`done`（本轮 review 修复、开发复验与远端六平台验收完成；Unreleased）**
 
 ## 目标、依赖与设计输入
 
@@ -12,7 +12,7 @@
 
 ## 本轮 review 状态
 
-本轮 review 发现的问题已修复，专项回归、最终 quality / 本机 CI、release-build SQL 与文档检查均已完成。当前验收证据使用 `target/phase19-review/`，不沿用旧 green；本轮目标范围内的复审已闭环，下文单独保留 transaction batch 的既有实现边界。实现与复审验证随本变更提交；推送和远端 CI 以 Git / Actions 的实际 ref 为准。正式发布与 Loreweft 接入不属于本轮交付。
+本轮 review 发现的问题已修复，专项回归、最终 quality / 本机 CI、release-build SQL 与文档检查均已完成。当前验收证据使用 `target/phase19-review/`，不沿用旧 green；本轮目标范围内的复审已闭环，下文单独保留 transaction batch 的既有实现边界。实现 revision 已提交并推送至 `origin/main`，其 repository CI 与六平台 Release Matrix 全部成功，精确 SHA 与 job 证据见[本轮远端验收](#phase19-remote-acceptance)。正式发布与 Loreweft 接入不属于本轮交付。
 
 下文 `target/phase19/` 的日志、构建 checksum、数字和源码 review 结论保留为**上一轮历史证据**，仅对应当时工作树；当前制品与复验结果由本轮新证据证明。Feature 与 QR 的当前复验状态另列，不把旧 green 迁移为新结果。
 
@@ -40,6 +40,25 @@
 | 最终 inherited TCK | **3897 total / 3777 applicable / 3777 passed / 0 failed / 120 not applicable**；`not_applicable_reasons` 与上一轮报告完全相等，没有改变原分类或分母 | `tck.json`、`quality.log` |
 | 本机 `scripts/ci.sh` | **exit 0**；Core / Extension 独立 invocation，SQLite **3.45.0 / 3.51.0 / 3.53.4**、SQL / transaction / access、Provider SPI / dual-extension、ABI、compatibility / TCK inventory 全部完成 | `ci.log` |
 | 文档与真实示例 | **80 Markdown** 链接/锚点/coverage、**528 Cypher examples × 2 surfaces = 1056 次执行**、**138 SQL statements**、172 function signatures / 38 Procedures、Python 应用和 C lifecycle 全部通过；最终状态回填另做 scoped 文档检查 | `ci.log` |
+
+<a id="phase19-remote-acceptance"></a>
+
+### 本轮远端验收
+
+2026-10-18，已提交并推送至 `origin/main` 的实现 revision 为 [`d7602c24b7c1bc399a6d12fdefb9f610c62c2e07`](https://github.com/bYiyLi/Lithograph/commit/d7602c24b7c1bc399a6d12fdefb9f610c62c2e07)。该精确 SHA 的 [repository CI `39136521139`](https://github.com/bYiyLi/Lithograph/actions/runs/39136521139) 为 `completed / success`，quality、Linux/macOS canonical gates 与 Windows load/ABI gates 共 **4/4 jobs 成功**。[Release Matrix `39136521126`](https://github.com/bYiyLi/Lithograph/actions/runs/39136521126) 同为 `completed / success`；前置 [storage-fixture](https://github.com/bYiyLi/Lithograph/actions/runs/39136521126/job/117702023075) 与下列 **6/6 平台 jobs 全部成功**。各平台均完成 Engine / Provider release build、版本与访问控制回归、真实 load / ABI / runtime / interoperability gates 和打包。
+
+| 平台 | 实际结果 | 直接证据 |
+| --- | --- | --- |
+| Linux x64 | `completed / success` | [job `117703701960`](https://github.com/bYiyLi/Lithograph/actions/runs/39136521126/job/117703701960) |
+| Linux arm64 | `completed / success` | [job `117703701878`](https://github.com/bYiyLi/Lithograph/actions/runs/39136521126/job/117703701878) |
+| macOS x64 | `completed / success` | [job `117703701941`](https://github.com/bYiyLi/Lithograph/actions/runs/39136521126/job/117703701941) |
+| macOS arm64 | `completed / success` | [job `117703701872`](https://github.com/bYiyLi/Lithograph/actions/runs/39136521126/job/117703701872) |
+| Windows x64 | `completed / success` | [job `117703701901`](https://github.com/bYiyLi/Lithograph/actions/runs/39136521126/job/117703701901) |
+| Windows arm64 | `completed / success` | [job `117703701887`](https://github.com/bYiyLi/Lithograph/actions/runs/39136521126/job/117703701887) |
+
+macOS x64 的完成日志 `target/phase19-review/macos-x64-completed.log` 另确认 Phase 19 C 探针在 SQLite **3.45.0 / 3.53.4** 各 **8/8**、共 **16/16 cases passed**；两套 runtime 共 10 次真实取消均返回 code 9，发出 interrupt 后最大延迟 **0.600 ms**，最终 cross-platform storage fixture 为 `status: ok`。这些数值只属于该 macOS x64 job。
+
+原始核验记录为 `target/phase19-review/ci-followup.json` 与 `matrix-followup.json`。这两个 run 仅证明上述实现 SHA；本次仅回填验收记录，后续文档 commit 的 SHA 与其交付状态单独记录，不把实现 run 归给文档 SHA。本轮运行来自 `main`，没有创建 tag，[publish-release](https://github.com/bYiyLi/Lithograph/actions/runs/39136521126/job/117709438604) 按条件 `skipped`；新能力继续保持 **Unreleased**。
 
 ### 本轮 release-build 验证证据
 
@@ -180,4 +199,4 @@ cancel case 包含 **128 MiB** 合成参数输入；宿主已有输入和 SQLite
 
 上一轮独立只读 hygiene 审查覆盖 **132 tracked 修改 + 78 untracked 新文件 = 210 文件**；新增 74 Rust、1 Phase 19 文档、1 驱动、2 SQL 探针，均为 UTF-8 text，0 trailing whitespace、0 binary，无 temporary database、build/log 产物或 secret。Cargo dependency/lock、Provider crate/header、Phase 18 历史与 release 文档未改；storage format 3、Commit identity 与 SPI entry signatures 保持；CHANGELOG 的 v0.3.2 及以下历史正文逐字保留。`allow` / `expect` 从 47 降至 44，没有新增豁免；quality 增加两个本 Phase gate，未降低阈值。当时文档重新读取、80 文件链接/锚点/coverage、`git diff --check` 与新文件 trailing-whitespace 检查通过；这些文件数与历史 diff 结论不代表本轮新增修改的统计。
 
-本 Phase 的本轮修改、复审修复、验证与文档同步已完成；实现与复审验证随本变更提交，推送和远端 CI 以 Git / Actions 的实际 ref 为准，不将本机 gate 解释为六平台 Matrix 或正式发布。Lithograph 新能力保持 **Unreleased**；Loreweft 仍需升级依赖并由宿主显式传入 `memoryLimitBytes`，其接入与完整下游验收不计入本轮完成结果。最终文档按当前结果重读，并检查 scoped local links / anchors / coverage、`git diff --check` 和新文件 trailing whitespace；当前制品使用本轮 checksum，旧记录保留历史身份。
+本 Phase 的本轮修改、复审修复、验证与文档同步已完成；实现 revision 已提交并推送至 `origin/main`，repository CI 与六平台 Matrix 的精确 SHA 证据见[本轮远端验收](#phase19-remote-acceptance)，本机与远端证据各自保留来源。Lithograph 新能力保持 **Unreleased**；Loreweft 仍需升级依赖并由宿主显式传入 `memoryLimitBytes`，其接入与完整下游验收不计入本轮完成结果。最终文档按当前结果重读，并检查 scoped local links / anchors / coverage、`git diff --check` 和新文件 trailing whitespace；当前制品使用本轮 checksum，旧记录保留历史身份。
