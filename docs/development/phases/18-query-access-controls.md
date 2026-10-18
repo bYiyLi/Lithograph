@@ -1,8 +1,8 @@
 # Phase 18：查询、返回与写入访问控制
 
-**状态：`done`（本机实施与验收完成；v0.3.2 发布交付进行中）**
+**状态：`done`（开发、远端验收、v0.3.2 正式发布与发布制品回验全部完成）**
 
-**审计重新打开与闭环（2026-10-18）：** 前轮 quality/CI 的 green 结果保留为当时工作树的真实证据；后续审计复现两个漏测问题：signed-zero 场景中 Squash 可能改变受保护属性，含 NaN 的无关 Revert 可能错误失败。因此前轮 done 结论已撤回，受影响的版本重组、canonical state reconstruction 与组合验收补齐后已闭环；新接口仍为 unreleased。访问控制、canonical/插值修复、永久回归、独立 review、最终 quality/CI 和当时的本机候选包验收均已完成，并曾恢复为 done。
+**审计重新打开与闭环（2026-10-18）：** 前轮 quality/CI 的 green 结果保留为当时工作树的真实证据；后续审计复现两个漏测问题：signed-zero 场景中 Squash 可能改变受保护属性，含 NaN 的无关 Revert 可能错误失败。因此前轮 done 结论已撤回，受影响的版本重组、canonical state reconstruction 与组合验收补齐后已闭环；当时新接口仍为 unreleased。访问控制、canonical/插值修复、永久回归、独立 review、最终 quality/CI 和当时的本机候选包验收均已完成，并曾恢复为 done。
 
 **用户追加 scope（2026-10-18）：** 用户随后明确要求修复 OpenAI-compatible Provider 可选 cache 的首次并发初始化竞争、补入永久回归并持续 review，之后重新准备 v0.3.2。这项有界追加工作继续记在本 Phase，不新建 Phase，也不回写 Phase 15 的历史完成记录。Provider 修复、真实多进程回归、独立 review、最终完整 quality/CI 与新候选包验收均已通过，因此 Phase 恢复 done。前述 112 项专项、完整 quality/CI 和旧候选包的 green 结果保留为追加前证据；追加完成结论使用 `target/cache-init-032/` 的新日志与新包。用户现已授权提交、推送、远端 CI/六平台验收通过后正式发布 v0.3.2，当前进度见本文末尾 [发布交付记录](#v032-release-delivery)。
 
@@ -301,16 +301,25 @@ Unix CI、release smoke 与 Windows wrapper 已接入同一永久 gate；Windows
 
 用户在本机实施与制品验收完成后，明确授权提交和推送，并要求精确 SHA 的远端 CI 与六平台 Release Matrix 全部通过后正式发布 v0.3.2。本 Phase 的开发验收保持 done，发布状态按下面的实际结果单独记录。此前“未授权提交/发布”及“本机未发布候选”段落保留当时事实，不代表当前授权边界。
 
-首次发布源码 `50b26f95262625cab33f08d834e7b7a49492446d` 已提交、推送到 main 并核对远端 SHA，但首轮远端未全绿：CI 的 Linux job 失败，macOS/Windows basic jobs 通过；Release Matrix 的 Linux x64/arm64 cache fixture 预期 `IO_ERROR` 2 却得到成功 0，Windows arm64 则因测试拼成 `file://C:\...` 而被生产 URI 校验正确拒绝。前者已用本机 Homebrew SQLite A/B 复现：持有 writer 后执行 `fs::read` 会打开并关闭同一 inode 的另一个 fd，POSIX 因此释放进程自己的锁；`target/release-032/posix-lock-close-ab.json` 记录保留该快照读取时独立进程成功、移到持锁前则真实返回 `BUSY` 5。cache fixture 正在保持 500 ms 等待、零 HTTP、字节与 Schema 断言的前提下修正，并补独立进程 `BUSY` 5 前置证明；生产实现不变。Windows 路径 fixture 已复用既有 Phase 08/15 helper 生成 `file:///C:/...`，release 定向 9/9、Clippy 与独立 review 通过。该轮失败不计为平台验收完成；修复后仍须以新 SHA 重新通过完整远端 CI 和六平台矩阵。
+首次发布源码 `50b26f95262625cab33f08d834e7b7a49492446d` 已提交、推送到 main 并核对远端 SHA，但首轮远端未全绿：[CI 39107295376](https://github.com/bYiyLi/Lithograph/actions/runs/39107295376) 的 Linux quality 与 Phase 01 jobs 因同一 cache fixture 失败，macOS/Windows basic jobs 通过；[Release Matrix 39107295388](https://github.com/bYiyLi/Lithograph/actions/runs/39107295388) 的 Linux x64/arm64 cache fixture 预期 `IO_ERROR` 2 却得到成功 0，Windows x64/arm64 则因测试拼成 `file://C:\...` 而被生产 URI 校验正确拒绝，两项 macOS matrix jobs 通过。两轮 workflow 自然完成为 failure，没有取消。前者已用本机 Homebrew SQLite A/B 复现：持有 writer 后执行 `fs::read` 会打开并关闭同一 inode 的另一个 fd，POSIX 因此释放进程自己的锁；`target/release-032/posix-lock-close-ab.json` 记录保留该快照读取时独立进程成功、移到持锁前则真实返回 `BUSY` 5。cache fixture 已保持 500 ms 等待、零 HTTP、字节与 Schema 断言完成修正，并补独立进程 `BUSY` 5 前置证明；生产实现不变。Windows 路径 fixture 已复用既有 Phase 08/15 helper 生成 `file:///C:/...`，release 定向 9/9、Clippy 与独立 review 通过。首轮失败不计为平台验收完成，由下述新 SHA 的完整远端结果替代。
+
+修复提交暨最终发布源码为 `97f93a9727a567c4f74a8fd6d56f3388c7ac2e26`，已推送 main 并核对远端 ref。[CI 39108175384](https://github.com/bYiyLi/Lithograph/actions/runs/39108175384) 的 4 个 jobs 与 [Release Matrix 39108175398](https://github.com/bYiyLi/Lithograph/actions/runs/39108175398) 的 storage fixture + 六平台 7 个 jobs 全部成功，main 的 publish job 按规则跳过。远端 quality **395.45s**，coverage regions **84.34%**、functions **84.98%**、lines **86.11%**；inherited TCK **3,777/3,777 applicable、0 failed**，120 个既有分类不变。正式创建 annotated `v0.3.2` 前已满足精确 SHA 的 CI/六平台全绿要求。
+
+annotated tag object 为 `2a71c83338b8607d5f6e036d3888812230664e0d`，peeled commit 与上述发布源码一致，远端两项 ref 已核对。[tag CI 39109422728](https://github.com/bYiyLi/Lithograph/actions/runs/39109422728) 的 4 个 jobs 与 [tag Release Matrix 39109422925](https://github.com/bYiyLi/Lithograph/actions/runs/39109422925) 的 8 个 jobs 全部成功，后者包含正式 publish job；publish 在相同 tag/SHA 的 push CI 成功后才继续。[v0.3.2 Release](https://github.com/bYiyLi/Lithograph/releases/tag/v0.3.2) 的 `publishedAt=2026-10-18T08:13:18Z`（北京时间 2026-10-18 16:13:18），`isDraft=false`、`isPrerelease=false`，正式资产集合为六平台包与 `SHA256SUMS`，共 7 项。发布与远端结果 JSON / 日志保存在本机 `target/release-032/`；正式下载制品的独立回验见下文，不以本机候选包或正式发布本身替代。
+
+正式下载资产审计已退出 **0**：`published-assets-audit.json` 核对 **6 packages / 12 binaries**，六包原始 SHA-256 与 [正式 SHA256SUMS](https://github.com/bYiyLi/Lithograph/releases/download/v0.3.2/SHA256SUMS) 一致；该校验文件本身的 SHA-256 为 `210c0d36f278c3fdb339fe21bf539e86d49e796964683d295585679905ebdcfb`。每包恰有 VERSION、主 extension、OpenAI-compatible Provider、README 与两份许可证六个成员，VERSION 均为 0.3.2，ELF/Mach-O/PE 的 x64/arm64 machine 与目标对应。README/许可证与 immutable tag blobs 一致；Windows 文本只在内容比较时规范化 CRLF，资产校验始终使用原始字节。实际下载的 macOS arm64 包 SHA-256 为 `2689c8f44cc79efe4caa241d45621522c2a927b48ff40feb418a41e6337e7297`；解包 Engine 为 `e82855ae001f08e4a2c2a0d71636c53039dc29ae9f3344265f12fe287305670c`，Provider 为 `9455ee59be4ab6987db842a4a8ddccdccb1586c82774e47a85a3067a38449311`，后续运行验证使用这两份正式制品。
+
+实际下载的 macOS arm64 Engine / Provider 已完成实物运行回验，日志与逐项退出码位于 `target/release-032/published-validation/`；`runtime-validation.json` 汇总 12 项检查全部退出 0，确认 `assertionSourcesMatchTag=true` 且双库验证前后 SHA 不变。完整 `release-artifact-smoke` 退出 **0**：SQLite **3.45.0 / 3.51.0 / 3.53.4** 各 **15 cache checks**、SQL **28/28**、CSV **28/28**、外联版本/配置 **22/22** 以及适用真实 load、SQL/事务与双扩展 probes 全通过。独立 canonical SQL **5/5**，每个 fixture 均确认真实版本 0.3.2、完整 integrity.ok=true；5 个 Python 应用、C host 的 warning-as-error 编译与运行均退出 **0**。同一下载 Engine 的完整文档回归再次通过 **528×2 Cypher 示例、138 SQL、172 signatures/38 Procedures**，对应 `cypher.result.json`、`guide-sql.result.json`、`inventory.result.json` 的退出码均为 **0**，验证前后制品 SHA 不变。Semantic 文档示例使用合成 Provider fixture；真实发布 Provider 的初始化/缓存行为由前述双扩展 cache probes 验证，不把第三方远程服务模板计为已运行示例。下载后本机动态回验只针对 macOS arm64；六目标的真实 load/ABI/runtime/interop 验收由成功的 hosted tag Matrix 提供。
 
 | 交付项 | 当前实际状态 |
 | --- | --- |
 | 实现、完整本机质量与包内验收 | 已完成；结果与本机 SHA 见前文 |
-| 正式版本文档与发布说明 | 已准备 v0.3.2 版本适用说明和固定 tag/下载入口；下载入口在正式发布后使用 |
-| 首次发布提交与推送 | [50b26f95262625cab33f08d834e7b7a49492446d](https://github.com/bYiyLi/Lithograph/commit/50b26f95262625cab33f08d834e7b7a49492446d) 已提交、推送 main，远端 SHA 已验证 |
-| 精确 SHA 的远端 CI | [CI 39107295376](https://github.com/bYiyLi/Lithograph/actions/runs/39107295376) 的 Linux job 失败，macOS/Windows basic jobs 通过；等待 fixture 修复后的新 SHA 完整重验 |
-| 六平台 Release Matrix | [Release Matrix 39107295388](https://github.com/bYiyLi/Lithograph/actions/runs/39107295388) 的 Linux x64/arm64 cache 与 Windows arm64 URI fixture 失败，本轮不计六平台通过；等待新 SHA 完整重验 |
-| v0.3.2 tag 与正式发布 | 已授权在前述远端检查全部成功后执行；尚未创建 tag、上传或发布 |
-| 正式下载资产与发布制品回验 | 尚未执行；本机包和历史 v0.3.1 证据不替代正式资产验收 |
+| 正式版本文档与发布说明 | 已随固定 v0.3.2 tag 与正式 Release 提供；公开正文/tag 保持不动 |
+| 发布源码提交与推送 | [97f93a9727a567c4f74a8fd6d56f3388c7ac2e26](https://github.com/bYiyLi/Lithograph/commit/97f93a9727a567c4f74a8fd6d56f3388c7ac2e26) 已推送 main，远端 SHA 已验证；首轮 50b26f9 失败历史保留 |
+| 精确 SHA 的远端 CI | [CI 39108175384](https://github.com/bYiyLi/Lithograph/actions/runs/39108175384) 4/4 jobs success |
+| 六平台 Release Matrix | [Release Matrix 39108175398](https://github.com/bYiyLi/Lithograph/actions/runs/39108175398) storage fixture + 六平台 7/7 jobs success；包含 Windows PowerShell/MSVC 与跨平台 interop |
+| v0.3.2 tag 与正式发布 | annotated tag / remote peeled commit 已核对；[tag CI](https://github.com/bYiyLi/Lithograph/actions/runs/39109422728) 4/4、[tag Matrix](https://github.com/bYiyLi/Lithograph/actions/runs/39109422925) 8/8 success；[Release](https://github.com/bYiyLi/Lithograph/releases/tag/v0.3.2) 已正式发布 |
+| 正式下载资产审计 | 已通过：六包 + SHA256SUMS 共 7 项，6 packages / 12 binaries 的原始 checksum、成员、VERSION、architecture 与固定 tag 文本均一致 |
+| 正式发布制品运行回验 | 已通过：下载解包 macOS arm64 双扩展的完整 smoke、三个 runtime 各 15 cache checks、canonical 5/5、SQL 28/28、CSV 28/28、外联 22/22、528×2 Cypher、138 SQL、inventory、5 Python 与 C host |
 
-tag workflow 直接使用 [v0.3.2 发布说明](../../releases/v0.3.2.md) 作为 GitHub Release 正文。公开手册的固定 v0.3.2 链接预先随发布提交准备，不表示 tag 或资产已经存在；待实际完成后在此追加源码、run URL、tag、资产校验和与制品回验结果。
+tag workflow 已使用 [v0.3.2 发布说明](../../releases/v0.3.2.md) 作为正式 GitHub Release 正文；固定 v0.3.2 手册与已发布源码对应。发布源码已提交、推送，pretag/tag CI、六平台 Matrix、正式 Release、资产审计与发布制品回验均已实际完成，Phase 18 的实现和发布验收闭环。此次只向 main 追加交付记录，不改写已发布 tag、Release 正文、公开手册或制品；本记录的 bookkeeping 提交/推送由根任务单独完成。

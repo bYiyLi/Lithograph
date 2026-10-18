@@ -11,7 +11,7 @@ Profile 由 Neo4j Cypher 25 current-graph Manual + 2026.08 已公开 Cypher addi
 
 Phase 12 的 FTS5 provider binding 不是新增 Cypher grammar 或新的语言 Profile。其非可移植 analyzer 取值、破坏升级和新增验收按 [Full-text](../design/full-text.md) 与下文 supplemental inventory 单列；已有 `done` 只代表对应已执行基线，不代表任意 tokenizer 或所有 analyzer 组合已通过。
 
-[Phase 18](phases/18-query-access-controls.md) 的 `readAccess` / `writeAccess` 属于 execution options 与宿主执行边界，不增加冻结 Cypher grammar/语言 coverage 分母。canonical/版本、插值/生命周期与用户追加的 Provider cache 初始化修复均已闭环，最终 quality/CI 各 **112/112** Core 专项、**3,777/3,777** applicable TCK（0 failure，120 个既有分类不变）、18 个冻结 fixtures、三个 SQLite runtime 各 **15 cache checks** 及新本机包完整验收通过，Phase 18 为 `done`。前轮 69 项、追加前 release 112 项与旧候选包仍保留为历史；cache 修复同样不改变语言 coverage 分母。v0.3.2 的后续提交、远端 exact-SHA CI/六平台与正式发布已获授权，当前按 [发布交付记录](phases/18-query-access-controls.md#v032-release-delivery) 推进；本机完成不等同于远端或发布完成。
+[Phase 18](phases/18-query-access-controls.md) 的 `readAccess` / `writeAccess` 属于 execution options 与宿主执行边界，不增加冻结 Cypher grammar/语言 coverage 分母。canonical/版本、插值/生命周期与用户追加的 Provider cache 初始化修复均已闭环，最终 quality/CI 各 **112/112** Core 专项、**3,777/3,777** applicable TCK（0 failure，120 个既有分类不变）、18 个冻结 fixtures、三个 SQLite runtime 各 **15 cache checks** 及新本机包完整验收通过，Phase 18 为 `done`。前轮 69 项、追加前 release 112 项与旧候选包仍保留为历史；cache 修复同样不改变语言 coverage 分母。v0.3.2 最终源码 `97f93a9727a567c4f74a8fd6d56f3388c7ac2e26` 的 pretag/tag CI 与六平台 Matrix 已全部成功，正式 Release 已发布；远端 quality 的 inherited TCK 同为 3,777 applicable passed、0 failed。六包/12 binary 资产审计已通过，正式下载 macOS arm64 Engine 的 528×2 Cypher、138 SQL、172 signatures/38 Procedures 与完整 runtime 回验亦通过，准确证据见 [发布交付记录](phases/18-query-access-controls.md#v032-release-delivery)。
 
 ## 2. Status Semantics
 
