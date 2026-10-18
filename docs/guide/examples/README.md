@@ -2,9 +2,9 @@
 
 # 可运行示例与文档验证
 
-适用版本：Lithograph v0.3.2 · [产品手册](../README.md) · [Cypher 手册](../../cypher/index.md)
+适用版本：Lithograph v0.3.3 · [产品手册](../README.md) · [Cypher 手册](../../cypher/index.md)
 
-完整文档回归包含 v0.3.2 场景，必须使用对应版本的构建；验证 v0.3.1 发行制品时，使用固定 v0.3.1 tag 中的同版文档和脚本。
+完整文档回归适用 v0.3.3（包含 v0.3.2 起提供的访问控制场景），必须使用对应版本的构建；验证 v0.3.1 发行制品时，使用固定 v0.3.1 tag 中的同版文档和脚本。
 
 这里的应用示例只使用 SQLite SQL，不要求 SDK、账号或外部服务。每次检查都创建临时数据库；不把业务数据库传给验证工具。Python 工具只依赖标准库，要求 Python 3.11+。Python 应用示例另要求其 SQLite 为 3.45.0+ 且允许扩展加载；文档 Cypher 与 inventory 工具还可以使用 `--sqlite3` 指定符合要求的 SQLite CLI。
 
@@ -117,7 +117,7 @@ python3 -B docs/guide/examples/check_docs.py
 
 默认检查 README、Guide、Cypher、Reference 和 Release 的本地文件/章节链接，并核对 [覆盖映射](../../development/documentation-coverage.json)。分母直接提取自兼容矩阵：每个 capability family 的 `Required coverage` 子项、Cypher 25 Delta 和 Phase 12/13/15 supplemental inventory 都必须逐项映射，不能只登记 family 名称。每个 required 子项提供准确文档落点与已登记示例；非 Cypher runtime/SPI inventory 可以提供 `verification.command/reason`，历史已替代项必须明确标记 `superseded` 并提供原因和当前替代引用。遗漏、重复、未知项和失效引用均失败。函数与 Procedure 的逐项覆盖另外由生成索引的全量行与链接检查共同证明。`scripts/ci.sh` 在真实扩展和 synthetic Provider 构建后运行这些门禁。
 
-下面保留的 v0.1.0 记录只代表当时发布制品，不覆盖当前 v0.3.2 的结果。
+下面保留的 v0.1.0 记录只代表当时发布制品，不覆盖当前 v0.3.3 的结果。
 
 ## v0.1.0 历史验证记录
 

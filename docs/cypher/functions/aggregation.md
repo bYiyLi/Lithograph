@@ -1,6 +1,6 @@
 # 聚合函数
 
-适用版本：**Lithograph v0.3.2** · Cypher Profile：`CY25-2026.08`。本文覆盖全部 Aggregating 函数及其 Cypher 25 命名别名。
+适用版本：**Lithograph v0.3.3** · Cypher Profile：`CY25-2026.08`。本文覆盖全部 Aggregating 函数及其 Cypher 25 命名别名。
 
 [Cypher 手册](../index.md) · [完整函数索引](../../reference/functions.md) · [分组、DISTINCT 与作用域](../aggregation.md) · [null 与值排序](../null-and-ordering.md)
 

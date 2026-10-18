@@ -2,7 +2,7 @@
 
 [语言手册](index.md) · [版本与范围](../reference/cypher-compatibility.md)
 
-本文适用于 Lithograph v0.3.2、`CY25-2026.08`。表达式对当前行中的变量、参数和图元素求值，产生一个运行时值。WHERE/FILTER 再把 Boolean 或 null 当作过滤条件；表达式本身不必是 Boolean。字面量见 [语法](syntax.md#literals)，值范围见 [类型](types.md)，函数签名及逐项说明见 [函数索引](../reference/functions.md)。
+本文适用于 Lithograph v0.3.3、`CY25-2026.08`。表达式对当前行中的变量、参数和图元素求值，产生一个运行时值。WHERE/FILTER 再把 Boolean 或 null 当作过滤条件；表达式本身不必是 Boolean。字面量见 [语法](syntax.md#literals)，值范围见 [类型](types.md)，函数签名及逐项说明见 [函数索引](../reference/functions.md)。
 
 <a id="precedence"></a>
 

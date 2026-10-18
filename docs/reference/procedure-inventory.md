@@ -1,6 +1,6 @@
 # Procedure 清单
 
-适用版本：Lithograph v0.3.2 · [产品手册](../guide/README.md) · [Procedure Reference](procedures.md)
+适用版本：Lithograph v0.3.3 · [产品手册](../guide/README.md) · [Procedure Reference](procedures.md)
 
 本表由目标扩展的 `SHOW PROCEDURES YIELD *` 生成，共 38 个公开 Procedure。参数的可选方括号是签名记号；返回列可由 `YIELD` 投影。
 

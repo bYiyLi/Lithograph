@@ -2,7 +2,7 @@
 
 [语言手册](index.md) · [版本与范围](../reference/cypher-compatibility.md)
 
-适用于 Lithograph v0.3.2，Cypher Profile `CY25-2026.08`。本章说明如何描述图结构；行和变量规则见 [查询模型](query-model.md)，重复路径见 [Quantified Path](quantified-paths.md)，重复元素和最短选择见 [Path Selection](path-selection.md)。
+适用于 Lithograph v0.3.3，Cypher Profile `CY25-2026.08`。本章说明如何描述图结构；行和变量规则见 [查询模型](query-model.md)，重复路径见 [Quantified Path](quantified-paths.md)，重复元素和最短选择见 [Path Selection](path-selection.md)。
 
 <a id="pattern-syntax"></a>
 

@@ -2,7 +2,7 @@
 
 [产品手册](README.md) · [Cypher 语言手册](../cypher/index.md) · [接口参考](../reference/README.md)
 
-本文适用 **v0.3.2**（`CY25-2026.08`，storage format `3`）。
+本文适用 **v0.3.3**（`CY25-2026.08`，storage format `3`）。
 
 Lithograph 运行在应用的 SQLite connection 中，没有独立管理 Server。以下操作涉及已有数据时，先确认文件路径、扩展版本、目标 Branch 与保留策略；不要直接修改 `_lithograph_*` 表。
 

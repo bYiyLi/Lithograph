@@ -2,7 +2,7 @@
 
 [产品手册](README.md) · [Cypher 语言手册](../cypher/index.md) · [接口参考](../reference/README.md)
 
-本文适用 **v0.3.2**（`CY25-2026.08`，storage format `3`）。
+本文适用 **v0.3.3**（`CY25-2026.08`，storage format `3`）。
 
 v0.3.1 区分以下事务边界：
 
@@ -47,7 +47,7 @@ SELECT lithograph_tx_abort();
 
 `tx_begin` options：`branch`、`expectedHead`、`author`、`message`。active transaction 内 query options 不能切换 branch/at/author/message/version context；`graphView` 和 `readOnlyNoExternalIO` 仍可按 execution 指定。安全选项放在每次 `lithograph()`/`lithograph_rows()` 的第三个参数，不是 `tx_begin` options。
 
-Unreleased / Phase 19 的 `memoryLimitBytes` 同样属于每次 execution；省略不继承上一条预算，预算错误会使 active transaction 整体 abort。v0.3.2 不支持此字段，完整配置和版本边界见 [Execution Options](../reference/execution-options.md#memory-limit)。
+v0.3.3 / Phase 19 的 `memoryLimitBytes` 同样属于每次 execution；省略不继承上一条预算，预算错误会使 active transaction 整体 abort。v0.3.2 不支持此字段，完整配置和版本边界见 [Execution Options](../reference/execution-options.md#memory-limit)。
 
 任一 execution 在 internal finalize-success 前发生 parse/type/constraint/I/O/interrupt/error，或 incomplete `lithograph_rows()` 被关闭，都会 fail-closed abort 整个 explicit transaction。之后必须重新 begin。内部已 finalize-success 后的 close 只回收资源；是否 incomplete 不能只按宿主是否拿到 summary 判断，精确边界见 [Transactions Reference](../reference/transactions.md#stream-lifecycle)。
 

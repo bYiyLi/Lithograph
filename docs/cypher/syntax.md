@@ -2,7 +2,7 @@
 
 [语言手册](index.md) · [版本与范围](../reference/cypher-compatibility.md)
 
-本文适用于 Lithograph v0.3.2、`CY25-2026.08`。Cypher 文本交给 SQLite 的 `lithograph()` 或 `lithograph_rows()` 执行；SQL 字符串的转义由宿主语言和 SQLite 处理，本文中的字符串是完成 SQL 解码后的 Cypher 字符串。接入方式见 [SQL API](../reference/sql-api.md)。
+本文适用于 Lithograph v0.3.3、`CY25-2026.08`。Cypher 文本交给 SQLite 的 `lithograph()` 或 `lithograph_rows()` 执行；SQL 字符串的转义由宿主语言和 SQLite 处理，本文中的字符串是完成 SQL 解码后的 Cypher 字符串。接入方式见 [SQL API](../reference/sql-api.md)。
 
 <a id="notation"></a>
 

@@ -2,7 +2,7 @@
 
 [产品手册](README.md) · [Cypher 语言手册](../cypher/index.md) · [接口参考](../reference/README.md)
 
-本文适用 **v0.3.2**（`CY25-2026.08`，storage format `3`）。
+本文适用 **v0.3.3**（`CY25-2026.08`，storage format `3`）。
 
 本页保留旧版本症状的明确标记。先记录实际应用进程中的 SQLite version、`lithograph_version()`、OS/进程架构、调用入口，以及完整的 category / SQLite code。不要先重复执行所有写请求，也不要直接编辑内部表。
 
@@ -69,7 +69,7 @@
 
 查询突然变慢：比较实际 Snapshot、Schema、输入规模与 cache 状态，执行只读 EXPLAIN。不要用带写入的 PROFILE 做健康检查，也不要把所有慢查询归结为缺少一个索引。完全缺缓存与已有持久索引 reopen 应分别测量。
 
-`RESOURCE_ERROR`：同时查看 SQLite code；TOOBIG 表示长度或受控资源限额，磁盘/内存不足则需恢复资源。将大结果改成必要字段投影与分页；流式查询也不能绕过单行限制。Unreleased / Phase 19 的 `memoryLimitBytes` 预算拒绝也返回 `RESOURCE_ERROR` / `SQLITE_TOOBIG`，应核对宿主配额和中间值开销，不自动去掉限制重试，见[内存预算](../reference/execution-options.md#memory-limit)。`SQLITE_INTERRUPT` 对应 `INTERRUPTED`，按取消清理处理。
+`RESOURCE_ERROR`：同时查看 SQLite code；TOOBIG 表示长度或受控资源限额，磁盘/内存不足则需恢复资源。将大结果改成必要字段投影与分页；流式查询也不能绕过单行限制。v0.3.3 / Phase 19 的 `memoryLimitBytes` 预算拒绝也返回 `RESOURCE_ERROR` / `SQLITE_TOOBIG`，应核对宿主配额和中间值开销，不自动去掉限制重试，见[内存预算](../reference/execution-options.md#memory-limit)。`SQLITE_INTERRUPT` 对应 `INTERRUPTED`，按取消清理处理。
 
 `STORAGE_ERROR` / integrity 失败：停止写入，保存原文件与脱敏复现，在隔离副本上检查并恢复有效备份。`FORMAT_TOO_NEW`：使用相容扩展，不修改格式标记。不要删除正在使用的 WAL / SHM 或只复制热库主文件后认为已经备份。
 

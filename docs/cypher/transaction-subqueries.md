@@ -1,6 +1,6 @@
 # Transaction subquery：分批事务
 
-适用版本：Lithograph **v0.3.2**，Cypher Profile **`CY25-2026.08`**。
+适用版本：Lithograph **v0.3.3**，Cypher Profile **`CY25-2026.08`**。
 
 [Cypher 手册](index.md) · [兼容范围](../reference/cypher-compatibility.md) · [事务指南](../guide/transactions.md)
 

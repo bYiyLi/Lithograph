@@ -1,6 +1,6 @@
 # 开发 Embedding Provider
 
-适用版本：**v0.3.2 / EmbeddingProviderV1**。上级：[开发者手册](README.md) · 精确接口：[Provider SPI](../reference/embedding-provider-spi.md) · 随附生产实现：[OpenAI-compatible](../reference/openai-compatible-provider.md)。
+适用版本：**v0.3.3 / EmbeddingProviderV1**。上级：[开发者手册](README.md) · 精确接口：[Provider SPI](../reference/embedding-provider-spi.md) · 随附生产实现：[OpenAI-compatible](../reference/openai-compatible-provider.md)。
 
 本教程使用仓库已有的 C synthetic fixture 跑通 **编译 → SQLite 注册 → 本地 validate → Semantic embedding → 错误清理**。fixture 用文本 hash 生成确定性向量，不理解自然语言，只用于集成验证；产品 Provider 在同样 SPI 后实现自己的模型或网络调用。
 

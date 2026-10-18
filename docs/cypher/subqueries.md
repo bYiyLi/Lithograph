@@ -2,7 +2,7 @@
 
 [语言手册](index.md) · [版本与范围](../reference/cypher-compatibility.md)
 
-适用于 Lithograph v0.3.2，Cypher Profile `CY25-2026.08`。命名 Procedure 的调用见 [Procedure CALL](procedure-calls.md)，子查询的独立 batch 事务见 [Transaction Subqueries](transaction-subqueries.md)。本章的普通 CALL 不创建独立事务。
+适用于 Lithograph v0.3.3，Cypher Profile `CY25-2026.08`。命名 Procedure 的调用见 [Procedure CALL](procedure-calls.md)，子查询的独立 batch 事务见 [Transaction Subqueries](transaction-subqueries.md)。本章的普通 CALL 不创建独立事务。
 
 <a id="call-subquery"></a>
 

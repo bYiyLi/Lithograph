@@ -1,6 +1,6 @@
 # 谓词函数
 
-适用版本：Lithograph **v0.3.2** · Cypher Profile **`CY25-2026.08`**。
+适用版本：Lithograph **v0.3.3** · Cypher Profile **`CY25-2026.08`**。
 
 [Cypher 手册](../index.md) · [完整函数索引](../../reference/functions.md)
 

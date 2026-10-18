@@ -1,6 +1,6 @@
 # Full-text Procedure 与查询字符串
 
-适用于 Lithograph v0.3.2 · [产品手册](../../guide/README.md) · [Procedure 总入口](../procedures.md) · [全文工作流](../../guide/search.md)
+适用于 Lithograph v0.3.3 · [产品手册](../../guide/README.md) · [Procedure 总入口](../procedures.md) · [全文工作流](../../guide/search.md)
 
 Full-text 使用当前 SQLite runtime 的 FTS5。索引创建语法、DDL options 与版本化定义见 [Index 语言参考](../../cypher/indexes.md)；本页拥有查询参数、字符串内的检索表达式和结果语义。
 

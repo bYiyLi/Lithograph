@@ -1,6 +1,6 @@
 # Value 与 Lithograph JSON v1
 
-适用版本：**v0.3.2** · [产品手册](../guide/README.md) · [接口参考](README.md)
+适用版本：**v0.3.3** · [产品手册](../guide/README.md) · [接口参考](README.md)
 
 SQL scalar envelope、rows event payload 和 params 共用 Lithograph JSON v1。它规定 SQLite/JSON 边界编码；Cypher 的类型、可存储 Property、null 与运算规则由 [语言类型](../cypher/types.md)、[null 与排序](../cypher/null-and-ordering.md) 说明。
 

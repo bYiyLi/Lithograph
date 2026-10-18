@@ -2,7 +2,7 @@
 
 [产品手册](../../guide/README.md) · [Procedure 参考](../procedures.md) · [版本对象格式](../versioning.md)
 
-适用版本：**Lithograph v0.3.2**，Cypher Profile `CY25-2026.08`，storage format `3`。本页给出 Branch、Tag、Commit、History、Diff/Patch 与历史改写的完整调用合同；[Merge Session](merge.md) 和 [维护](maintenance.md) 分别说明合并与 GC。
+适用版本：**Lithograph v0.3.3**，Cypher Profile `CY25-2026.08`，storage format `3`。本页给出 Branch、Tag、Commit、History、Diff/Patch 与历史改写的完整调用合同；[Merge Session](merge.md) 和 [维护](maintenance.md) 分别说明合并与 GC。
 
 下面 `[...]` 表示可以省略的位置参数；调用时不要输入方括号。参数为非空 `STRING`，除非条目明确给出其它类型。`null` 不代表“使用默认值”。返回的 `commit`、`previousCommit`、`from`、`to`、`parents` 元素都是 `commit/<64-hex-id>` Descriptor。
 

@@ -1,6 +1,6 @@
 # SQL API 与结果合同
 
-适用版本：**v0.3.2** · [产品手册](../guide/README.md) · [接口参考](README.md)
+适用版本：**v0.3.3** · [产品手册](../guide/README.md) · [接口参考](README.md)
 
 SQL 入口作用于加载扩展的 connection 的 `main` database；ATTACH 的其它 schema 不参与。查询/参数/options 必须为 UTF-8 TEXT；省略的可选 JSON 参数等价 `'{}'`，SQL `NULL` 不表示省略。应用使用 SQLite statement 参数绑定传递这些文本。
 

@@ -2,7 +2,7 @@
 
 [产品手册](README.md) · [Cypher 语言手册](../cypher/index.md) · [接口参考](../reference/README.md)
 
-本文适用 **v0.3.2**（`CY25-2026.08`，storage format `3`）。
+本文适用 **v0.3.3**（`CY25-2026.08`，storage format `3`）。
 
 v0.3.1 的 **application-facing execution 统一走 SQLite SQL**。应用不需要也不应解析 Lithograph shared library 的 query symbols；只需要使用自己的 SQLite driver/`sqlite3*` 加载 extension 并执行 SQL。
 
@@ -89,7 +89,7 @@ python3 docs/guide/examples/streaming.py /absolute/path/lithograph.dylib
 
 应用可以用 driver 提供的 `interrupt()`（C 为 `sqlite3_interrupt()`）取消执行；耗时 operator 在检查点停止，返回 SQLite interrupt。跨线程调用必须遵守实际 binding 与 SQLite threading mode。取消后 close/finalize 对应 cursor，再检查事务是否已经自动 abort。
 
-Unreleased / Phase 19 将中断检查传入长表达式和函数循环，包括嵌套 `reduce()`；可分块的长文本也分段检查。第三方不可拆分调用只保证调用前后检查，阻塞中的单次调用仍受其已有 timeout 合同约束。宿主使用自己的请求期限调用 `interrupt()`，不存在 query `timeout` option。
+v0.3.3 / Phase 19 将中断检查传入长表达式和函数循环，包括嵌套 `reduce()`；可分块的长文本也分段检查。第三方不可拆分调用只保证调用前后检查，阻塞中的单次调用仍受其已有 timeout 合同约束。宿主使用自己的请求期限调用 `interrupt()`，不存在 query `timeout` option。
 
 真实中断可能使 caller-owned SQLite transaction 整体回滚，包含此前尚未提交的宿主业务写入。Phase 19 的普通潜在写与 active explicit execution 会确认 SQLite 已恢复到 autocommit；无法证明清理完成时隔离 connection 并返回 `INTERNAL_ERROR`，应关闭丢弃。应用 finalize/close 后检查实际事务状态，不把收到 code 9 理解成只撤销本次调用的内部 SAVEPOINT；连接池复用条件见 [取消与连接池](../reference/transactions.md#cancellation)。
 
@@ -97,9 +97,9 @@ Lithograph 会在普通 execution 的 finalize-success 前预检自己的 JSON �
 
 <a id="execution-memory-budget"></a>
 
-### 设置 execution 内存预算（Unreleased）
+### 设置 execution 内存预算（v0.3.3）
 
-以下能力属于 Unreleased 变更，当前实施与验收状态见 [Phase 19](../development/phases/19-query-correctness-resources.md)；**v0.3.2 发行库不接受 `memoryLimitBytes`**。宿主使用包含本功能的构建时，在原有受控 options 中增加正整数预算；下例继续使用已加载扩展、初始化完成的 `db`，且只允许客户端传 query/params：
+以下能力从 v0.3.3 提供，实施与发布验收状态见 [Phase 19](../development/phases/19-query-correctness-resources.md)；**v0.3.2 发行库不接受 `memoryLimitBytes`**。宿主使用包含本功能的构建时，在原有受控 options 中增加正整数预算；下例继续使用已加载扩展、初始化完成的 `db`，且只允许客户端传 query/params：
 
 ```python
 def budgeted_read(db, cypher, params):

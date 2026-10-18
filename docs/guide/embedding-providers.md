@@ -1,6 +1,6 @@
 # 使用 Embedding Provider
 
-适用版本：**v0.3.2**。上级：[开发者手册](README.md) · 参数查询：[OpenAI-compatible Provider](../reference/openai-compatible-provider.md) · 检索流程：[Search](search.md)。
+适用版本：**v0.3.3**。上级：[开发者手册](README.md) · 参数查询：[OpenAI-compatible Provider](../reference/openai-compatible-provider.md) · 检索流程：[Search](search.md)。
 
 本指南把已有文本 Property 接到兼容 Embeddings endpoint。需要自己提供 vector、让向量值进入 Commit 历史，或使用 Cypher `SEARCH WHERE` 时，选择 [Raw Vector](../cypher/search.md)。Managed Semantic 将文本保存在 graph 中，生成的向量只是 derived search data。
 

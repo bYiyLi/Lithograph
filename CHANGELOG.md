@@ -4,6 +4,10 @@ Lithograph 的用户可见版本变化记录在此文件。版本遵循 Semantic
 
 ## Unreleased
 
+## 0.3.3
+
+完整变化见 [发布说明](docs/releases/v0.3.3.md)；版本提交、tag、远端验收与正式资产见 [Phase 19 发布交付记录](https://github.com/bYiyLi/Lithograph/blob/main/docs/development/phases/19-query-correctness-resources.md#v033-release-delivery)。
+
 ### Added
 
 - 可选 execution option `memoryLimitBytes`：宿主显式限制受控运行时工作内存，省略保持既有行为；预算拒绝为 `RESOURCE_ERROR` / `SQLITE_TOOBIG`。预算包含中间值和结果收集，具体边界见 [Execution Options](docs/reference/execution-options.md#memory-limit)。
@@ -14,7 +18,7 @@ Lithograph 的用户可见版本变化记录在此文件。版本遵循 Semantic
 - 将 SQLite 中断检查传入长表达式和函数循环，使 `range()`、嵌套 `reduce()` 等计算响应取消并进入既有失败清理路径。
 - 真实 SQLite interrupt 后核实 transaction 已实际 abort；取消 caller-owned SQLite transaction 中的写 execution 可能撤销该事务内先前未提交的宿主写入，状态确认与恢复边界见 [取消与连接池](docs/reference/transactions.md#cancellation)。
 
-上述变化由 [Phase 19](docs/development/phases/19-query-correctness-resources.md) 管理，已完成开发验收，尚未发布；完整证据见该计划，不能用于推断 v0.3.2 发行制品已支持。
+上述变化由 [Phase 19](docs/development/phases/19-query-correctness-resources.md) 管理，已完成开发验收；v0.3.3 的实际发布状态见上述交付记录，v0.3.2 发行制品不支持新预算选项。
 
 ## 0.3.2
 

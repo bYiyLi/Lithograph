@@ -2,7 +2,7 @@
 
 [语言手册](index.md) · [版本与范围](../reference/cypher-compatibility.md)
 
-适用于 Lithograph v0.3.2，Cypher Profile `CY25-2026.08`。Match mode 决定一个 MATCH 内是否允许重复关系，path mode 决定一条路径内能否重复元素，selector 决定每对起终点保留哪些路径。三者在语法和语义上分开。
+适用于 Lithograph v0.3.3，Cypher Profile `CY25-2026.08`。Match mode 决定一个 MATCH 内是否允许重复关系，path mode 决定一条路径内能否重复元素，selector 决定每对起终点保留哪些路径。三者在语法和语义上分开。
 
 <a id="path-selection-syntax"></a>
 

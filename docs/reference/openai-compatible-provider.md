@@ -1,6 +1,6 @@
 # OpenAI-compatible Embedding Provider
 
-适用版本：**v0.3.2**。上级：[接口参考](README.md) · 操作流程：[使用 Embedding Provider](../guide/embedding-providers.md) · 扩展协议：[Embedding Provider SPI](embedding-provider-spi.md)。
+适用版本：**v0.3.3**。上级：[接口参考](README.md) · 操作流程：[使用 Embedding Provider](../guide/embedding-providers.md) · 扩展协议：[Embedding Provider SPI](embedding-provider-spi.md)。
 
 <a id="identity-and-loading"></a>
 

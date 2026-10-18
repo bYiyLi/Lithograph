@@ -1,6 +1,6 @@
 # 索引维护与历史 GC Procedure
 
-适用于 Lithograph v0.3.2 · [产品手册](../../guide/README.md) · [Procedure 总入口](../procedures.md) · [运维工作流](../../guide/operations.md)
+适用于 Lithograph v0.3.3 · [产品手册](../../guide/README.md) · [Procedure 总入口](../procedures.md) · [运维工作流](../../guide/operations.md)
 
 <a id="proc-lithograph-index-rebuild"></a>
 

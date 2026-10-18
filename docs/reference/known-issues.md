@@ -2,11 +2,13 @@
 
 # 已知问题、版本适用范围与规避
 
-适用版本：**v0.3.1** · [产品手册](../guide/README.md) · [接口参考](README.md)
+适用版本：**v0.3.3**（含明确标注的旧版本历史） · [产品手册](../guide/README.md) · [接口参考](README.md)
 
 v0.3.2 保留 Procedure metadata 与 createStatement 完整性限制；Provider cache 首次并发初始化已修复，并通过真实多进程、最终完整源码门禁与本机包验收，见 [发布说明](../releases/v0.3.2.md)。下文保留 v0.3.1 实际制品证据与适用规避；v0.3.2 的远端及发布状态见 [Phase 18](https://github.com/bYiyLi/Lithograph/blob/main/docs/development/phases/18-query-access-controls.md#v032-release-delivery)。
 
 ## 当前版本
+
+v0.3.3 保留以下 Procedure metadata 与 createStatement 限制。execution 预算不等于 RSS 硬上限；transaction inner batch 仍先形成完整 RowSet，超预算时拒绝当前 batch，已 durable batch 保留，省略预算时工作集仍可能增长，详见 [v0.3.3 发布说明](../releases/v0.3.3.md) 与 [执行预算](execution-options.md#memory-limit)。
 
 `SHOW PROCEDURES` 的参数/结果 metadata 仍不完整：v0.3.1 中，`lithograph.branch.list` 的 argumentDescription 为空，active 被描述为 STRING，但实际返回 Boolean。范围与规避见 [DOC-V010-03](#procedure-metadata)。接口名称/signature 仍可用于发现；不要仅凭错误 metadata 自动生成返回类型绑定。
 

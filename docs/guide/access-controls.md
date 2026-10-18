@@ -1,6 +1,6 @@
 # 控制查询、返回和写入的字段
 
-适用版本：**v0.3.2**。v0.3.1 发行库不接受 `readAccess` / `writeAccess`；固定版本手册仍见 [v0.3.1](https://github.com/bYiyLi/Lithograph/blob/v0.3.1/docs/guide/README.md)。本页演示宿主如何让调用方用内部键定位人物、返回人物时隐藏内部键，并禁止修改内部维护字段。
+适用版本：**v0.3.3**。v0.3.1 发行库不接受 `readAccess` / `writeAccess`；固定版本手册仍见 [v0.3.1](https://github.com/bYiyLi/Lithograph/blob/v0.3.1/docs/guide/README.md)。本页演示宿主如何让调用方用内部键定位人物、返回人物时隐藏内部键，并禁止修改内部维护字段。
 
 调用仍是 `lithograph(query, params, options)` 或 `lithograph_rows(query, params, options)`，只增加第三个参数里的规则。由可信宿主构造 options；允许用户自行删掉规则或直接执行其它 SQLite SQL，就不能强制这些限制。完整字段表见 [Execution Options](../reference/execution-options.md#access-controls)。
 

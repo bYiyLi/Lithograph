@@ -1,6 +1,6 @@
 # EXPLAIN、PROFILE 与 SHOW
 
-适用 Lithograph v0.3.2、`CY25-2026.08`。[Cypher 手册](index.md) · [兼容范围](../reference/cypher-compatibility.md) · [SQL API](../reference/sql-api.md)
+适用 Lithograph v0.3.3、`CY25-2026.08`。[Cypher 手册](index.md) · [兼容范围](../reference/cypher-compatibility.md) · [SQL API](../reference/sql-api.md)
 
 EXPLAIN 查看计划，PROFILE 执行并观察计划计数，SHOW 读取当前图的语言和 Schema 目录。它们通过相同的 `lithograph()` / `lithograph_rows()` surface 执行，JSON 结果和 summary 的结构见 [SQL API](../reference/sql-api.md)。
 

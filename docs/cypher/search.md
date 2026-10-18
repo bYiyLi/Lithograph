@@ -1,6 +1,6 @@
 # Vector SEARCH
 
-适用 Lithograph v0.3.2、`CY25-2026.08`。[Cypher 手册](index.md) · [兼容范围](../reference/cypher-compatibility.md) · [Search 操作指南](../guide/search.md)
+适用 Lithograph v0.3.3、`CY25-2026.08`。[Cypher 手册](index.md) · [兼容范围](../reference/cypher-compatibility.md) · [Search 操作指南](../guide/search.md)
 
 SEARCH 是 MATCH/OPTIONAL MATCH 的 Vector 检索子句。它从指定标准 VECTOR Index 选择与 query vector 最相似的元素，再继续 Cypher 行处理。调用方负责向量值；文本自动 Embedding 使用独立的 [Managed Semantic Procedure](../reference/procedures/semantic.md)，全文检索使用 [Full-text Procedure](../reference/procedures/fulltext.md)。
 

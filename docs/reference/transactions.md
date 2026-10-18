@@ -1,6 +1,6 @@
 # 事务与 Execution 生命周期参考
 
-适用版本：**v0.3.2** · [产品手册](../guide/README.md) · [接口参考](README.md)
+适用版本：**v0.3.3** · [产品手册](../guide/README.md) · [接口参考](README.md)
 
 本页定义宿主调用的生命周期；[事务指南](../guide/transactions.md) 提供任务流程，Cypher 的 batch 语法与部分提交规则见 [Transaction Subqueries](../cypher/transaction-subqueries.md)。所有生命周期调用都必须使用同一 SQLite connection，不能在连接池的不同连接间传递事务。
 
@@ -39,7 +39,7 @@
 
 v0.3.1 execution options 只接受 `graphView` 与 `readOnlyNoExternalIO`；v0.3.2 还接受每次独立指定的 `readAccess` / `writeAccess`；begin 确定的 Branch、base 和 metadata 固定。每个安全读取都必须独立传 `readOnlyNoExternalIO:true`；一次成功不会自动把后续 execution 变成安全读取。
 
-Unreleased / Phase 19 另接受每次独立指定的 `memoryLimitBytes`，不在 begin 中设置，详见[执行内存预算](#execution-memory-budget)。
+v0.3.3 / Phase 19 另接受每次独立指定的 `memoryLimitBytes`，不在 begin 中设置，详见[执行内存预算](#execution-memory-budget)。
 
 Graph/Schema/Index 查询与写入可组合。普通 LOAD CSV、Managed Semantic query 可执行并占用当前 writer；它们失败时整体 abort。Version/ref/checkout/GC、需要 committed target 的维护操作、transaction-owning subquery 等不能嵌套，返回 `TRANSACTION_BOUNDARY_REQUIRED`。具体 Procedure 的限制见各自条目。
 
@@ -109,7 +109,7 @@ SQLite 交付 summary 时的分配或宿主处理失败，可能使应用没有�
 
 取消使用宿主的 `sqlite3_interrupt()` 或 binding 的对应 API。错误 category 为 `INTERRUPTED`，SQLite code 为 `SQLITE_INTERRUPT`；消费线程应检查真实返回码并 finalize。取消与完成可能竞争，收到取消请求并不证明 execution 尚未完成，先检查实际结果和版本状态。
 
-Unreleased / Phase 19 将检查传播到长表达式/函数循环；不可拆分第三方调用前后检查，调用进行中不保证异步抢占。该改进不改变 SQLite threading mode 或取消与完成竞争的结果确认规则。
+v0.3.3 / Phase 19 将检查传播到长表达式/函数循环；不可拆分第三方调用前后检查，调用进行中不保证异步抢占。该改进不改变 SQLite threading mode 或取消与完成竞争的结果确认规则。
 
 Phase 19 同时确认真实 SQLite interrupt 后的事务恢复。普通潜在写或 active explicit execution 只有实际恢复到 autocommit 才算 cleanup 成功；无法确认时返回 `INTERNAL_ERROR` 并 quarantine，关闭丢弃 connection。取消 caller-owned SQLite transaction 中的 mutating execution 可能使 **整个 SQLite transaction 回滚**，包括此前尚未提交的宿主业务写入。不要假设只回滚了 Lithograph 内部 SAVEPOINT；finalize/close 后检查 driver transaction 状态或 `sqlite3_get_autocommit()`。纯 read execution 不为 caller-owned transaction 增加整体回滚保证。实现边界见 [Runtime](../design/runtime.md#sqlite-interrupt-recovery)。
 
@@ -125,7 +125,7 @@ Phase 19 同时确认真实 SQLite interrupt 后的事务恢复。普通潜在�
 
 <a id="execution-memory-budget"></a>
 
-## Execution 内存预算（Unreleased）
+## Execution 内存预算（v0.3.3）
 
 `memoryLimitBytes` 属于每次普通 execution 的 query options，active explicit transaction 也可使用；`tx_begin` 不接受该字段。嵌套查询、分支和 concurrent batch 共享一次预算，不同 execution/cursor 独立；一次 execution 成功不把额度或消耗传给下一次 execution。完整配置/计账范围见 [Execution Options](execution-options.md#memory-limit)。
 

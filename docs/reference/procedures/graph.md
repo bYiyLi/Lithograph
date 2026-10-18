@@ -1,6 +1,6 @@
 # 图元信息 Procedure
 
-适用于 Lithograph v0.3.2 · [产品手册](../../guide/README.md) · [Procedure 总入口](../procedures.md) · [CALL / YIELD](../../cypher/procedure-calls.md)
+适用于 Lithograph v0.3.3 · [产品手册](../../guide/README.md) · [Procedure 总入口](../procedures.md) · [CALL / YIELD](../../cypher/procedure-calls.md)
 
 这些 Procedure 枚举当前 execution 可见图中**实际使用**的名字。它们不枚举内部 dictionary、历史上曾出现但当前已删除的名字或尚未用于数据的 Schema 声明；结果去重。三个接口无位置参数、无 Procedure options，Mode 均为 `READ`，不写 graph / Schema，不创建 Commit。
 

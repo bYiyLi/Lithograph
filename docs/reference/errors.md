@@ -1,6 +1,6 @@
 # Error Reference
 
-适用版本：**v0.3.2**；ACCESS_DENIED 从 v0.3.2 新增 · [产品手册](../guide/README.md) · [接口参考](README.md)
+适用版本：**v0.3.3**；ACCESS_DENIED 从 v0.3.3 新增 · [产品手册](../guide/README.md) · [接口参考](README.md)
 
 SQL 异常前缀为 `LITHOGRAPH_<CATEGORY>:`，parse/semantic 等定位信息以可选 `[line=N,column=N]` suffix 保留；调用方同时检查 SQLite primary result code，不要只匹配英语 message。
 
@@ -42,7 +42,7 @@ v0.3.2 的 `ACCESS_DENIED` 对应 `SQLITE_AUTH` (23)。query 属性不可见本�
 
 资源失败可能是 NOMEM (7)、TOOBIG (18)、FULL (13)；I/O 类还包括 READONLY 等 code。不要假定某个 category 永远只对应一个 code；使用实际返回值。
 
-**Unreleased / Phase 19：** `memoryLimitBytes` 配置类型或范围错误返回 `INVALID_ARGUMENT`；合法预算被本次执行用尽返回 `RESOURCE_ERROR` + `SQLITE_TOOBIG` (18)，这是引擎在分配前拒绝的策略限制，不应当报告为系统实际 OOM。参数解码、中间值、semantic barrier 和结果编码/收集都可能触发预算错误。不要自动移除预算重试；宿主先检查工作量及自己的配额策略。配置合同和发布边界见 [Execution Options](execution-options.md#memory-limit)。
+**v0.3.3 / Phase 19：** `memoryLimitBytes` 配置类型或范围错误返回 `INVALID_ARGUMENT`；合法预算被本次执行用尽返回 `RESOURCE_ERROR` + `SQLITE_TOOBIG` (18)，这是引擎在分配前拒绝的策略限制，不应当报告为系统实际 OOM。参数解码、中间值、semantic barrier 和结果编码/收集都可能触发预算错误。不要自动移除预算重试；宿主先检查工作量及自己的配额策略。配置合同和发布边界见 [Execution Options](execution-options.md#memory-limit)。
 
 <a id="atomicity-after-error"></a>
 

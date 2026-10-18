@@ -2,7 +2,7 @@
 
 [产品手册](README.md) · [Cypher 语言手册](../cypher/index.md) · [接口参考](../reference/README.md)
 
-本文适用 **v0.3.2**（`CY25-2026.08`，storage format `3`）。
+本文适用 **v0.3.3**（`CY25-2026.08`，storage format `3`）。
 
 目标：从 source Branch 合并到 target Branch，允许跨连接、重启和多轮人工/程序审查，不生成中间 Commit。
 

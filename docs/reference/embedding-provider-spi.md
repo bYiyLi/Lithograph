@@ -1,6 +1,6 @@
 # Embedding Provider SPI
 
-适用版本：**v0.3.2 / EmbeddingProviderV1**。上级：[接口参考](README.md) · 教程：[开发 Provider](../guide/provider-development.md) · 随附实现：[OpenAI-compatible](openai-compatible-provider.md)。
+适用版本：**v0.3.3 / EmbeddingProviderV1**。上级：[接口参考](README.md) · 教程：[开发 Provider](../guide/provider-development.md) · 随附实现：[OpenAI-compatible](openai-compatible-provider.md)。
 
 <a id="public-boundary"></a>
 

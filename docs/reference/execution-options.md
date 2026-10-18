@@ -1,8 +1,8 @@
 # Execution Options
 
-适用版本：**v0.3.2**；v0.3.1 不接受新增 readAccess/writeAccess · [产品手册](../guide/README.md) · [接口参考](README.md)
+适用版本：**v0.3.3**；v0.3.1 不接受新增 readAccess/writeAccess · [产品手册](../guide/README.md) · [接口参考](README.md)
 
-本页另列 **Unreleased / Phase 19** 的 `memoryLimitBytes`，v0.3.2 发行库不支持该 key；实施与验收状态见 [Phase 19](../development/phases/19-query-correctness-resources.md)。
+v0.3.3 增加 `memoryLimitBytes`，v0.3.2 发行库不支持该 key；实施与验收状态见 [Phase 19](../development/phases/19-query-correctness-resources.md)。
 
 options 是 `lithograph()` / `lithograph_rows()` 第三个参数的 JSON object TEXT；省略等价于 `'{}'`。SQL `NULL`、JSON `null`、数组、malformed JSON、未知 key 或 key 的错误大小写均返回 `INVALID_ARGUMENT`。params 与 options 独立：查询里的 `$name` 从第二个参数读取，options 不用于参数绑定。
 
@@ -17,7 +17,7 @@ options 是 `lithograph()` / `lithograph_rows()` 第三个参数的 JSON object 
 | `author` | STRING 或 null；默认 null | 新 Commit 的 author，不是账号认证 |
 | `message` | STRING 或 null；默认 null | 新 Commit 的 message |
 | `readOnlyNoExternalIO` | BOOLEAN；默认 `false` | 同时禁止本次 Cypher 的 mutation 和外部 I/O，完整规则见下节 |
-| `memoryLimitBytes` | 正 JSON INTEGER，`1..9223372036854775807`；省略不新增限制；Unreleased | 单次 execution 的引擎计账内存预算，见下文 |
+| `memoryLimitBytes` | 正 JSON INTEGER，`1..9223372036854775807`；省略不新增限制；v0.3.3 | 单次 execution 的引擎计账内存预算，见下文 |
 | `readAccess` | object；默认无附加限制；v0.3.2 | query 属性隐藏、返回图对象过滤与读取能力开关，见下文 |
 | `writeAccess` | object；默认无附加限制；v0.3.2 | 属性、创建/删除/Label/Schema/版本/维护限制，见下文 |
 | `graphView` | object；默认完整图 | `{requireAllLabels:[STRING],excludeAnyLabels:[STRING]}` |
@@ -64,7 +64,7 @@ lithograph.merge.conflicts
 
 <a id="memory-limit"></a>
 
-## `memoryLimitBytes`（Unreleased）
+## `memoryLimitBytes`（v0.3.3）
 
 用于单次 `lithograph()` / `lithograph_rows()` execution 的工作内存预算，同样适用于 active explicit transaction 内的每次 execution。宿主显式选择字节数，省略时不增加新限制；已有 `range()` 200 万元素上限、SQLite 长度限制和实际资源限制继续生效。只能传 `1..9223372036854775807` 的 JSON 整数；`null`、零、负数、小数、Boolean、字符串、越界值均返回 `INVALID_ARGUMENT`，`67108864.0` 也不是整数配置。
 
@@ -219,7 +219,7 @@ begin 不接受 `at`、`graphView`、`mergeSession`、`readOnlyNoExternalIO`、`
 
 begin 后继续调用普通 `lithograph()` / `lithograph_rows()`。v0.3.1 此时仅接受 `graphView`、`readOnlyNoExternalIO`，默认分别为完整图、`false`；v0.3.2 还接受 `readAccess`、`writeAccess`，默认无附加限制。它们作用于当前 staged state，能看到同一事务内前面成功的 execution。
 
-Unreleased 的 `memoryLimitBytes` 也按 execution 指定，不成为整个 transaction 的累计额度；一次成功不为后续 execution 继承预算。v0.3.2 不接受该 key。
+v0.3.3 的 `memoryLimitBytes` 也按 execution 指定，不成为整个 transaction 的累计额度；一次成功不为后续 execution 继承预算。v0.3.2 不接受该 key。
 
 `branch` / `at` / `expectedHead` / `author` / `message` / `mergeSession` 和其它 key 均返回 `INVALID_ARGUMENT`；作为 active execution failure，它们也会自动 abort 整个 Lithograph explicit transaction。安全拒绝同样遵循这条 fail-closed 规则。v0.3.1 没有独立 `lithograph_tx_execute()`。
 

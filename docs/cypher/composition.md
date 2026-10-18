@@ -2,7 +2,7 @@
 
 [语言手册](index.md) · [版本与范围](../reference/cypher-compatibility.md)
 
-适用于 Lithograph v0.3.2，Cypher Profile `CY25-2026.08`。本章说明多个 query 如何合并结果、按条件选择，或把结果行传给后续 query。普通 clause 的变量传递见 [查询模型](query-model.md)，相关调用见 [Subqueries](subqueries.md)。
+适用于 Lithograph v0.3.3，Cypher Profile `CY25-2026.08`。本章说明多个 query 如何合并结果、按条件选择，或把结果行传给后续 query。普通 clause 的变量传递见 [查询模型](query-model.md)，相关调用见 [Subqueries](subqueries.md)。
 
 <a id="union"></a>
 

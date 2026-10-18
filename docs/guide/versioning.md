@@ -2,7 +2,7 @@
 
 [产品手册](README.md) · [Cypher 语言手册](../cypher/index.md) · [接口参考](../reference/README.md)
 
-本文适用 **v0.3.2**（`CY25-2026.08`，storage format `3`）。
+本文适用 **v0.3.3**（`CY25-2026.08`，storage format `3`）。
 
 本页先用独立演示库解释日常操作，再介绍会改写 Branch 历史的操作。完整可执行流程见 [version_workflow.py](examples/version_workflow.py)；合并冲突独立见 [Merge Session](merge.md)。
 

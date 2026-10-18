@@ -2,7 +2,7 @@
 
 [语言手册](index.md) · [版本与范围](../reference/cypher-compatibility.md)
 
-本文适用于 Lithograph v0.3.2、`CY25-2026.08`。聚合把一组输入行计算成一条输出行；分组键决定哪些行属于同组。`RETURN` 和 `WITH` 都可以形成聚合边界。完整函数说明见 [聚合函数](functions/aggregation.md)。
+本文适用于 Lithograph v0.3.3、`CY25-2026.08`。聚合把一组输入行计算成一条输出行；分组键决定哪些行属于同组。`RETURN` 和 `WITH` 都可以形成聚合边界。完整函数说明见 [聚合函数](functions/aggregation.md)。
 
 <a id="implicit-grouping"></a>
 

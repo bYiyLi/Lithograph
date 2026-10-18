@@ -1,4 +1,4 @@
-# Cypher 25 兼容范围 — v0.3.2
+# Cypher 25 兼容范围 — v0.3.3
 
 Lithograph 当前语言基线仍是冻结的 **`CY25-2026.08`**：Cypher 25 current-graph surface，以及截至 2026.08 公开 additions；证据于 2026-09-09 冻结。它不是“任意未来 Cypher 25 文档页面上的所有内容”，也不是 Neo4j Server 的全部产品能力。
 
@@ -40,8 +40,10 @@ Lithograph 不提供 Bolt/HTTP 数据库服务器或 Neo4j driver 协议。APOC 
 
 仓库记录的 release-level inherited openCypher TCK evidence 为：3,897 个 scenario 中 3,777 个 applicable 全部通过，其余 120 个有明确的 profile 排除或 superseded 原因；另有 Cypher 25 专项 fixtures 与 feature/regression suites。该证据记录于 [兼容矩阵](../development/cypher25-compatibility.md)，不是本次编写手册重新运行出来的全套测试结果。
 
-v0.3.2 文档示例通过目标版本的真实 SQLite SQL surface 执行，具体范围见 [验证入口](../guide/examples/README.md) 与 [Phase 18](../development/phases/18-query-access-controls.md)。v0.3.1 与 v0.1.0 的实际制品验证仍作为历史记录保留，不能替代本版本验收。测试通过只证明对应输入和环境。
+Phase 19 开发基线的文档示例通过目标版本的真实 SQLite SQL surface 执行，具体范围见 [验证入口](../guide/examples/README.md) 与 [Phase 19](../development/phases/19-query-correctness-resources.md)。v0.3.1 与 v0.1.0 的实际制品验证仍作为历史记录保留，不能替代本版本验收。测试通过只证明对应输入和环境。
 
 完整的语言说明见 [Cypher 手册](../cypher/index.md)。未来 Profile 升级单独明确版本和变化，固定 tag 的手册不随外部在线文档静默扩大能力范围。
 
 v0.3.2 沿用同一冻结 Profile。新访问控制、canonical 修复和本轮实际门禁由 [Phase 18](../development/phases/18-query-access-controls.md) 记录；远端与正式发布结果见其 [发布交付记录](https://github.com/bYiyLi/Lithograph/blob/main/docs/development/phases/18-query-access-controls.md#v032-release-delivery)，不能用 v0.3.1 历史发布证据替代。
+
+当前 v0.3.3 继续使用同一冻结 Profile；名称、取消与内存预算的验收及正式发布结果见 [Phase 19 发布交付记录](../development/phases/19-query-correctness-resources.md#v033-release-delivery)。旧版本结果不替代本版本的 tag/制品验收。

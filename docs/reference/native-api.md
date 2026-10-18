@@ -1,6 +1,6 @@
 # Native / FFI Surface
 
-适用版本：**v0.3.2**。上级：[接口参考](README.md) · 应用接入：[Integration](../guide/integration.md)。
+适用版本：**v0.3.3**。上级：[接口参考](README.md) · 应用接入：[Integration](../guide/integration.md)。
 
 <a id="sqlite-entrypoint"></a>
 

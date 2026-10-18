@@ -1,6 +1,6 @@
 # Phase 19：查询正确性、取消与执行内存限额
 
-**状态：`done`（本轮 review 修复、开发复验与远端六平台验收完成；Unreleased）**
+**状态：`done`（本轮 review 修复、开发复验与远端六平台验收完成；v0.3.3 发布准备中）**
 
 ## 目标、依赖与设计输入
 
@@ -12,7 +12,7 @@
 
 ## 本轮 review 状态
 
-本轮 review 发现的问题已修复，专项回归、最终 quality / 本机 CI、release-build SQL 与文档检查均已完成。当前验收证据使用 `target/phase19-review/`，不沿用旧 green；本轮目标范围内的复审已闭环，下文单独保留 transaction batch 的既有实现边界。实现 revision 已提交并推送至 `origin/main`，其 repository CI 与六平台 Release Matrix 全部成功，精确 SHA 与 job 证据见[本轮远端验收](#phase19-remote-acceptance)。正式发布与 Loreweft 接入不属于本轮交付。
+本轮 review 发现的问题已修复，专项回归、最终 quality / 本机 CI、release-build SQL 与文档检查均已完成。当前验收证据使用 `target/phase19-review/`，不沿用旧 green；本轮目标范围内的复审已闭环，下文单独保留 transaction batch 的既有实现边界。实现 revision 已提交并推送至 `origin/main`，其 repository CI 与六平台 Release Matrix 全部成功，精确 SHA 与 job 证据见[本轮远端验收](#phase19-remote-acceptance)。随后授权的 v0.3.3 发布见[发布交付记录](#v033-release-delivery)；Loreweft 接入不属于本轮交付。
 
 下文 `target/phase19/` 的日志、构建 checksum、数字和源码 review 结论保留为**上一轮历史证据**，仅对应当时工作树；当前制品与复验结果由本轮新证据证明。Feature 与 QR 的当前复验状态另列，不把旧 green 迁移为新结果。
 
@@ -58,7 +58,7 @@
 
 macOS x64 的完成日志 `target/phase19-review/macos-x64-completed.log` 另确认 Phase 19 C 探针在 SQLite **3.45.0 / 3.53.4** 各 **8/8**、共 **16/16 cases passed**；两套 runtime 共 10 次真实取消均返回 code 9，发出 interrupt 后最大延迟 **0.600 ms**，最终 cross-platform storage fixture 为 `status: ok`。这些数值只属于该 macOS x64 job。
 
-原始核验记录为 `target/phase19-review/ci-followup.json` 与 `matrix-followup.json`。这两个 run 仅证明上述实现 SHA；本次仅回填验收记录，后续文档 commit 的 SHA 与其交付状态单独记录，不把实现 run 归给文档 SHA。本轮运行来自 `main`，没有创建 tag，[publish-release](https://github.com/bYiyLi/Lithograph/actions/runs/39136521126/job/117709438604) 按条件 `skipped`；新能力继续保持 **Unreleased**。
+原始核验记录为 `target/phase19-review/ci-followup.json` 与 `matrix-followup.json`。这两个 run 仅证明上述实现 SHA；本次仅回填验收记录，后续文档 commit 的 SHA 与其交付状态单独记录，不把实现 run 归给文档 SHA。本轮运行来自 `main`，没有创建 tag，[publish-release](https://github.com/bYiyLi/Lithograph/actions/runs/39136521126/job/117709438604) 按条件 `skipped`；该实现提交验收时新能力仍为 **Unreleased**，随后授权的版本发布另见下文。
 
 ### 本轮 release-build 验证证据
 
@@ -199,4 +199,14 @@ cancel case 包含 **128 MiB** 合成参数输入；宿主已有输入和 SQLite
 
 上一轮独立只读 hygiene 审查覆盖 **132 tracked 修改 + 78 untracked 新文件 = 210 文件**；新增 74 Rust、1 Phase 19 文档、1 驱动、2 SQL 探针，均为 UTF-8 text，0 trailing whitespace、0 binary，无 temporary database、build/log 产物或 secret。Cargo dependency/lock、Provider crate/header、Phase 18 历史与 release 文档未改；storage format 3、Commit identity 与 SPI entry signatures 保持；CHANGELOG 的 v0.3.2 及以下历史正文逐字保留。`allow` / `expect` 从 47 降至 44，没有新增豁免；quality 增加两个本 Phase gate，未降低阈值。当时文档重新读取、80 文件链接/锚点/coverage、`git diff --check` 与新文件 trailing-whitespace 检查通过；这些文件数与历史 diff 结论不代表本轮新增修改的统计。
 
-本 Phase 的本轮修改、复审修复、验证与文档同步已完成；实现 revision 已提交并推送至 `origin/main`，repository CI 与六平台 Matrix 的精确 SHA 证据见[本轮远端验收](#phase19-remote-acceptance)，本机与远端证据各自保留来源。Lithograph 新能力保持 **Unreleased**；Loreweft 仍需升级依赖并由宿主显式传入 `memoryLimitBytes`，其接入与完整下游验收不计入本轮完成结果。最终文档按当前结果重读，并检查 scoped local links / anchors / coverage、`git diff --check` 和新文件 trailing whitespace；当前制品使用本轮 checksum，旧记录保留历史身份。
+本 Phase 的本轮修改、复审修复、验证与文档同步已完成；实现 revision 已提交并推送至 `origin/main`，repository CI 与六平台 Matrix 的精确 SHA 证据见[本轮远端验收](#phase19-remote-acceptance)，本机与远端证据各自保留来源。Lithograph 新能力的 v0.3.3 正式发布状态见下文[交付记录](#v033-release-delivery)；Loreweft 仍需升级依赖并由宿主显式传入 `memoryLimitBytes`，其接入与完整下游验收不计入本轮完成结果。最终文档按当前结果重读，并检查 scoped local links / anchors / coverage、`git diff --check` 和新文件 trailing whitespace；当前制品使用本轮 checksum，旧记录保留历史身份。
+
+<a id="v033-release-delivery"></a>
+
+## v0.3.3 发布交付记录
+
+用户于 2026-10-18 授权发布新版本。本轮将 workspace 与内部精确版本依赖同步为 **0.3.3**，保持 storage format 3、Commit identity 和 Provider SPI V1；旧 v0.3.2 及 Phase 18 的发布记录不变。
+
+发布准备包含 CHANGELOG、[v0.3.3 Release Notes](../../releases/v0.3.3.md)、README、安装路径与同版 Guide / Cypher / Reference。实现提交的已有 green 仅作开发基线；版本提交的精确 SHA 必须先通过 CI 与六平台 Matrix，再创建 annotated tag，等待 tag CI / Matrix 与 publish job 成功，随后下载正式资产核对 checksum、成员、版本和架构，并在本机 macOS arm64 实际回验。此处当前仅记录准备状态，尚未创建 v0.3.3 tag 或发布资产；后续结果按真实动作回填。Loreweft 升级接入不在本次发布范围。
+
+版本准备本机检查使用 `target/release-033/`：`--locked --offline` metadata 确认 6/6 workspace packages 均为 0.3.3，外部 dependency/lock entries 未变；release build **51.08 s、exit 0**，真实加载版本为 0.3.3、Profile 与 format 范围不变；SQLite 3.51.0 的 Phase 19 C 八组 **8/8** 和 Python 固定预算百万行/取消/生命周期检查均 exit 0，运行时 inventory **172 signatures / 38 Procedures** 与文档一致；131 份 Markdown 的链接、锚点、coverage 与 `git diff --check` 通过。版本提交及后续远端结果仍按各自精确 SHA 记录。
