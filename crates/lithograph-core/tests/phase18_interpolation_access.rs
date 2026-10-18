@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use lithograph_core::cypher::Value;
 use lithograph_core::query::{ExecutionOptions, QueryCursor, QueryError, QueryErrorKind, prepare};
@@ -40,6 +41,15 @@ fn execute(
 
 fn text(value: &str) -> Vec<Vec<Value>> {
     vec![vec![Value::String(value.to_owned())]]
+}
+
+fn local_file_uri(path: &Path) -> String {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if cfg!(windows) {
+        format!("file:///{}", normalized.trim_start_matches('/'))
+    } else {
+        format!("file://{normalized}")
+    }
 }
 
 #[test]
@@ -377,7 +387,7 @@ fn interpolated_csv_reads_succeed_when_allowed_and_are_rejected_before_open_when
     let directory = tempfile::tempdir().expect("temporary directory");
     let path = directory.path().join("interpolation.csv");
     std::fs::write(&path, "id,name\n1,Alice\n2,Bob\n").expect("synthetic CSV");
-    let source = format!("file://{}", path.display());
+    let source = local_file_uri(&path);
     let query = "RETURN s\"{COUNT { LOAD CSV WITH HEADERS FROM $source AS row RETURN row }}\"";
     let params = BTreeMap::from([("source".to_owned(), Value::String(source))]);
     for options in ["{}", r#"{"readAccess":{"allowExternalIO":true}}"#] {

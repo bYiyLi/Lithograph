@@ -299,15 +299,17 @@ Unix CI、release smoke 与 Windows wrapper 已接入同一永久 gate；Windows
 
 ## v0.3.2 发布交付记录
 
-用户在本机实施与制品验收完成后，明确授权提交和推送，并要求精确 SHA 的远端 CI 与六平台 Release Matrix 全部通过后正式发布 v0.3.2。该交付现已开始准备；本 Phase 的开发验收保持 done，发布状态按下面的实际结果单独记录。此前“未授权提交/发布”及“本机未发布候选”段落保留当时事实，不代表当前授权边界。
+用户在本机实施与制品验收完成后，明确授权提交和推送，并要求精确 SHA 的远端 CI 与六平台 Release Matrix 全部通过后正式发布 v0.3.2。本 Phase 的开发验收保持 done，发布状态按下面的实际结果单独记录。此前“未授权提交/发布”及“本机未发布候选”段落保留当时事实，不代表当前授权边界。
+
+首次发布源码 `50b26f95262625cab33f08d834e7b7a49492446d` 已提交、推送到 main 并核对远端 SHA，但首轮远端未全绿：CI 的 Linux job 失败，macOS/Windows basic jobs 通过；Release Matrix 的 Linux x64/arm64 cache fixture 预期 `IO_ERROR` 2 却得到成功 0，Windows arm64 则因测试拼成 `file://C:\...` 而被生产 URI 校验正确拒绝。前者已用本机 Homebrew SQLite A/B 复现：持有 writer 后执行 `fs::read` 会打开并关闭同一 inode 的另一个 fd，POSIX 因此释放进程自己的锁；`target/release-032/posix-lock-close-ab.json` 记录保留该快照读取时独立进程成功、移到持锁前则真实返回 `BUSY` 5。cache fixture 正在保持 500 ms 等待、零 HTTP、字节与 Schema 断言的前提下修正，并补独立进程 `BUSY` 5 前置证明；生产实现不变。Windows 路径 fixture 已复用既有 Phase 08/15 helper 生成 `file:///C:/...`，release 定向 9/9、Clippy 与独立 review 通过。该轮失败不计为平台验收完成；修复后仍须以新 SHA 重新通过完整远端 CI 和六平台矩阵。
 
 | 交付项 | 当前实际状态 |
 | --- | --- |
 | 实现、完整本机质量与包内验收 | 已完成；结果与本机 SHA 见前文 |
 | 正式版本文档与发布说明 | 已准备 v0.3.2 版本适用说明和固定 tag/下载入口；下载入口在正式发布后使用 |
-| 首次发布提交与推送 | 已授权、准备中；尚无实际提交 SHA 或远端 ref 验证 |
-| 精确 SHA 的远端 CI | 等待提交推送后实际触发与验收 |
-| 六平台 Release Matrix | 等待提交推送后实际触发与验收；包括 Windows PowerShell/MSVC 与跨平台 interop |
+| 首次发布提交与推送 | [50b26f95262625cab33f08d834e7b7a49492446d](https://github.com/bYiyLi/Lithograph/commit/50b26f95262625cab33f08d834e7b7a49492446d) 已提交、推送 main，远端 SHA 已验证 |
+| 精确 SHA 的远端 CI | [CI 39107295376](https://github.com/bYiyLi/Lithograph/actions/runs/39107295376) 的 Linux job 失败，macOS/Windows basic jobs 通过；等待 fixture 修复后的新 SHA 完整重验 |
+| 六平台 Release Matrix | [Release Matrix 39107295388](https://github.com/bYiyLi/Lithograph/actions/runs/39107295388) 的 Linux x64/arm64 cache 与 Windows arm64 URI fixture 失败，本轮不计六平台通过；等待新 SHA 完整重验 |
 | v0.3.2 tag 与正式发布 | 已授权在前述远端检查全部成功后执行；尚未创建 tag、上传或发布 |
 | 正式下载资产与发布制品回验 | 尚未执行；本机包和历史 v0.3.1 证据不替代正式资产验收 |
 

@@ -257,18 +257,18 @@ fn check_initial_wait(
 ) -> Result<(), Box<dyn Error>> {
     let fixture = FileDatabaseFixture::new(0x1505_0300 + u64::from(cancel))?;
     let cache = fixture.directory().join("locked-empty.db");
-    let locker = Connection::open(&cache)?;
-    locker.execute_batch("BEGIN IMMEDIATE")?;
-    let before = fs::read(&cache)?;
+    let (locker, before) = lock_empty_cache_for_wait(&cache)?;
     let server = EmbeddingServer::start(&[1])?;
     let config = provider_config_with_timeout(server.base_url(), &cache, 24, 5_000);
     let loads = format!("{provider_load}\n{probe_load}");
     let worker = Worker::new(fixture.directory(), "waiting-worker");
     let mut children = vec![worker.start(&loads, &config, "winner", cancel)?];
     wait_for_paths(std::slice::from_ref(&worker.ready), &mut children, DEADLINE)?;
+    require_writer_is_blocked(&cache, probe_load)?;
     worker.release()?;
     let output = children.remove(0).wait(DEADLINE)?;
-    require_status(&output, if cancel { 4 } else { 2 })?;
+    require_status(&output, if cancel { 4 } else { 2 })
+        .map_err(|error| format!("initial cache lock wait (cancel={cancel}): {error}"))?;
     require(
         server.finish()?.is_empty(),
         "failed initial lock wait caused HTTP",
@@ -281,6 +281,31 @@ fn check_initial_wait(
     require_empty_schema(&cache)?;
     locker.execute_batch("BEGIN IMMEDIATE; ROLLBACK")?;
     check_recovery_after_wait(fixture.path(), &cache, &loads)
+}
+
+fn lock_empty_cache_for_wait(cache: &Path) -> Result<(Connection, Vec<u8>), Box<dyn Error>> {
+    let locker = Connection::open(cache)?;
+    // Materialize a stable empty database before taking the byte snapshot.
+    // Closing a raw file descriptor while a POSIX SQLite lock is held would
+    // release the process's locks without SQLite observing that release.
+    locker.execute_batch("VACUUM")?;
+    let before = fs::read(cache)?;
+    locker.execute_batch("BEGIN IMMEDIATE")?;
+    Ok((locker, before))
+}
+
+fn require_writer_is_blocked(cache: &Path, probe_load: &str) -> Result<(), Box<dyn Error>> {
+    let output = start(
+        cache,
+        &format!(
+            "{probe_load}\n.timeout 0\nSELECT provider_cache_probe_sql_error('BEGIN IMMEDIATE');"
+        ),
+    )?
+    .wait(DEADLINE)?;
+    require(
+        output.starts_with("code=5;error="),
+        &format!("initial-wait fixture did not retain its SQLite writer lock: {output}"),
+    )
 }
 
 fn check_recovery_after_wait(
