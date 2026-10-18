@@ -61,6 +61,8 @@ OpenAI-compatible Provider 的可选 cache database 是宿主显式配置的独�
 
 执行 Cypher、初始化、migration、version mutation 和 integrity-maintenance 的 SQL entrypoints 注册为 direct-only surface，不能从持久化 trigger/view/schema expression 隐式触发。纯信息函数只有在确认无副作用后才可注册为 innocuous。
 
+`readAccess` / `writeAccess` 是后续版本的 query-local 执行边界，配置与语义分别见 [Interfaces](interfaces.md#query-access-controls) 和 [Query Engine](query-engine.md#query-access-controls)。它们只限制明确指定的能力，省略或空配置不收紧权限；需要强制访问控制的宿主必须控制 SQL execution surface 与 options 构造。该机制不是账号/认证系统，不约束原始 SQLite SQL、初始化、数据库文件访问或独立 transaction lifecycle API，也不改变 Provider SPI。禁止外部 I/O 时必须在文件、HTTP、Provider 或宿主 tokenizer 调用前拒绝；SQLite 内部读取与 TEMP/spill 仍属于正常执行。
+
 `_lithograph_*` 是内部表。直接 SQL 修改这些表不属于公开 API；由于数据库文件所有者最终拥有 SQLite 全权限，Lithograph 不伪装成能阻止文件所有者篡改，而通过 hash、referential integrity 和 `lithograph_integrity_check()` 检测损坏。
 
 该 integrity contract 证明 database 内仍存在的 canonical evidence 是否自洽，不提供独立于数据库文件的 authenticity / anti-tamper trust anchor。拥有文件全权限的主体若删除全部 Lithograph internal evidence，结果在单文件内部与从未初始化的 pristine database 不可区分；若同时自洽重写全部 canonical data/hash，也不能仅靠同一文件证明其历史真实性。需要这种外部真实性保证的部署必须由宿主另行提供 trusted backup、signature/attestation 或其它外部锚点，Lithograph 不在 embedded database 内伪造该能力。

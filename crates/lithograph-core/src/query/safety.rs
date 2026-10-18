@@ -4,11 +4,13 @@ use crate::cypher::{AstKind, AstNode, ClauseKind, ExpressionKind, QueryAst, Subq
 
 use super::{ExecutionOptions, QueryError, QueryResult};
 
+mod access;
+
 pub(super) fn validate(ast: &QueryAst, options: &ExecutionOptions) -> QueryResult<()> {
-    if !options.read_only_no_external_io {
-        return Ok(());
+    if options.read_only_no_external_io {
+        validate_node(&ast.root)?;
     }
-    validate_node(&ast.root)
+    access::validate(ast, &options.access)
 }
 
 fn validate_node(root: &AstNode) -> QueryResult<()> {
@@ -31,7 +33,7 @@ fn validate_node(root: &AstNode) -> QueryResult<()> {
             AstKind::Clause(kind) => return forbidden(&format!("mutating clause {kind:?}")),
             AstKind::TransactionSubclause => return forbidden("transaction subquery"),
             AstKind::Expression(ExpressionKind::InterpolatedString) => {
-                validate_interpolation(node)?;
+                validate_interpolation_with(node, validate_node)?;
             }
             _ => {}
         }
@@ -39,7 +41,10 @@ fn validate_node(root: &AstNode) -> QueryResult<()> {
     Ok(())
 }
 
-fn validate_interpolation(node: &AstNode) -> QueryResult<()> {
+pub(super) fn validate_interpolation_with(
+    node: &AstNode,
+    mut validate: impl FnMut(&AstNode) -> QueryResult<()>,
+) -> QueryResult<()> {
     // The grammar retains an interpolated string as one atomic AST node. Its
     // expressions are parsed separately by the frontend and executor, so the
     // same fragments must join the prepare-time safety walk as well.
@@ -51,7 +56,7 @@ fn validate_interpolation(node: &AstNode) -> QueryResult<()> {
     for fragment in fragments {
         let expression =
             crate::cypher::parse_expression_fragment_at(fragment.text, fragment.text, 0)?;
-        validate_node(&expression)?;
+        validate(&expression)?;
     }
     Ok(())
 }

@@ -3,6 +3,7 @@ use super::*;
 pub(super) struct AdapterExecution {
     cursor: query::QueryCursor,
     columns: Vec<String>,
+    access: query::AccessPolicy,
     read_guard: Option<MainReadGuard>,
     side_effect_guard: Option<SideEffectGuard>,
     explicit_transaction: bool,
@@ -39,6 +40,10 @@ impl AdapterExecution {
 
     pub(super) fn columns(&self) -> &[String] {
         &self.columns
+    }
+
+    pub(super) fn row_json(&self, row: &[cypher::Value]) -> Value {
+        row_json(row, &self.access)
     }
 
     pub(super) fn is_write(&self) -> bool {
@@ -149,7 +154,7 @@ fn prepare_adapter_execution(
     explicit_state: Option<&ExplicitTransactionState>,
 ) -> LithographResult<AdapterExecution> {
     let metadata = require_initialized(connection)?;
-    let (mut cursor, columns, semantic_maintenance) = prepare_cursor(
+    let (mut cursor, columns, semantic_maintenance, access) = prepare_cursor(
         connection,
         query_text,
         params_text,
@@ -167,6 +172,7 @@ fn prepare_adapter_execution(
     Ok(AdapterExecution {
         cursor,
         columns,
+        access,
         read_guard,
         side_effect_guard,
         explicit_transaction: explicit_state.is_some(),
@@ -181,7 +187,7 @@ fn prepare_cursor(
     params_text: &str,
     options_text: &str,
     explicit_state: Option<&ExplicitTransactionState>,
-) -> LithographResult<(query::QueryCursor, Vec<String>, bool)> {
+) -> LithographResult<(query::QueryCursor, Vec<String>, bool, query::AccessPolicy)> {
     let params = cypher::decode_parameters_text(params_text)
         .map_err(|error| LithographError::invalid_argument(error.message))?;
     let effective_options = match explicit_state {
@@ -195,10 +201,12 @@ fn prepare_cursor(
     query::initialize_connection_state(connection).map_err(map_query_error)?;
     let semantic_maintenance = prepared.has_semantic_maintenance();
     let columns = prepared.columns.clone();
+    let access = prepared.access_policy().clone();
     Ok((
         query::QueryCursor::new(prepared),
         columns,
         semantic_maintenance,
+        access,
     ))
 }
 
@@ -269,7 +277,7 @@ fn collect_scalar_result(
     let mut rows = Vec::new();
     let summary = loop {
         let batch = execution.next_batch(connection, 256)?;
-        rows.extend(batch.rows.iter().map(|row| row_json(row)));
+        rows.extend(batch.rows.iter().map(|row| execution.row_json(row)));
         if batch.done {
             break batch.summary.ok_or_else(|| {
                 LithographError::internal("terminal execution batch is missing summary")
@@ -319,8 +327,22 @@ pub(super) fn ensure_scalar_result_fits_handle(
     Ok(())
 }
 
-pub(super) fn row_json(row: &[cypher::Value]) -> Value {
-    Value::Array(row.iter().map(cypher::encode_json).collect())
+pub(super) fn row_json(row: &[cypher::Value], access: &query::AccessPolicy) -> Value {
+    let query_rules = &access.read.query;
+    let result_rules = &access.read.result;
+    if query_rules.is_empty() && result_rules.is_empty() {
+        return Value::Array(row.iter().map(cypher::encode_json).collect());
+    }
+    Value::Array(
+        row.iter()
+            .map(|value| {
+                let mut filtered = value.clone();
+                query_rules.restrict_graph_properties(&mut filtered);
+                result_rules.restrict_graph_properties(&mut filtered);
+                cypher::encode_json(&filtered)
+            })
+            .collect(),
+    )
 }
 
 pub(super) fn summary_json(summary: &query::QuerySummary) -> Value {
@@ -387,6 +409,7 @@ pub(super) fn map_query_error(error: query::QueryError) -> LithographError {
             query::QueryErrorKind::Schema => ErrorCategory::Schema,
             query::QueryErrorKind::Constraint => ErrorCategory::Constraint,
             query::QueryErrorKind::InvalidArgument => ErrorCategory::InvalidArgument,
+            query::QueryErrorKind::AccessDenied => ErrorCategory::AccessDenied,
             query::QueryErrorKind::VersionNotFound => ErrorCategory::VersionNotFound,
             query::QueryErrorKind::BranchNotFound => ErrorCategory::BranchNotFound,
             query::QueryErrorKind::TagNotFound => ErrorCategory::TagNotFound,
@@ -412,6 +435,7 @@ pub(super) fn map_query_error(error: query::QueryError) -> LithographError {
         query::QueryErrorKind::Busy => ffi::SQLITE_BUSY,
         query::QueryErrorKind::Resource => ffi::SQLITE_TOOBIG,
         query::QueryErrorKind::Io => ffi::SQLITE_IOERR,
+        query::QueryErrorKind::AccessDenied => ffi::SQLITE_AUTH,
         _ => ffi::SQLITE_ERROR,
     });
     let message = match error.kind {

@@ -203,11 +203,22 @@ impl Cache {
         &self,
         is_cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), Failure> {
-        let objects = retry_sqlite(is_cancelled, || self.object_names())?;
+        let objects = retry_sqlite(is_cancelled, || self.schema_objects())?;
         if objects.is_empty() {
             return self.initialize(is_cancelled);
         }
-        let mut expected = vec![ENTRY_TABLE.to_owned(), META_TABLE.to_owned()];
+        self.validate(objects, is_cancelled)
+    }
+
+    fn validate(
+        &self,
+        objects: Vec<(String, String)>,
+        is_cancelled: &mut (impl FnMut() -> bool + ?Sized),
+    ) -> Result<(), Failure> {
+        let mut expected = vec![
+            (ENTRY_TABLE.to_owned(), "table".to_owned()),
+            (META_TABLE.to_owned(), "table".to_owned()),
+        ];
         expected.sort();
         if objects != expected {
             return Err(Failure::invalid(
@@ -241,7 +252,11 @@ impl Cache {
     }
 
     fn initialize(&self, is_cancelled: &mut impl FnMut() -> bool) -> Result<(), Failure> {
-        with_immediate_transaction(&self.connection, is_cancelled, |_is_cancelled| {
+        with_immediate_transaction(&self.connection, is_cancelled, |is_cancelled| {
+            let objects = self.schema_objects()?;
+            if !objects.is_empty() {
+                return self.validate(objects, is_cancelled);
+            }
             self.connection.execute_batch(&format!(
                 "CREATE TABLE {META_TABLE}(\
                     id INTEGER PRIMARY KEY CHECK(id=1),\
@@ -268,11 +283,11 @@ impl Cache {
         })
     }
 
-    fn object_names(&self) -> rusqlite::Result<Vec<String>> {
+    fn schema_objects(&self) -> rusqlite::Result<Vec<(String, String)>> {
         let mut statement = self.connection.prepare(
-            "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            "SELECT name,type FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY name,type",
         )?;
-        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect()
     }
 
@@ -379,7 +394,7 @@ impl Cache {
             used = self.publish_entries(space_hash, dimensions, generated, used, is_cancelled)?;
             used = evict_to_budget(&self.connection, used, self.max_bytes)?;
             write_used_counter(&self.connection, used)?;
-            Ok(())
+            Ok::<(), SqliteError>(())
         })
     }
 
@@ -625,10 +640,10 @@ fn evict_to_budget(
     Ok(used)
 }
 
-fn with_immediate_transaction(
+fn with_immediate_transaction<E: Into<Failure>>(
     connection: &Connection,
     is_cancelled: &mut impl FnMut() -> bool,
-    operation: impl FnOnce(&mut dyn FnMut() -> bool) -> rusqlite::Result<()>,
+    operation: impl FnOnce(&mut dyn FnMut() -> bool) -> Result<(), E>,
 ) -> Result<(), Failure> {
     retry_sqlite(is_cancelled, || connection.execute_batch("BEGIN IMMEDIATE"))?;
     let result = operation(is_cancelled);
@@ -642,13 +657,13 @@ fn with_immediate_transaction(
         }
         Err(error) => {
             let _ = connection.execute_batch("ROLLBACK");
-            Err(map_sqlite_error(error))
+            Err(error.into())
         }
     }
 }
 
 fn retry_sqlite<T>(
-    is_cancelled: &mut impl FnMut() -> bool,
+    is_cancelled: &mut (impl FnMut() -> bool + ?Sized),
     mut operation: impl FnMut() -> rusqlite::Result<T>,
 ) -> Result<T, Failure> {
     let started = Instant::now();
@@ -664,7 +679,7 @@ fn retry_sqlite<T>(
     }
 }
 
-fn ensure_not_cancelled(is_cancelled: &mut impl FnMut() -> bool) -> Result<(), Failure> {
+fn ensure_not_cancelled(is_cancelled: &mut (impl FnMut() -> bool + ?Sized)) -> Result<(), Failure> {
     if is_cancelled() {
         Err(Failure::cancelled())
     } else {
@@ -696,6 +711,12 @@ fn map_sqlite_error(error: SqliteError) -> Failure {
         };
     }
     Failure::io("cache database operation failed")
+}
+
+impl From<SqliteError> for Failure {
+    fn from(error: SqliteError) -> Self {
+        map_sqlite_error(error)
+    }
 }
 
 fn cache_structure_error(failure: Failure) -> Failure {

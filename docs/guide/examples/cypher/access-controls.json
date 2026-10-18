@@ -1,0 +1,43 @@
+{
+  "examples": [
+    {
+      "id": "access-write-protected",
+      "path": "docs/guide/access-controls.md",
+      "options": {
+        "writeAccess": {
+          "denyPropertyPrefixes": [
+            "@loreweft:"
+          ]
+        }
+      },
+      "error": "ACCESS_DENIED"
+    },
+    {
+      "id": "access-query-masked",
+      "path": "docs/guide/access-controls.md",
+      "options": {
+        "readAccess": {
+          "query": {
+            "denyProperties": [
+              "私密备注"
+            ]
+          }
+        }
+      },
+      "columns": [
+        "姓名",
+        "备注",
+        "属性"
+      ],
+      "rows": [
+        [
+          "示例",
+          null,
+          {
+            "姓名": "示例"
+          }
+        ]
+      ]
+    }
+  ]
+}

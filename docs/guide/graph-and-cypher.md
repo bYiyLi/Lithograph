@@ -2,7 +2,7 @@
 
 [产品手册](README.md) · [Cypher 语言手册](../cypher/index.md) · [接口参考](../reference/README.md)
 
-本文适用 **v0.3.1**（`CY25-2026.08`，storage format `3`）。
+本文适用 **v0.3.2**（`CY25-2026.08`，storage format `3`）。
 
 以下 SQL 示例在独立空库、已加载扩展的 connection 中依次运行。
 

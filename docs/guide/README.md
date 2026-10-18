@@ -2,7 +2,7 @@
 
 # Lithograph 开发者手册
 
-本手册面向将 Lithograph 嵌入自己产品的开发者，适用于 **v0.3.1**。从安装、图查询到版本管理、搜索与维护，公开能力的使用说明均可在本手册内查到。旧版本行为见对应 [Release Notes](../releases/) 和 tag。
+本手册面向将 Lithograph 嵌入自己产品的开发者，适用版本为 **v0.3.2**。从安装、图查询到版本管理、搜索与维护，公开能力的使用说明均可在本手册内查到。旧版本行为见对应 [Release Notes](../releases/) 和 tag。readAccess/writeAccess 与本轮审计修复从 v0.3.2 提供，不能用于推断 v0.3.1 二进制已支持；版本变化见 [v0.3.2 发布说明](../releases/v0.3.2.md)，实际发布进度见 [Phase 18](https://github.com/bYiyLi/Lithograph/blob/main/docs/development/phases/18-query-access-controls.md#v032-release-delivery)。
 
 <a id="v030-基线"></a>
 
@@ -13,7 +13,7 @@
 | Cypher Profile | 冻结的 `CY25-2026.08` |
 | 应用执行入口 | SQLite SQL：`lithograph()` / `lithograph_rows()` |
 | 多 execution 单 Commit | `lithograph_tx_begin()` → 普通 execution → `lithograph_tx_commit()` / `lithograph_tx_abort()` |
-| 安全执行 | query-local `readOnlyNoExternalIO`，默认 false |
+| 安全执行 | 既有 `readOnlyNoExternalIO`；v0.3.2 新增 readAccess/writeAccess，缺省不额外限制 |
 | Embedding Provider SPI | `EmbeddingProviderV1` |
 | Lithograph storage format | 读 1–3；新建/迁移目标 3 |
 | SQLite | 3.45.0+，支持 loadable extension、FTS5 与线程安全 |
@@ -41,6 +41,7 @@ Lithograph 是嵌入式 SQLite extension。一个 SQLite connection 的 `main` d
 | 普通执行、外层 SQL、多 execution 单 Commit 与 batch 的选择 | [事务与并发](transactions.md) |
 | 限定查询和修改可见子图 | [Graph View](graph-views.md) |
 | 强制只读并阻止外部 I/O | [安全执行](safe-execution.md) |
+| 控制字段查询、图对象返回和写入权限（v0.3.2） | [访问控制](access-controls.md) |
 | Schema、Constraint、Graph Type 与 Index | [Schema 与 Index](schema-and-indexes.md) |
 | Full-text、Raw Vector、Managed Semantic | [Search](search.md) |
 | 参数化导入、CSV、batch 和错误检查 | [数据导入](import.md) |
@@ -64,6 +65,6 @@ Lithograph 是嵌入式 SQLite extension。一个 SQLite connection 的 `main` d
 
 [Examples](examples/README.md) 包含 Python quickstart、完整版本工作流、SQL 事务、streaming 和 SQLite C host 示例，并说明验证方式与环境要求。接口细节和当前限制分别见 [Reference](../reference/README.md) 与 [Known Issues](../reference/known-issues.md)。
 
-需要稳定引用时，使用 [v0.3.1 产品手册](https://github.com/bYiyLi/Lithograph/blob/v0.3.1/docs/guide/README.md)、[v0.3.1 Cypher 手册](https://github.com/bYiyLi/Lithograph/blob/v0.3.1/docs/cypher/index.md)、[v0.3.1 接口参考](https://github.com/bYiyLi/Lithograph/blob/v0.3.1/docs/reference/README.md)。固定 tag 的正文与二进制版本对应；主分支代表当前开发内容。
+v0.3.2 tag 的固定入口为 [产品手册](https://github.com/bYiyLi/Lithograph/blob/v0.3.2/docs/guide/README.md)、[Cypher 手册](https://github.com/bYiyLi/Lithograph/blob/v0.3.2/docs/cypher/index.md)、[接口参考](https://github.com/bYiyLi/Lithograph/blob/v0.3.2/docs/reference/README.md)。固定 tag 的正文与二进制版本对应；主分支代表当前开发内容，实际 tag/发布进度由 [Phase 18](https://github.com/bYiyLi/Lithograph/blob/main/docs/development/phases/18-query-access-controls.md#v032-release-delivery) 维护。
 
 v0.3.0 起应用执行统一 SQL-only，Provider 自己维护 persistent embedding cache。v0.2.0/v0.2.1 的 Native query ABI、专用 tx_execute 和 format 4 属于历史版本；切换旧数据库前阅读 [升级边界](installation.md)。许可见 [LICENSE](../../LICENSE) 与 [Commercial License](../../COMMERCIAL-LICENSE.md)。

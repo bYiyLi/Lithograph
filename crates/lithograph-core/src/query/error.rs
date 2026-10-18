@@ -11,6 +11,7 @@ pub enum QueryErrorKind {
     Schema,
     Constraint,
     InvalidArgument,
+    AccessDenied,
     VersionNotFound,
     BranchNotFound,
     TagNotFound,
@@ -55,6 +56,12 @@ impl QueryError {
 
     pub fn semantic(message: impl Into<String>) -> Self {
         Self::new(QueryErrorKind::Semantic, message)
+    }
+
+    pub fn access_denied(message: impl Into<String>) -> Self {
+        let mut error = Self::new(QueryErrorKind::AccessDenied, message);
+        error.sqlite_code = Some(rusqlite::ffi::SQLITE_AUTH);
+        error
     }
 
     pub fn constraint(message: impl Into<String>) -> Self {
@@ -144,6 +151,7 @@ impl From<rusqlite::Error> for QueryError {
         };
         let kind = match sqlite_code {
             Some(code) if code == rusqlite::ffi::SQLITE_INTERRUPT => QueryErrorKind::Interrupted,
+            Some(rusqlite::ffi::SQLITE_AUTH) => QueryErrorKind::AccessDenied,
             Some(rusqlite::ffi::SQLITE_BUSY | rusqlite::ffi::SQLITE_LOCKED) => QueryErrorKind::Busy,
             Some(
                 rusqlite::ffi::SQLITE_IOERR
@@ -232,6 +240,7 @@ mod tests {
 
         for (code, expected) in [
             (rusqlite::ffi::SQLITE_INTERRUPT, QueryErrorKind::Interrupted),
+            (rusqlite::ffi::SQLITE_AUTH, QueryErrorKind::AccessDenied),
             (rusqlite::ffi::SQLITE_NOMEM, QueryErrorKind::Resource),
             (rusqlite::ffi::SQLITE_FULL, QueryErrorKind::Resource),
             (rusqlite::ffi::SQLITE_TOOBIG, QueryErrorKind::Resource),

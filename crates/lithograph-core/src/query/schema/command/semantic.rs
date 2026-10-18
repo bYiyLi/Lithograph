@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use rusqlite::Connection;
 
 use crate::cypher::{AstKind, AstNode, ClauseKind, Value};
+use crate::query::access::PropertyRules;
 use crate::query::expression::{self, BindingRow, compile_expression, surface_expressions};
 use crate::storage::{
     HashId, IndexConfiguration, IndexDefinition, IndexTarget, SchemaState, Snapshot,
@@ -71,8 +72,9 @@ pub(super) fn apply_create_index(
     clause: &AstNode,
     kind: SemanticCreateKind,
     params: &BTreeMap<String, Value>,
+    query_access: &PropertyRules,
 ) -> QueryResult<()> {
-    let arguments = create_arguments(connection, base_commit, clause, params)?;
+    let arguments = create_arguments(connection, base_commit, clause, params, query_access)?;
     if arguments.len() != 4 {
         return Err(schema_error(
             "Semantic Index create procedure requires exactly 4 arguments",
@@ -193,6 +195,7 @@ fn create_arguments(
     base_commit: HashId,
     clause: &AstNode,
     params: &BTreeMap<String, Value>,
+    query_access: &PropertyRules,
 ) -> QueryResult<Vec<Value>> {
     let name_end = clause
         .descendants()
@@ -208,7 +211,7 @@ fn create_arguments(
         .into_iter()
         .map(|node| {
             let expression = compile_expression(node)?;
-            expression::evaluate(&expression, &snapshot, &row, params)
+            expression::evaluate_with_access(&expression, &snapshot, &row, params, query_access)
         })
         .collect()
 }

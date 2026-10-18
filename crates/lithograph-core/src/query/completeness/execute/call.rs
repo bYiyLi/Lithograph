@@ -115,6 +115,7 @@ impl ReadExecutor<'_, '_> {
                         right,
                         connector != QueryConnector::UnionAll,
                         &self.snapshot,
+                        &self.graph_view.query_access,
                     )?;
                 }
             }

@@ -1,6 +1,6 @@
 # 标量与图元素函数
 
-适用版本：Lithograph **v0.3.1**；Cypher Profile：`CY25-2026.08`。
+适用版本：Lithograph **v0.3.2**；Cypher Profile：`CY25-2026.08`。
 
 [语言手册](../index.md) · [全部函数索引](../../reference/functions.md)
 

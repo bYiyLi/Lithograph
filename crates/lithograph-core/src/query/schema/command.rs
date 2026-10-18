@@ -51,6 +51,9 @@ pub(crate) fn prepare_schema(
     let Some(command) = dispatch::find_schema_command(&ast.root)? else {
         return Ok(None);
     };
+    if !options.access.write.allow_schema_changes {
+        return Err(QueryError::access_denied("Schema changes are not allowed"));
+    }
     if !options.graph_view.is_full_graph() {
         return Err(QueryError::invalid_argument(
             "schema DDL cannot execute with options.graphView",
@@ -66,9 +69,11 @@ pub(crate) fn prepare_schema(
         command,
         source,
         params,
+        &options.access.read.query,
     )?;
     refresh_backing_indexes(&mut state)?;
     validate_schema_state(&state)?;
+    super::validate_external_transition(&current, &state, &options.access)?;
     let counters = schema_counters(&current, &state);
     Ok(Some(PreparedSchema {
         branch,
@@ -661,10 +666,7 @@ fn apply_create_constraint(
         )));
     }
     if let Some(backing) = constraint.backing_index()
-        && state
-            .indexes
-            .values()
-            .any(|existing| same_index_schema(existing, &backing))
+        && has_equivalent_index(state.indexes.values(), &backing)?
     {
         return Err(schema_error(
             "Constraint conflicts with an existing range Index on the same schema",
@@ -891,29 +893,29 @@ fn insert_index_definition(
     if_not_exists: bool,
 ) -> QueryResult<()> {
     let name = index.name.clone();
-    let equivalent = state.indexes.values().find(|existing| {
-        existing.owning_constraint.is_none() && same_index_schema(existing, &index)
-    });
+    let equivalent = has_equivalent_index(
+        state
+            .indexes
+            .values()
+            .filter(|existing| existing.owning_constraint.is_none()),
+        &index,
+    )?;
     if state.constraints.contains_key(&name) {
         return Err(schema_error(format!(
             "Schema name {name} is already used by a Constraint"
         )));
     }
-    if if_not_exists && (state.indexes.contains_key(&name) || equivalent.is_some()) {
+    if if_not_exists && (state.indexes.contains_key(&name) || equivalent) {
         return Ok(());
     }
     if let Some(existing) = state.indexes.get(&name) {
-        return if existing == &index {
+        return if existing.canonical_eq(&index)? {
             Err(schema_error(format!("Index {name} already exists")))
         } else {
             Err(schema_error(format!("Index name {name} is already in use")))
         };
     }
-    if state
-        .indexes
-        .values()
-        .any(|existing| same_index_schema(existing, &index))
-    {
+    if has_equivalent_index(state.indexes.values(), &index)? {
         return Err(schema_error("an equivalent Index already exists"));
     }
     state.indexes.insert(name, index);
@@ -1177,10 +1179,7 @@ fn validate_constraint_state(state: &SchemaState) -> QueryResult<()> {
 fn validate_index_state(state: &SchemaState) -> QueryResult<()> {
     let indexes = state.indexes.values().collect::<Vec<_>>();
     for (position, index) in indexes.iter().enumerate() {
-        if indexes[..position]
-            .iter()
-            .any(|existing| same_index_schema(existing, index))
-        {
+        if has_equivalent_index(indexes[..position].iter().copied(), index)? {
             return Err(schema_error(format!(
                 "Index {} duplicates another Index on the same schema",
                 index.name
@@ -1250,12 +1249,21 @@ fn validate_index_definition(state: &SchemaState, index: &IndexDefinition) -> Qu
     Ok(())
 }
 
-fn same_index_schema(left: &IndexDefinition, right: &IndexDefinition) -> bool {
-    left.kind == right.kind
-        && left.target == right.target
-        && left.labels_or_types == right.labels_or_types
-        && left.additional_properties == right.additional_properties
-        && left.configuration == right.configuration
+fn has_equivalent_index<'a>(
+    indexes: impl IntoIterator<Item = &'a IndexDefinition>,
+    index: &IndexDefinition,
+) -> QueryResult<bool> {
+    for existing in indexes {
+        let mut normalized = index.clone();
+        normalized.name.clone_from(&existing.name);
+        normalized
+            .owning_constraint
+            .clone_from(&existing.owning_constraint);
+        if existing.canonical_eq(&normalized)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn type_constraint(

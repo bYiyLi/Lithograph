@@ -6,8 +6,10 @@ use rusqlite::Connection;
 use crate::cypher::{AstKind, AstNode, ClauseKind, ExpressionKind, QueryConnector, Value};
 use crate::storage::{HashId, IndexDefinition, IndexTarget, Snapshot, StandardIndexKind};
 
+use super::super::access::PropertyRules;
 use super::super::expression::{
-    self, BindingRow, BindingValue, binding_from_value, binding_value, compile_expression,
+    self, BindingRow, BindingValue, binding_from_value, binding_value_with_access,
+    compile_expression,
 };
 use super::super::graph::ResolvedGraphView;
 use super::super::options::ExecutionOptions;
@@ -95,6 +97,7 @@ pub(crate) fn validate_executed_columns(expected: &[String], actual: &[String]) 
 pub(crate) fn materialize_rows(
     snapshot: &Snapshot<'_>,
     result: RowSet,
+    rules: &PropertyRules,
 ) -> QueryResult<Vec<Vec<Value>>> {
     result
         .rows
@@ -104,9 +107,10 @@ pub(crate) fn materialize_rows(
                 .columns
                 .iter()
                 .map(|column| {
-                    binding_value(
+                    binding_value_with_access(
                         snapshot,
                         row.values.get(column).unwrap_or(&BindingValue::Null),
+                        rules,
                     )
                 })
                 .collect::<QueryResult<Vec<_>>>()
@@ -340,7 +344,11 @@ pub(super) fn execute_read_snapshot_with_version_summary(
     let result = executor.execute_query_body(&program.root, RowSet::seed())?;
     let rows = if program.public_result {
         validate_executed_columns(&program.columns, &result.columns)?;
-        materialize_rows(&executor.snapshot, result)?
+        materialize_rows(
+            &executor.snapshot,
+            result,
+            &executor.graph_view.query_access,
+        )?
     } else {
         Vec::new()
     };
@@ -420,6 +428,7 @@ impl ReadExecutor<'_, '_> {
                         right,
                         connector != QueryConnector::UnionAll,
                         &self.snapshot,
+                        &self.graph_view.query_access,
                     )?;
                 }
             }
@@ -453,7 +462,13 @@ impl ReadExecutor<'_, '_> {
             };
             let branch_result = self.execute_conditional_branch(branch, row)?;
             output = Some(match output {
-                Some(current) => union_rows(current, branch_result, false, &self.snapshot)?,
+                Some(current) => union_rows(
+                    current,
+                    branch_result,
+                    false,
+                    &self.snapshot,
+                    &self.graph_view.query_access,
+                )?,
                 None => branch_result,
             });
         }
@@ -668,26 +683,7 @@ impl ReadExecutor<'_, '_> {
     }
 
     fn execute_let(&mut self, clause: &AstNode, input: RowSet) -> QueryResult<RowSet> {
-        let mut binding_nodes = clause
-            .descendants()
-            .filter(|node| node.kind == AstKind::LetBinding)
-            .collect::<Vec<_>>();
-        binding_nodes.sort_by_key(|node| node.span.start);
-        let bindings = binding_nodes
-            .into_iter()
-            .map(|binding| {
-                let name = binding
-                    .descendants()
-                    .find(|node| node.kind == AstKind::BindingVariable)
-                    .and_then(|node| node.text.clone())
-                    .ok_or_else(|| QueryError::semantic("LET binding is missing its variable"))?;
-                let expression = surface_expressions(binding)
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| QueryError::semantic("LET binding is missing its expression"))?;
-                Ok((name, compile_expression(expression)?))
-            })
-            .collect::<QueryResult<Vec<_>>>()?;
+        let bindings = expression::compile_let_bindings(clause)?;
         let mut columns = input.columns;
         for (name, _) in &bindings {
             if !columns.contains(name) {
@@ -780,7 +776,12 @@ impl ReadExecutor<'_, '_> {
         mut projected: Vec<ProjectedRow>,
     ) -> QueryResult<Vec<ProjectedRow>> {
         if projection_is_distinct(body) {
-            projected = distinct_projected(projected, columns, &self.snapshot)?;
+            projected = distinct_projected(
+                projected,
+                columns,
+                &self.snapshot,
+                &self.graph_view.query_access,
+            )?;
         }
         if let Some(order) = body
             .children
@@ -789,9 +790,23 @@ impl ReadExecutor<'_, '_> {
         {
             self.sort_projected(&mut projected, order)?;
         }
-        let skip =
-            pagination(body, AstKind::Skip, "SKIP", &self.snapshot, self.params)?.unwrap_or(0);
-        let limit = pagination(body, AstKind::Limit, "LIMIT", &self.snapshot, self.params)?;
+        let skip = pagination(
+            body,
+            AstKind::Skip,
+            "SKIP",
+            &self.snapshot,
+            self.params,
+            &self.graph_view.query_access,
+        )?
+        .unwrap_or(0);
+        let limit = pagination(
+            body,
+            AstKind::Limit,
+            "LIMIT",
+            &self.snapshot,
+            self.params,
+            &self.graph_view.query_access,
+        )?;
         Ok(projected
             .into_iter()
             .skip(skip)
@@ -973,8 +988,15 @@ impl ReadExecutor<'_, '_> {
         row: &BindingRow,
         aliases: &BTreeMap<String, Value>,
     ) -> QueryResult<Value> {
-        let expression = self.materialize_subqueries(expression, row)?;
-        expression::evaluate_with_aliases(&expression, &self.snapshot, row, self.params, aliases)
+        let expression = self.materialize_subqueries(expression, row, aliases)?;
+        expression::evaluate_with_aliases_and_access(
+            &expression,
+            &self.snapshot,
+            row,
+            self.params,
+            aliases,
+            &self.graph_view.query_access,
+        )
     }
 
     fn evaluate_group_expression(
@@ -984,13 +1006,15 @@ impl ReadExecutor<'_, '_> {
         representative: &BindingRow,
         aliases: &BTreeMap<String, Value>,
     ) -> QueryResult<Value> {
-        let expression = self.materialize_group_expression(expression, group, representative)?;
-        expression::evaluate_with_aliases(
+        let expression =
+            self.materialize_group_expression(expression, group, representative, aliases)?;
+        expression::evaluate_with_aliases_and_access(
             &expression,
             &self.snapshot,
             representative,
             self.params,
             aliases,
+            &self.graph_view.query_access,
         )
     }
 
@@ -999,9 +1023,31 @@ impl ReadExecutor<'_, '_> {
         value: &expression::Expr,
         group: &[BindingRow],
         representative: &BindingRow,
+        aliases: &BTreeMap<String, Value>,
     ) -> QueryResult<expression::Expr> {
         expression::transform_expression(value, &mut |candidate| {
             use expression::Expr;
+            if let Some(value) =
+                graph_expression::evaluate_lazy_graph_expression(candidate, &mut |nested| {
+                    self.evaluate_group_expression(nested, group, representative, aliases)
+                })?
+            {
+                return Ok(Some(Expr::Literal(value)));
+            }
+            if let Some(value) = graph_expression::evaluate_scoped_graph_expression(
+                candidate,
+                aliases,
+                &mut |nested, locals| {
+                    let local = graph_expression::scoped_binding_row(
+                        &self.snapshot,
+                        representative,
+                        locals,
+                    )?;
+                    self.evaluate_group_expression(nested, group, &local, locals)
+                },
+            )? {
+                return Ok(Some(Expr::Literal(value)));
+            }
             let replacement = match candidate {
                 Expr::Function {
                     name,
@@ -1011,7 +1057,7 @@ impl ReadExecutor<'_, '_> {
                 } if super::super::registry::is_aggregating(name) => {
                     Some(self.evaluate_aggregate(name, args, *distinct, *star, group)?)
                 }
-                _ => self.evaluate_graph_runtime_candidate(candidate, representative)?,
+                _ => self.evaluate_graph_runtime_candidate(candidate, representative, aliases)?,
             };
             Ok(replacement.map(Expr::Literal))
         })
@@ -1098,7 +1144,16 @@ impl ReadExecutor<'_, '_> {
             .output
             .values
             .iter()
-            .map(|(name, value)| Ok((name.clone(), binding_value(&self.snapshot, value)?)))
+            .map(|(name, value)| {
+                Ok((
+                    name.clone(),
+                    binding_value_with_access(
+                        &self.snapshot,
+                        value,
+                        &self.graph_view.query_access,
+                    )?,
+                ))
+            })
             .collect::<QueryResult<BTreeMap<_, _>>>()?;
         let representative = record.group.first().unwrap_or(&record.output);
         self.evaluate_group_expression(expression, &record.group, representative, &aliases)
@@ -1150,8 +1205,14 @@ impl ReadExecutor<'_, '_> {
     }
 
     fn evaluate(&mut self, expression: &expression::Expr, row: &BindingRow) -> QueryResult<Value> {
-        let expression = self.materialize_subqueries(expression, row)?;
-        expression::evaluate(&expression, &self.snapshot, row, self.params)
+        let expression = self.materialize_subqueries(expression, row, &BTreeMap::new())?;
+        expression::evaluate_with_access(
+            &expression,
+            &self.snapshot,
+            row,
+            self.params,
+            &self.graph_view.query_access,
+        )
     }
 
     fn check_interrupted(&self) -> QueryResult<()> {

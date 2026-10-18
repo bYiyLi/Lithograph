@@ -2,7 +2,7 @@
 
 [产品手册](README.md) · [Cypher 语言手册](../cypher/index.md) · [接口参考](../reference/README.md)
 
-本文适用 **v0.3.1**（`CY25-2026.08`，storage format `3`）。
+本文适用 **v0.3.2**（`CY25-2026.08`，storage format `3`）。
 
 目标：在一个新的演示库中定义业务键、字段类型与索引，并确认这些定义随图一起进入历史。已加载扩展后依次执行本页 SQL。
 

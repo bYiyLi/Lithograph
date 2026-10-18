@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
 set -eu
 
-if [ "$#" -ne 1 ]; then
-  echo "usage: scripts/phase15-provider-cache-smoke.sh <openai-compatible-provider-path>" >&2
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+  echo "usage: scripts/phase15-provider-cache-smoke.sh <openai-compatible-provider-path> [lithograph-extension-path]" >&2
   exit 2
 fi
 
@@ -42,7 +42,14 @@ ${CC:-cc} \
   $link_flags \
   -o "$probe"
 
-cargo run --locked --quiet \
-  -p lithograph-test-support \
-  --bin lithograph-phase15-provider-cache \
-  -- "$provider" "$probe"
+if [ "$#" -eq 2 ]; then
+  cargo run --locked --quiet \
+    -p lithograph-test-support \
+    --bin lithograph-phase15-provider-cache \
+    -- "$provider" "$probe" "$2"
+else
+  cargo run --locked --quiet \
+    -p lithograph-test-support \
+    --bin lithograph-phase15-provider-cache \
+    -- "$provider" "$probe"
+fi

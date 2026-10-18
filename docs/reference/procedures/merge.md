@@ -1,6 +1,6 @@
 # Merge Session Procedure
 
-适用版本：v0.3.1 · Cypher Profile：`CY25-2026.08`。
+适用版本：v0.3.2 · Cypher Profile：`CY25-2026.08`。
 
 [产品手册](../../guide/README.md) · [接口参考](../README.md) · [Procedure 索引](../procedures.md) · [Merge 操作指南](../../guide/merge.md)
 

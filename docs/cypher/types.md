@@ -2,7 +2,7 @@
 
 [语言手册](index.md) · [版本与范围](../reference/cypher-compatibility.md)
 
-**适用版本：v0.3.1，Cypher Profile：`CY25-2026.08`。** 本章说明 Cypher 查询内部的值与类型。SQLite 参数、结果中的 JSON wrapper、整数精度和解码规则见 [Value 与 Lithograph JSON](../reference/values.md)。类型的相等、比较和排序规则见 [null、相等与排序](null-and-ordering.md)。
+**适用版本：v0.3.2，Cypher Profile：`CY25-2026.08`。** 本章说明 Cypher 查询内部的值与类型。SQLite 参数、结果中的 JSON wrapper、整数精度和解码规则见 [Value 与 Lithograph JSON](../reference/values.md)。类型的相等、比较和排序规则见 [null、相等与排序](null-and-ordering.md)。
 
 <a id="value-families"></a>
 

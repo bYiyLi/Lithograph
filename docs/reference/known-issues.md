@@ -4,6 +4,8 @@
 
 适用版本：**v0.3.1** · [产品手册](../guide/README.md) · [接口参考](README.md)
 
+v0.3.2 保留 Procedure metadata 与 createStatement 完整性限制；Provider cache 首次并发初始化已修复，并通过真实多进程、最终完整源码门禁与本机包验收，见 [发布说明](../releases/v0.3.2.md)。下文保留 v0.3.1 实际制品证据与适用规避；v0.3.2 的远端及发布状态见 [Phase 18](https://github.com/bYiyLi/Lithograph/blob/main/docs/development/phases/18-query-access-controls.md#v032-release-delivery)。
+
 ## 当前版本
 
 `SHOW PROCEDURES` 的参数/结果 metadata 仍不完整：v0.3.1 中，`lithograph.branch.list` 的 argumentDescription 为空，active 被描述为 STRING，但实际返回 Boolean。范围与规避见 [DOC-V010-03](#procedure-metadata)。接口名称/signature 仍可用于发现；不要仅凭错误 metadata 自动生成返回类型绑定。
@@ -20,7 +22,9 @@ v0.3.1 的 FULLTEXT/VECTOR `createStatement` 只输出基础创建形式，不�
 
 ## v0.3.1：Provider cache 首次并发初始化
 
-**仍影响 v0.3.1 随附的 OpenAI-compatible Provider，修复版本尚未发布。** 仅当 `cache.enabled=true`，多个进程首次同时打开同一个尚未初始化的 cache path 时，一个请求可能返回 Provider `IO_ERROR`（code 2），message 为 `cache database operation failed`。两方都可能先观察到空库；取得初始化 writer 后没有重新检查另一方刚创建的 Schema，后一方创建同名表失败。cache 已初始化后的正常并发读写不涉及这个首次创建窗口。
+**影响 v0.3.1 随附的 OpenAI-compatible Provider；v0.3.2 已修复。** 仅当 `cache.enabled=true`，多个进程首次同时打开同一个尚未初始化的 cache path 时，一个请求可能返回 Provider `IO_ERROR`（code 2），message 为 `cache database operation failed`。两方都可能先观察到空库；取得初始化 writer 后没有重新检查另一方刚创建的 Schema，后一方创建同名表失败。cache 已初始化后的正常并发读写不涉及这个首次创建窗口。
+
+v0.3.2 的真实多进程永久回归、最终 quality/CI 与本机 macOS arm64 包均通过 SQLite 3.45.0 / 3.51.0 / 3.53.4 的适用验收。v0.3.1 tag、Provider 二进制与下面的历史证据保持不变，下面的串行预热规避继续适用于 v0.3.1。
 
 该问题在下载的 macOS arm64 v0.3.1 Provider / SQLite 3.51.0 上用两个进程、临时空 cache 和 150 ms 初始化锁定向复现 5/5：一个请求成功，另一个失败，最终只有成功请求的 entry；未观察到 cache 内容损坏。其它平台共享相关源码，此处不将源码推断写成逐平台复现。v0.3.0 与 v0.3.1 的 cache 实现源码未变，但本条制品证据只针对 v0.3.1。
 

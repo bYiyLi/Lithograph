@@ -1,4 +1,4 @@
-use super::{QueryError, QueryResult};
+use super::{AccessPolicy, QueryError, QueryResult};
 use crate::storage;
 use rusqlite::Connection;
 use serde_json::{Map, Value as JsonValue};
@@ -34,6 +34,7 @@ pub struct ExecutionOptions {
     pub snapshot: SnapshotSelector,
     pub graph_view: GraphViewSelector,
     pub read_only_no_external_io: bool,
+    pub access: AccessPolicy,
     pub merge_session: Option<MergeSessionSelector>,
     pub(crate) write_branch: Option<String>,
     pub(crate) author: Option<String>,
@@ -47,6 +48,7 @@ impl Default for ExecutionOptions {
             snapshot: SnapshotSelector::Current,
             graph_view: GraphViewSelector::default(),
             read_only_no_external_io: false,
+            access: AccessPolicy::default(),
             merge_session: None,
             write_branch: None,
             author: None,
@@ -71,30 +73,15 @@ impl ExecutionOptions {
         let message = optional_nullable_string(object, "message")?;
         let (snapshot, write_branch) = parse_snapshot_option(object)?;
         let graph_view = parse_graph_view_option(object)?;
-        let read_only_no_external_io = match object.get("readOnlyNoExternalIO") {
-            None => false,
-            Some(JsonValue::Bool(value)) => *value,
-            Some(_) => {
-                return Err(QueryError::invalid_argument(
-                    "options.readOnlyNoExternalIO must be a Boolean",
-                ));
-            }
-        };
+        let read_only_no_external_io = parse_read_only_option(object)?;
         let merge_session = parse_merge_session(object)?;
-        if merge_session.is_some()
-            && (object.contains_key("branch")
-                || object.contains_key("at")
-                || object.contains_key("author")
-                || object.contains_key("message"))
-        {
-            return Err(QueryError::invalid_argument(
-                "options.mergeSession is mutually exclusive with branch, at, author, and message",
-            ));
-        }
+        let access = AccessPolicy::parse(object)?;
+        validate_merge_session_context(object, merge_session.is_some())?;
         Ok(Self {
             snapshot,
             graph_view,
             read_only_no_external_io,
+            access,
             merge_session,
             write_branch,
             author,
@@ -102,6 +89,32 @@ impl ExecutionOptions {
             author_present: object.contains_key("author"),
             message_present: object.contains_key("message"),
         })
+    }
+}
+
+fn validate_merge_session_context(
+    object: &Map<String, JsonValue>,
+    has_merge_session: bool,
+) -> QueryResult<()> {
+    if has_merge_session
+        && ["branch", "at", "author", "message"]
+            .iter()
+            .any(|key| object.contains_key(*key))
+    {
+        return Err(QueryError::invalid_argument(
+            "options.mergeSession is mutually exclusive with branch, at, author, and message",
+        ));
+    }
+    Ok(())
+}
+
+fn parse_read_only_option(object: &Map<String, JsonValue>) -> QueryResult<bool> {
+    match object.get("readOnlyNoExternalIO") {
+        None => Ok(false),
+        Some(JsonValue::Bool(value)) => Ok(*value),
+        Some(_) => Err(QueryError::invalid_argument(
+            "options.readOnlyNoExternalIO must be a Boolean",
+        )),
     }
 }
 
@@ -218,6 +231,8 @@ fn validate_top_level_keys(object: &Map<String, JsonValue>) -> QueryResult<()> {
                 | "graphView"
                 | "readOnlyNoExternalIO"
                 | "mergeSession"
+                | "readAccess"
+                | "writeAccess"
         ) {
             return Err(QueryError::invalid_argument(format!(
                 "unknown execution option {key}"

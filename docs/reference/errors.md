@@ -1,6 +1,6 @@
 # Error Reference
 
-适用版本：**v0.3.1** · [产品手册](../guide/README.md) · [接口参考](README.md)
+适用版本：**v0.3.2**；ACCESS_DENIED 从 v0.3.2 新增 · [产品手册](../guide/README.md) · [接口参考](README.md)
 
 SQL 异常前缀为 `LITHOGRAPH_<CATEGORY>:`，parse/semantic 等定位信息以可选 `[line=N,column=N]` suffix 保留；调用方同时检查 SQLite primary result code，不要只匹配英语 message。
 
@@ -13,6 +13,7 @@ SQL 异常前缀为 `LITHOGRAPH_<CATEGORY>:`，parse/semantic 等定位信息以
 | `CONSTRAINT_ERROR` | 当前数据或候选状态违反约束 | 修改数据/迁移方案，不自动删除约束 |
 | `NOT_INITIALIZED` | 尚未初始化 graph | 由 provisioning 步骤显式 init |
 | `INVALID_ARGUMENT` | JSON、option、Descriptor、参数形状、调用状态不合法，或 `readOnlyNoExternalIO` 拒绝操作 | 修复调用 |
+| `ACCESS_DENIED`（v0.3.2） | readAccess/writeAccess 明确禁止的能力或写入；Search/完整版本资料依赖不可读属性 | 保留策略，调整操作范围或由可信宿主重新授权；SQLite code 为 `SQLITE_AUTH` (23) |
 | `GRAPH_VIEW_VIOLATION` | 写入越出 selector，或触及不可见依赖 | 在允许的完整边界内重建操作 |
 | `VERSION_NOT_FOUND` | Commit/Descriptor 不存在或已被 GC | 核实 databaseId、保留引用和备份 |
 | `BRANCH_NOT_FOUND` | Branch name 不存在 | 查 branch.list，不静默创建同名空分支 |
@@ -37,6 +38,8 @@ SQL 异常前缀为 `LITHOGRAPH_<CATEGORY>:`，parse/semantic 等定位信息以
 
 普通语法/参数/语义错误常见为 `SQLITE_ERROR` (1)；调用状态误用可为 `SQLITE_MISUSE` (21)。忙/锁分别可能是 `SQLITE_BUSY` (5) / `SQLITE_LOCKED` (6)。取消固定使用 `SQLITE_INTERRUPT` (9) + `INTERRUPTED`，不再归入 `RESOURCE_ERROR`。
 
+v0.3.2 的 `ACCESS_DENIED` 对应 `SQLITE_AUTH` (23)。query 属性不可见本身不报权限错误，而是按不存在返回 null/缺少 key；非法规则配置仍为 `INVALID_ARGUMENT`。
+
 资源失败可能是 NOMEM (7)、TOOBIG (18)、FULL (13)；I/O 类还包括 READONLY 等 code。不要假定某个 category 永远只对应一个 code；使用实际返回值。
 
 <a id="atomicity-after-error"></a>
@@ -58,6 +61,7 @@ category prefix 和可选尾部位置是稳定识别部分，message 用于人�
 | 情况 | 下一步 |
 | --- | --- |
 | `INVALID_ARGUMENT` 且安全选项拒绝 | 缩小 query 到允许能力；不要自动去掉安全选项重试 |
+| `ACCESS_DENIED`（v0.3.2） | 检查实际命中的查询/结果/写入能力；不要自动去掉规则重试；active transaction 失败整体 abort |
 | `BRANCH_HEAD_MOVED` / `MERGE_SESSION_CHANGED` | 重新读取对象和 revision，重新审查；不直接覆盖旧预期 |
 | `BUSY` | 先关闭泄漏 cursor/transaction，再使用宿主有上限 busy timeout/退避 |
 | active explicit transaction execution 失败 | 认为整体已自动 abort；检查实际清理结果，再建立新 transaction |

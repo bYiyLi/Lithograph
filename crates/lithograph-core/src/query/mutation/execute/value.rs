@@ -1,4 +1,5 @@
 use super::*;
+use crate::query::access::PropertyRules;
 use crate::query::spill::{
     BINDING_SPILL_BATCH_ROWS, BindingSpill, DistinctSpill, RowSpill, SortSpill, SpillOutput,
     drop_temp_table, open_spill_connection, read_output_row,
@@ -9,8 +10,9 @@ pub(super) fn evaluate_map(
     snapshot: &Snapshot<'_>,
     row: &BindingRow,
     params: &BTreeMap<String, Value>,
+    query_access: &PropertyRules,
 ) -> QueryResult<BTreeMap<String, Value>> {
-    match expression::evaluate(expression, snapshot, row, params)? {
+    match expression::evaluate_with_access(expression, snapshot, row, params, query_access)? {
         Value::Map(map) => Ok(map),
         Value::Null => Ok(BTreeMap::new()),
         _ => Err(QueryError::new(
@@ -78,6 +80,7 @@ fn set_map_property(
     key: &str,
     value: &Value,
 ) -> QueryResult<()> {
+    context.access.check_write_property(key)?;
     let next = property_from_value(value.clone())?;
     let key_id = match &next {
         Some(_) => storage::intern_property_key(context.connection, key)?,
@@ -322,15 +325,37 @@ pub(super) fn project_rows(
     rows: Vec<BindingRow>,
     projection: &WriteProjection,
     is_interrupted: &dyn Fn() -> bool,
+    query_access: &PropertyRules,
 ) -> QueryResult<Option<WriteRows>> {
     if is_aggregate_projection(projection) {
-        return project_aggregate_write_rows(snapshot, params, &rows, projection, is_interrupted);
+        return project_aggregate_write_rows(
+            snapshot,
+            params,
+            &rows,
+            projection,
+            is_interrupted,
+            query_access,
+        );
     }
     reject_mixed_aggregate_projection(projection)?;
     if projection.order.is_empty() && !projection.distinct {
-        return project_direct_rows(snapshot, params, rows, projection, is_interrupted);
+        return project_direct_rows(
+            snapshot,
+            params,
+            rows,
+            projection,
+            is_interrupted,
+            query_access,
+        );
     }
-    project_barrier_rows(snapshot, params, rows, projection, is_interrupted)
+    project_barrier_rows(
+        snapshot,
+        params,
+        rows,
+        projection,
+        is_interrupted,
+        query_access,
+    )
 }
 
 fn project_aggregate_write_rows(
@@ -339,8 +364,16 @@ fn project_aggregate_write_rows(
     rows: &[BindingRow],
     projection: &WriteProjection,
     is_interrupted: &dyn Fn() -> bool,
+    query_access: &PropertyRules,
 ) -> QueryResult<Option<WriteRows>> {
-    let rows = project_aggregate_rows(snapshot, params, rows, projection, is_interrupted)?;
+    let rows = project_aggregate_rows(
+        snapshot,
+        params,
+        rows,
+        projection,
+        is_interrupted,
+        query_access,
+    )?;
     spill_value_rows(rows)
 }
 
@@ -350,6 +383,7 @@ fn project_barrier_rows(
     rows: Vec<BindingRow>,
     projection: &WriteProjection,
     is_interrupted: &dyn Fn() -> bool,
+    query_access: &PropertyRules,
 ) -> QueryResult<Option<WriteRows>> {
     let connection = open_spill_connection()?;
     let output = if projection.order.is_empty() {
@@ -360,6 +394,7 @@ fn project_barrier_rows(
             rows,
             projection,
             is_interrupted,
+            query_access,
         )?
     } else {
         sorted_output_from_rows(
@@ -369,6 +404,7 @@ fn project_barrier_rows(
             rows,
             projection,
             is_interrupted,
+            query_access,
         )?
     };
     select_spill_output(connection, output, projection.skip, projection.limit)
@@ -381,6 +417,7 @@ fn distinct_output_from_rows(
     rows: Vec<BindingRow>,
     projection: &WriteProjection,
     is_interrupted: &dyn Fn() -> bool,
+    query_access: &PropertyRules,
 ) -> QueryResult<SpillOutput> {
     let mut spill = DistinctSpill::create(connection)?;
     for binding in rows {
@@ -391,6 +428,7 @@ fn distinct_output_from_rows(
             projection,
             is_interrupted,
             |row, _| spill.push(connection, &row),
+            query_access,
         )?;
     }
     Ok(spill.output())
@@ -403,6 +441,7 @@ fn sorted_output_from_rows(
     rows: Vec<BindingRow>,
     projection: &WriteProjection,
     is_interrupted: &dyn Fn() -> bool,
+    query_access: &PropertyRules,
 ) -> QueryResult<SpillOutput> {
     let directions = projection
         .order
@@ -418,6 +457,7 @@ fn sorted_output_from_rows(
             projection,
             is_interrupted,
             |row, keys| spill.push(connection, row, keys),
+            query_access,
         )?;
     }
     finish_sort_output(connection, spill, is_interrupted)
@@ -441,6 +481,10 @@ fn finish_sort_output(
     Ok(spill.into_output(total))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "write projection keeps the execution-local property policy explicit"
+)]
 pub(super) fn project_spilled_rows(
     main_connection: &Connection,
     snapshot_state: crate::storage::ResolvedSnapshotState,
@@ -449,6 +493,7 @@ pub(super) fn project_spilled_rows(
     rows: BindingSpill,
     projection: &WriteProjection,
     is_interrupted: &dyn Fn() -> bool,
+    query_access: &PropertyRules,
 ) -> QueryResult<Option<WriteRows>> {
     if projection.order.is_empty() && !projection.distinct && !is_aggregate_projection(projection) {
         reject_mixed_aggregate_projection(projection)?;
@@ -458,6 +503,7 @@ pub(super) fn project_spilled_rows(
             spill_connection,
             rows,
             projection,
+            query_access,
         );
     }
 
@@ -465,7 +511,14 @@ pub(super) fn project_spilled_rows(
     if is_aggregate_projection(projection) {
         let collected = rows.collect(&spill_connection)?;
         rows.abort(&spill_connection)?;
-        return project_rows(&snapshot, params, collected, projection, is_interrupted);
+        return project_rows(
+            &snapshot,
+            params,
+            collected,
+            projection,
+            is_interrupted,
+            query_access,
+        );
     }
     reject_mixed_aggregate_projection(projection)?;
     project_spilled_barrier_rows(
@@ -475,6 +528,7 @@ pub(super) fn project_spilled_rows(
         rows,
         projection,
         is_interrupted,
+        query_access,
     )
 }
 
@@ -484,6 +538,7 @@ fn project_lazy_spilled_rows(
     spill_connection: Connection,
     rows: BindingSpill,
     projection: &WriteProjection,
+    query_access: &PropertyRules,
 ) -> QueryResult<Option<WriteRows>> {
     let available = rows.len().saturating_sub(projection.skip);
     let total = projection
@@ -502,12 +557,17 @@ fn project_lazy_spilled_rows(
             snapshot_state: Box::new(snapshot_state),
             params: params.clone(),
             projection: projection.clone(),
+            query_access: Box::new(query_access.clone()),
             seen: 0,
             emitted: 0,
         }),
     }))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "write projection keeps the execution-local property policy explicit"
+)]
 fn project_spilled_barrier_rows(
     snapshot: &Snapshot<'_>,
     params: &BTreeMap<String, Value>,
@@ -515,6 +575,7 @@ fn project_spilled_barrier_rows(
     rows: BindingSpill,
     projection: &WriteProjection,
     is_interrupted: &dyn Fn() -> bool,
+    query_access: &PropertyRules,
 ) -> QueryResult<Option<WriteRows>> {
     let output_connection = open_spill_connection()?;
     let output = if projection.order.is_empty() {
@@ -526,6 +587,7 @@ fn project_spilled_barrier_rows(
             &rows,
             projection,
             is_interrupted,
+            query_access,
         )?
     } else {
         sorted_output_from_spill(
@@ -536,12 +598,17 @@ fn project_spilled_barrier_rows(
             &rows,
             projection,
             is_interrupted,
+            query_access,
         )?
     };
     rows.abort(&spill_connection)?;
     select_spill_output(output_connection, output, projection.skip, projection.limit)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "write projection keeps the execution-local property policy explicit"
+)]
 fn distinct_output_from_spill(
     output_connection: &Connection,
     snapshot: &Snapshot<'_>,
@@ -550,6 +617,7 @@ fn distinct_output_from_spill(
     rows: &BindingSpill,
     projection: &WriteProjection,
     is_interrupted: &dyn Fn() -> bool,
+    query_access: &PropertyRules,
 ) -> QueryResult<SpillOutput> {
     // #lizard forgives(parameter_count)
     let mut output = DistinctSpill::create(output_connection)?;
@@ -562,6 +630,7 @@ fn distinct_output_from_spill(
                 projection,
                 is_interrupted,
                 |row, _| output.push(output_connection, &row),
+                query_access,
             )?;
         }
         Ok(())
@@ -569,6 +638,10 @@ fn distinct_output_from_spill(
     Ok(output.output())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "write projection keeps the execution-local property policy explicit"
+)]
 fn sorted_output_from_spill(
     output_connection: &Connection,
     snapshot: &Snapshot<'_>,
@@ -577,6 +650,7 @@ fn sorted_output_from_spill(
     rows: &BindingSpill,
     projection: &WriteProjection,
     is_interrupted: &dyn Fn() -> bool,
+    query_access: &PropertyRules,
 ) -> QueryResult<SpillOutput> {
     // #lizard forgives(parameter_count)
     let directions = projection
@@ -594,6 +668,7 @@ fn sorted_output_from_spill(
                 projection,
                 is_interrupted,
                 |row, keys| output.push(output_connection, row, keys),
+                query_access,
             )?;
         }
         Ok(())
@@ -608,9 +683,10 @@ fn project_and_push(
     projection: &WriteProjection,
     is_interrupted: &dyn Fn() -> bool,
     push: impl FnOnce(Vec<Value>, Vec<Value>) -> QueryResult<()>,
+    query_access: &PropertyRules,
 ) -> QueryResult<()> {
     check_interrupted(is_interrupted)?;
-    let (row, keys) = project_binding(snapshot, params, binding, projection)?;
+    let (row, keys) = project_binding(snapshot, params, binding, projection, query_access)?;
     push(row, keys)
 }
 
@@ -620,6 +696,7 @@ fn project_direct_rows(
     rows: Vec<BindingRow>,
     projection: &WriteProjection,
     is_interrupted: &dyn Fn() -> bool,
+    query_access: &PropertyRules,
 ) -> QueryResult<Option<WriteRows>> {
     let connection = open_spill_connection()?;
     let mut spill = RowSpill::create(&connection)?;
@@ -631,7 +708,7 @@ fn project_direct_rows(
         if emitted >= limit {
             break;
         }
-        let (row, _) = project_binding(snapshot, params, &binding, projection)?;
+        let (row, _) = project_binding(snapshot, params, &binding, projection, query_access)?;
         if seen < projection.skip {
             seen = seen.saturating_add(1);
             continue;
@@ -780,7 +857,13 @@ impl ProjectedWriteRows {
                 self.seen = self.seen.saturating_add(1);
                 continue;
             }
-            let (row, _) = project_binding(snapshot, &self.params, &binding, &self.projection)?;
+            let (row, _) = project_binding(
+                snapshot,
+                &self.params,
+                &binding,
+                &self.projection,
+                &self.query_access,
+            )?;
             self.after = sequence;
             self.seen = self.seen.saturating_add(1);
             self.emitted = self.emitted.saturating_add(1);
@@ -795,6 +878,7 @@ pub(crate) fn materialize_binding_rows_to_spill(
     columns: &[String],
     rows: Vec<BindingRow>,
     is_interrupted: &dyn Fn() -> bool,
+    query_access: &PropertyRules,
 ) -> QueryResult<Option<WriteRows>> {
     let connection = open_spill_connection()?;
     let mut spill = RowSpill::create(&connection)?;
@@ -803,9 +887,10 @@ pub(crate) fn materialize_binding_rows_to_spill(
         let values = columns
             .iter()
             .map(|column| {
-                expression::binding_value(
+                expression::binding_value_with_access(
                     snapshot,
                     row.values.get(column).unwrap_or(&BindingValue::Null),
+                    query_access,
                 )
             })
             .collect::<QueryResult<Vec<_>>>()?;
@@ -842,18 +927,25 @@ fn project_aggregate_rows(
     rows: &[BindingRow],
     projection: &WriteProjection,
     is_interrupted: &dyn Fn() -> bool,
+    query_access: &PropertyRules,
 ) -> QueryResult<Vec<Vec<Value>>> {
     let mut counts = vec![0_i64; projection.projections.len()];
     for row in rows {
         check_interrupted(is_interrupted)?;
         for (index, item) in projection.projections.iter().enumerate() {
-            if expression::count_contributes(&item.expression, snapshot, row, params)? {
+            if expression::count_contributes_with_access(
+                &item.expression,
+                snapshot,
+                row,
+                params,
+                query_access,
+            )? {
                 counts[index] = counts[index].saturating_add(1);
             }
         }
     }
     let projected = counts.into_iter().map(Value::Integer).collect::<Vec<_>>();
-    validate_aggregate_order(snapshot, params, projection, &projected)?;
+    validate_aggregate_order(snapshot, params, projection, &projected, query_access)?;
     if projection.skip > 0 || projection.limit == Some(0) {
         Ok(Vec::new())
     } else {
@@ -866,6 +958,7 @@ fn validate_aggregate_order(
     params: &BTreeMap<String, Value>,
     projection: &WriteProjection,
     projected: &[Value],
+    query_access: &PropertyRules,
 ) -> QueryResult<()> {
     let aliases = projection
         .projections
@@ -887,12 +980,13 @@ fn validate_aggregate_order(
                 "Phase 05 aggregate ORDER BY supports projected count expressions, their aliases, and constant expressions only",
             ));
         }
-        let _ = expression::evaluate_with_aliases(
+        let _ = expression::evaluate_with_aliases_and_access(
             &item.expression,
             snapshot,
             &empty_binding,
             params,
             &aliases,
+            query_access,
         )?;
     }
     Ok(())
@@ -967,11 +1061,20 @@ fn project_binding(
     params: &BTreeMap<String, Value>,
     binding: &BindingRow,
     projection: &WriteProjection,
+    query_access: &PropertyRules,
 ) -> QueryResult<(Vec<Value>, Vec<Value>)> {
     let row = projection
         .projections
         .iter()
-        .map(|item| expression::evaluate(&item.expression, snapshot, binding, params))
+        .map(|item| {
+            expression::evaluate_with_access(
+                &item.expression,
+                snapshot,
+                binding,
+                params,
+                query_access,
+            )
+        })
         .collect::<QueryResult<Vec<_>>>()?;
     let aliases = projection
         .projections
@@ -983,7 +1086,14 @@ fn project_binding(
         .order
         .iter()
         .map(|item| {
-            expression::evaluate_with_aliases(&item.expression, snapshot, binding, params, &aliases)
+            expression::evaluate_with_aliases_and_access(
+                &item.expression,
+                snapshot,
+                binding,
+                params,
+                &aliases,
+                query_access,
+            )
         })
         .collect::<QueryResult<Vec<_>>>()?;
     Ok((row, keys))

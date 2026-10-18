@@ -1,5 +1,6 @@
 use super::*;
 
+mod context;
 mod delete;
 mod delta;
 mod matcher;
@@ -29,110 +30,9 @@ struct MutationContext<'connection, 'query> {
     base_commit: HashId,
     params: &'query BTreeMap<String, Value>,
     graph_view_selector: &'query GraphViewSelector,
+    access: &'query super::super::access::AccessPolicy,
     delta: DeltaBuilder,
     global_bindings: BindingRow,
-}
-
-impl<'connection, 'query> MutationContext<'connection, 'query> {
-    fn new(
-        connection: &'connection Connection,
-        base_commit: HashId,
-        params: &'query BTreeMap<String, Value>,
-        graph_view_selector: &'query GraphViewSelector,
-    ) -> QueryResult<Self> {
-        let base = Snapshot::resolve(connection, base_commit)?;
-        Ok(Self {
-            connection,
-            staged: base.clone(),
-            base,
-            base_commit,
-            params,
-            graph_view_selector,
-            delta: DeltaBuilder::default(),
-            global_bindings: BindingRow::default(),
-        })
-    }
-
-    fn staged_snapshot(&self) -> QueryResult<Snapshot<'connection>> {
-        Ok(self.staged.clone())
-    }
-
-    fn set_node(&mut self, id: i64, current: bool) -> QueryResult<()> {
-        self.delta.set_node(&self.base, id, current)?;
-        let mut layer = LayerBuilder::default();
-        if current {
-            layer.add_node(id)?;
-        } else {
-            layer.remove_node(id)?;
-        }
-        self.staged.apply_layer(&layer)?;
-        Ok(())
-    }
-
-    fn set_label(&mut self, node_id: i64, label_id: i64, current: bool) -> QueryResult<()> {
-        self.delta
-            .set_label(&self.base, node_id, label_id, current)?;
-        let mut layer = LayerBuilder::default();
-        if current {
-            layer.add_label(node_id, label_id)?;
-        } else {
-            layer.remove_label(node_id, label_id)?;
-        }
-        self.staged.apply_layer(&layer)?;
-        Ok(())
-    }
-
-    fn set_relationship(
-        &mut self,
-        id: i64,
-        current: Option<RelationshipRecord>,
-    ) -> QueryResult<()> {
-        let previous = self.staged.relationship(id)?;
-        self.delta.set_relationship(&self.base, id, current)?;
-        let mut layer = LayerBuilder::default();
-        match current {
-            Some(record) => layer.add_relationship(record)?,
-            None => {
-                if let Some(record) = previous {
-                    layer.remove_relationship(record)?;
-                }
-            }
-        }
-        self.staged.apply_layer(&layer)?;
-        Ok(())
-    }
-
-    fn set_property(
-        &mut self,
-        owner_kind: OwnerKind,
-        owner_id: i64,
-        key_id: i64,
-        current: Option<PropertyValue>,
-    ) -> QueryResult<()> {
-        self.delta
-            .set_property(&self.base, owner_kind, owner_id, key_id, current.clone())?;
-        let mut layer = LayerBuilder::default();
-        match current {
-            Some(value) => layer.set_property(owner_kind, owner_id, key_id, value)?,
-            None => layer.remove_property(owner_kind, owner_id, key_id)?,
-        }
-        self.staged.apply_layer(&layer)?;
-        Ok(())
-    }
-
-    fn graph_view(&self) -> QueryResult<ResolvedGraphView> {
-        ResolvedGraphView::resolve(self.connection, self.graph_view_selector)
-    }
-
-    fn validate_view(&self, touched: &TouchedElements) -> QueryResult<()> {
-        validate_clause_view(
-            self.connection,
-            self.base_commit,
-            &self.delta,
-            self.graph_view_selector,
-            touched,
-        )
-    }
 }
 
 pub(crate) fn execute_write(
@@ -143,7 +43,13 @@ pub(crate) fn execute_write(
     metrics: &mut QueryMetrics,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<WriteOutcome> {
-    let mut context = MutationContext::new(connection, base_commit, params, &prepared.graph_view)?;
+    let mut context = MutationContext::new(
+        connection,
+        base_commit,
+        params,
+        &prepared.graph_view,
+        &prepared.access,
+    )?;
     let spill_connection = open_spill_connection()?;
     let mut rows = BindingSpill::from_rows(&spill_connection, &[BindingRow::default()])?;
     for clause in &prepared.clauses {
@@ -207,6 +113,7 @@ fn finish_spilled_write(
             rows,
             projection,
             is_interrupted,
+            &context.access.read.query,
         )?,
         None => {
             rows.abort(&spill_connection)?;
@@ -588,8 +495,13 @@ fn evaluate_delete_targets(
         .map(|row| {
             let mut targets = BindingRow::default();
             for (variable, expression) in variables.iter().zip(expressions) {
-                let value =
-                    expression::evaluate(expression, &state.clause_input, row, context.params)?;
+                let value = expression::evaluate_with_access(
+                    expression,
+                    &state.clause_input,
+                    row,
+                    context.params,
+                    &context.access.read.query,
+                )?;
                 targets.insert(
                     variable.clone(),
                     expression::binding_from_value(&state.clause_input, value)?,
@@ -783,6 +695,9 @@ fn create_node(
     clause_input: &Snapshot<'_>,
     touched: &mut TouchedElements,
 ) -> QueryResult<i64> {
+    if !context.access.write.allow_create {
+        return Err(QueryError::access_denied("Node creation is not allowed"));
+    }
     let id = storage::allocate_node_id(context.connection)?;
     context.set_node(id, true)?;
     touched.nodes.insert(id);
@@ -812,7 +727,13 @@ fn apply_create_properties(
     let Some(properties) = properties else {
         return Ok(());
     };
-    let map = evaluate_map(properties, clause_input, row, context.params)?;
+    let map = evaluate_map(
+        properties,
+        clause_input,
+        row,
+        context.params,
+        &context.access.read.query,
+    )?;
     set_new_property_map(context, owner_kind, owner_id, &map)
 }
 
@@ -823,6 +744,7 @@ fn set_new_property_map(
     map: &BTreeMap<String, Value>,
 ) -> QueryResult<()> {
     for (key, value) in map {
+        context.access.check_write_property(key)?;
         let Some(value) = property_from_value(value.clone())? else {
             continue;
         };
@@ -851,8 +773,17 @@ fn add_node_labels(
             })
             .collect()
     } else {
-        resolve_write_names(labels, clause_input, row, context.params)?
+        resolve_write_names(
+            labels,
+            clause_input,
+            row,
+            context.params,
+            &context.access.read.query,
+        )?
     };
+    if !resolved.is_empty() {
+        context.require_label_changes()?;
+    }
     for label in resolved {
         let label_id = storage::intern_label(context.connection, &label)?;
         context.set_label(id, label_id, true)?;
@@ -881,10 +812,16 @@ fn create_relationship(
         clause_input,
         row,
         context.params,
+        &context.access.read.query,
     )?;
     if relationship_types.len() != 1 {
         return Err(QueryError::semantic(
             "dynamic Relationship Type expression must produce exactly one name",
+        ));
+    }
+    if !context.access.write.allow_create {
+        return Err(QueryError::access_denied(
+            "Relationship creation is not allowed",
         ));
     }
     let id = storage::allocate_relationship_id(context.connection)?;
@@ -1006,8 +943,21 @@ fn set_single_property(
     touched: &mut TouchedElements,
 ) -> QueryResult<()> {
     let (owner_kind, id) = visible_owner(&context.staged, clause_input, row, variable, graph_view)?;
-    let key = resolve_property_key(key, &context.staged, row, context.params)?;
-    let value = expression::evaluate(value, &context.staged, row, context.params)?;
+    let key = resolve_property_key(
+        key,
+        &context.staged,
+        row,
+        context.params,
+        &context.access.read.query,
+    )?;
+    context.access.check_write_property(&key)?;
+    let value = expression::evaluate_with_access(
+        value,
+        &context.staged,
+        row,
+        context.params,
+        &context.access.read.query,
+    )?;
     let next = property_from_value(value)?;
     let key_id = match &next {
         Some(_) => storage::intern_property_key(context.connection, &key)?,
@@ -1040,7 +990,13 @@ fn set_property_map_item(
     touched: &mut TouchedElements,
 ) -> QueryResult<()> {
     let (owner_kind, id) = visible_owner(staged, clause_input, row, variable, graph_view)?;
-    let map = evaluate_map(value, staged, row, context.params)?;
+    let map = evaluate_map(
+        value,
+        staged,
+        row,
+        context.params,
+        &context.access.read.query,
+    )?;
     set_property_map(
         context,
         staged,
@@ -1077,7 +1033,13 @@ fn mutate_labels(
     let id = binding_node(row, variable)?;
     require_visible_owner(graph_view, clause_input, staged, row, variable)?;
     let existing = staged.labels(id)?;
-    for label in resolve_write_names(labels, staged, row, context.params)? {
+    for label in resolve_write_names(
+        labels,
+        staged,
+        row,
+        context.params,
+        &context.access.read.query,
+    )? {
         let label_id = match mutation {
             LabelMutation::Add => storage::intern_label(context.connection, &label)?,
             LabelMutation::Remove => {
@@ -1167,7 +1129,8 @@ fn remove_property(
     touched: &mut TouchedElements,
 ) -> QueryResult<()> {
     let (owner_kind, id) = visible_owner(staged, clause_input, row, variable, graph_view)?;
-    let key = resolve_property_key(key, staged, row, context.params)?;
+    let key = resolve_property_key(key, staged, row, context.params, &context.access.read.query)?;
+    context.access.check_write_property(&key)?;
     let Some(key_id) = storage::find_property_key(context.connection, &key)? else {
         return Ok(());
     };
@@ -1183,11 +1146,13 @@ fn resolve_property_key(
     snapshot: &Snapshot<'_>,
     row: &BindingRow,
     params: &BTreeMap<String, Value>,
+    query_access: &super::super::access::PropertyRules,
 ) -> QueryResult<String> {
     match key {
         WritePropertyKey::Static(key) => Ok(key.clone()),
         WritePropertyKey::Dynamic(expression) => {
-            match expression::evaluate(expression, snapshot, row, params)? {
+            match expression::evaluate_with_access(expression, snapshot, row, params, query_access)?
+            {
                 Value::String(key) if !key.is_empty() => Ok(key),
                 Value::String(_) => {
                     Err(QueryError::semantic("dynamic property key cannot be empty"))
@@ -1223,7 +1188,13 @@ fn merge_one(
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<Vec<BindingRow>> {
     let staged = context.staged_snapshot()?;
-    validate_merge_pattern_properties(&staged, &row, &merge.pattern, context.params)?;
+    validate_merge_pattern_properties(
+        &staged,
+        &row,
+        &merge.pattern,
+        context.params,
+        &context.access.read.query,
+    )?;
     let match_graph_view = context.graph_view()?;
     let matches = match_pattern(
         context.connection,
@@ -1261,6 +1232,7 @@ fn validate_merge_pattern_properties(
     row: &BindingRow,
     pattern: &WritePatternPart,
     params: &BTreeMap<String, Value>,
+    query_access: &super::super::access::PropertyRules,
 ) -> QueryResult<()> {
     let expressions = pattern
         .nodes
@@ -1273,7 +1245,7 @@ fn validate_merge_pattern_properties(
                 .filter_map(|relationship| relationship.properties.as_ref()),
         );
     for expression in expressions {
-        for (key, value) in evaluate_map(expression, snapshot, row, params)? {
+        for (key, value) in evaluate_map(expression, snapshot, row, params, query_access)? {
             if matches!(value, Value::Null) {
                 return Err(QueryError::semantic(format!(
                     "MERGE property {key:?} cannot be null"

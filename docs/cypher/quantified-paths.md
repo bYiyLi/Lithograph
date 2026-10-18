@@ -2,7 +2,7 @@
 
 [语言手册](index.md) · [版本与范围](../reference/cypher-compatibility.md)
 
-适用于 Lithograph v0.3.1，Cypher Profile `CY25-2026.08`。本章说明一段关系或一个子模式重复零次或多次时的匹配、变量和结果；固定元素语法见 [Patterns](patterns.md)。
+适用于 Lithograph v0.3.2，Cypher Profile `CY25-2026.08`。本章说明一段关系或一个子模式重复零次或多次时的匹配、变量和结果；固定元素语法见 [Patterns](patterns.md)。
 
 <a id="quantified-forms"></a>
 

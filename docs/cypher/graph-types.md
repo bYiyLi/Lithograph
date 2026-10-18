@@ -1,6 +1,6 @@
 # Graph Type
 
-适用 Lithograph v0.3.1、`CY25-2026.08`。[Cypher 手册](index.md) · [兼容范围](../reference/cypher-compatibility.md) · [Schema 操作指南](../guide/schema-and-indexes.md)
+适用 Lithograph v0.3.2、`CY25-2026.08`。[Cypher 手册](index.md) · [兼容范围](../reference/cypher-compatibility.md) · [Schema 操作指南](../guide/schema-and-indexes.md)
 
 Graph Type 声明节点和关系的类型、属性类型、必填字段、隐含 Label、端点要求及键。它是 open Schema：只约束声明覆盖的元素，不禁止其它 Label、Relationship Type 或未声明的属性。空库的 Graph Type 为 `{}`。
 

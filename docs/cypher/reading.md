@@ -2,7 +2,7 @@
 
 [语言手册](index.md) · [版本与范围](../reference/cypher-compatibility.md)
 
-本文适用于 Lithograph v0.3.1、`CY25-2026.08`。基础行规则见 [查询模型](query-model.md)。以下建图块只需在空图执行一次；本页涉及人物的示例均从该数据开始，各示例互相独立。
+本文适用于 Lithograph v0.3.2、`CY25-2026.08`。基础行规则见 [查询模型](query-model.md)。以下建图块只需在空图执行一次；本页涉及人物的示例均从该数据开始，各示例互相独立。
 
 <!-- example: foundation-reading-data -->
 ```cypher

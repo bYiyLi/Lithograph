@@ -95,6 +95,8 @@ args = [
     "tests/sql_surface_smoke.c",
     "tests/sql_scale_smoke.c",
     "tests/provider_cache_probe.c",
+    "tests/phase18_external_access_smoke.c",
+    "tests/phase18_external_access_version.c",
     "tests/phase15_streaming_resource.c",
     "tests/openai_compatible_provider_smoke.c",
     "tests/phase13_semantic_concurrency.c",
@@ -210,10 +212,13 @@ LITHOGRAPH_PHASE11_SEARCH_PROGRESS=256 \
   cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase11-search
 cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase10-tck
 scripts/sql-surface-smoke.sh "$extension"
+python3 -B tests/phase18_access_sql.py "$extension"
+python3 -B tests/phase18_load_csv_access.py "$extension"
+scripts/phase18-external-access-smoke.sh "$extension"
 scripts/synthetic-embedding-provider-smoke.sh "$synthetic_provider"
 python3 scripts/check-extension-artifact.py "$openai_provider" --provider
 scripts/openai-compatible-provider-smoke.sh "$openai_provider"
-scripts/phase15-provider-cache-smoke.sh "$openai_provider"
+scripts/phase15-provider-cache-smoke.sh "$openai_provider" "$extension"
 cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase13 -- \
   "$extension" "$synthetic_provider" "$openai_provider"
 

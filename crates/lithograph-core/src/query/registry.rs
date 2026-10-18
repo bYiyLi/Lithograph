@@ -2,6 +2,9 @@
 
 use crate::cypher::{AGGREGATING_FUNCTIONS, SCALAR_FUNCTIONS};
 
+mod effects;
+pub(crate) use effects::procedure_effects;
+
 pub(crate) fn is_function(name: &str) -> bool {
     crate::cypher::is_builtin_function(name)
 }

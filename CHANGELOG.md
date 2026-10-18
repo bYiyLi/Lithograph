@@ -4,6 +4,28 @@ Lithograph 的用户可见版本变化记录在此文件。版本遵循 Semantic
 
 ## Unreleased
 
+## 0.3.2
+
+完整变化见 [发布说明](docs/releases/v0.3.2.md)；提交、远端验收与正式发布结果见 [Phase 18 发布交付记录](https://github.com/bYiyLi/Lithograph/blob/main/docs/development/phases/18-query-access-controls.md#v032-release-delivery)。
+
+### Added
+
+- query-local `readAccess` / `writeAccess`：查询属性可见性、公开图对象属性过滤、属性及操作写入限制，支持精确名/前缀/regex、函数与能力禁令；缺省不额外限制。
+- `ACCESS_DENIED` category 对应 SQLite `SQLITE_AUTH`，scalar/rows、显式事务和独立/并发批次共用访问规则。
+
+### Fixed
+
+- Canonical graph/Schema 状态比较保留 signed zero、统一 canonical NaN；修复 Squash 重组保护字段、无关 Revert/Patch before 错误，以及 Diff/Merge/Rebase 和 opaque Schema definition 的相关路径。
+- reduce 的规范函数识别、字符串插值内 COUNT/COLLECT/EXISTS 的图求值与策略传播、lazy branch 三值逻辑和列表/分组作用域；插值保留外联、版本组合与事务生命周期限制。
+- 补齐保护写入、版本权限交集、流式失败/提前关闭/长度错误、Graph View、索引/Search、Provider/tokenizer 和 warm-cache 权限组合的回归。
+- OpenAI-compatible Provider 首次并发初始化空 cache 时在 writer 仲裁后重查并验证 Schema，避免重复建表失败；严格拒绝非 Provider table/view/index/trigger 与 `sqlitex` 用户对象，保留合法 warm hit 不要求 writer 的行为。
+
+### Compatibility and validation
+
+- `CY25-2026.08`、storage format 3、既有 Commit identity 与 Provider SPI V1 不变；v0.3.1 的固定 tag/资产不变。
+- 包含 Provider 修复的最终本机 quality/CI 均通过，各含 112 项 Core 回归；新 macOS arm64 本机包完整 smoke 与 canonical SQL 5/5 通过。后续远端与正式发布结果由上述 main Phase 18 记录维护。
+- Provider 初始化修复已通过真实多进程旧红→新绿；SQLite 3.45.0 / 3.51.0 / 3.53.4 各 15 项 cache 检查通过，cache schema/key version、Provider SPI 与 graph storage 不变。已发布 v0.3.1 继续使用串行预热或默认禁用 cache 的规避。
+
 ## 0.3.1 - 2026-10-16
 
 ### Added

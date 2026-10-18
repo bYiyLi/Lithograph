@@ -316,13 +316,14 @@ fn delete_node(
     id: i64,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<()> {
+    context.require_delete()?;
     for label_id in staged.labels(id)? {
         check_interrupted(is_interrupted)?;
-        context.set_label(id, label_id, false)?;
+        context.set_label_for_delete(id, label_id, false)?;
     }
     for (key_id, _) in staged.properties(OwnerKind::Node, id)? {
         check_interrupted(is_interrupted)?;
-        context.set_property(OwnerKind::Node, id, key_id, None)?;
+        context.set_property_for_delete(OwnerKind::Node, id, key_id, None)?;
     }
     if staged.node_exists(id)? {
         context.set_node(id, false)?;
@@ -336,9 +337,10 @@ fn delete_relationship(
     record: RelationshipRecord,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<()> {
+    context.require_delete()?;
     for (key_id, _) in staged.properties(OwnerKind::Relationship, record.id)? {
         check_interrupted(is_interrupted)?;
-        context.set_property(OwnerKind::Relationship, record.id, key_id, None)?;
+        context.set_property_for_delete(OwnerKind::Relationship, record.id, key_id, None)?;
     }
     if staged.relationship(record.id)?.is_some() {
         context.set_relationship(record.id, None)?;

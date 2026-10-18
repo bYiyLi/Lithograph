@@ -2,7 +2,7 @@
 
 [产品手册](../guide/README.md) · [接口参考](README.md) · [版本 Procedure](procedures/versioning.md) · [Merge Procedure](procedures/merge.md)
 
-适用版本：**Lithograph v0.3.1**，storage format `3`。本页定义公开 Version Descriptor、Commit metadata、Commit Data、History cursor、Patch、Merge Session/conflict/resolution 和 rebase mapping 的字段。调用参数、状态变化与错误分别由 [Version Procedure](procedures/versioning.md) 和 [Merge Procedure](procedures/merge.md) 说明。
+适用版本：**Lithograph v0.3.2**，storage format `3`。本页定义公开 Version Descriptor、Commit metadata、Commit Data、History cursor、Patch、Merge Session/conflict/resolution 和 rebase mapping 的字段。调用参数、状态变化与错误分别由 [Version Procedure](procedures/versioning.md) 和 [Merge Procedure](procedures/merge.md) 说明。
 
 代码框中的 `<...>` 是格式说明，不是可以直接传入的字面值。API 返回的是 typed Cypher value；通过 SQLite JSON surface 传输时继续使用 [Values 编码](values.md)，不能把所有字段转成字符串。
 

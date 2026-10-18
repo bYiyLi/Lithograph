@@ -1,6 +1,6 @@
 # SQL API 与结果合同
 
-适用版本：**v0.3.1** · [产品手册](../guide/README.md) · [接口参考](README.md)
+适用版本：**v0.3.2** · [产品手册](../guide/README.md) · [接口参考](README.md)
 
 SQL 入口作用于加载扩展的 connection 的 `main` database；ATTACH 的其它 schema 不参与。查询/参数/options 必须为 UTF-8 TEXT；省略的可选 JSON 参数等价 `'{}'`，SQL `NULL` 不表示省略。应用使用 SQLite statement 参数绑定传递这些文本。
 
@@ -44,7 +44,7 @@ fresh/current storage format 为 `3`；更高格式报 `FORMAT_TOO_NEW`，不能
 
 ## `lithograph_validate(query)`
 
-验证 Cypher parsing 与 static semantics，不执行图操作。它不接受 params/options，因此不会验证 `readOnlyNoExternalIO` policy，也不能证明实际参数、Schema、Constraint、数据、资源和 I/O 来源可用。调用仍要求图已初始化。成功返回 `{"valid":true,"cypherProfile":"CY25-2026.08"}`；失败通过 SQLite error channel，没有 `{valid:false}` 成功 envelope。
+验证 Cypher parsing 与 static semantics，不执行图操作。它不接受 params/options，因此不会验证 `readOnlyNoExternalIO` 或后续 `readAccess` / `writeAccess` policy，也不能证明实际参数、Schema、Constraint、数据、资源和 I/O 来源可用。调用仍要求图已初始化。成功返回 `{"valid":true,"cypherProfile":"CY25-2026.08"}`；失败通过 SQLite error channel，没有 `{valid:false}` 成功 envelope。
 
 <a id="integrity-check"></a>
 

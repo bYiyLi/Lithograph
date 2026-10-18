@@ -2,7 +2,7 @@
 
 [产品手册](README.md) · [Cypher 语言手册](../cypher/index.md) · [接口参考](../reference/README.md)
 
-本文适用 **v0.3.1**（`CY25-2026.08`，storage format `3`）。
+本文适用 **v0.3.2**（`CY25-2026.08`，storage format `3`）。
 
 v0.3.1 的 **application-facing execution 统一走 SQLite SQL**。应用不需要也不应解析 Lithograph shared library 的 query symbols；只需要使用自己的 SQLite driver/`sqlite3*` 加载 extension 并执行 SQL。
 

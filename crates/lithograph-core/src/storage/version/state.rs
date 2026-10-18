@@ -298,7 +298,9 @@ fn append_property_delta(
     for (slot, before_value) in &before.properties {
         match after.properties.get(slot) {
             None => layer.remove_property(slot.0, slot.1, slot.2)?,
-            Some(after_value) if after_value != before_value => {
+            Some(after_value)
+                if after_value.canonical_bytes()? != before_value.canonical_bytes()? =>
+            {
                 layer.set_property(slot.0, slot.1, slot.2, after_value.clone())?;
             }
             Some(_) => {}

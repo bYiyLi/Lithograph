@@ -111,7 +111,10 @@ if [ -n "$extension" ]; then
   python3 scripts/check-extension-artifact.py "$extension"
   python3 scripts/check-extension-artifact.py "$openai_provider" --provider
   scripts/sql-surface-smoke.sh "$extension"
-  scripts/phase15-provider-cache-smoke.sh "$openai_provider"
+  python3 -B tests/phase18_access_sql.py "$extension"
+  python3 -B tests/phase18_load_csv_access.py "$extension"
+  scripts/phase18-external-access-smoke.sh "$extension"
+  scripts/phase15-provider-cache-smoke.sh "$openai_provider" "$extension"
 
   # The language examples come from Markdown, with assertions and setup references
   # in sidecars. Synthetic embedding exercises the real dual-extension boundary

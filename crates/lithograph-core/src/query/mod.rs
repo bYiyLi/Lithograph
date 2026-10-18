@@ -2,6 +2,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod access;
 mod completeness;
 mod error;
 mod expression;
@@ -23,6 +24,7 @@ mod stream;
 mod transaction;
 mod version;
 
+pub use access::{AccessPolicy, PropertyRules, ReadAccess, WriteAccess};
 pub use error::{QueryError, QueryErrorKind, QueryResult};
 pub use options::{ExecutionOptions, GraphViewSelector, MergeSessionSelector, SnapshotSelector};
 pub use plan::{

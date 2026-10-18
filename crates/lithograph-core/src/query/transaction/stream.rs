@@ -251,7 +251,8 @@ impl TransactionProgramStream {
         };
 
         let prefix_snapshot = Snapshot::resolve(connection, initial_commit)?;
-        let prefix_graph_view = ResolvedGraphView::resolve(connection, &options.graph_view)?;
+        let prefix_graph_view = ResolvedGraphView::resolve(connection, &options.graph_view)?
+            .with_query_access(options.access.read.query.clone());
         let Some(prefix) = program::build_program_prefix_stream(
             connection,
             program,
@@ -623,7 +624,8 @@ impl TransactionProgramStream {
     ) -> QueryResult<()> {
         let snapshot = Snapshot::resolve(connection, self.commit)?;
         let graph_view =
-            ResolvedGraphView::resolve(connection, &transaction_options(program)?.graph_view)?;
+            ResolvedGraphView::resolve(connection, &transaction_options(program)?.graph_view)?
+                .with_query_access(transaction_options(program)?.access.read.query.clone());
         let spill_connection = open_spill_connection()?;
         let mut spill = RowSpill::create(&spill_connection)?;
         if self.suffix.is_empty() {
@@ -633,6 +635,7 @@ impl TransactionProgramStream {
                 &spill_connection,
                 &mut spill,
                 is_interrupted,
+                &graph_view.query_access,
             )?;
         } else {
             let Some(mut suffix) = program::build_program_suffix_stream(
@@ -671,12 +674,13 @@ impl TransactionProgramStream {
         spill_connection: &Connection,
         spill: &mut RowSpill,
         is_interrupted: &dyn Fn() -> bool,
+        query_access: &crate::query::access::PropertyRules,
     ) -> QueryResult<()> {
         for row in rows {
             check_interrupted(is_interrupted)?;
             spill.push(
                 spill_connection,
-                &materialize_binding_row(snapshot, &self.call_columns, &row)?,
+                &materialize_binding_row(snapshot, &self.call_columns, &row, query_access)?,
             )?;
         }
         Ok(())
@@ -768,6 +772,7 @@ impl TransactionProgramStream {
             base_commit,
             branch: &options.branch,
             graph_view: &options.graph_view,
+            access: &options.access,
             author: options.author.as_deref(),
             message: options.message.as_deref(),
             params,
@@ -803,7 +808,8 @@ impl TransactionProgramStream {
     ) -> QueryResult<(Connection, BindingSpill)> {
         let snapshot = Snapshot::resolve(connection, self.commit)?;
         let graph_view =
-            ResolvedGraphView::resolve(connection, &transaction_options(program)?.graph_view)?;
+            ResolvedGraphView::resolve(connection, &transaction_options(program)?.graph_view)?
+                .with_query_access(transaction_options(program)?.access.read.query.clone());
         let Some(mut stream) = program::build_program_spilled_suffix_stream(
             connection,
             program,
@@ -865,7 +871,8 @@ impl TransactionProgramStream {
                     QueryError::internal("transaction program is missing transaction options")
                 })?
                 .graph_view,
-        )?;
+        )?
+        .with_query_access(transaction_options(program)?.access.read.query.clone());
         let mut rows = Vec::with_capacity(max_rows);
         let mut ended = false;
         while rows.len() < max_rows {
@@ -926,13 +933,15 @@ fn materialize_binding_row(
     snapshot: &Snapshot<'_>,
     columns: &[String],
     row: &BindingRow,
+    query_access: &crate::query::access::PropertyRules,
 ) -> QueryResult<Vec<Value>> {
     columns
         .iter()
         .map(|column| {
-            expression::binding_value(
+            expression::binding_value_with_access(
                 snapshot,
                 row.values.get(column).unwrap_or(&BindingValue::Null),
+                query_access,
             )
         })
         .collect()

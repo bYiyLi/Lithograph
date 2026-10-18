@@ -8,6 +8,9 @@ use crate::storage::{
     SchemaState, Snapshot,
 };
 
+use super::canonical::{
+    same_index_definition, same_optional_value, same_property_value, same_value,
+};
 use super::{
     ProcedureRow, commit_value, ensure_target_branch_head, map_target_branch_error, now_micros,
     resolve_descriptor_at, row, target_branch,
@@ -16,10 +19,15 @@ use crate::query::mutation::property_from_value;
 use crate::query::options::ExecutionOptions;
 use crate::query::{QueryError, QueryErrorKind, QueryResult};
 
-pub(super) fn diff(connection: &Connection, args: Vec<Value>) -> QueryResult<Vec<ProcedureRow>> {
+pub(super) fn diff(
+    connection: &Connection,
+    args: Vec<Value>,
+    options: &ExecutionOptions,
+) -> QueryResult<Vec<ProcedureRow>> {
     let before_commit = resolve_descriptor_at(connection, &args, 0, "before")?;
     let after_commit = resolve_descriptor_at(connection, &args, 1, "after")?;
     let patch = diff_commits(connection, before_commit, after_commit)?;
+    super::access::check_patch_read(&patch, &options.access.read.query)?;
     Ok(vec![row([("patch", patch)])])
 }
 
@@ -38,6 +46,15 @@ pub(super) fn apply(
     apply_patch_to_state(connection, &mut state, patch)?;
     let base = storage::load_snapshot_state(connection, pinned_head)?;
     let layer = storage::layer_between(&base, &state)?;
+    validate_patch_access(
+        connection,
+        pinned_head,
+        patch,
+        &base,
+        &state,
+        &layer,
+        &options.access,
+    )?;
     validate_candidate(connection, pinned_head, &layer, &state.schema)?;
     let schema_hash = state.schema.persist(connection)?;
     let metadata = CommitMetadata {
@@ -56,6 +73,23 @@ pub(super) fn apply(
     )
     .map_err(|error| map_target_branch_error(error, &branch))?;
     Ok(vec![row([("commit", commit_value(commit))])])
+}
+
+fn validate_patch_access(
+    connection: &Connection,
+    pinned_head: HashId,
+    patch: &Value,
+    base: &storage::SnapshotState,
+    state: &storage::SnapshotState,
+    layer: &storage::LayerBuilder,
+    access: &crate::query::AccessPolicy,
+) -> QueryResult<()> {
+    if !access.write.properties.is_empty() {
+        let after = Snapshot::resolve_with_layer(connection, pinned_head, layer)?;
+        super::access::check_patch_write(patch, &after, access)?;
+    }
+    super::access::check_layer(connection, pinned_head, layer, &state.schema, access)?;
+    super::access::check_schema_validation(&base.schema, &state.schema, access)
 }
 
 pub(crate) fn diff_commits(
@@ -292,7 +326,7 @@ fn append_property_operations(
     for slot in property_slots {
         let previous = before.properties.get(&slot);
         let next = after.properties.get(&slot);
-        if previous == next {
+        if same_property_value(previous, next)? {
             continue;
         }
         append_property_operation(connection, operations, slot, previous, next)?;
@@ -525,7 +559,7 @@ fn apply_schema_operation(
 ) -> QueryResult<()> {
     require_operation_slot(operation, "schema")?;
     let current = schema_core_value(&state.schema)?;
-    if operation.get("before") != Some(&current) {
+    if !same_optional_value(operation.get("before"), Some(&current)) {
         return before_mismatch(operation);
     }
     let after = operation
@@ -584,7 +618,7 @@ fn drop_index_from_patch(
     if operation.get("after") != Some(&Value::Null) {
         return Err(QueryError::invalid_argument("DropIndex after must be null"));
     }
-    if state.schema.indexes.get(name) != Some(&expected) {
+    if !same_index_definition(state.schema.indexes.get(name), Some(&expected))? {
         return before_mismatch(operation);
     }
     state.schema.indexes.remove(name);
@@ -601,7 +635,7 @@ fn set_index_from_patch(
     if expected.name != name || replacement.name != name {
         return Err(QueryError::invalid_argument("SetIndex slot/name mismatch"));
     }
-    if state.schema.indexes.get(&name) != Some(&expected) {
+    if !same_index_definition(state.schema.indexes.get(&name), Some(&expected))? {
         return before_mismatch(operation);
     }
     state.schema.indexes.insert(name, replacement);
@@ -638,7 +672,7 @@ fn validate_property_before(
             .properties
             .get(&(target.owner_kind, target.owner_id, key_id))
     });
-    if operation.get("before") != Some(&property_state(actual)?) {
+    if !same_optional_value(operation.get("before"), Some(&property_state(actual)?)) {
         return before_mismatch(operation);
     }
     Ok(())
@@ -730,7 +764,7 @@ fn append_schema_operations(
     after: &SchemaState,
     operations: &mut Vec<Value>,
 ) -> QueryResult<()> {
-    if schema_core_value(before)? != schema_core_value(after)? {
+    if !same_value(&schema_core_value(before)?, &schema_core_value(after)?) {
         operations.push(operation(
             "SetSchema",
             "schema".to_owned(),
@@ -746,7 +780,7 @@ fn append_schema_operations(
     for name in names {
         let left = before.indexes.get(&name);
         let right = after.indexes.get(&name);
-        if left == right {
+        if same_index_definition(left, right)? {
             continue;
         }
         match (left, right) {

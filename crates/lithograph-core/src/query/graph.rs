@@ -8,6 +8,7 @@ use crate::cypher::{
 };
 use crate::storage::{self, HashId, LabelId, OwnerKind, RelationshipRecord, Snapshot};
 
+use super::access::PropertyRules;
 use super::options::{GraphViewSelector, SnapshotSelector};
 use super::{QueryError, QueryErrorKind, QueryResult};
 
@@ -16,6 +17,7 @@ pub(crate) struct ResolvedGraphView {
     required: Vec<LabelId>,
     excluded: Vec<LabelId>,
     required_unknown: bool,
+    pub(crate) query_access: PropertyRules,
 }
 
 impl ResolvedGraphView {
@@ -41,7 +43,13 @@ impl ResolvedGraphView {
             required,
             excluded,
             required_unknown,
+            query_access: PropertyRules::default(),
         })
+    }
+
+    pub(crate) fn with_query_access(mut self, query_access: PropertyRules) -> Self {
+        self.query_access = query_access;
+        self
     }
 
     pub(crate) fn visible_node(&self, snapshot: &Snapshot<'_>, node_id: i64) -> QueryResult<bool> {
@@ -171,7 +179,11 @@ fn validate_ref_selector(name: &str) -> QueryResult<()> {
     })
 }
 
-pub(crate) fn materialize_node(snapshot: &Snapshot<'_>, node_id: i64) -> QueryResult<NodeValue> {
+pub(crate) fn materialize_node_with_access(
+    snapshot: &Snapshot<'_>,
+    node_id: i64,
+    query_access: &PropertyRules,
+) -> QueryResult<NodeValue> {
     if !snapshot.node_exists(node_id)? {
         return Err(QueryError::semantic(format!(
             "Node n:{node_id} is no longer present in the active graph state"
@@ -185,7 +197,7 @@ pub(crate) fn materialize_node(snapshot: &Snapshot<'_>, node_id: i64) -> QueryRe
             })?;
         labels.push(name);
     }
-    let properties = materialize_properties(snapshot, OwnerKind::Node, node_id)?;
+    let properties = materialize_properties(snapshot, OwnerKind::Node, node_id, query_access)?;
     Ok(NodeValue {
         element_id: format!("n:{node_id}"),
         labels,
@@ -193,9 +205,10 @@ pub(crate) fn materialize_node(snapshot: &Snapshot<'_>, node_id: i64) -> QueryRe
     })
 }
 
-pub(crate) fn materialize_relationship(
+pub(crate) fn materialize_relationship_with_access(
     snapshot: &Snapshot<'_>,
     relationship: RelationshipRecord,
+    query_access: &PropertyRules,
 ) -> QueryResult<RelationshipValue> {
     if snapshot.relationship(relationship.id)?.is_none() {
         return Err(QueryError::semantic(format!(
@@ -211,7 +224,12 @@ pub(crate) fn materialize_relationship(
                     relationship.type_id
                 ))
             })?;
-    let properties = materialize_properties(snapshot, OwnerKind::Relationship, relationship.id)?;
+    let properties = materialize_properties(
+        snapshot,
+        OwnerKind::Relationship,
+        relationship.id,
+        query_access,
+    )?;
     Ok(RelationshipValue {
         element_id: format!("r:{}", relationship.id),
         relationship_type,
@@ -226,12 +244,21 @@ pub(crate) fn node_property(
     node_id: i64,
     key: &str,
 ) -> QueryResult<Value> {
+    node_property_with_access(snapshot, node_id, key, &PropertyRules::default())
+}
+
+pub(crate) fn node_property_with_access(
+    snapshot: &Snapshot<'_>,
+    node_id: i64,
+    key: &str,
+    query_access: &PropertyRules,
+) -> QueryResult<Value> {
     if !snapshot.node_exists(node_id)? {
         return Err(QueryError::semantic(format!(
             "Node n:{node_id} is no longer present in the active graph state"
         )));
     }
-    element_property(snapshot, OwnerKind::Node, node_id, key)
+    element_property(snapshot, OwnerKind::Node, node_id, key, query_access)
 }
 
 pub(crate) fn relationship_property(
@@ -239,25 +266,37 @@ pub(crate) fn relationship_property(
     id: i64,
     key: &str,
 ) -> QueryResult<Value> {
+    relationship_property_with_access(snapshot, id, key, &PropertyRules::default())
+}
+
+pub(crate) fn relationship_property_with_access(
+    snapshot: &Snapshot<'_>,
+    id: i64,
+    key: &str,
+    query_access: &PropertyRules,
+) -> QueryResult<Value> {
     if snapshot.relationship(id)?.is_none() {
         return Err(QueryError::semantic(format!(
             "Relationship r:{id} is no longer present in the active graph state"
         )));
     }
-    element_property(snapshot, OwnerKind::Relationship, id, key)
+    element_property(snapshot, OwnerKind::Relationship, id, key, query_access)
 }
 
 fn materialize_properties(
     snapshot: &Snapshot<'_>,
     owner_kind: OwnerKind,
     owner_id: i64,
+    query_access: &PropertyRules,
 ) -> QueryResult<BTreeMap<String, Value>> {
     let mut properties = BTreeMap::new();
     for (key_id, value) in snapshot.properties(owner_kind, owner_id)? {
         let name = storage::property_key_name(snapshot_connection(snapshot), key_id)?.ok_or_else(
             || QueryError::internal(format!("Property dictionary id {key_id} is missing")),
         )?;
-        properties.insert(name, property_value(value)?);
+        if !query_access.denies(&name) {
+            properties.insert(name, property_value(value)?);
+        }
     }
     Ok(properties)
 }
@@ -267,7 +306,11 @@ fn element_property(
     owner_kind: OwnerKind,
     owner_id: i64,
     key: &str,
+    query_access: &PropertyRules,
 ) -> QueryResult<Value> {
+    if query_access.denies(key) {
+        return Ok(Value::Null);
+    }
     let Some(key_id) = storage::find_property_key(snapshot_connection(snapshot), key)? else {
         return Ok(Value::Null);
     };

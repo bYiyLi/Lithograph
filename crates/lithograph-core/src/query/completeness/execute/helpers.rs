@@ -633,10 +633,11 @@ pub(super) fn union_rows(
     right: RowSet,
     distinct: bool,
     snapshot: &Snapshot<'_>,
+    rules: &PropertyRules,
 ) -> QueryResult<RowSet> {
     let mut left = merge_union_rows(left, right)?;
     if distinct {
-        left.rows = distinct_bindings(left.rows, &left.columns, snapshot)?;
+        left.rows = distinct_bindings(left.rows, &left.columns, snapshot, rules)?;
     }
     Ok(left)
 }
@@ -656,22 +657,25 @@ pub(crate) fn distinct_bindings(
     rows: Vec<BindingRow>,
     columns: &[String],
     snapshot: &Snapshot<'_>,
+    rules: &PropertyRules,
 ) -> QueryResult<Vec<BindingRow>> {
-    distinct_rows(rows, columns, snapshot, |row| row)
+    distinct_rows(rows, columns, snapshot, rules, |row| row)
 }
 
 pub(super) fn distinct_projected(
     rows: Vec<ProjectedRow>,
     columns: &[String],
     snapshot: &Snapshot<'_>,
+    rules: &PropertyRules,
 ) -> QueryResult<Vec<ProjectedRow>> {
-    distinct_rows(rows, columns, snapshot, |row| &row.output)
+    distinct_rows(rows, columns, snapshot, rules, |row| &row.output)
 }
 
 fn distinct_rows<T>(
     rows: Vec<T>,
     columns: &[String],
     snapshot: &Snapshot<'_>,
+    rules: &PropertyRules,
     binding: impl Fn(&T) -> &BindingRow,
 ) -> QueryResult<Vec<T>> {
     let mut seen = BTreeSet::new();
@@ -680,12 +684,13 @@ fn distinct_rows<T>(
         let values = columns
             .iter()
             .map(|column| {
-                binding_value(
+                binding_value_with_access(
                     snapshot,
                     binding(&row)
                         .values
                         .get(column)
                         .unwrap_or(&BindingValue::Null),
+                    rules,
                 )
             })
             .collect::<QueryResult<Vec<_>>>()?;
@@ -731,6 +736,7 @@ pub(super) fn pagination(
     name: &str,
     snapshot: &Snapshot<'_>,
     params: &BTreeMap<String, Value>,
+    rules: &PropertyRules,
 ) -> QueryResult<Option<usize>> {
     let Some(node) = body.children.iter().find(|node| node.kind == kind) else {
         return Ok(None);
@@ -739,11 +745,12 @@ pub(super) fn pagination(
         .into_iter()
         .next()
         .ok_or_else(|| QueryError::semantic(format!("{name} is missing its expression")))?;
-    let value = expression::evaluate(
+    let value = expression::evaluate_with_access(
         &compile_expression(expression)?,
         snapshot,
         &BindingRow::default(),
         params,
+        rules,
     )?;
     let Value::Integer(value) = value else {
         return Err(QueryError::new(

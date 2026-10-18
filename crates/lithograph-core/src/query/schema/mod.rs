@@ -1,3 +1,4 @@
+mod access;
 mod command;
 mod equality;
 mod execute;
@@ -5,6 +6,7 @@ mod index;
 mod show;
 mod validate;
 
+pub(crate) use access::validate_external_transition;
 pub(crate) use command::{PreparedSchema, SchemaCounters, prepare_schema};
 pub(crate) use execute::{execute_schema, persist_validated_blob};
 pub(crate) use index::{

@@ -47,6 +47,29 @@ pub(crate) fn surface_expressions(node: &AstNode) -> Vec<&AstNode> {
     collect_surface_expressions(node, false)
 }
 
+pub(crate) fn compile_let_bindings(clause: &AstNode) -> QueryResult<Vec<(String, Expr)>> {
+    let mut bindings = clause
+        .descendants()
+        .filter(|node| node.kind == AstKind::LetBinding)
+        .collect::<Vec<_>>();
+    bindings.sort_by_key(|node| node.span.start);
+    bindings
+        .into_iter()
+        .map(|binding| {
+            let name = binding
+                .descendants()
+                .find(|node| node.kind == AstKind::BindingVariable)
+                .and_then(|node| node.text.clone())
+                .ok_or_else(|| QueryError::semantic("LET binding is missing its variable"))?;
+            let expression = surface_expressions(binding)
+                .into_iter()
+                .next()
+                .ok_or_else(|| QueryError::semantic("LET binding is missing its expression"))?;
+            Ok((name, compile_expression(expression)?))
+        })
+        .collect()
+}
+
 pub(crate) fn surface_expressions_without_nested_queries(node: &AstNode) -> Vec<&AstNode> {
     collect_surface_expressions(node, true)
 }
@@ -890,21 +913,16 @@ fn compile_function(node: &AstNode) -> QueryResult<Expr> {
 }
 
 fn function_name(node: &AstNode) -> QueryResult<String> {
-    if predicate_variable(node).is_some()
-        && let Some(name) = node
-            .text
-            .as_deref()
-            .and_then(|text| text.split_once('(').map(|(name, _)| name.trim().to_owned()))
-    {
-        return Ok(name);
-    }
-    node.descendants()
+    node.children
+        .iter()
         .find(|child| matches!(child.kind, AstKind::FunctionName))
         .and_then(|child| child.text.clone())
         .or_else(|| {
-            node.text
-                .as_deref()
-                .and_then(|text| text.split_once('(').map(|(name, _)| name.to_owned()))
+            // Keyword calls such as reduce have no FunctionName child. Their
+            // name belongs to this call, never to a function in an argument.
+            let source = node.text.as_deref()?;
+            let length = source.bytes().take_while(u8::is_ascii_alphabetic).count();
+            (length > 0).then(|| source[..length].to_owned())
         })
         .ok_or_else(|| QueryError::semantic("function call is missing its name"))
 }
@@ -1341,12 +1359,16 @@ fn binary_operator(text: &str) -> QueryResult<BinaryOp> {
 
 mod comparison;
 mod evaluate;
+mod lazy;
 mod operators;
 mod properties;
+mod scoped;
 mod transform;
 
 pub(crate) use evaluate::{
-    binding_from_value, binding_value, count_contributes, evaluate, evaluate_with_aliases,
-    is_count, predicate, value_to_string,
+    binding_from_value, binding_value_with_access, count_contributes_with_access,
+    evaluate_with_access, evaluate_with_aliases_and_access, is_count, predicate, value_to_string,
 };
+pub(crate) use lazy::evaluate_lazy_expression;
+pub(crate) use scoped::evaluate_scoped_expression;
 pub(crate) use transform::transform_expression;

@@ -2,7 +2,7 @@
 
 [产品手册](README.md) · [Cypher 语言手册](../cypher/index.md) · [接口参考](../reference/README.md)
 
-本文适用 **v0.3.1**（`CY25-2026.08`，storage format `3`）。目标：宿主允许调用方提交 Cypher query，但由宿主强制禁止本次 execution 的写入、文件读取、HTTP 和 Provider 调用。需要先具备 [应用集成](integration.md) 的 SQLite connection；以下 SQL 在新的演示库依次执行。
+本文适用 **v0.3.2**（`CY25-2026.08`，storage format `3`）。目标：宿主允许调用方提交 Cypher query，但由宿主强制禁止本次 execution 的写入、文件读取、HTTP 和 Provider 调用。需要先具备 [应用集成](integration.md) 的 SQLite connection；以下 SQL 在新的演示库依次执行。
 
 <a id="force-options"></a>
 
@@ -99,3 +99,5 @@ SELECT lithograph('MATCH (d:StagedSafe) RETURN count(d) AS count');
 该选项限制本次 Lithograph Cypher execution；SQLite 读取当前数据库、TEMP/spill 和可重建 derived-state 工作仍允许。它不隔离任意 SQL、本机扩展、OS 文件权限、其它 connection，也不约束单独的 init/transaction lifecycle SQL。它没有内置 CPU、耗时、结果行数或内存配额；宿主仍需适当的查询/结果预算、取消和并发管理。
 
 Graph View 限制可见图，`readOnlyNoExternalIO` 限制本次操作能力；需要二者时由宿主同时强制设置。完整 option 合同及允许的 Procedure 名称见 [Execution Options](../reference/execution-options.md)，连接清理见 [Transactions Reference](../reference/transactions.md)。
+
+v0.3.2 还提供字段级查询/返回/写入限制和可组合操作开关，见 [访问控制指南](access-controls.md)。它们省略时不自动收紧权限，不能把空 readAccess/writeAccess 当作此页的整体只读策略。

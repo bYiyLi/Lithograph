@@ -1,6 +1,6 @@
 # Index
 
-适用 Lithograph v0.3.1、`CY25-2026.08`。[Cypher 手册](index.md) · [兼容范围](../reference/cypher-compatibility.md) · [Schema 操作指南](../guide/schema-and-indexes.md)
+适用 Lithograph v0.3.2、`CY25-2026.08`。[Cypher 手册](index.md) · [兼容范围](../reference/cypher-compatibility.md) · [Schema 操作指南](../guide/schema-and-indexes.md)
 
 Index definition 随图版本化，物理索引内容可以重建。标准索引有 LOOKUP、RANGE、TEXT、POINT、FULLTEXT、VECTOR 六类；Managed Semantic 是通过 [Semantic Procedure](../reference/procedures/semantic.md) 创建的独立扩展类型，仍由通用 SHOW/DROP 管理。
 
@@ -98,7 +98,7 @@ CREATE TEXT INDEX person_name FOR (p:Person) ON (p.name)
 CREATE POINT INDEX place_location FOR (p:Place) ON (p.location)
 ```
 
-v0.3.1 不提供可调整的标准 LOOKUP/RANGE/TEXT/POINT provider 或空间范围配置；不要从 Neo4j 的服务器配置推导本扩展的效果。
+v0.3.2 不提供可调整的标准 LOOKUP/RANGE/TEXT/POINT provider 或空间范围配置；不要从 Neo4j 的服务器配置推导本扩展的效果。
 
 <a id="fulltext"></a>
 

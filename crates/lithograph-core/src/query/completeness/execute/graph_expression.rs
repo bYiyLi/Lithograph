@@ -5,10 +5,24 @@ impl ReadExecutor<'_, '_> {
         &mut self,
         value: &expression::Expr,
         row: &BindingRow,
+        aliases: &BTreeMap<String, Value>,
     ) -> QueryResult<expression::Expr> {
         expression::transform_expression(value, &mut |candidate| {
+            if let Some(value) = evaluate_lazy_graph_expression(candidate, &mut |nested| {
+                self.evaluate_with_aliases(nested, row, aliases)
+            })? {
+                return Ok(Some(expression::Expr::Literal(value)));
+            }
+            if let Some(value) =
+                evaluate_scoped_graph_expression(candidate, aliases, &mut |nested, locals| {
+                    let local = scoped_binding_row(&self.snapshot, row, locals)?;
+                    self.evaluate_with_aliases(nested, &local, locals)
+                })?
+            {
+                return Ok(Some(expression::Expr::Literal(value)));
+            }
             Ok(self
-                .evaluate_graph_runtime_candidate(candidate, row)?
+                .evaluate_graph_runtime_candidate(candidate, row, aliases)?
                 .map(expression::Expr::Literal))
         })
     }
@@ -17,72 +31,29 @@ impl ReadExecutor<'_, '_> {
         &mut self,
         candidate: &expression::Expr,
         row: &BindingRow,
+        aliases: &BTreeMap<String, Value>,
     ) -> QueryResult<Option<Value>> {
         use expression::Expr;
+        if !matches!(
+            candidate,
+            Expr::Subquery { .. } | Expr::PatternPredicate(_) | Expr::PatternComprehension(_)
+        ) {
+            return Ok(None);
+        }
+        let local;
+        let row = if aliases.is_empty() {
+            row
+        } else {
+            local = scoped_binding_row(&self.snapshot, row, aliases)?;
+            &local
+        };
         let value = match candidate {
             Expr::Subquery { kind, node } => self.evaluate_subquery_expression(*kind, node, row)?,
-            Expr::ListComprehension {
-                variable,
-                collection,
-                predicate,
-                projection,
-            } if list_comprehension_needs_graph_runtime(
-                predicate.as_deref(),
-                projection.as_deref(),
-            ) =>
-            {
-                self.evaluate_list_comprehension_expression(
-                    variable,
-                    collection,
-                    predicate.as_deref(),
-                    projection.as_deref(),
-                    row,
-                )?
-            }
             Expr::PatternPredicate(node) => self.evaluate_pattern_predicate(node, row)?,
             Expr::PatternComprehension(node) => self.evaluate_pattern_comprehension(node, row)?,
-            _ => return Ok(None),
+            _ => unreachable!("graph runtime candidate was checked above"),
         };
         Ok(Some(value))
-    }
-
-    pub(super) fn evaluate_list_comprehension_expression(
-        &mut self,
-        variable: &str,
-        collection: &expression::Expr,
-        predicate: Option<&expression::Expr>,
-        projection: Option<&expression::Expr>,
-        row: &BindingRow,
-    ) -> QueryResult<Value> {
-        let collection = self.evaluate(collection, row)?;
-        let Value::List(values) = collection else {
-            if matches!(collection, Value::Null) {
-                return Ok(Value::Null);
-            }
-            return Err(QueryError::new(
-                QueryErrorKind::Type,
-                "list comprehension requires a List or null",
-            ));
-        };
-        let mut output = Vec::new();
-        for value in values {
-            let mut local = row.clone();
-            local.insert(
-                variable.to_owned(),
-                binding_from_value(&self.snapshot, value.clone())?,
-            );
-            let keep = match predicate {
-                None => true,
-                Some(predicate) => expression::predicate(self.evaluate(predicate, &local)?)?,
-            };
-            if keep {
-                output.push(match projection {
-                    Some(projection) => self.evaluate(projection, &local)?,
-                    None => value,
-                });
-            }
-        }
-        Ok(Value::List(output))
     }
 
     pub(super) fn evaluate_pattern_predicate(
@@ -209,9 +180,10 @@ impl ReadExecutor<'_, '_> {
                     .rows
                     .into_iter()
                     .map(|row| {
-                        binding_value(
+                        binding_value_with_access(
                             &self.snapshot,
                             row.values.get(column).unwrap_or(&BindingValue::Null),
+                            &self.graph_view.query_access,
                         )
                     })
                     .collect::<QueryResult<Vec<_>>>()
@@ -224,12 +196,51 @@ impl ReadExecutor<'_, '_> {
     }
 }
 
-pub(super) fn list_comprehension_needs_graph_runtime(
-    predicate: Option<&expression::Expr>,
-    projection: Option<&expression::Expr>,
-) -> bool {
-    predicate.is_some_and(expression_contains_graph_runtime)
-        || projection.is_some_and(expression_contains_graph_runtime)
+pub(super) fn evaluate_lazy_graph_expression(
+    expression: &expression::Expr,
+    evaluate: &mut impl FnMut(&expression::Expr) -> QueryResult<Value>,
+) -> QueryResult<Option<Value>> {
+    if matches!(
+        expression,
+        expression::Expr::Case { .. }
+            | expression::Expr::Binary(expression::BinaryOp::And | expression::BinaryOp::Or, _, _)
+    ) && expression_contains_graph_runtime(expression)
+    {
+        expression::evaluate_lazy_expression(expression, evaluate)
+    } else {
+        Ok(None)
+    }
+}
+
+pub(super) fn evaluate_scoped_graph_expression(
+    expression: &expression::Expr,
+    aliases: &BTreeMap<String, Value>,
+    evaluate: &mut impl FnMut(&expression::Expr, &BTreeMap<String, Value>) -> QueryResult<Value>,
+) -> QueryResult<Option<Value>> {
+    if matches!(
+        expression,
+        expression::Expr::ListComprehension { .. }
+            | expression::Expr::ListPredicate { .. }
+            | expression::Expr::Reduce { .. }
+            | expression::Expr::AllReduce { .. }
+    ) && expression_contains_graph_runtime(expression)
+    {
+        expression::evaluate_scoped_expression(expression, aliases, evaluate).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+pub(super) fn scoped_binding_row(
+    snapshot: &Snapshot<'_>,
+    row: &BindingRow,
+    locals: &BTreeMap<String, Value>,
+) -> QueryResult<BindingRow> {
+    let mut local = row.clone();
+    for (name, value) in locals {
+        local.insert(name.clone(), binding_from_value(snapshot, value.clone())?);
+    }
+    Ok(local)
 }
 
 fn expression_contains_graph_runtime(expression: &expression::Expr) -> bool {

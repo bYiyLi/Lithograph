@@ -111,7 +111,7 @@ if [ -n "$openai_provider" ]; then
     scripts/openai-compatible-provider-smoke.sh "$openai_provider"
   LITHOGRAPH_SQLITE3="$sqlite_bin" \
     LITHOGRAPH_SQLITE_SOURCE_DIR="$source_dir" \
-    scripts/phase15-provider-cache-smoke.sh "$openai_provider"
+    scripts/phase15-provider-cache-smoke.sh "$openai_provider" "$extension"
 fi
 if [ -n "$synthetic_provider" ]; then
   LITHOGRAPH_SQLITE3="$sqlite_bin" \

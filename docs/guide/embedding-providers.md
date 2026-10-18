@@ -1,6 +1,6 @@
 # 使用 Embedding Provider
 
-适用版本：**v0.3.1**。上级：[开发者手册](README.md) · 参数查询：[OpenAI-compatible Provider](../reference/openai-compatible-provider.md) · 检索流程：[Search](search.md)。
+适用版本：**v0.3.2**。上级：[开发者手册](README.md) · 参数查询：[OpenAI-compatible Provider](../reference/openai-compatible-provider.md) · 检索流程：[Search](search.md)。
 
 本指南把已有文本 Property 接到兼容 Embeddings endpoint。需要自己提供 vector、让向量值进入 Commit 历史，或使用 Cypher `SEARCH WHERE` 时，选择 [Raw Vector](../cypher/search.md)。Managed Semantic 将文本保存在 graph 中，生成的向量只是 derived search data。
 
@@ -125,7 +125,7 @@ query 会为需要参与的 source/query text 调用 Provider；Graph View 在 P
 
 先创建父目录并确保宿主可以写入。path 不能指向 Lithograph main、内存数据库或 SQLite URI；相对路径基于宿主工作目录，部署中优先使用自己管理的明确路径。配置完整规则与 key identity 见 [Provider cache 参考](../reference/openai-compatible-provider.md#persistent-cache)。
 
-v0.3.1 首次并发初始化同一空 cache 存在已知竞争。启动多个 worker 前，先由单个进程用同一配置完成一次有效请求并等待成功，再开放并发；不能只创建一个空文件。范围与失败处理见 [已知问题](../reference/known-issues.md#provider-cache-first-use)。
+v0.3.2 已修复首次并发初始化同一空 cache 的竞争，并通过真实多进程、完整源码门禁与新包验收，范围见 [发布说明](../releases/v0.3.2.md)。已发布 v0.3.1 仍存在该竞争：在该版本启动多个 worker 前，先由单个进程用同一配置完成一次有效请求并等待成功，再开放并发；不能只创建一个空文件。v0.3.1 的适用范围与失败处理见 [已知问题](../reference/known-issues.md#provider-cache-first-use)。
 
 重复执行相同有效请求可以减少远程重算。cache 不保存 source/query 原文或 credential 原文，但保存 derived vectors 与 hashes；独立管理其文件权限和生命周期。容量是 vector payload budget，FIFO eviction 不保证文件立即缩小。删除 cache 不改变 graph/history；缺失后将重新请求 endpoint。
 

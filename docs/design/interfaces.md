@@ -286,7 +286,7 @@ SQL explicit transaction 的 begin options 使用独立的 transaction-level sha
 - `branch` 省略时使用当前 connection active Branch；开始后 target Branch 固定，active transaction 内的普通 execution 不能切换 Branch；
 - `expectedHead` 可省略；提供时只接受 resolved `commit/<id>`，并在取得 writer ownership 后与 target Branch 当前 head 原子比较，不一致返回 `BRANCH_HEAD_MOVED` 且 transaction 不开始；
 - `author` / `message` 只属于最终唯一 Commit；active transaction 内各 `lithograph()` / `lithograph_rows()` execution 不再接受自己的 Commit metadata；
-- active transaction 内 execution 可以使用 query-local `graphView`，但 `branch` / `at` / `author` / `message` / `mergeSession` 等会选择另一 transaction/version context 的 options 返回 `INVALID_ARGUMENT`；
+- active transaction 内 execution 可以使用 query-local `graphView`、`readOnlyNoExternalIO` 及后续版本的 `readAccess` / `writeAccess`，但 `branch` / `at` / `author` / `message` / `mergeSession` 等会选择另一 transaction/version context 的 options 返回 `INVALID_ARGUMENT`；
 - Version Procedure、Branch/Tag/Commit Data mutation、checkout/GC，以及 `CALL { ... } IN TRANSACTIONS` / `IN CONCURRENT TRANSACTIONS` 不能在 explicit transaction 内嵌套执行，返回 `TRANSACTION_BOUNDARY_REQUIRED`；
 - External I/O 本身不禁止 explicit transaction execution；普通 `LOAD CSV`、Managed Semantic query 等只要不另行拥有独立 transaction/version lifecycle 就可以执行。显式 rebuild/maintenance procedure 是否允许由其 own lifecycle contract 决定。调用方承担长 I/O 延长 SQLite single-writer ownership 的成本；失败时整个 explicit transaction fail closed abort。
 
@@ -309,6 +309,76 @@ Merge Session candidate inspection 使用同一 execution options surface，而�
 - 只有当前没有 unresolved merge conflict 的 Session 才能读取 candidate；仍有 unresolved conflict 时返回 `MERGE_CONFLICT`；
 - candidate execution 只允许普通 current-graph read、Search 与 Schema/Constraint/Index introspection。graph/schema/index mutation 返回 `READ_ONLY_SNAPSHOT`；Version Procedure、transaction-owning subquery 与 `LOAD CSV` 返回 `TRANSACTION_BOUNDARY_REQUIRED`；
 - candidate query 绑定 `(session, revision)` 而不是 Commit，因此 `summary.commit = null`，并通过[Lithograph JSON](#lithograph-json)的 `summary.mergeSession` 返回实际 session/revision。调用方可以用同一 revision 执行多次一致性检查，随后把该 revision 交给 `merge.finalize`；若期间 resolution 改变，finalize 必须以 `MERGE_SESSION_CHANGED` 拒绝旧验证结果。
+
+<a id="query-access-controls"></a>
+
+### 查询、返回与写入访问控制
+
+`readAccess` / `writeAccess` 是后续版本能力，实施与验收由 [Phase 18](../development/phases/18-query-access-controls.md) 记录；v0.3.1 发行库不接受这些字段。它们复用 `lithograph(query, params, options)` 与 `lithograph_rows(query, params, options)` 的第三个参数，不新增 execution API、账号系统或 Provider SPI。
+
+```json
+{
+  "readAccess": {
+    "query": {"denyProperties": ["私密备注"]},
+    "result": {"denyPropertyPrefixes": ["@loreweft:"]},
+    "denyFunctions": ["elementId", "id"],
+    "allowExternalIO": false
+  },
+  "writeAccess": {
+    "denyProperties": ["创建时间", "私密备注"],
+    "denyPropertyPrefixes": ["@loreweft:"],
+    "allowDelete": false
+  }
+}
+```
+
+只限制调用方明确指定的权限。省略两个 object、传入 `{}`、省略数组或传入空数组，均不额外收紧既有能力；所有新增 Boolean 省略时不限制，只有显式 `false` 禁止对应操作。两个 object 必须为 JSON object，未知 key、错误类型（包括显式 `null`）、非法正则或空匹配项返回 `INVALID_ARGUMENT`。所有权限取交集：显式 `true` 不能覆盖属性规则、其它禁止开关、`readOnlyNoExternalIO=true`、历史 Snapshot 只读或已有 transaction/Graph View 限制。旧安全选项的拒绝 category 保持原合同。
+
+属性规则由以下三项组成，`readAccess.query`、`readAccess.result` 和 `writeAccess` 使用相同 shape：
+
+| Key | 类型与默认 | 匹配行为 |
+| --- | --- | --- |
+| `denyProperties` | STRING 数组（项非空）；默认 `[]` | 精确属性名 |
+| `denyPropertyPrefixes` | STRING 数组（项非空）；默认 `[]` | 字面前缀，不解释正则 |
+| `denyPropertyPatterns` | STRING 数组（项非空）；默认 `[]` | 用现有 regex 语法完整匹配属性名；规则在一次 execution 内编译一次 |
+
+三项按并集生效。属性名区分大小写，不做 Unicode normalization；规则作用于所有 Node/Relationship 的真实属性，不按 Label 分组，不匹配普通 Map 的 key、字符串内容或返回 alias。正则非法时执行失败，不降级为字面匹配；字符串为空的规则项非法。
+
+| 位置 | 对外行为 |
+| --- | --- |
+| `readAccess.query` | 匹配属性在整个查询过程中按不存在处理：静态/动态读取为 `null`，枚举不包含该属性，过滤、计算、聚合和图对象物化使用受限值 |
+| `readAccess.result` | 只在对外 JSON 编码时过滤图对象属性；递归处理 List/Map 内的图对象及 Path 元素，不改变查询计算 |
+| `writeAccess` | 禁止匹配属性的新增、修改与移除，包含动态 key、`null` 删除、Map 合并、整组替换的隐含删除，以及显式写回相同值 |
+
+只有 `result` 命中的字段仍可用显式 scalar/alias、`properties(n)` 或 `n{.*}` 提取；这些表达式产生的普通 Map/scalar 不再按名称清理。要阻止实际取值，必须同时配置 `query`。结果规则不删除 structural `elementId`、Label、Type、端点或 `summary.commit`，不按普通 Map key 清理 Schema、Commit Data 等 metadata JSON。查询、索引、写入与版本状态判断的完整语义由 [Access Control Execution Boundary](query-engine.md#query-access-controls) 拥有。
+
+`readAccess` 的操作权限为：
+
+| Key | 类型与默认 | 显式禁止的能力 |
+| --- | --- | --- |
+| `denyFunctions` | STRING 数组（项非空）；默认 `[]` | 规范函数名的精确调用；按 Cypher 的 ASCII 大小写规则规范化比较，未知注册函数名返回 `INVALID_ARGUMENT`，不做前缀/正则匹配 |
+| `allowNamedProcedures` | 可选 BOOLEAN；默认不限制 | 命名 `CALL` Procedure，不包括语言内联子查询 |
+| `allowShow` | 可选 BOOLEAN；默认不限制 | `SHOW` introspection |
+| `allowExplain` | 可选 BOOLEAN；默认不限制 | `EXPLAIN` |
+| `allowProfile` | 可选 BOOLEAN；默认不限制 | `PROFILE` |
+| `allowExternalIO` | 可选 BOOLEAN；默认不限制 | `LOAD CSV` 文件/HTTP、Embedding Provider（含 cache hit）、宿主 tokenizer 等外部能力调用 |
+
+`writeAccess` 另支持以下可选 Boolean，全部省略时不限制：
+
+| Key | 显式 `false` 禁止的能力 |
+| --- | --- |
+| `allowCreate` | 创建 Node/Relationship |
+| `allowDelete` | 删除 Node/Relationship，含 DETACH 的连带 Relationship 删除 |
+| `allowLabelChanges` | 添加或移除 Node Label，包含创建时的初始 Label；与创建权限取交集 |
+| `allowSchemaChanges` | Graph Type、Constraint、Index 的逻辑定义变化 |
+| `allowVersionChanges` | Branch/Tag/Commit Data、显式 Commit、Merge Session 与版本历史/ref 操作 |
+| `allowMaintenance` | GC、Index rebuild 等显式维护操作 |
+
+`allowCreate` / `allowDelete` / `allowLabelChanges` 按实际图效果检查：MERGE 命中既有对象而没有创建、或零行没有产生创建时，不因创建禁令拒绝。读取能力、函数禁令、Schema command 及已知 Procedure 固定效果在完整 AST 的 prepare 分类，不受未运行分支/零行豁免。
+
+Procedure 按其实际效果叠加权限，不以 `mode=READ` 代替分类。Schema/Index 操作可能调用 Provider/tokenizer，必须同时满足 Schema、maintenance 与 external-I/O 等适用权限；纯引用、metadata 和 derived-data 操作不被误当作普通属性写入。
+
+active SQL explicit transaction 的每次 execution 可以传入新的 `readAccess` / `writeAccess`，以该 execution 开始时的 staged state 为写入校验基线；失败按既有规则自动 abort 整个 explicit transaction。`tx_begin` 不接受这两个字段。独立/并发 transaction batch 继承同一次 execution 的规则，保持已有逐 batch commit 和 `ON ERROR` 语义。
 
 <a id="external-io"></a>
 
@@ -417,6 +487,7 @@ SCHEMA_ERROR
 CONSTRAINT_ERROR
 NOT_INITIALIZED
 INVALID_ARGUMENT
+ACCESS_DENIED
 GRAPH_VIEW_VIOLATION
 VERSION_NOT_FOUND
 BRANCH_NOT_FOUND
@@ -445,4 +516,4 @@ LITHOGRAPH_<CATEGORY>: <message> [line=<N>,column=<N>]
 
 只有 Core 提供 query source position 时才追加第二种**尾部 suffix**；`line` / `column` 都是 1-based decimal integer，中间固定使用英文逗号且不插入额外空格。没有 position 时使用第一种形式，不伪造 `0` / `null`。调用方若需要机器识别，解析稳定 category prefix 与可选 trailing location suffix；`<message>` 本身仍是人类可读诊断，不承诺可机器解析。
 
-SQL surface 同时通过 `sqlite3_result_error_code` 保留 SQLite primary result code；parse/semantic/type/schema/version argument error 通常为 `SQLITE_ERROR`，API misuse 为 `SQLITE_MISUSE`，host lock contention 的 `SQLITE_BUSY/SQLITE_LOCKED` 映射 `BUSY`，host/user cancellation 的 `SQLITE_INTERRUPT` 映射 `INTERRUPTED` 并保留 `SQLITE_INTERRUPT`，`SQLITE_NOMEM/SQLITE_TOOBIG/SQLITE_FULL` 映射 `RESOURCE_ERROR`，I/O/open/read-only-file 类错误映射 `IO_ERROR`。Interrupt 不是 memory/disk resource exhaustion，不能为了沿用旧 adapter enum 把它写成 `RESOURCE_ERROR`。SQLite 对少数 resource result code 有宿主级 canonicalization：例如 `SQLITE_NOMEM` 可能把自定义 text 改写成 `out of memory`。真实 primary code 始终比保留 Lithograph prefix 更优先，不能为了 error text 伪装成 `SQLITE_ERROR`。错误不得泄漏内部 SQLite table/schema 或 Provider secret。
+SQL surface 同时通过 `sqlite3_result_error_code` 保留 SQLite primary result code；parse/semantic/type/schema/version argument error 通常为 `SQLITE_ERROR`，API misuse 为 `SQLITE_MISUSE`，明确访问禁令为 `ACCESS_DENIED` + `SQLITE_AUTH`，host lock contention 的 `SQLITE_BUSY/SQLITE_LOCKED` 映射 `BUSY`，host/user cancellation 的 `SQLITE_INTERRUPT` 映射 `INTERRUPTED` 并保留 `SQLITE_INTERRUPT`，`SQLITE_NOMEM/SQLITE_TOOBIG/SQLITE_FULL` 映射 `RESOURCE_ERROR`，I/O/open/read-only-file 类错误映射 `IO_ERROR`。Interrupt 不是 memory/disk resource exhaustion，不能为了沿用旧 adapter enum 把它写成 `RESOURCE_ERROR`。SQLite 对少数 resource result code 有宿主级 canonicalization：例如 `SQLITE_NOMEM` 可能把自定义 text 改写成 `out of memory`。真实 primary code 始终比保留 Lithograph prefix 更优先，不能为了 error text 伪装成 `SQLITE_ERROR`。错误不得泄漏内部 SQLite table/schema 或 Provider secret。

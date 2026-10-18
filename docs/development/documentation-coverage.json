@@ -2868,6 +2868,24 @@
       "name": "mergeSession.revision",
       "path": "docs/reference/execution-options.md",
       "anchor": "ordinary-execution"
+    },
+    {
+      "kind": "option",
+      "name": "options.readAccess",
+      "path": "docs/reference/execution-options.md",
+      "anchor": "access-controls",
+      "examples": [
+        "access-query-masked"
+      ]
+    },
+    {
+      "kind": "option",
+      "name": "options.writeAccess",
+      "path": "docs/reference/execution-options.md",
+      "anchor": "access-controls",
+      "examples": [
+        "access-write-protected"
+      ]
     }
   ],
   "inventories": [

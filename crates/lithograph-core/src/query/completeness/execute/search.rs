@@ -59,12 +59,32 @@ fn prepare_search(
         &spec.index,
         StandardIndexKind::Vector,
     )?;
+    super::super::super::semantic_index::validate_query_index_access(&index, executor.graph_view)?;
+    validate_search_filter_access(&spec, &executor.graph_view.query_access)?;
     validate_search_pattern(clause, &spec, &index)?;
     validate_search_expressions(&spec, &index)?;
     materialize_search_filter_values(executor, &mut spec, input)?;
     let query = executor.evaluate(&spec.query, input)?;
     let limit = search_limit(executor.evaluate(&spec.limit, input)?)?;
     Ok((spec, index, query, limit))
+}
+
+fn validate_search_filter_access(spec: &SearchSpec, rules: &PropertyRules) -> QueryResult<()> {
+    if rules.is_empty() {
+        return Ok(());
+    }
+    let Some(filter) = &spec.filter else {
+        return Ok(());
+    };
+    expression::transform_expression(filter, &mut |candidate| {
+        if search_property(candidate, &spec.variable).is_some_and(|name| rules.denies(name)) {
+            return Err(QueryError::access_denied(
+                "SEARCH filter depends on a query-restricted graph property",
+            ));
+        }
+        Ok(None)
+    })?;
+    Ok(())
 }
 
 fn materialize_search_filter_values(

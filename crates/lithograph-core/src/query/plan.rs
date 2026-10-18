@@ -13,7 +13,7 @@ use super::expression::{Expr, compile_expression, is_count, surface_expressions}
 use super::graph::{ResolvedGraphView, resolve_commit};
 use super::schema::PreparedSchema;
 use super::stats::PlannerStatistics;
-use super::{ExecutionOptions, QueryError, QueryResult};
+use super::{AccessPolicy, ExecutionOptions, QueryError, QueryResult};
 
 mod build;
 pub(crate) use build::append_pattern_operators;
@@ -254,6 +254,7 @@ pub(crate) struct ProjectionPlan {
 
 #[derive(Debug, Clone)]
 pub struct PreparedQuery {
+    pub(crate) access: AccessPolicy,
     pub(crate) commit: HashId,
     pub(crate) candidate: Option<super::version::CandidateContext>,
     pub(crate) resolved_state: Option<storage::ResolvedSnapshotState>,
@@ -277,6 +278,10 @@ pub struct PreparedQuery {
 }
 
 impl PreparedQuery {
+    pub fn access_policy(&self) -> &AccessPolicy {
+        &self.access
+    }
+
     pub fn requires_transaction_boundary(&self) -> bool {
         self.program
             .as_ref()
@@ -284,37 +289,21 @@ impl PreparedQuery {
     }
 
     pub fn has_external_io(&self) -> bool {
-        self.program.as_ref().is_some_and(|program| {
-            program.root.descendants().any(|node| {
-                node.kind == AstKind::Clause(ClauseKind::LoadCsv)
-                    || matches!(
-                        node.kind,
-                        AstKind::FunctionName
-                            if node.text.as_deref().is_some_and(
-                                super::registry::is_semantic_direct_only
-                            )
-                    )
-            })
-        })
+        self.program
+            .as_ref()
+            .is_some_and(|program| program.effects.has_external_io())
     }
 
     #[doc(hidden)]
     pub fn has_semantic_maintenance(&self) -> bool {
-        self.program.as_ref().is_some_and(|program| {
-            program.root.descendants().any(|node| {
-                matches!(
-                    node.kind,
-                    AstKind::FunctionName
-                        if node.text.as_deref().is_some_and(
-                            super::registry::is_semantic_maintenance
-                        )
-                )
-            })
-        })
+        self.program
+            .as_ref()
+            .is_some_and(|program| program.effects.semantic_maintenance)
     }
 }
 
 struct PrepareContext {
+    access: AccessPolicy,
     commit: HashId,
     candidate: Option<super::version::CandidateContext>,
     graph_view: ResolvedGraphView,
@@ -373,9 +362,10 @@ fn prepare_context(
     };
     let graph_view = ResolvedGraphView::resolve(connection, &options.graph_view)?;
     Ok(PrepareContext {
+        access: options.access.clone(),
         commit,
         candidate,
-        graph_view,
+        graph_view: graph_view.with_query_access(options.access.read.query.clone()),
         params,
         mode: ast.execution_mode,
     })
@@ -387,6 +377,7 @@ fn prepare_schema_query(
 ) -> QueryResult<PreparedQuery> {
     reject_candidate_write(&context)?;
     Ok(schema_query(
+        context.access,
         context.commit,
         context.candidate,
         context.graph_view,
@@ -402,6 +393,7 @@ fn prepare_program_query(
 ) -> QueryResult<PreparedQuery> {
     validate_candidate_program(&context, &program)?;
     Ok(program_query(
+        context.access,
         context.commit,
         context.candidate,
         context.graph_view,
@@ -429,16 +421,8 @@ fn validate_candidate_program(
     }
     let owns_transaction = program.version_operation
         || program.transaction_options.is_some()
-        || program.root.descendants().any(|node| {
-            node.kind == AstKind::Clause(ClauseKind::LoadCsv)
-                || matches!(
-                    node.kind,
-                    AstKind::FunctionName
-                        if node.text.as_deref().is_some_and(
-                            super::registry::is_semantic_maintenance
-                        )
-                )
-        });
+        || program.effects.load_csv
+        || program.effects.semantic_maintenance;
     if owns_transaction {
         return Err(QueryError::transaction_boundary_required(
             "Merge Session candidate context cannot execute Version Procedures, external I/O, or transaction-owning Cypher",
@@ -469,6 +453,7 @@ fn prepare_write_query(
     let logical = write.logical.clone();
     let physical = build_physical(&logical, &write.matches_for_explain, false);
     Ok(PreparedQuery {
+        access: context.access,
         commit: context.commit,
         candidate: context.candidate,
         resolved_state: None,
@@ -522,7 +507,12 @@ fn prepare_read_query(
     let schema = resolved_state.query_schema_state().ok_or_else(|| {
         QueryError::internal("read query resolved state is missing its versioned Schema")
     })?;
-    super::schema::select_standard_index_seeks(schema, &mut matches, &context.params);
+    super::schema::select_standard_index_seeks(
+        schema,
+        &mut matches,
+        &context.params,
+        &context.access.read.query,
+    );
     let columns = output_columns(context.mode, &projections);
     let logical = build_logical(
         &matches,
@@ -534,6 +524,7 @@ fn prepare_read_query(
     );
     let physical = build_physical(&logical, &matches, !order.is_empty());
     Ok(PreparedQuery {
+        access: context.access,
         commit: context.commit,
         candidate: context.candidate,
         resolved_state: Some(resolved_state),
@@ -558,6 +549,7 @@ fn prepare_read_query(
 }
 
 fn program_query(
+    access: AccessPolicy,
     commit: HashId,
     candidate: Option<super::version::CandidateContext>,
     graph_view: ResolvedGraphView,
@@ -573,13 +565,14 @@ fn program_query(
     let logical = program.logical.clone();
     let physical = program.physical.clone();
     let mut prepared = empty_prepared_query(
-        commit, candidate, graph_view, params, mode, logical, physical, columns,
+        access, commit, candidate, graph_view, params, mode, logical, physical, columns,
     );
     prepared.program = Some(program);
     prepared
 }
 
 fn schema_query(
+    access: AccessPolicy,
     commit: HashId,
     candidate: Option<super::version::CandidateContext>,
     graph_view: ResolvedGraphView,
@@ -600,7 +593,7 @@ fn schema_query(
         Vec::new()
     };
     let mut prepared = empty_prepared_query(
-        commit, candidate, graph_view, params, mode, logical, physical, columns,
+        access, commit, candidate, graph_view, params, mode, logical, physical, columns,
     );
     prepared.schema = Some(schema);
     prepared
@@ -611,6 +604,7 @@ fn schema_query(
     reason = "PreparedQuery construction keeps its owned execution context explicit"
 )]
 fn empty_prepared_query(
+    access: AccessPolicy,
     commit: HashId,
     candidate: Option<super::version::CandidateContext>,
     graph_view: ResolvedGraphView,
@@ -621,6 +615,7 @@ fn empty_prepared_query(
     columns: Vec<String>,
 ) -> PreparedQuery {
     PreparedQuery {
+        access,
         commit,
         candidate,
         resolved_state: None,

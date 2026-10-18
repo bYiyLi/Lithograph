@@ -2,7 +2,7 @@
 
 [产品手册](README.md) · [Cypher 语言手册](../cypher/index.md) · [接口参考](../reference/README.md)
 
-本文适用 **v0.3.1**（`CY25-2026.08`，storage format `3`）。目标：选择适合输入规模和失败恢复要求的导入方式，并用业务查询核对最终结果。SQL 示例在独立空库、已加载扩展的 connection 中依次执行；文件例子使用单独的临时库。
+本文适用 **v0.3.2**（`CY25-2026.08`，storage format `3`）。目标：选择适合输入规模和失败恢复要求的导入方式，并用业务查询核对最终结果。SQL 示例在独立空库、已加载扩展的 connection 中依次执行；文件例子使用单独的临时库。
 
 <a id="atomicity"></a>
 

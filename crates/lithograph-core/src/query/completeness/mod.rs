@@ -13,11 +13,13 @@ use crate::cypher::{
     AstKind, AstNode, ClauseKind, ExecutionMode, QueryAst, QueryConnector, ShowTargetKind, Value,
 };
 
+mod effects;
 pub(crate) mod execute;
 mod path;
 mod validation;
 mod version;
 
+use effects::ProgramEffects;
 pub(crate) use execute::execute_version_program;
 use validation::{
     has_graph_expression, query_body_has_public_result, validate_static_property_accesses,
@@ -26,6 +28,7 @@ pub(crate) use version::{retry_version_busy, suppress_version_summary_commit};
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedProgram {
+    pub(crate) effects: ProgramEffects,
     pub(crate) root: AstNode,
     pub(crate) source: String,
     pub(crate) columns: Vec<String>,
@@ -43,6 +46,7 @@ pub(crate) struct PreparedProgram {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ProgramWriteOptions {
+    pub(crate) access: super::access::AccessPolicy,
     pub(crate) graph_view: GraphViewSelector,
     pub(crate) branch: String,
     pub(crate) author: Option<String>,
@@ -51,6 +55,7 @@ pub(crate) struct ProgramWriteOptions {
 
 #[derive(Debug, Clone)]
 pub(crate) struct TransactionProgramOptions {
+    pub(crate) access: super::access::AccessPolicy,
     pub(crate) graph_view: GraphViewSelector,
     pub(crate) branch: String,
     pub(crate) author: Option<String>,
@@ -237,15 +242,10 @@ fn has_aggregating_function(root: &AstNode) -> bool {
 }
 
 fn validate_semantic_external_io_program(
-    root: &AstNode,
+    effects: &ProgramEffects,
     transaction_owning: bool,
 ) -> QueryResult<()> {
-    let has_semantic_external_io = root
-        .descendants()
-        .filter(|node| node.kind == AstKind::FunctionName)
-        .filter_map(|node| node.text.as_deref())
-        .any(super::registry::is_semantic_direct_only);
-    if has_semantic_external_io && transaction_owning {
+    if effects.semantic_external_io && transaction_owning {
         return Err(QueryError::transaction_boundary_required(
             "Semantic external I/O cannot execute inside transaction-owning Cypher",
         ));
@@ -259,6 +259,7 @@ pub(crate) fn prepare_program(
     source: &str,
     options: &ExecutionOptions,
 ) -> QueryResult<PreparedProgram> {
+    let effects = ProgramEffects::collect(&ast.root)?;
     let transaction_owning = ast
         .root
         .descendants()
@@ -271,9 +272,8 @@ pub(crate) fn prepare_program(
     let public_result = query_body_has_public_result(&ast.root);
     let columns = output_columns(&ast.root, source, public_result)?;
     let writes = contains_mutation(&ast.root);
-    validate_semantic_external_io_program(&ast.root, transaction_owning)?;
-    let version =
-        version::validate_version_program(&ast.root, options, writes, transaction_owning)?;
+    validate_semantic_external_io_program(&effects, transaction_owning)?;
+    let version = version::validate_version_program(&effects, options, writes, transaction_owning)?;
     let write_options = writes
         .then(|| program_write_options(connection, options))
         .transpose()?;
@@ -286,6 +286,7 @@ pub(crate) fn prepare_program(
         .map(physical_operator)
         .collect::<Vec<_>>();
     Ok(PreparedProgram {
+        effects,
         root: ast.root.clone(),
         source: source.to_owned(),
         columns,
@@ -311,6 +312,7 @@ fn transaction_program_options(
     options: &ExecutionOptions,
 ) -> QueryResult<TransactionProgramOptions> {
     Ok(TransactionProgramOptions {
+        access: options.access.clone(),
         graph_view: options.graph_view.clone(),
         branch: writable_branch(connection, options)?,
         author: options.author.clone(),
@@ -408,6 +410,7 @@ fn program_write_options(
     options: &ExecutionOptions,
 ) -> QueryResult<ProgramWriteOptions> {
     Ok(ProgramWriteOptions {
+        access: options.access.clone(),
         graph_view: options.graph_view.clone(),
         branch: writable_branch(connection, options)?,
         author: options.author.clone(),

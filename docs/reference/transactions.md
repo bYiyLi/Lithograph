@@ -1,6 +1,6 @@
 # 事务与 Execution 生命周期参考
 
-适用版本：**v0.3.1** · [产品手册](../guide/README.md) · [接口参考](README.md)
+适用版本：**v0.3.2** · [产品手册](../guide/README.md) · [接口参考](README.md)
 
 本页定义宿主调用的生命周期；[事务指南](../guide/transactions.md) 提供任务流程，Cypher 的 batch 语法与部分提交规则见 [Transaction Subqueries](../cypher/transaction-subqueries.md)。所有生命周期调用都必须使用同一 SQLite connection，不能在连接池的不同连接间传递事务。
 
@@ -37,11 +37,23 @@
 
 使用普通 `lithograph()` / `lithograph_rows()`；它们共享当前 staged graph/Schema/Index state，前一条成功的写入对后一条可见。每个 execution 都返回正常 columns/rows/counters，但 `summary.commit=null`，不能将其作为已发布版本。
 
-execution options 只接受 `graphView` 与 `readOnlyNoExternalIO`；begin 确定的 Branch、base 和 metadata 固定。每个安全读取都必须独立传 `readOnlyNoExternalIO:true`；一次成功不会自动把后续 execution 变成安全读取。
+v0.3.1 execution options 只接受 `graphView` 与 `readOnlyNoExternalIO`；v0.3.2 还接受每次独立指定的 `readAccess` / `writeAccess`；begin 确定的 Branch、base 和 metadata 固定。每个安全读取都必须独立传 `readOnlyNoExternalIO:true`；一次成功不会自动把后续 execution 变成安全读取。
 
 Graph/Schema/Index 查询与写入可组合。普通 LOAD CSV、Managed Semantic query 可执行并占用当前 writer；它们失败时整体 abort。Version/ref/checkout/GC、需要 committed target 的维护操作、transaction-owning subquery 等不能嵌套，返回 `TRANSACTION_BOUNDARY_REQUIRED`。具体 Procedure 的限制见各自条目。
 
 execution 在 finalize-success 前发生 parse、semantic、type、constraint、options、I/O、编码、interrupt 或安全拒绝失败时，整个 explicit transaction fail closed：先前成功的 staged writes 一起 rollback。之后 `tx_commit()` / `tx_abort()` 返回 no-active-transaction 的 `INVALID_ARGUMENT`，不能靠重试 commit 恢复已回滚内容。已经 finalize-success 的 statement 不因后续 SQLite summary handoff 失败而重新 abort，详见下文 cursor 生命周期。
+
+<a id="access-controls"></a>
+
+## 每次 execution 的访问规则（v0.3.2）
+
+`readAccess` / `writeAccess` 加在普通 `lithograph()` / `lithograph_rows()` execution 上；`tx_begin` 的 options shape 不变。每次可选择新规则，以本次开始时的 staged state 为保护属性写入的基线，不追溯否定此前可信 execution 的写入。未填写规则不会自动继承上一次策略；宿主需要每次构造并传入。
+
+查询属性隐藏作用于当前 staged read；result 只过滤本次公开图对象。明确拒绝为 `ACCESS_DENIED` + `SQLITE_AUTH`，仍自动 abort 整个 active explicit transaction，之前 staged writes 一并回滚。普通 caller-owned SQLite transaction 的 invocation 失败按原有 SAVEPOINT/outer transaction 合同处理，不擅自提交外层事务。
+
+`IN TRANSACTIONS` / concurrent variant 在原有合法的 autocommit context 中继承整个 execution 的策略。当前失败 batch 不发布；`ON ERROR CONTINUE/BREAK/FAIL` 等保持 Cypher 原有语义，earlier durable batches 不被倒退。不能因为后来 ACCESS_DENIED、取消或结果交付失败，把导入报告成“整体没有副作用”。Version/maintenance Procedure 在 explicit transaction 内原有独立边界限制仍然生效，不因 allowVersionChanges/allowMaintenance 为 true 解除。
+
+完整调用与失败后 Branch head/数据断言见 [访问控制指南](../guide/access-controls.md) 和 [access_controls.py](../guide/examples/access_controls.py)。
 
 <a id="commit"></a>
 

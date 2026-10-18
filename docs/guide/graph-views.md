@@ -2,7 +2,7 @@
 
 [产品手册](README.md) · [Cypher 语言手册](../cypher/index.md) · [接口参考](../reference/README.md)
 
-本文适用 **v0.3.1**（`CY25-2026.08`，storage format `3`）。
+本文适用 **v0.3.2**（`CY25-2026.08`，storage format `3`）。
 
 Graph View 是一次 execution 的 Label selector，不是另一张图、另一份数据库或授权系统。以下在独立空库中运行。
 

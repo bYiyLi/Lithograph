@@ -61,6 +61,7 @@ impl TransactionRuntime<'_> {
             base_commit,
             branch: &self.options.branch,
             graph_view: &self.options.graph_view,
+            access: &self.options.access,
             author: self.options.author.as_deref(),
             message: self.options.message.as_deref(),
             params: self.params,
@@ -145,6 +146,7 @@ pub(crate) fn execute_transaction_program(
             &result.columns,
             result.rows,
             is_interrupted,
+            &runtime.options.access.read.query,
         )?
     } else {
         None
@@ -320,7 +322,8 @@ fn execute_read_clause_at_commit(
     input: RowSet,
 ) -> QueryResult<RowSet> {
     let snapshot = Snapshot::resolve(runtime.connection, runtime.commit)?;
-    let graph_view = ResolvedGraphView::resolve(runtime.connection, &runtime.options.graph_view)?;
+    let graph_view = ResolvedGraphView::resolve(runtime.connection, &runtime.options.graph_view)?
+        .with_query_access(runtime.options.access.read.query.clone());
     execute_read_clause(
         runtime.connection,
         snapshot,
@@ -666,7 +669,13 @@ fn evaluate_at_commit(
     row: &BindingRow,
 ) -> QueryResult<Value> {
     let snapshot = Snapshot::resolve(runtime.connection, runtime.commit)?;
-    expression::evaluate(expression, &snapshot, row, runtime.params)
+    expression::evaluate_with_access(
+        expression,
+        &snapshot,
+        row,
+        runtime.params,
+        &runtime.options.access.read.query,
+    )
 }
 
 fn execute_batch_with_retry(

@@ -2,7 +2,7 @@
 
 [产品手册](../guide/README.md) · [接口参考](../reference/README.md) · [版本与兼容范围](../reference/cypher-compatibility.md)
 
-本手册适用于 **Lithograph v0.3.1**，语言基线为冻结的 **`CY25-2026.08`**。它说明本产品公开的 Cypher 语法与可观察行为。Cypher 通过 SQLite 的 `lithograph()` 或 `lithograph_rows()` 执行；第一次接入请先完成 [快速入门](../guide/getting-started.md)。
+本手册适用于 **Lithograph v0.3.2**，语言基线为冻结的 **`CY25-2026.08`**。它说明本产品公开的 Cypher 语法与可观察行为。Cypher 通过 SQLite 的 `lithograph()` 或 `lithograph_rows()` 执行；第一次接入请先完成 [快速入门](../guide/getting-started.md)。
 
 ## 阅读与查找
 

@@ -487,6 +487,10 @@ impl ReadExecutor<'_, '_> {
                 &index_name,
                 StandardIndexKind::Semantic,
             )?;
+            super::super::super::semantic_index::validate_query_index_access(
+                &index,
+                self.graph_view,
+            )?;
             let hits = managed_semantic::query(
                 self.connection,
                 &self.snapshot,
@@ -637,6 +641,7 @@ impl ReadExecutor<'_, '_> {
             &index_name,
             StandardIndexKind::FullText,
         )?;
+        super::super::super::semantic_index::validate_query_index_access(&index, self.graph_view)?;
         let hits = fulltext_query(
             self.connection,
             &self.snapshot,
@@ -689,17 +694,21 @@ impl ReadExecutor<'_, '_> {
         let (field, value) = match hit.entity {
             SemanticEntity::Node(node) => (
                 "node",
-                Value::Node(super::super::super::graph::materialize_node(
+                Value::Node(super::super::super::graph::materialize_node_with_access(
                     &self.snapshot,
                     node,
+                    &self.graph_view.query_access,
                 )?),
             ),
             SemanticEntity::Relationship(relationship) => (
                 "relationship",
-                Value::Relationship(super::super::super::graph::materialize_relationship(
-                    &self.snapshot,
-                    relationship,
-                )?),
+                Value::Relationship(
+                    super::super::super::graph::materialize_relationship_with_access(
+                        &self.snapshot,
+                        relationship,
+                        &self.graph_view.query_access,
+                    )?,
+                ),
             ),
         };
         Ok(BTreeMap::from([
@@ -871,7 +880,9 @@ impl ReadExecutor<'_, '_> {
         values: &mut BTreeSet<String>,
     ) -> QueryResult<()> {
         for (key, _) in self.snapshot.properties(owner_kind, owner_id)? {
-            if let Some(name) = storage::property_key_name(self.connection, key)? {
+            if let Some(name) = storage::property_key_name(self.connection, key)?
+                && !self.graph_view.query_access.denies(&name)
+            {
                 values.insert(name);
             }
         }

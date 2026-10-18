@@ -52,7 +52,9 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 
 **Phase 16 已完成开发验收。** [只读且禁止外部 I/O 的 Cypher execution option](phases/16-safe-execution-option.md) 在共享 SQL execution core 上增加 query-local 安全约束；完整 AST（含插值）检查、SQL scalar/rows/explicit transaction、synthetic Provider 零调用拒绝、完整 Core/quality/CI 均通过。旧本机权限阻塞已解决，实际证据见 Phase 计划；v0.3.1 的远端与发布验收由 Phase 17 记录。
 
-当前仓库实现已经完成 Phase 00–17。current-graph engine 已闭合 query composition、aggregation、advanced path、expression/function/value、mutation、versioned Graph Type/Constraint、lookup/range/text/point/full-text/vector index、Raw Vector `SEARCH`、Managed Semantic、`LOAD CSV`、Cypher transaction batching、SQL-only normal execution 与 explicit transaction。`lithograph_rows()` 已支持 read/write/external-I/O/transaction-subquery true streaming；application Native query ABI 与专用 `tx_execute` 已删除；Lithograph Core 不再拥有 persistent embedding result cache。
+**Phase 18 已完成访问控制与追加 cache 修复验收。** [查询、返回与写入访问控制](phases/18-query-access-controls.md) 的 signed-zero Squash、NaN 无关 Revert、Schema canonical 与插值/生命周期发现均已闭环，版本/流式/Graph View/索引/外联漏测已补入永久回归。用户随后追加的 OpenAI-compatible Provider cache 首次并发初始化修复已通过真实多进程旧红→新绿；新最终 quality/CI、各 **112/112** Core 专项、三个 SQLite runtime 各 **15 cache checks**、SQL **28/28**、CSV **28/28**、外联 **22/22** 与新 macOS arm64 包完整 smoke 全部通过，独立 review 无剩余 finding，Phase 为 `done`。前轮 green 与旧包保留为历史，新证据使用 `target/cache-init-032/`。用户现已授权提交、推送，并在远端 exact-SHA CI/六平台通过后正式发布；当前交付正在准备，实际结果由 [Phase 18 发布交付记录](phases/18-query-access-controls.md#v032-release-delivery) 维护。
+
+当前仓库 Phase 00–18 均为 `done`；Phase 18 的追加 Provider cache 修复已使用新源码门禁与新包验收闭环，未改写 Phase 15 等历史完成记录。current-graph engine 已闭合 query composition、aggregation、advanced path、expression/function/value、mutation、versioned Graph Type/Constraint、lookup/range/text/point/full-text/vector index、Raw Vector `SEARCH`、Managed Semantic、`LOAD CSV`、Cypher transaction batching、SQL-only normal execution 与 explicit transaction。`lithograph_rows()` 已支持 read/write/external-I/O/transaction-subquery true streaming；application Native query ABI 与专用 `tx_execute` 已删除；Lithograph Core 不再拥有 persistent embedding result cache。
 
 当前 Design 进一步确认了通用版本化状态能力：Commit 保持 immutable；Commit Data 是可修改 JSON sidecar；Tag 是显式可移动但不会随写入自动前进的 named ref；允许显式创建 empty-delta Commit；History 需要 opaque cursor 做 bounded DAG traversal；SQL explicit transaction 可以把多个标准 Cypher current-graph execution 组合为一个最终 Commit，并通过 `expectedHead` 提供 transaction-start CAS；Merge 使用 durable Merge Session，把大量 conflict 的分页/逐步 resolution 与最终 Commit/Branch move 分开，并通过 session revision + target-head CAS 支持上层在 finalize 前验证 exact candidate。它们不回开已完成的 Phase 02/05：Phase 05 保持“一次普通 top-level mutating query -> 一个 Commit”的 auto-commit foundation，Phase 08 的 `IN TRANSACTIONS` 继续“每个 mutating batch -> 一个 Commit”，多 execution 单 Commit与 Merge Session 的 version-atomicity foundation来自 Phase 09，Phase 15 负责把 normal SQL execution surface 接到同一 staged lifecycle。Phase 09 同时把 storage format 从 development baseline `1` 显式迁移到首个公开 release 的 format `2`；Phase 10 负责当时的 migration/scale/recovery closure。
 
@@ -74,6 +76,7 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 - Phase 15：`done`；
 - Phase 16：`done`；
 - Phase 17：`done`；
+- Phase 18：`done`（含追加 Provider cache 初始化修复与新候选验收）；
 - `docs/development/cypher25-compatibility.md` 保留 Phase 00–15 已执行证据；Full-text family、Phase 12 provider、Phase 13 Managed Semantic 与 Phase 15 SQL execution / Provider cache supplemental inventory 均已闭合为 `done`。Phase 14/15 都不改变冻结 Cypher 语言 coverage 分母。
 
 ## 4. 路线总览
@@ -98,6 +101,7 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 | [15 SQL Execution Surface、True Streaming 与 Provider-owned Cache](phases/15-sql-execution-provider-cache.md) | `done` | SQL-only application surface、真正 rows execution stream、normal surfaces 复用 explicit tx、删除 Native query ABI、Provider-owned embedding cache | 01、04–14 |
 | [16 只读且禁止外部 I/O 的 Cypher execution option](phases/16-safe-execution-option.md) | `done` | Query-local 只读、禁止 LOAD CSV / Provider I/O；scalar/rows 与 explicit transaction 共用 Core 安全检查 | 15 |
 | [17 完整开发者手册与 v0.3.1 发布](phases/17-developer-documentation-release.md) | `done` | 完整用户文档、可执行示例、覆盖/生成/链接 CI 与 v0.3.1 真实发布验收 | 16 |
+| [18 查询、返回与写入访问控制](phases/18-query-access-controls.md) | `done` | Query/result/write、canonical/插值与 Provider cache 初始化修复；永久回归、最终本机门禁和 v0.3.2 新候选包验收全部通过，未发布 | 15–17 |
 
 Phase 15 的 EX15-01–19 已全部闭合。实现 revision `b0d5a3da9c5c0266218e01c51d6d34a1be0a6b9d` 的 repository CI `35586275713` 与 hosted Release Matrix `35586275736` 均成功，Linux/macOS/Windows x64/arm64 六目标 artifact build/load/symbol/runtime 全部通过；10M streaming/resource 与本地 acceptance 数值见 Phase 15 计划。
 
@@ -207,6 +211,9 @@ full repository gates
 - [Phase 13](phases/13-managed-semantic-vector.md)
 - [Phase 14](phases/14-sql-explicit-transaction.md)
 - [Phase 15](phases/15-sql-execution-provider-cache.md)
+- [Phase 16](phases/16-safe-execution-option.md)
+- [Phase 17](phases/17-developer-documentation-release.md)
+- [Phase 18](phases/18-query-access-controls.md)
 - [FTS5 Tokenizer 研究证据](../research/fts5-tokenizer-contract.md)
 - [Embedding Provider / Cypher Vector 研究证据](../research/embedding-provider-contract.md)
 - [性能证据与测量限制](../research/phase11-performance-evidence.md)

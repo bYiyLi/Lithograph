@@ -9,6 +9,8 @@ use crate::storage::{self, CommitMetadata, HashId};
 use super::options::{ExecutionOptions, MergeSessionSelector, SnapshotSelector};
 use super::{QueryError, QueryErrorKind, QueryResult, now_micros};
 
+mod access;
+mod canonical;
 mod merge;
 mod operations;
 mod patch;
@@ -197,13 +199,13 @@ pub(crate) fn execute_procedure(
         "lithograph.tag.move" => tag_move(connection, args),
         "lithograph.tag.delete" => tag_delete(connection, args),
         "lithograph.log" => log(connection, args),
-        "lithograph.diff" => patch::diff(connection, args),
+        "lithograph.diff" => patch::diff(connection, args, options),
         "lithograph.patch.apply" => patch::apply(connection, args, options, pinned_commit),
         "lithograph.merge.start" => merge::start(connection, args, options, pinned_commit),
         "lithograph.merge.get" => merge::get(connection, args),
         "lithograph.merge.list" => merge::list(connection, args),
-        "lithograph.merge.conflicts" => merge::conflicts(connection, args),
-        "lithograph.merge.resolve" => merge::resolve(connection, args),
+        "lithograph.merge.conflicts" => merge::conflicts(connection, args, options),
+        "lithograph.merge.resolve" => merge::resolve(connection, args, options),
         "lithograph.merge.finalize" => merge::finalize(connection, args, options),
         "lithograph.merge.abort" => merge::abort(connection, args),
         "lithograph.rebase" => operations::rebase(connection, args, options, pinned_commit),

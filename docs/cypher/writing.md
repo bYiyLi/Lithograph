@@ -2,7 +2,7 @@
 
 [语言手册](index.md) · [版本与范围](../reference/cypher-compatibility.md)
 
-适用于 Lithograph v0.3.1，Cypher Profile `CY25-2026.08`。本章说明 graph-data mutation；Schema/Index DDL 见各自章节，Branch/Commit/Merge 等版本接口见 [Procedure Reference](../reference/procedures.md)。所有例子在隔离教学图运行。
+适用于 Lithograph v0.3.2，Cypher Profile `CY25-2026.08`。本章说明 graph-data mutation；Schema/Index DDL 见各自章节，Branch/Commit/Merge 等版本接口见 [Procedure Reference](../reference/procedures.md)。所有例子在隔离教学图运行。
 
 <a id="create-insert"></a>
 

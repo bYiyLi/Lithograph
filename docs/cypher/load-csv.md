@@ -1,6 +1,6 @@
 # LOAD CSV
 
-适用版本：Lithograph **v0.3.1**，Cypher Profile **`CY25-2026.08`**。
+适用版本：Lithograph **v0.3.2**，Cypher Profile **`CY25-2026.08`**。
 
 [Cypher 手册](index.md) · [兼容范围](../reference/cypher-compatibility.md) · [导入指南](../guide/import.md)
 
@@ -206,4 +206,4 @@ RETURN row
 
 预期 `INVALID_ARGUMENT`，不会开始读取 source。
 
-语言用法另与 [Neo4j Cypher 25 LOAD CSV](https://neo4j.com/docs/cypher-manual/25/clauses/load-csv/) 核对。这里的 URI、宿主权限、错误和事务说明以 Lithograph v0.3.1 为准；线上手册的服务器管理能力不扩展本页支持范围。
+语言用法另与 [Neo4j Cypher 25 LOAD CSV](https://neo4j.com/docs/cypher-manual/25/clauses/load-csv/) 核对。这里的 URI、宿主权限、错误和事务说明以 Lithograph v0.3.2 为准；线上手册的服务器管理能力不扩展本页支持范围。

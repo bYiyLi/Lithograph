@@ -21,11 +21,12 @@ impl QueryCursor {
                 };
                 self.metrics.record_active_rows(1);
                 for (index, projection) in self.prepared.projections.iter().enumerate() {
-                    if expression::count_contributes(
+                    if expression::count_contributes_with_access(
                         &projection.expression,
                         snapshot,
                         &row,
                         &self.prepared.params,
+                        &self.prepared.graph_view.query_access,
                     )? {
                         counts[index] = counts[index].saturating_add(1);
                     }
@@ -55,7 +56,13 @@ pub(super) fn project_row(
         .projections
         .iter()
         .map(|projection| {
-            expression::evaluate(&projection.expression, snapshot, row, &prepared.params)
+            expression::evaluate_with_access(
+                &projection.expression,
+                snapshot,
+                row,
+                &prepared.params,
+                &prepared.graph_view.query_access,
+            )
         })
         .collect()
 }
@@ -76,12 +83,13 @@ pub(super) fn order_values(
         .order
         .iter()
         .map(|item| {
-            expression::evaluate_with_aliases(
+            expression::evaluate_with_aliases_and_access(
                 &item.expression,
                 snapshot,
                 binding,
                 &prepared.params,
                 &aliases,
+                &prepared.graph_view.query_access,
             )
         })
         .collect()

@@ -36,6 +36,7 @@ pub(super) fn squash(
     let target = storage::load_snapshot_state(connection, head)?;
     let base = storage::load_snapshot_state(connection, since)?;
     let layer = storage::layer_between(&base, &target)?;
+    super::access::check_schema_validation(&base.schema, &target.schema, &options.access)?;
     super::patch::validate_candidate(connection, since, &layer, &target.schema)?;
 
     // Move inside the enclosing savepoint, then install the one replacement Commit.
@@ -58,6 +59,7 @@ pub(super) fn reset(
     let branch = target_branch(connection, options)?;
     let previous = pinned_head;
     ensure_target_branch_head(connection, &branch, previous)?;
+    super::access::check_commits(connection, previous, target, &options.access)?;
     move_target_branch(connection, &branch, previous, target)?;
     Ok(vec![row([
         ("from", commit_value(previous)),
@@ -117,6 +119,8 @@ fn apply_revert_patch(
     let mut target = base.clone();
     super::patch::apply_patch_to_state(connection, &mut target, inverse)?;
     let layer = storage::layer_between(&base, &target)?;
+    super::access::check_layer(connection, head, &layer, &target.schema, &options.access)?;
+    super::access::check_schema_validation(&base.schema, &target.schema, &options.access)?;
     super::patch::validate_candidate(connection, head, &layer, &target.schema)?;
     commit_rewritten_snapshot(connection, &branch, head, &layer, &target, options)
 }
@@ -164,6 +168,7 @@ pub(super) fn rebase(
             old_head,
             onto,
             &supplied_resolutions,
+            options,
         );
     }
     let base = first_parent_rebase_base(connection, old_head, onto)?;
@@ -175,6 +180,7 @@ pub(super) fn rebase(
             old_head,
             onto,
             &supplied_resolutions,
+            options,
         );
     }
     execute_rebase_sequence(
@@ -184,6 +190,7 @@ pub(super) fn rebase(
         onto,
         sequence,
         &supplied_resolutions,
+        options,
     )
 }
 
@@ -193,8 +200,10 @@ fn finish_up_to_date_rebase(
     old_head: HashId,
     onto: HashId,
     supplied_resolutions: &BTreeMap<HashId, Value>,
+    options: &ExecutionOptions,
 ) -> QueryResult<Vec<ProcedureRow>> {
     ensure_rebase_resolutions_known(supplied_resolutions, &BTreeSet::new())?;
+    super::access::check_commits(connection, old_head, onto, &options.access)?;
     move_target_branch(connection, branch, old_head, onto)?;
     Ok(rebase_result(
         "up_to_date",
@@ -232,6 +241,7 @@ fn execute_rebase_sequence(
     onto: HashId,
     sequence: Vec<HashId>,
     supplied_resolutions: &BTreeMap<HashId, Value>,
+    options: &ExecutionOptions,
 ) -> QueryResult<Vec<ProcedureRow>> {
     connection.execute_batch("SAVEPOINT lithograph_rebase")?;
     move_target_branch(connection, branch, old_head, onto)?;
@@ -245,6 +255,7 @@ fn execute_rebase_sequence(
             replay_head,
             source,
             supplied_resolutions,
+            options,
         )? {
             RebaseStep::Conflict {
                 conflicts,
@@ -254,6 +265,13 @@ fn execute_rebase_sequence(
                 ensure_rebase_resolutions_known(supplied_resolutions, &seen_conflicts)?;
                 connection
                     .execute_batch("ROLLBACK TO lithograph_rebase; RELEASE lithograph_rebase")?;
+                for conflict in &conflicts {
+                    if let Value::Map(conflict) = conflict
+                        && let Some(Value::String(slot)) = conflict.get("slot")
+                    {
+                        super::access::check_slot_read(slot, &options.access.read.query)?;
+                    }
+                }
                 return Ok(rebase_result("conflicted", None, Vec::new(), conflicts));
             }
             RebaseStep::Applied {
@@ -268,6 +286,7 @@ fn execute_rebase_sequence(
         }
     }
     ensure_rebase_resolutions_known(supplied_resolutions, &seen_conflicts)?;
+    super::access::check_commits(connection, old_head, replay_head, &options.access)?;
     connection.execute_batch("RELEASE lithograph_rebase")?;
     Ok(rebase_result(
         "rebased",
@@ -295,6 +314,7 @@ fn replay_rebase_commit(
     replay_head: HashId,
     source: HashId,
     supplied_resolutions: &BTreeMap<HashId, Value>,
+    options: &ExecutionOptions,
 ) -> QueryResult<RebaseStep> {
     let source_record = storage::load_commit(connection, source)?;
     let source_parent = source_record.parent1.ok_or_else(|| {
@@ -329,6 +349,11 @@ fn replay_rebase_commit(
     }
     let current = storage::load_snapshot_state(connection, replay_head)?;
     let layer = storage::layer_between(&current, &outcome.candidate)?;
+    super::access::check_schema_validation(
+        &current.schema,
+        &outcome.candidate.schema,
+        &options.access,
+    )?;
     super::patch::validate_candidate(connection, replay_head, &layer, &outcome.candidate.schema)?;
     let schema_hash = outcome.candidate.schema.persist(connection)?;
     let next = storage::commit_layer_with_schema(

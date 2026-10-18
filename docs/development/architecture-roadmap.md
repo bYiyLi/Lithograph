@@ -4,7 +4,7 @@
 
 ## 1. Critical Path
 
-[Phase 16](phases/16-safe-execution-option.md) 在共享 execution core 上增加安全约束；[Phase 17](phases/17-developer-documentation-release.md) 建设完整用户手册、示例和覆盖门禁并验收 v0.3.1 发布。当前证据由对应 Phase 维护，原 Phase 00–15 的历史完成状态不变。
+[Phase 16](phases/16-safe-execution-option.md) 在共享 execution core 上增加安全约束；[Phase 17](phases/17-developer-documentation-release.md) 建设完整用户手册、示例和覆盖门禁并验收 v0.3.1 发布。[Phase 18](phases/18-query-access-controls.md) 的 query/result/write、canonical/插值与追加 Provider cache 首次并发初始化修复均已完成永久回归、最终源码与本机包验收，状态为 done。v0.3.2 的提交、远端 CI/六平台与正式发布已获授权并开始准备，实际进度见 [发布交付记录](phases/18-query-access-controls.md#v032-release-delivery)；旧证据与原 Phase 00–17 历史完成状态不变。
 
 ```text
 Phase 00 Engineering Foundation
@@ -63,6 +63,9 @@ Phase 16 Read-only / No External I/O (done)
         |
         v
 Phase 17 Developer Documentation / v0.3.1 Release (done)
+        |
+        v
+Phase 18 Query / Result / Write Access Controls (done; v0.3.2 release delivery in progress)
 ```
 
 Phase 00–15 均已完成开发验收。Phase 15 的 EX15-01–19 全部闭合：15.1 host feasibility probe 确认 same-connection SAVEPOINT / repeated inner transaction 可行并收敛 `xClose` cleanup-failure contract；本地 correctness/resource/quality/CI/docs review 已通过；revision `b0d5a3da9c5c0266218e01c51d6d34a1be0a6b9d` 的 repository CI `35586275713` 与六目标 Release Matrix `35586275736` 全部成功。Phase 13/14 的 Provider/format4/Native/SQL tx adapter 记录继续作为历史实现证据，当前产品合同以 Phase 15 收敛后的 SQL-only / format3 / Provider-owned cache 设计为准。具体证据见 [Phase 15 计划](phases/15-sql-execution-provider-cache.md)。
@@ -82,6 +85,8 @@ Phase 15 的目标由 [Interfaces](../design/interfaces.md)、[Explicit Transact
 Phase 15 已进入 v0.3.0 正式发布基线。实现修复 revision `b0d5a3da9c5c0266218e01c51d6d34a1be0a6b9d` 的 repository CI `35586275713` 与六目标 Release Matrix `35586275736` 均通过。
 
 Phase 16 的安全执行选项已完成 2026-10-16 的完整本地验收：Core、scalar/rows/explicit transaction、synthetic Provider、quality 与 canonical CI 均通过。Phase 17 亦已完成 v0.3.1 完整手册、文档 CI、六平台正式发布、资产与发布制品回归；精确源码/tag/CI 与 checksum 证据见 [Phase 17](phases/17-developer-documentation-release.md)。
+
+Phase 18 的前轮 69 项、追加前 112 项与旧包历史证据保留；signed-zero Squash、NaN 无关 Revert、Schema canonical、插值与生命周期发现已修复并补齐组合回归。追加 Provider cache 初始化修复通过真实多进程旧红→新绿，最终 quality/CI 各 **112/112** Core 专项、三个 SQLite runtime 各 **15 cache checks**、新 macOS arm64 包完整 smoke 与独立 review 全部闭环，状态为 done；不回开 Phase 15 历史完成状态。后续提交、远端 exact-SHA CI、六平台与正式发布按新增授权推进，实际结果统一见 [Phase 18 发布交付记录](phases/18-query-access-controls.md#v032-release-delivery)。
 
 ## 2. 为什么 Version Storage 必须早于 Cypher Engine
 
@@ -133,6 +138,7 @@ Phase 16 的安全执行选项已完成 2026-10-16 的完整本地验收：Core�
 | Explicit empty-delta Commit / cursor-based DAG history | 09 | 09 |
 | Compatibility closure | 10 | 10 |
 | Scale / crash / migration / cross-platform release | 10 | 15 |
+| Query-local read/result/write access controls | 18 | 18 |
 
 ## 4. Vertical Slice 顺序
 

@@ -157,3 +157,128 @@ fn scalar_panic_guard_converts_panics_to_internal_errors() {
     assert_eq!(error.category, ErrorCategory::Internal);
     assert!(error.message.contains("SQLite scalar callback"));
 }
+
+#[test]
+fn query_access_denied_preserves_category_and_sqlite_auth() {
+    for sqlite_code in [None, Some(ffi::SQLITE_AUTH)] {
+        let mapped = execution::map_query_error(query::QueryError {
+            kind: query::QueryErrorKind::AccessDenied,
+            message: "protected operation".to_owned(),
+            line: None,
+            column: None,
+            sqlite_code,
+        });
+        assert_eq!(mapped.category, ErrorCategory::AccessDenied);
+        assert_eq!(mapped.sqlite_code, ffi::SQLITE_AUTH);
+        assert_eq!(
+            mapped.public_message(),
+            "LITHOGRAPH_ACCESS_DENIED: protected operation"
+        );
+        let json = mapped.to_json_value();
+        assert_eq!(json["category"], "ACCESS_DENIED");
+        assert_eq!(json["sqliteCode"], ffi::SQLITE_AUTH);
+    }
+}
+
+#[test]
+fn explicit_transaction_forwards_per_execution_access_rules() {
+    let options = json!({
+        "graphView": {"nodeLabels": ["Person"]},
+        "readOnlyNoExternalIO": false,
+        "readAccess": {"result": {"denyProperties": ["secret"]}},
+        "writeAccess": {"allowDelete": false},
+    });
+    let forwarded: Value = serde_json::from_str(
+        &transaction::execution_options(&options.to_string(), "main").expect("valid options"),
+    )
+    .expect("forwarded JSON");
+    assert_eq!(forwarded["branch"], "main");
+    for key in [
+        "graphView",
+        "readOnlyNoExternalIO",
+        "readAccess",
+        "writeAccess",
+    ] {
+        assert_eq!(forwarded[key], options[key]);
+    }
+    let empty: Value =
+        serde_json::from_str(&transaction::execution_options("{}", "main").expect("empty options"))
+            .expect("forwarded empty JSON");
+    assert_eq!(empty, json!({"branch": "main"}));
+    let error = transaction::execution_options(r#"{"branch":"other"}"#, "main")
+        .expect_err("execution cannot change the explicit transaction Branch");
+    assert_eq!(error.category, ErrorCategory::InvalidArgument);
+}
+
+#[test]
+fn output_encoding_filters_only_graph_properties_without_changing_runtime_values() {
+    use std::collections::BTreeMap;
+
+    use cypher::Value as CypherValue;
+
+    let node = cypher::NodeValue {
+        element_id: "n:1".to_owned(),
+        labels: vec!["Person".to_owned()],
+        properties: BTreeMap::from([
+            ("name".to_owned(), CypherValue::String("Alice".to_owned())),
+            ("secret".to_owned(), CypherValue::Integer(7)),
+            ("hidden".to_owned(), CypherValue::Integer(9)),
+        ]),
+    };
+    let relationship = cypher::RelationshipValue {
+        element_id: "r:1".to_owned(),
+        relationship_type: "KNOWS".to_owned(),
+        start: "n:1".to_owned(),
+        end: "n:2".to_owned(),
+        properties: node.properties.clone(),
+    };
+    let path = cypher::PathValue {
+        nodes: vec![node.clone()],
+        relationships: vec![relationship.clone()],
+    };
+    let row = vec![
+        CypherValue::Node(node.clone()),
+        CypherValue::Relationship(relationship),
+        CypherValue::Path(path),
+        CypherValue::Map(BTreeMap::from([
+            ("secret".to_owned(), CypherValue::Integer(7)),
+            (
+                "nested".to_owned(),
+                CypherValue::List(vec![CypherValue::Node(node)]),
+            ),
+        ])),
+        CypherValue::Integer(7),
+    ];
+    let original = row.clone();
+    let options = query::ExecutionOptions::parse_text(
+        r#"{
+        "readAccess": {
+            "query": {"denyProperties": ["hidden"]},
+            "result": {"denyProperties": ["secret"]}
+        }
+    }"#,
+    )
+    .expect("access options");
+    let encoded = execution::row_json(&row, &options.access);
+    let expected_properties = json!({"name": "Alice"});
+    assert_eq!(encoded[0]["properties"], expected_properties);
+    assert_eq!(encoded[1]["properties"], expected_properties);
+    assert_eq!(encoded[2]["nodes"][0]["properties"], expected_properties);
+    assert_eq!(
+        encoded[2]["relationships"][0]["properties"],
+        expected_properties
+    );
+    assert_eq!(encoded[3]["secret"], 7);
+    assert_eq!(encoded[3]["nested"][0]["properties"], expected_properties);
+    assert_eq!(encoded[4], 7);
+    assert_eq!(encoded[0]["elementId"], "n:1");
+    assert_eq!(encoded[0]["labels"], json!(["Person"]));
+    assert_eq!(encoded[1]["type"], "KNOWS");
+    assert_eq!(encoded[1]["start"], "n:1");
+    assert_eq!(encoded[1]["end"], "n:2");
+    assert_eq!(row, original);
+    assert_eq!(
+        execution::row_json(&row, &query::AccessPolicy::default()),
+        Value::Array(row.iter().map(cypher::encode_json).collect()),
+    );
+}

@@ -87,9 +87,10 @@ impl BindingSource for DistinctBindingSource {
                     .columns
                     .iter()
                     .map(|column| {
-                        expression::binding_value(
+                        expression::binding_value_with_access(
                             runtime.snapshot,
                             binding.values.get(column).unwrap_or(&BindingValue::Null),
+                            &runtime.graph_view.query_access,
                         )
                     })
                     .collect::<QueryResult<Vec<_>>>()?;
@@ -272,8 +273,13 @@ impl BindingSource for FilterSource {
             let Some(row) = self.upstream.next(runtime)? else {
                 return Ok(None);
             };
-            let value =
-                expression::evaluate(&self.predicate, runtime.snapshot, &row, runtime.params)?;
+            let value = expression::evaluate_with_access(
+                &self.predicate,
+                runtime.snapshot,
+                &row,
+                runtime.params,
+                &runtime.graph_view.query_access,
+            )?;
             if expression::predicate(value)? {
                 return Ok(Some(row));
             }
@@ -295,8 +301,13 @@ impl BindingSource for LetSource {
         };
         let mut output = source.clone();
         for (name, expression) in &self.bindings {
-            let value =
-                expression::evaluate(expression, runtime.snapshot, &source, runtime.params)?;
+            let value = expression::evaluate_with_access(
+                expression,
+                runtime.snapshot,
+                &source,
+                runtime.params,
+                &runtime.graph_view.query_access,
+            )?;
             output.insert(
                 name.clone(),
                 expression::binding_from_value(runtime.snapshot, value)?,
@@ -335,8 +346,13 @@ impl BindingSource for UnwindSource {
                 self.current_input = None;
                 return Ok(None);
             };
-            let value =
-                expression::evaluate(&self.expression, runtime.snapshot, &input, runtime.params)?;
+            let value = expression::evaluate_with_access(
+                &self.expression,
+                runtime.snapshot,
+                &input,
+                runtime.params,
+                &runtime.graph_view.query_access,
+            )?;
             let values = match value {
                 Value::Null => Vec::new(),
                 Value::List(values) => values,
@@ -390,7 +406,13 @@ impl BindingSource for LoadCsvSource {
                 return Ok(None);
             };
             let (source, delimiter) = evaluate_csv_source(&self.spec, |expr| {
-                expression::evaluate(expr, runtime.snapshot, &input, runtime.params)
+                expression::evaluate_with_access(
+                    expr,
+                    runtime.snapshot,
+                    &input,
+                    runtime.params,
+                    &runtime.graph_view.query_access,
+                )
             })?;
             self.current_stream =
                 Some(CsvStream::open(&source, delimiter, self.spec.with_headers)?);
@@ -422,11 +444,12 @@ impl BindingSource for ProjectionSource {
             let mut output = BindingRow::default();
             output.load_csv_context.clone_from(&input.load_csv_context);
             for projection in &self.projections {
-                let value = expression::evaluate(
+                let value = expression::evaluate_with_access(
                     &projection.expression,
                     runtime.snapshot,
                     &input,
                     runtime.params,
+                    &runtime.graph_view.query_access,
                 )?;
                 output.insert(
                     projection.column.clone(),
@@ -536,6 +559,7 @@ impl BarrierProjectionSource {
                 &input,
                 &self.projections,
                 &self.order,
+                &runtime.graph_view.query_access,
             )?;
             spill.push(connection, &row)?;
         }
@@ -557,6 +581,7 @@ impl BarrierProjectionSource {
                 &input,
                 &self.projections,
                 &self.order,
+                &runtime.graph_view.query_access,
             )?;
             spill.push(connection, row, keys)?;
         }
@@ -572,10 +597,19 @@ fn project_binding_values(
     input: &BindingRow,
     projections: &[Projection],
     order: &[OrderItem],
+    query_access: &crate::query::access::PropertyRules,
 ) -> QueryResult<(Vec<Value>, Vec<Value>)> {
     let row = projections
         .iter()
-        .map(|projection| expression::evaluate(&projection.expression, snapshot, input, params))
+        .map(|projection| {
+            expression::evaluate_with_access(
+                &projection.expression,
+                snapshot,
+                input,
+                params,
+                query_access,
+            )
+        })
         .collect::<QueryResult<Vec<_>>>()?;
     let aliases = projections
         .iter()
@@ -585,7 +619,14 @@ fn project_binding_values(
     let keys = order
         .iter()
         .map(|item| {
-            expression::evaluate_with_aliases(&item.expression, snapshot, input, params, &aliases)
+            expression::evaluate_with_aliases_and_access(
+                &item.expression,
+                snapshot,
+                input,
+                params,
+                &aliases,
+                query_access,
+            )
         })
         .collect::<QueryResult<Vec<_>>>()?;
     Ok((row, keys))
@@ -651,9 +692,10 @@ impl ProgramStream {
         self.columns
             .iter()
             .map(|column| {
-                expression::binding_value(
+                expression::binding_value_with_access(
                     snapshot,
                     row.values.get(column).unwrap_or(&BindingValue::Null),
+                    &graph_view.query_access,
                 )
             })
             .collect::<QueryResult<Vec<_>>>()
@@ -1028,6 +1070,7 @@ impl ClauseStreamBuilder<'_, '_> {
                 &schema,
                 std::slice::from_mut(&mut step),
                 self.params,
+                &self.program.options.access.read.query,
             );
         }
         Ok(Some(Box::new(MatchSource {
@@ -1055,7 +1098,7 @@ impl ClauseStreamBuilder<'_, '_> {
     ) -> QueryResult<Option<Box<dyn BindingSource>>> {
         Ok(Some(Box::new(LetSource {
             upstream: source,
-            bindings: compile_let_bindings(clause)?,
+            bindings: expression::compile_let_bindings(clause)?,
         })))
     }
 
@@ -1212,7 +1255,10 @@ fn projection_requires_global_executor(clause: &AstNode) -> bool {
                     .text
                     .as_deref()
                     .is_some_and(super::super::registry::is_aggregating))
-    }) || (projection_requires_batch_executor(clause) && projection_has_global_modifier(clause))
+    }) || interpolation_contains(
+        clause,
+        |expression| matches!(expression, Expr::Function { name, .. } if super::super::registry::is_aggregating(name)),
+    ) || (projection_requires_batch_executor(clause) && projection_has_global_modifier(clause))
 }
 
 fn projection_requires_batch_executor(clause: &AstNode) -> bool {
@@ -1244,7 +1290,34 @@ fn clause_contains_subquery(clause: &AstNode) -> bool {
 }
 
 fn clause_requires_graph_executor(clause: &AstNode) -> bool {
-    clause_contains_subquery(clause) || has_graph_expression(clause, false)
+    clause_contains_subquery(clause)
+        || has_graph_expression(clause, false)
+        || interpolation_contains(clause, |expression| {
+            matches!(
+                expression,
+                Expr::Subquery { .. } | Expr::PatternPredicate(_) | Expr::PatternComprehension(_)
+            )
+        })
+}
+
+fn interpolation_contains(clause: &AstNode, predicate: impl Fn(&Expr) -> bool) -> bool {
+    clause
+        .descendants()
+        .filter(|node| node.kind == AstKind::Expression(ExpressionKind::InterpolatedString))
+        .any(|node| {
+            // Interpolation is atomic in the source AST. Inspect its compiled
+            // expressions once while selecting the stream operator, rather
+            // than sending graph subqueries to the scalar evaluator.
+            let Ok(expression) = expression::compile_expression(node) else {
+                return true;
+            };
+            let mut found = false;
+            let _ = expression::transform_expression(&expression, &mut |candidate| {
+                found |= predicate(candidate);
+                Ok(None)
+            });
+            found
+        })
 }
 
 fn has_graph_expression(node: &AstNode, expression_context: bool) -> bool {
@@ -1297,26 +1370,4 @@ fn first_expression(node: &AstNode, message: &str) -> QueryResult<Expr> {
         .next()
         .ok_or_else(|| QueryError::semantic(message))?;
     expression::compile_expression(expression)
-}
-
-fn compile_let_bindings(clause: &AstNode) -> QueryResult<Vec<(String, Expr)>> {
-    let mut bindings = clause
-        .descendants()
-        .filter(|node| node.kind == AstKind::LetBinding)
-        .collect::<Vec<_>>();
-    bindings.sort_by_key(|node| node.span.start);
-    bindings
-        .into_iter()
-        .map(|binding| {
-            let name = binding
-                .descendants()
-                .find(|node| node.kind == AstKind::BindingVariable)
-                .and_then(|node| node.text.clone())
-                .ok_or_else(|| QueryError::semantic("LET binding is missing its variable"))?;
-            Ok((
-                name,
-                first_expression(binding, "LET binding is missing its expression")?,
-            ))
-        })
-        .collect()
 }

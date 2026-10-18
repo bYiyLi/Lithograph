@@ -42,7 +42,13 @@ pub(crate) fn ensure_standard_indexes_for_commit(
 ) -> QueryResult<()> {
     let snapshot = Snapshot::resolve(connection, commit)?;
     for (name, index) in &schema.indexes {
-        if previous.indexes.get(name) == Some(index) {
+        if previous
+            .indexes
+            .get(name)
+            .map(|previous| previous.canonical_eq(index))
+            .transpose()?
+            .unwrap_or(false)
+        {
             continue;
         }
         if is_interrupted() {

@@ -1,6 +1,6 @@
 # Execution Options
 
-适用版本：**v0.3.1** · [产品手册](../guide/README.md) · [接口参考](README.md)
+适用版本：**v0.3.2**；v0.3.1 不接受新增 readAccess/writeAccess · [产品手册](../guide/README.md) · [接口参考](README.md)
 
 options 是 `lithograph()` / `lithograph_rows()` 第三个参数的 JSON object TEXT；省略等价于 `'{}'`。SQL `NULL`、JSON `null`、数组、malformed JSON、未知 key 或 key 的错误大小写均返回 `INVALID_ARGUMENT`。params 与 options 独立：查询里的 `$name` 从第二个参数读取，options 不用于参数绑定。
 
@@ -15,6 +15,8 @@ options 是 `lithograph()` / `lithograph_rows()` 第三个参数的 JSON object 
 | `author` | STRING 或 null；默认 null | 新 Commit 的 author，不是账号认证 |
 | `message` | STRING 或 null；默认 null | 新 Commit 的 message |
 | `readOnlyNoExternalIO` | BOOLEAN；默认 `false` | 同时禁止本次 Cypher 的 mutation 和外部 I/O，完整规则见下节 |
+| `readAccess` | object；默认无附加限制；v0.3.2 | query 属性隐藏、返回图对象过滤与读取能力开关，见下文 |
+| `writeAccess` | object；默认无附加限制；v0.3.2 | 属性、创建/删除/Label/Schema/版本/维护限制，见下文 |
 | `graphView` | object；默认完整图 | `{requireAllLabels:[STRING],excludeAnyLabels:[STRING]}` |
 | `mergeSession` | object；默认无 | `{id:"merge-session/<id>",revision:INTEGER}`，revision 为正整数 |
 
@@ -56,6 +58,95 @@ lithograph.merge.conflicts
 检查遍历嵌套 CALL、EXISTS/COUNT/COLLECT、WHEN/NEXT/UNION 等完整结构；未进入的分支、空 UNWIND、运行时参数以及 `EXPLAIN` / `PROFILE` 均不能豁免。例如 `EXPLAIN CREATE (:Person)` 仍被拒绝，而不是因 EXPLAIN 不执行而获准。语法本身不合法时可先返回 `PARSE_ERROR` / `SEMANTIC_ERROR`。
 
 这是 query-local 限制，不会改变 Branch checkout 或给连接安装永久只读属性。它允许当前 SQLite database 的正常读取，以及 SQLite 的 TEMP/spill 和引擎内部派生工作；不能替代 SQL 权限控制或 OS sandbox。它不控制同一连接上的其它 SQL、`lithograph_init()` 或单独调用的 transaction lifecycle API。接收不可信 Cypher 的宿主必须自行构造 options、强制为 `true`，并限制用户对原始 SQL surface 的访问。实际流程见 [安全执行指南](../guide/safe-execution.md)。
+
+<a id="access-controls"></a>
+
+## `readAccess` / `writeAccess`（v0.3.2）
+
+本节适用于 v0.3.2，**不适用于 v0.3.1 发行库**；v0.3.1 会把这两个 key 报为 `INVALID_ARGUMENT`。上层宿主按业务选择限制，只填写需要禁止的规则。省略 object、`{}`、省略数组或 `[]` 都不额外收紧能力；每个 Boolean 默认不限制，显式 `false` 才禁止。
+
+```json
+{
+  "readAccess": {
+    "query": {"denyProperties": ["私密备注"]},
+    "result": {"denyPropertyPrefixes": ["@loreweft:"]},
+    "denyFunctions": ["elementId", "id"],
+    "allowExternalIO": false
+  },
+  "writeAccess": {
+    "denyProperties": ["创建时间", "私密备注"],
+    "denyPropertyPrefixes": ["@loreweft:"],
+    "allowDelete": false
+  }
+}
+```
+
+### 属性选择规则
+
+`readAccess.query`、`readAccess.result`、`writeAccess` 都支持以下三个 STRING array，三项按并集生效：
+
+| Key | 匹配对象 | 例子 |
+| --- | --- | --- |
+| `denyProperties` | 完整精确属性名 | `["私密备注", "创建时间"]` |
+| `denyPropertyPrefixes` | 字面前缀 | `["@loreweft:", "private_"]` |
+| `denyPropertyPatterns` | 使用 regex 语法完整匹配属性名 | `["audit_[0-9]+"]` 匹配 `audit_1`，不匹配 `my_audit_1` 或 `audit_1_extra` |
+
+大小写敏感，不自动规范化，不按 Label 分组。只匹配图 Node/Relationship 的真实属性；普通 Map key、字符串、alias 不匹配。每项必须是非空 STRING；未知 key、错误 type（含 null）、空字符串项、非法 regex 返回 `INVALID_ARGUMENT`。regex 在一次 execution 内编译一次；空数组表示没有该类限制。
+
+| 阶段 | 命中属性时的行为 | 应用选择 |
+| --- | --- | --- |
+| `query` | 按不存在处理：读取为 null，keys/properties/图对象不包含；条件、计算和聚合使用受限值 | 字段不能被 Cypher 使用 |
+| `result` | 只过滤最终 Node/Relationship/Path 属性，递归处理 List/Map 内的图对象 | 字段允许定位/计算，但返回图对象时不展示 |
+| `writeAccess` | 新增/修改/删除均拒绝，包括 null、动态 key、Map 替换隐含删除和相同值显式写回 | 字段必须由可信路径维护 |
+
+只有 result 规则时，显式 `RETURN n.secret AS value`、`properties(n)`、`n{.*}` 仍返回真实值；这些是调用方主动提取 scalar/普通 Map。要连显式读取也禁止，配置 query。result 不删除 structural elementId、Label、Type、端点或 summary.commit，也不按 key 清理 Schema/Commit Data JSON。query 与 result 同时命中时以 query 的不可见值为基础。
+
+### 读取能力
+
+| `readAccess` 成员 | 类型/默认 | 效果 |
+| --- | --- | --- |
+| `query` / `result` | 属性规则 object，默认 `{}` | 上述两个读取阶段 |
+| `denyFunctions` | STRING 数组（项非空），默认 `[]` | 精确禁止规范函数名调用；按 Cypher 的 ASCII 大小写规则规范化比较；未知注册函数名返回 INVALID_ARGUMENT，不解释前缀/regex |
+| `allowNamedProcedures` | BOOLEAN，默认不限制 | false 禁止命名 CALL；内联 CALL 子查询不属于此开关 |
+| `allowShow` / `allowExplain` / `allowProfile` | BOOLEAN，默认不限制 | false 分别禁止 SHOW / EXPLAIN / PROFILE |
+| `allowExternalIO` | BOOLEAN，默认不限制 | false 在文件/HTTP、Provider（含 cache hit）、宿主 tokenizer 调用前拒绝 |
+
+完整 AST 包括嵌套、未进入 branch 和字符串插值均检查。函数禁令只禁止调用；例如禁用 `elementId()` 不会自动从 Node JSON 删除 structural elementId。命名 Procedure 同时按真实 graph/Schema/version/maintenance/external-I/O 效果受其它规则限制，不能只依据 `SHOW PROCEDURES.mode` 判断安全。依赖 query 隐藏属性的 Search、或必须完整返回隐藏属性的 Diff/Patch/conflict read，报 `ACCESS_DENIED`，不返回删减后的伪完整版本对象。
+
+### 写入能力
+
+`writeAccess` 在上述三个属性数组之外只接受以下 BOOLEAN：
+
+| Key | false 的效果 |
+| --- | --- |
+| `allowCreate` | 禁止创建 Node/Relationship |
+| `allowDelete` | 禁止删除 Node/Relationship，含 DETACH 的连带删除 |
+| `allowLabelChanges` | 禁止添加/移除 Label，包含 CREATE 的初始 Label |
+| `allowSchemaChanges` | 禁止 Graph Type / Constraint / Index 逻辑定义变化 |
+| `allowVersionChanges` | 禁止 Branch/Tag/Commit Data、显式 Commit、Merge Session 与版本/ref 操作 |
+| `allowMaintenance` | 禁止 GC / Index rebuild 等维护 |
+
+创建、删除、Label 开关按实际图效果检查；MERGE 只匹配既有对象而未创建时允许，零行没有实际创建时也不触发创建禁令。读取能力/函数禁令、Schema command 和已知 Procedure 的固定效果则在完整 AST 准备阶段检查。
+
+显式 `LOAD CSV` 与已知会外联的命名 Procedure 按完整 AST 检查，零行或未进入的 branch 仍拒绝。普通 CRUD 或 Reset 则不会仅因当前 Schema 含 Full-text/Semantic Index 而被 external-I/O 禁令拒绝；只有真正新增/变更相关定义需要外部验证时，才在调用前拒绝。没有定义变化的 IF NOT EXISTS、DROP 不因这条 I/O 禁令失败。Schema 权限等其它限制仍独立生效。
+
+这些开关全部可省略，默认不限制。允许对象 DELETE 时，删除对象自带的属性/Label 清理不再当作独立属性/Label 修改；对象删除仍受 allowDelete、Graph View、完整性和版本规则限制。
+
+Patch、Reset、Revert、Merge、Rebase、Squash 按操作前后目标 Branch 的最终有效图/Schema 变化检查。Squash/Rebase 最终受保护字段不变时允许，不能只因内部 Layer replay 曾写过该字段而拒绝；真正改变保护字段则拒绝。Merge 显式 candidate 修改受保护，finalize 使用本次调用的规则重验，Session 创建时的允许配置不会豁免后续禁令。
+
+<a id="canonical-version-state"></a>
+
+### 版本中的“字段没有改变”
+
+版本操作比较属性的持久类型与 canonical 内容，不用 Cypher 的数值 `=` 判断。Float 的 `+0.0` 与 `-0.0` 是不同的持久状态，因此真正切换正负零仍算保护字段变化；NaN 的不同 payload 统一为一个 canonical NaN，同一 canonical NaN 不应使无关 Revert/Patch 错误报告 before-condition 冲突。List/Point 等包含浮点的持久值同样按各自 canonical 内容判断。这不改变查询里的普通数值比较，也不改变现有 Commit identity 或存储格式。
+
+### 权限组合与失败
+
+所有限制取交集。`true` 不能解除另一个 false、属性禁令、`readOnlyNoExternalIO=true`、只读 Snapshot、Graph View 或现有 transaction boundary。普通查询属性不可见只得到 null/缺少 key；明确能力或写入拒绝为 `ACCESS_DENIED` + SQLite `SQLITE_AUTH` (23)。配置错误仍是 `INVALID_ARGUMENT`。旧 readOnlyNoExternalIO 的 category 保持不变。
+
+规则是每次 execution 的配置，不保存在 connection，也不进入 Commit identity。active transaction 每次使用本次初始 staged state 作校验基线；子查询及独立/并发 batch 继承当前 execution 策略。失败沿用 [事务失败范围](transactions.md#access-controls)：不反向撤销已 durable 的 earlier batch。
+
+这些 options 不限制原始 SQLite SQL、初始化、文件访问权限或独立 tx lifecycle；强制策略必须由可信宿主构造。完整调用示例见 [访问控制指南](../guide/access-controls.md)。
 
 <a id="graph-view"></a>
 
@@ -101,13 +192,13 @@ Version mutation 与 `at` 组合报 `READ_ONLY_SNAPSHOT`。不要把同一份 op
 | `author` | STRING 或 null；默认 null | 最终唯一 Commit metadata |
 | `message` | STRING 或 null；默认 null | 最终唯一 Commit metadata |
 
-begin 不接受 `at`、`graphView`、`mergeSession`、`readOnlyNoExternalIO`；要限制每次 query，在 execution options 中传入。完整生命周期见 [Transactions Reference](transactions.md)。
+begin 不接受 `at`、`graphView`、`mergeSession`、`readOnlyNoExternalIO`、`readAccess`、`writeAccess`；要限制每次 query，在 execution options 中传入。完整生命周期见 [Transactions Reference](transactions.md)。
 
 <a id="active-transaction-options"></a>
 
 ## Active explicit transaction 中的 execution options
 
-begin 后继续调用普通 `lithograph()` / `lithograph_rows()`。此时仅接受 `graphView`、`readOnlyNoExternalIO`，默认分别为完整图、`false`。它们作用于当前 staged state，能看到同一事务内前面成功的 execution。
+begin 后继续调用普通 `lithograph()` / `lithograph_rows()`。v0.3.1 此时仅接受 `graphView`、`readOnlyNoExternalIO`，默认分别为完整图、`false`；v0.3.2 还接受 `readAccess`、`writeAccess`，默认无附加限制。它们作用于当前 staged state，能看到同一事务内前面成功的 execution。
 
 `branch` / `at` / `expectedHead` / `author` / `message` / `mergeSession` 和其它 key 均返回 `INVALID_ARGUMENT`；作为 active execution failure，它们也会自动 abort 整个 Lithograph explicit transaction。安全拒绝同样遵循这条 fail-closed 规则。v0.3.1 没有独立 `lithograph_tx_execute()`。
 

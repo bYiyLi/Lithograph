@@ -1,6 +1,6 @@
 # 内置函数索引
 
-适用版本：Lithograph v0.3.1 · [产品手册](../guide/README.md) · [Cypher 手册](../cypher/index.md)
+适用版本：Lithograph v0.3.2 · [产品手册](../guide/README.md) · [Cypher 手册](../cypher/index.md)
 
 本表由目标扩展的 `SHOW FUNCTIONS YIELD *` 生成：169 个名称，172 条签名。重载分别列出；分类保持运行时登记值。
 Cypher Profile 为 `CY25-2026.08`。`::`、可选方括号和默认值是签名说明，实际调用形式、参数语义、null/type/error 和示例见每行的语言参考。

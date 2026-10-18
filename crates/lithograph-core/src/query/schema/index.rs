@@ -7,6 +7,7 @@ use crate::storage::{
     SchemaTarget, StandardIndexKind,
 };
 
+use super::super::access::PropertyRules;
 use super::super::expression::{BinaryOp, Expr, UnaryOp};
 use super::super::plan::MatchStep;
 
@@ -53,12 +54,19 @@ pub(crate) fn select_standard_index_seeks(
     schema: &SchemaState,
     matches: &mut [MatchStep],
     params: &BTreeMap<String, Value>,
+    query_access: &PropertyRules,
 ) {
     for step in matches {
         let candidates = step
             .predicate
             .as_ref()
-            .map(|predicate| predicate_candidates(predicate, params))
+            .map(|predicate| {
+                let mut candidates = predicate_candidates(predicate, params);
+                if !query_access.is_empty() {
+                    candidates.retain(|(_, property, _)| !query_access.denies(property));
+                }
+                candidates
+            })
             .unwrap_or_default();
         for part in &mut step.parts {
             part.start.index_seek = choose_node_seek(

@@ -1,17 +1,20 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::cypher::{self, AstNode, PathValue, Value};
+use crate::cypher::{AstNode, PathValue, Value};
+use crate::query::access::PropertyRules;
 use crate::query::graph::{
-    materialize_node, materialize_relationship, node_property, relationship_property,
+    materialize_node_with_access, materialize_relationship_with_access, node_property_with_access,
+    relationship_property_with_access,
 };
 use crate::query::{QueryError, QueryErrorKind, QueryResult};
 use crate::storage::{self, Snapshot};
 use unicode_normalization::{is_nfc, is_nfd, is_nfkc, is_nfkd};
 
+use super::lazy::{evaluate_case, evaluate_lazy_and, evaluate_lazy_or};
 use super::operators::{evaluate_binary, evaluate_unary};
 use super::{
-    BinaryOp, BindingRow, BindingValue, Expr, InterpolatedPart, ListPredicateKind,
-    NormalizationForm, TypeKind, TypeSpec, TypeTermSpec, compile_expression,
+    BinaryOp, BindingRow, BindingValue, Expr, InterpolatedPart, NormalizationForm, TypeKind,
+    TypeSpec, TypeTermSpec, compile_expression,
 };
 
 #[derive(Clone, Copy)]
@@ -20,6 +23,7 @@ struct EvalContext<'data, 'connection> {
     row: &'data BindingRow,
     params: &'data BTreeMap<String, Value>,
     aliases: &'data BTreeMap<String, Value>,
+    query_access: &'data PropertyRules,
 }
 
 impl<'data, 'connection> EvalContext<'data, 'connection> {
@@ -39,25 +43,35 @@ impl<'data, 'connection> EvalContext<'data, 'connection> {
             row: self.row,
             params: self.params,
             aliases,
+            query_access: self.query_access,
         }
     }
 }
 
-pub(crate) fn evaluate(
+pub(crate) fn evaluate_with_access(
     expression: &Expr,
     snapshot: &Snapshot<'_>,
     row: &BindingRow,
     params: &BTreeMap<String, Value>,
+    query_access: &PropertyRules,
 ) -> QueryResult<Value> {
-    evaluate_with_aliases(expression, snapshot, row, params, &BTreeMap::new())
+    evaluate_with_aliases_and_access(
+        expression,
+        snapshot,
+        row,
+        params,
+        &BTreeMap::new(),
+        query_access,
+    )
 }
 
-pub(crate) fn evaluate_with_aliases(
+pub(crate) fn evaluate_with_aliases_and_access(
     expression: &Expr,
     snapshot: &Snapshot<'_>,
     row: &BindingRow,
     params: &BTreeMap<String, Value>,
     aliases: &BTreeMap<String, Value>,
+    query_access: &PropertyRules,
 ) -> QueryResult<Value> {
     evaluate_in_context(
         expression,
@@ -66,13 +80,14 @@ pub(crate) fn evaluate_with_aliases(
             row,
             params,
             aliases,
+            query_access,
         },
     )
 }
 
 fn evaluate_in_context(expression: &Expr, context: EvalContext<'_, '_>) -> QueryResult<Value> {
     match expression {
-        Expr::Literal(value) => Ok(value.clone()),
+        Expr::Literal(value) => Ok(context.query_access.filter_graph_properties(value)),
         Expr::List(items) => items
             .iter()
             .map(|item| context.evaluate(item))
@@ -84,13 +99,16 @@ fn evaluate_in_context(expression: &Expr, context: EvalContext<'_, '_>) -> Query
             .collect::<QueryResult<BTreeMap<_, _>>>()
             .map(Value::Map),
         Expr::Variable(name) => match context.aliases.get(name) {
-            Some(value) => Ok(value.clone()),
-            None => binding_value(
+            Some(value) => Ok(context.query_access.filter_graph_properties(value)),
+            None => binding_value_with_access(
                 context.snapshot,
                 context.row.values.get(name).unwrap_or(&BindingValue::Null),
+                context.query_access,
             ),
         },
-        Expr::Parameter(name) => Ok(context.params.get(name).cloned().unwrap_or(Value::Null)),
+        Expr::Parameter(name) => Ok(context
+            .query_access
+            .filter_graph_properties(context.params.get(name).unwrap_or(&Value::Null))),
         Expr::Property(base, key) => evaluate_property(base, key, context),
         Expr::Function {
             name,
@@ -106,7 +124,7 @@ fn evaluate_in_context(expression: &Expr, context: EvalContext<'_, '_>) -> Query
             operand.as_deref(),
             alternatives,
             fallback.as_deref(),
-            context,
+            &mut |expression| context.evaluate(expression),
         ),
         _ => evaluate_collection_expression(expression, context),
     }
@@ -117,54 +135,13 @@ fn evaluate_collection_expression(
     context: EvalContext<'_, '_>,
 ) -> QueryResult<Value> {
     match expression {
-        Expr::ListComprehension {
-            variable,
-            collection,
-            predicate,
-            projection,
-        } => evaluate_list_comprehension(
-            variable,
-            collection,
-            predicate.as_deref(),
-            projection.as_deref(),
-            context,
-        ),
-        Expr::ListPredicate {
-            kind,
-            variable,
-            collection,
-            predicate,
-        } => evaluate_list_predicate(*kind, variable, collection, predicate.as_deref(), context),
-        Expr::Reduce {
-            accumulator,
-            initial,
-            variable,
-            collection,
-            reduction,
-        } => evaluate_reduction(
-            accumulator,
-            initial,
-            variable,
-            collection,
-            reduction,
-            None,
-            context,
-        ),
-        Expr::AllReduce {
-            accumulator,
-            initial,
-            variable,
-            collection,
-            reduction,
-            predicate,
-        } => evaluate_reduction(
-            accumulator,
-            initial,
-            variable,
-            collection,
-            reduction,
-            Some(predicate),
-            context,
+        Expr::ListComprehension { .. }
+        | Expr::ListPredicate { .. }
+        | Expr::Reduce { .. }
+        | Expr::AllReduce { .. } => super::evaluate_scoped_expression(
+            expression,
+            context.aliases,
+            &mut |expression, aliases| context.with_aliases(aliases).evaluate(expression),
         ),
         Expr::MapProjection {
             base,
@@ -208,8 +185,12 @@ fn evaluate_postfix_expression(
             "subquery expression reached the scalar evaluator",
         )),
         Expr::Unary(op, value) => evaluate_unary(*op, context.evaluate(value)?),
-        Expr::Binary(BinaryOp::And, left, right) => evaluate_lazy_and(left, right, context),
-        Expr::Binary(BinaryOp::Or, left, right) => evaluate_lazy_or(left, right, context),
+        Expr::Binary(BinaryOp::And, left, right) => {
+            evaluate_lazy_and(left, right, &mut |expression| context.evaluate(expression))
+        }
+        Expr::Binary(BinaryOp::Or, left, right) => {
+            evaluate_lazy_or(left, right, &mut |expression| context.evaluate(expression))
+        }
         Expr::Binary(op, left, right) => {
             let left = context.evaluate(left)?;
             let right = context.evaluate(right)?;
@@ -231,51 +212,6 @@ fn evaluate_postfix_expression(
             "expression dispatch reached an inconsistent evaluator branch",
         )),
     }
-}
-
-fn evaluate_lazy_and(
-    left: &Expr,
-    right: &Expr,
-    context: EvalContext<'_, '_>,
-) -> QueryResult<Value> {
-    match context.evaluate(left)? {
-        Value::Boolean(false) => Ok(Value::Boolean(false)),
-        Value::Boolean(true) => require_boolean_or_null(context.evaluate(right)?),
-        Value::Null => match require_boolean_or_null(context.evaluate(right)?)? {
-            Value::Boolean(false) => Ok(Value::Boolean(false)),
-            Value::Boolean(true) | Value::Null => Ok(Value::Null),
-            _ => unreachable!("boolean-or-null validator returned another value"),
-        },
-        _ => boolean_operand_error(),
-    }
-}
-
-fn evaluate_lazy_or(left: &Expr, right: &Expr, context: EvalContext<'_, '_>) -> QueryResult<Value> {
-    match context.evaluate(left)? {
-        Value::Boolean(true) => Ok(Value::Boolean(true)),
-        Value::Boolean(false) => require_boolean_or_null(context.evaluate(right)?),
-        Value::Null => match require_boolean_or_null(context.evaluate(right)?)? {
-            Value::Boolean(true) => Ok(Value::Boolean(true)),
-            Value::Boolean(false) | Value::Null => Ok(Value::Null),
-            _ => unreachable!("boolean-or-null validator returned another value"),
-        },
-        _ => boolean_operand_error(),
-    }
-}
-
-fn require_boolean_or_null(value: Value) -> QueryResult<Value> {
-    if matches!(value, Value::Boolean(_) | Value::Null) {
-        Ok(value)
-    } else {
-        boolean_operand_error()
-    }
-}
-
-fn boolean_operand_error<T>() -> QueryResult<T> {
-    Err(QueryError::new(
-        QueryErrorKind::Type,
-        "Boolean operator requires Boolean or null",
-    ))
 }
 
 fn evaluate_predicate_expression(
@@ -323,203 +259,6 @@ fn evaluate_predicate_expression(
         } => evaluate_label_predicate(value, name_expression, *negated, context),
         _ => Err(QueryError::internal(
             "non-predicate expression reached predicate evaluation",
-        )),
-    }
-}
-
-fn evaluate_case(
-    operand: Option<&Expr>,
-    alternatives: &[(Expr, Expr)],
-    fallback: Option<&Expr>,
-    context: EvalContext<'_, '_>,
-) -> QueryResult<Value> {
-    let operand = operand.map(|value| context.evaluate(value)).transpose()?;
-    for (condition, result) in alternatives {
-        let condition = context.evaluate(condition)?;
-        let take = match &operand {
-            Some(operand) => cypher::cypher_equals(operand, &condition)?.unwrap_or(false),
-            None => match condition {
-                Value::Boolean(value) => value,
-                Value::Null => false,
-                _ => {
-                    return Err(QueryError::new(
-                        QueryErrorKind::Type,
-                        "searched CASE condition must be Boolean or null",
-                    ));
-                }
-            },
-        };
-        if take {
-            return context.evaluate(result);
-        }
-    }
-    fallback.map_or(Ok(Value::Null), |fallback| context.evaluate(fallback))
-}
-
-fn evaluate_list_comprehension(
-    variable: &str,
-    collection: &Expr,
-    predicate_expression: Option<&Expr>,
-    projection: Option<&Expr>,
-    context: EvalContext<'_, '_>,
-) -> QueryResult<Value> {
-    let Some(values) = evaluate_list_input(collection, context, "list comprehension")? else {
-        return Ok(Value::Null);
-    };
-    let mut output = Vec::new();
-    for value in values {
-        let mut local = context.aliases.clone();
-        local.insert(variable.to_owned(), value.clone());
-        let local_context = context.with_aliases(&local);
-        let keep = predicate_expression.map_or(Ok(true), |predicate_expression| {
-            let value = local_context.evaluate(predicate_expression)?;
-            match value {
-                Value::Boolean(value) => Ok(value),
-                Value::Null => Ok(false),
-                _ => Err(QueryError::new(
-                    QueryErrorKind::Type,
-                    "list comprehension WHERE must be Boolean or null",
-                )),
-            }
-        })?;
-        if keep {
-            output.push(
-                projection.map_or(Ok(value), |projection| local_context.evaluate(projection))?,
-            );
-        }
-    }
-    Ok(Value::List(output))
-}
-
-fn evaluate_list_predicate(
-    kind: ListPredicateKind,
-    variable: &str,
-    collection: &Expr,
-    predicate_expression: Option<&Expr>,
-    context: EvalContext<'_, '_>,
-) -> QueryResult<Value> {
-    let Some(values) = evaluate_list_input(collection, context, "list predicate")? else {
-        return Ok(Value::Null);
-    };
-    let counts = evaluate_list_predicate_values(variable, values, predicate_expression, context)?;
-    Ok(list_predicate_result(kind, counts))
-}
-
-#[derive(Default)]
-struct PredicateCounts {
-    true_count: usize,
-    false_count: usize,
-    has_null: bool,
-}
-
-fn evaluate_list_predicate_values(
-    variable: &str,
-    values: Vec<Value>,
-    predicate_expression: Option<&Expr>,
-    context: EvalContext<'_, '_>,
-) -> QueryResult<PredicateCounts> {
-    let mut counts = PredicateCounts::default();
-    for value in values {
-        let mut local = context.aliases.clone();
-        local.insert(variable.to_owned(), value.clone());
-        let tested = match predicate_expression {
-            Some(predicate_expression) => context
-                .with_aliases(&local)
-                .evaluate(predicate_expression)?,
-            None => value,
-        };
-        match tested {
-            Value::Boolean(true) => counts.true_count += 1,
-            Value::Boolean(false) => counts.false_count += 1,
-            Value::Null => counts.has_null = true,
-            _ => {
-                return Err(QueryError::new(
-                    QueryErrorKind::Type,
-                    "list predicate WHERE must be Boolean or null",
-                ));
-            }
-        }
-    }
-    Ok(counts)
-}
-
-fn list_predicate_result(kind: ListPredicateKind, counts: PredicateCounts) -> Value {
-    let result = match kind {
-        ListPredicateKind::All if counts.false_count > 0 => Some(false),
-        ListPredicateKind::All if counts.has_null => None,
-        ListPredicateKind::All => Some(true),
-        ListPredicateKind::Any if counts.true_count > 0 => Some(true),
-        ListPredicateKind::Any if counts.has_null => None,
-        ListPredicateKind::Any => Some(false),
-        ListPredicateKind::None if counts.true_count > 0 => Some(false),
-        ListPredicateKind::None if counts.has_null => None,
-        ListPredicateKind::None => Some(true),
-        ListPredicateKind::Single if counts.true_count > 1 => Some(false),
-        ListPredicateKind::Single if counts.has_null => None,
-        ListPredicateKind::Single => Some(counts.true_count == 1),
-    };
-    result.map(Value::Boolean).unwrap_or(Value::Null)
-}
-
-fn evaluate_reduction(
-    accumulator_name: &str,
-    initial: &Expr,
-    variable: &str,
-    collection: &Expr,
-    reduction: &Expr,
-    predicate_expression: Option<&Expr>,
-    context: EvalContext<'_, '_>,
-) -> QueryResult<Value> {
-    let mut accumulator = context.evaluate(initial)?;
-    let Some(values) = evaluate_list_input(collection, context, "reduction")? else {
-        return Ok(Value::Null);
-    };
-    let mut has_null_predicate = false;
-    for value in values {
-        let mut local = context.aliases.clone();
-        local.insert(accumulator_name.to_owned(), accumulator);
-        local.insert(variable.to_owned(), value);
-        accumulator = context.with_aliases(&local).evaluate(reduction)?;
-        if let Some(predicate_expression) = predicate_expression {
-            local.insert(accumulator_name.to_owned(), accumulator.clone());
-            match context
-                .with_aliases(&local)
-                .evaluate(predicate_expression)?
-            {
-                Value::Boolean(true) => {}
-                Value::Boolean(false) => return Ok(Value::Boolean(false)),
-                Value::Null => has_null_predicate = true,
-                _ => {
-                    return Err(QueryError::new(
-                        QueryErrorKind::Type,
-                        "allReduce() predicate must be Boolean or null",
-                    ));
-                }
-            }
-        }
-    }
-    if predicate_expression.is_some() {
-        Ok(if has_null_predicate {
-            Value::Null
-        } else {
-            Value::Boolean(true)
-        })
-    } else {
-        Ok(accumulator)
-    }
-}
-
-fn evaluate_list_input(
-    expression: &Expr,
-    context: EvalContext<'_, '_>,
-    operation: &str,
-) -> QueryResult<Option<Vec<Value>>> {
-    match context.evaluate(expression)? {
-        Value::List(values) => Ok(Some(values)),
-        Value::Null => Ok(None),
-        _ => Err(QueryError::new(
-            QueryErrorKind::Type,
-            format!("{operation} IN input must be a List or null"),
         )),
     }
 }
@@ -796,26 +535,34 @@ pub(crate) fn predicate(value: Value) -> QueryResult<bool> {
     }
 }
 
-pub(crate) fn binding_value(snapshot: &Snapshot<'_>, value: &BindingValue) -> QueryResult<Value> {
+pub(crate) fn binding_value_with_access(
+    snapshot: &Snapshot<'_>,
+    value: &BindingValue,
+    query_access: &PropertyRules,
+) -> QueryResult<Value> {
     match value {
-        BindingValue::Node(id) => Ok(Value::Node(materialize_node(snapshot, *id)?)),
-        BindingValue::Relationship(record) => Ok(Value::Relationship(materialize_relationship(
-            snapshot, *record,
+        BindingValue::Node(id) => Ok(Value::Node(materialize_node_with_access(
+            snapshot,
+            *id,
+            query_access,
         )?)),
+        BindingValue::Relationship(record) => Ok(Value::Relationship(
+            materialize_relationship_with_access(snapshot, *record, query_access)?,
+        )),
         BindingValue::Path {
             nodes,
             relationships,
         } => Ok(Value::Path(PathValue {
             nodes: nodes
                 .iter()
-                .map(|id| materialize_node(snapshot, *id))
+                .map(|id| materialize_node_with_access(snapshot, *id, query_access))
                 .collect::<QueryResult<Vec<_>>>()?,
             relationships: relationships
                 .iter()
-                .map(|record| materialize_relationship(snapshot, *record))
+                .map(|record| materialize_relationship_with_access(snapshot, *record, query_access))
                 .collect::<QueryResult<Vec<_>>>()?,
         })),
-        BindingValue::Scalar(value) => Ok(value.clone()),
+        BindingValue::Scalar(value) => Ok(query_access.filter_graph_properties(value)),
         BindingValue::Null => Ok(Value::Null),
     }
 }
@@ -881,23 +628,41 @@ fn element_numeric_id(element_id: &str, prefix: &str, kind: &str) -> QueryResult
 fn evaluate_property(base: &Expr, key: &str, context: EvalContext<'_, '_>) -> QueryResult<Value> {
     if let Expr::Variable(name) = base {
         if let Some(value) = context.aliases.get(name) {
-            return value_property(value, key);
+            return value_property_with_access(value, key, context.query_access);
         }
         return match context.row.values.get(name) {
-            Some(BindingValue::Node(id)) => node_property(context.snapshot, *id, key),
-            Some(BindingValue::Relationship(record)) => {
-                relationship_property(context.snapshot, record.id, key)
+            Some(BindingValue::Node(id)) => {
+                node_property_with_access(context.snapshot, *id, key, context.query_access)
             }
+            Some(BindingValue::Relationship(record)) => relationship_property_with_access(
+                context.snapshot,
+                record.id,
+                key,
+                context.query_access,
+            ),
             Some(BindingValue::Path { .. }) => Err(QueryError::new(
                 QueryErrorKind::Type,
                 "property access requires Node, Relationship, Map, or null",
             )),
-            Some(BindingValue::Scalar(value)) => value_property(value, key),
+            Some(BindingValue::Scalar(value)) => {
+                value_property_with_access(value, key, context.query_access)
+            }
             Some(BindingValue::Null) | None => Ok(Value::Null),
         };
     }
     let value = context.evaluate(base)?;
-    value_property(&value, key)
+    value_property_with_access(&value, key, context.query_access)
+}
+
+fn value_property_with_access(
+    value: &Value,
+    key: &str,
+    query_access: &PropertyRules,
+) -> QueryResult<Value> {
+    if matches!(value, Value::Node(_) | Value::Relationship(_)) && query_access.denies(key) {
+        return Ok(Value::Null);
+    }
+    value_property(value, key)
 }
 
 pub(crate) fn value_property(value: &Value, key: &str) -> QueryResult<Value> {
@@ -944,7 +709,12 @@ fn evaluate_function(
         .map(|arg| context.evaluate(arg))
         .collect::<QueryResult<Vec<_>>>()?;
     if matches!(lower.as_str(), "startnode" | "endnode") {
-        return relationship_endpoint(&lower, &values, context.snapshot);
+        return relationship_endpoint_with_access(
+            &lower,
+            &values,
+            context.snapshot,
+            context.query_access,
+        );
     }
     evaluate_function_values(name, &values)
 }
@@ -1026,10 +796,11 @@ fn evaluate_bound_element_id(
     Ok(Some(value))
 }
 
-pub(crate) fn relationship_endpoint(
+pub(crate) fn relationship_endpoint_with_access(
     name: &str,
     values: &[Value],
     snapshot: &Snapshot<'_>,
+    query_access: &PropertyRules,
 ) -> QueryResult<Value> {
     let [value] = values else {
         return Err(QueryError::semantic(format!(
@@ -1051,7 +822,7 @@ pub(crate) fn relationship_endpoint(
         .strip_prefix("n:")
         .and_then(|value| value.parse::<i64>().ok())
         .ok_or_else(|| QueryError::internal("Relationship endpoint elementId is invalid"))?;
-    materialize_node(snapshot, id).map(Value::Node)
+    materialize_node_with_access(snapshot, id, query_access).map(Value::Node)
 }
 
 pub(crate) fn evaluate_function_values(name: &str, values: &[Value]) -> QueryResult<Value> {
@@ -1074,11 +845,12 @@ pub(crate) fn is_count(expression: &Expr) -> bool {
     )
 }
 
-pub(crate) fn count_contributes(
+pub(crate) fn count_contributes_with_access(
     expression: &Expr,
     snapshot: &Snapshot<'_>,
     row: &BindingRow,
     params: &BTreeMap<String, Value>,
+    query_access: &PropertyRules,
 ) -> QueryResult<bool> {
     let Expr::Function {
         name, args, star, ..
@@ -1097,7 +869,7 @@ pub(crate) fn count_contributes(
         [] if *star => Ok(true),
         [] => Ok(true),
         [argument] => Ok(!matches!(
-            evaluate(argument, snapshot, row, params)?,
+            evaluate_with_access(argument, snapshot, row, params, query_access)?,
             Value::Null
         )),
         _ => Err(QueryError::semantic(

@@ -1,6 +1,6 @@
 # Managed Semantic Procedure
 
-适用于 Lithograph v0.3.1 · [产品手册](../../guide/README.md) · [Procedure 总入口](../procedures.md) · [搜索工作流](../../guide/search.md) · [Provider 配置](../openai-compatible-provider.md)
+适用于 Lithograph v0.3.2 · [产品手册](../../guide/README.md) · [Procedure 总入口](../procedures.md) · [搜索工作流](../../guide/search.md) · [Provider 配置](../openai-compatible-provider.md)
 
 Managed Semantic 将一个 String Property 的精确文本交给当前 connection 注册的 Embedding Provider，再做向量相似度检索。文本和 IndexDefinition 随 graph history 版本化；生成的 Vector 不成为 Property 或 Commit 数据。自己管理 Vector Property 的调用方使用 [Raw Vector SEARCH](../../cypher/search.md)。
 

@@ -199,6 +199,8 @@ Patch 是一个 map：
 
 `lithograph.patch.apply` 在 active Branch 上验证 patch 的 `before` condition，全部成立后以一个新 Commit 原子应用；任一 condition 不成立则整体失败。
 
+本文件中 Property logical slot 的状态相同、Patch `before` applicability、三方合并及版本重组的净变化，均沿用 [Storage 已冻结的 canonical value encoding](storage.md#canonical-value-encoding)；不能用 [Cypher runtime 数值比较](query-engine.md#runtime-values-and-properties) 代替持久状态相等。该规则不改变既有编码、Commit identity 或 Cypher 查询比较语义。
+
 Diff / Patch 只描述 canonical graph / Schema / Index Snapshot change。Commit Data、Tag、Branch ref 不进入 patch。显式 empty-delta Commit 与其 parent 的 `diff` 可以合法返回空 `operations`；这不表示两个 Commit identity 相同。
 
 <a id="merge-session"></a>

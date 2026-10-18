@@ -1,6 +1,6 @@
 # 数值、三角与对数函数
 
-适用版本：**Lithograph v0.3.1** · Cypher Profile：`CY25-2026.08`。本文覆盖 `SHOW FUNCTIONS` 的 Numeric、Trigonometric、Logarithmic 类别。
+适用版本：**Lithograph v0.3.2** · Cypher Profile：`CY25-2026.08`。本文覆盖 `SHOW FUNCTIONS` 的 Numeric、Trigonometric、Logarithmic 类别。
 
 [Cypher 手册](../index.md) · [完整函数索引](../../reference/functions.md) · [值与宿主 JSON 编码](../../reference/values.md)
 

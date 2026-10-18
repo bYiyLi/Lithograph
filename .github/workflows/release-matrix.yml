@@ -77,12 +77,19 @@ jobs:
       - name: Install host SQLite on Linux
         if: startsWith(matrix.os, 'ubuntu-')
         run: sudo apt-get update && sudo apt-get install -y sqlite3 libsqlite3-dev
-      - name: Install host SQLite on macOS
+      - uses: actions/setup-python@v6
+        if: startsWith(matrix.os, 'ubuntu-')
+        with:
+          python-version: '3.14'
+      - name: Install host SQLite and Python on macOS
         if: startsWith(matrix.os, 'macos-')
-        run: brew install sqlite
-      - name: Select Homebrew SQLite
+        run: brew install sqlite python@3.14
+      - name: Select Homebrew SQLite and Python
         if: startsWith(matrix.os, 'macos-')
-        run: echo "LITHOGRAPH_SQLITE3=$(brew --prefix sqlite)/bin/sqlite3" >> "$GITHUB_ENV"
+        run: |
+          echo "LITHOGRAPH_SQLITE3=$(brew --prefix sqlite)/bin/sqlite3" >> "$GITHUB_ENV"
+          echo "$(brew --prefix python@3.14)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix python@3.14)/libexec/bin" >> "$GITHUB_PATH"
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.98.1 --profile minimal
       - name: Restore cross-platform storage fixture
@@ -97,8 +104,21 @@ jobs:
           cargo build --release --locked -p lithograph-openai-compatible
           cp "${{ matrix.built }}" "${{ matrix.artifact }}"
           cp "${{ matrix.provider_built }}" "${{ matrix.provider_artifact }}"
-      - name: Run Phase 09 version regressions
-        run: cargo test --release --locked -p lithograph-core --test phase09_version
+      - name: Run version and access-control regressions
+        run: |
+          cargo test --release --locked -p lithograph-core --features test-support \
+            --test phase09_version \
+            --test phase18_access_options \
+            --test phase18_batch_access \
+            --test phase18_external_access \
+            --test phase18_index_access \
+            --test phase18_interpolation_access \
+            --test phase18_interpolation_classification \
+            --test phase18_interpreter_access \
+            --test phase18_mutation_access \
+            --test phase18_mutation_reads \
+            --test phase18_schema_canonical \
+            --test phase18_version_access
       - name: Run release load, ABI, runtime, and interoperability gates
         run: scripts/release-artifact-smoke.sh "${{ matrix.artifact }}" target/phase10-interop/interop.sqlite "${{ matrix.provider_artifact }}"
       - name: Package distributable release asset
@@ -133,11 +153,17 @@ jobs:
         include:
           - name: windows-x64
             os: windows-latest
+            architecture: x64
           - name: windows-arm64
             os: windows-11-vs2026-arm
+            architecture: arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+          architecture: ${{ matrix.architecture }}
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.98.1 --profile minimal
       - name: Restore cross-platform storage fixture
@@ -166,7 +192,7 @@ jobs:
           cargo build --release --locked -p lithograph-extension
           cargo build --release --locked -p lithograph-openai-compatible
           Copy-Item target/release/lithograph_openai_compatible.dll target/release/lithograph-openai-compatible.dll
-      - name: Run Phase 09, release load, ABI, runtime, and interoperability gates
+      - name: Run version, access-control, release load, ABI, runtime, and interoperability gates
         shell: pwsh
         run: ./scripts/windows-release-smoke.ps1 -ExtensionPath target/release/lithograph.dll -InteropFixture target/phase10-interop/interop.sqlite -OpenAIProviderPath target/release/lithograph-openai-compatible.dll
       - name: Package distributable release asset
@@ -203,8 +229,36 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      actions: read
     steps:
       - uses: actions/checkout@v4
+      - name: Require successful CI for this exact tag
+        timeout-minutes: 60
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 120); do
+            run_id=$(gh run list --repo "$GITHUB_REPOSITORY" \
+              --workflow ci.yml --event push --commit "$GITHUB_SHA" \
+              --branch "$GITHUB_REF_NAME" --limit 20 \
+              --json databaseId --jq '.[0].databaseId // empty')
+            if [ -n "$run_id" ]; then
+              ci_state=$(gh run view "$run_id" \
+                --repo "$GITHUB_REPOSITORY" --json status,conclusion \
+                --jq '"\(.status) \(.conclusion)"')
+              read -r status conclusion <<< "$ci_state"
+              echo "Tag CI $run_id: $status $conclusion"
+              if [ "$status" = "completed" ]; then
+                test "$conclusion" = "success"
+                exit 0
+              fi
+            fi
+            sleep 30
+          done
+          echo "Timed out waiting for CI for $GITHUB_REF_NAME at $GITHUB_SHA" >&2
+          exit 1
       - name: Download distributable release packages
         uses: actions/download-artifact@v4
         with:

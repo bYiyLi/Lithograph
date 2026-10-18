@@ -32,6 +32,7 @@ pub(crate) struct TransactionMutationContext<'a> {
     pub(crate) base_commit: HashId,
     pub(crate) branch: &'a str,
     pub(crate) graph_view: &'a crate::query::options::GraphViewSelector,
+    pub(crate) access: &'a crate::query::access::AccessPolicy,
     pub(crate) author: Option<&'a str>,
     pub(crate) message: Option<&'a str>,
     pub(crate) params: &'a BTreeMap<String, Value>,
@@ -51,7 +52,13 @@ pub(crate) fn execute_program(
         .write_options
         .as_ref()
         .ok_or_else(|| QueryError::internal("mutating program is missing write options"))?;
-    let mut context = MutationContext::new(connection, base_commit, params, &options.graph_view)?;
+    let mut context = MutationContext::new(
+        connection,
+        base_commit,
+        params,
+        &options.graph_view,
+        &options.access,
+    )?;
     let result = execute_query_body(
         &mut context,
         program,
@@ -147,6 +154,7 @@ fn execute_program_suffix_inner(
         transaction.base_commit,
         transaction.params,
         transaction.graph_view,
+        transaction.access,
     )?;
     let rows = execute_single_from(
         &mut context,
@@ -172,6 +180,7 @@ fn execute_spilled_outer_write_inner(
         transaction.base_commit,
         transaction.params,
         transaction.graph_view,
+        transaction.access,
     )?;
     for clause in clauses {
         let AstKind::Clause(kind) = clause.kind else {
@@ -228,6 +237,7 @@ fn execute_transaction_batch_inner(
         transaction.base_commit,
         transaction.params,
         transaction.graph_view,
+        transaction.access,
     )?;
     let rows = execute_call_subquery_rows(
         &mut context,
@@ -459,11 +469,12 @@ fn execute_conditional(
         let selected = {
             let snapshot = context.staged_snapshot()?;
             select_branch(query, |expression| {
-                expression::predicate(expression::evaluate(
+                expression::predicate(expression::evaluate_with_access(
                     &compile_expression(expression)?,
                     &snapshot,
                     &row,
                     context.params,
+                    &context.access.read.query,
                 )?)
             })?
         };
@@ -937,7 +948,13 @@ fn foreach_values(
     outer: &BindingRow,
 ) -> QueryResult<Vec<Value>> {
     let snapshot = context.staged_snapshot()?;
-    match expression::evaluate(expression, &snapshot, outer, context.params)? {
+    match expression::evaluate_with_access(
+        expression,
+        &snapshot,
+        outer,
+        context.params,
+        &context.access.read.query,
+    )? {
         Value::Null => Ok(Vec::new()),
         Value::List(values) => Ok(values),
         _ => Err(QueryError::new(
@@ -1021,7 +1038,12 @@ fn union_rows(
     let mut left = merge_union_rows(left, right)?;
     if distinct {
         let snapshot = context.staged_snapshot()?;
-        left.rows = distinct_bindings(left.rows, &left.columns, &snapshot)?;
+        left.rows = distinct_bindings(
+            left.rows,
+            &left.columns,
+            &snapshot,
+            &context.access.read.query,
+        )?;
     }
     Ok(left)
 }
@@ -1050,6 +1072,7 @@ fn finish_program(
             &result.columns,
             result.rows,
             is_interrupted,
+            &context.access.read.query,
         )?
     } else {
         None

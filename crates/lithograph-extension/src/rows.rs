@@ -154,7 +154,7 @@ impl RowsCursor<'_> {
                 batch
                     .rows
                     .iter()
-                    .map(|row| execution::row_json(row).to_string()),
+                    .map(|row| execution.row_json(row).to_string()),
             );
             if batch.done {
                 self.execution_done = true;

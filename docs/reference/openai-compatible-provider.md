@@ -1,6 +1,6 @@
 # OpenAI-compatible Embedding Provider
 
-适用版本：**v0.3.1**。上级：[接口参考](README.md) · 操作流程：[使用 Embedding Provider](../guide/embedding-providers.md) · 扩展协议：[Embedding Provider SPI](embedding-provider-spi.md)。
+适用版本：**v0.3.2**。上级：[接口参考](README.md) · 操作流程：[使用 Embedding Provider](../guide/embedding-providers.md) · 扩展协议：[Embedding Provider SPI](embedding-provider-spi.md)。
 
 <a id="identity-and-loading"></a>
 
@@ -108,7 +108,7 @@ Provider 在发 batch、HTTP 返回、重试前、backoff 和下一批前检查�
 
 启用 cache 后，Provider 使用宿主 SQLite runtime 打开独立 database，不能把它 `ATTACH` 为 Lithograph 的 canonical state，也不能把 cache.path 指向 main 文件（包括同一底层文件的别名）。Provider 不自动创建父目录。已有非空 database 必须有匹配的 Provider marker/schema；不会接管任意用户 database。
 
-v0.3.1 在多个进程首次同时初始化空 cache 时可能返回 `IO_ERROR`；部署时先由单进程完成一次有效请求，再启动并发 worker。此限制与现有 cache 的并发 publish 不同，准确复现与处理见 [Known Issues](known-issues.md#provider-cache-first-use)。
+v0.3.2 修复首次并发初始化窗口：取得初始化 writer 后重新检查状态，另一进程已完成初始化时验证并使用已有 cache；warm hit 不因此要求 writer。真实多进程、完整源码门禁与新包验收已通过，范围与证据见 [发布说明](../releases/v0.3.2.md)。已发布 v0.3.1 在多个进程首次同时初始化空 cache 时仍可能返回 `IO_ERROR`；该版本先由单进程完成一次有效请求，再启动并发 worker。v0.3.1 的准确复现与处理见 [Known Issues](known-issues.md#provider-cache-first-use)。
 
 cache key 包含 ABI implementation identity、cache-key encoding version、dimensions、调用方 `semantic_identity`、有效 endpoint/model/body/header/auth 语义和 exact text。credential/header 以 digest 参与，不将原值或 source/query 原文写入 cache。只改变 timeout、retry、batch、cache 开关、路径或容量，不改变有效 embedding identity。显式默认值与省略默认值可以共享 cache。变更实际 credential、tenant、model、endpoint 或 salt 可能产生 miss。
 

@@ -38,6 +38,7 @@ pub(crate) struct PreparedWrite {
     clauses: Vec<WriteClause>,
     projection: Option<WriteProjection>,
     graph_view: GraphViewSelector,
+    access: super::access::AccessPolicy,
     branch: String,
     author: Option<String>,
     message: Option<String>,
@@ -180,6 +181,7 @@ struct ProjectedWriteRows {
     snapshot_state: Box<storage::ResolvedSnapshotState>,
     params: BTreeMap<String, Value>,
     projection: WriteProjection,
+    query_access: Box<super::access::PropertyRules>,
     seen: usize,
     emitted: usize,
 }
@@ -266,6 +268,7 @@ pub(crate) fn prepare_write(
         clauses,
         projection,
         graph_view: options.graph_view.clone(),
+        access: options.access.clone(),
         branch,
         author: options.author.clone(),
         message: options.message.clone(),
@@ -757,13 +760,20 @@ fn resolve_write_names(
     snapshot: &Snapshot<'_>,
     row: &BindingRow,
     params: &BTreeMap<String, Value>,
+    query_access: &super::access::PropertyRules,
 ) -> QueryResult<Vec<String>> {
     let mut output = Vec::new();
     for name in names {
         match name {
             WriteName::Static(name) => output.push(name.clone()),
             WriteName::Dynamic(expression) => {
-                match expression::evaluate(expression, snapshot, row, params)? {
+                match expression::evaluate_with_access(
+                    expression,
+                    snapshot,
+                    row,
+                    params,
+                    query_access,
+                )? {
                     Value::String(value) => output.push(value),
                     Value::List(values) => {
                         for value in values {

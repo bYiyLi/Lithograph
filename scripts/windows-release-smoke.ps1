@@ -95,6 +95,7 @@ function Build-SqliteRuntime {
         throw "expected SQLite $Version fixture, got $actualVersion"
     }
     return [PSCustomObject]@{
+        Version = $Version
         Root = $runtimeRoot
         Exe = $sqliteExe
         Obj = $sqliteObj
@@ -160,7 +161,7 @@ function Invoke-Phase13Probe {
     }
 }
 
-function Invoke-Phase09Regressions {
+function Invoke-VersionAndAccessRegressions {
     param(
         [Parameter(Mandatory = $true)]$Runtime
     )
@@ -173,9 +174,21 @@ function Invoke-Phase09Regressions {
         $env:SQLITE3_LIB_DIR = $Runtime.LibDir
         $env:SQLITE3_INCLUDE_DIR = $Runtime.Include
         $env:SQLITE3_STATIC = "1"
-        & cargo test --release --locked -p lithograph-core --test phase09_version
+        & cargo test --release --locked -p lithograph-core --features test-support `
+            --test phase09_version `
+            --test phase18_access_options `
+            --test phase18_batch_access `
+            --test phase18_external_access `
+            --test phase18_index_access `
+            --test phase18_interpolation_access `
+            --test phase18_interpolation_classification `
+            --test phase18_interpreter_access `
+            --test phase18_mutation_access `
+            --test phase18_mutation_reads `
+            --test phase18_schema_canonical `
+            --test phase18_version_access
         if ($LASTEXITCODE -ne 0) {
-            throw "Phase 09 version regressions failed with $($Runtime.Exe)"
+            throw "Version and access-control regressions failed with $($Runtime.Exe)"
         }
     } finally {
         $env:LITHOGRAPH_SQLITE3 = $previousSqlite3
@@ -203,14 +216,79 @@ function Invoke-SqlTxSmoke {
     }
 }
 
+function Invoke-Phase18ExternalSmoke {
+    param(
+        [Parameter(Mandatory = $true)]$Runtime,
+        [Parameter(Mandatory = $true)][string]$SyntheticProvider,
+        [Parameter(Mandatory = $true)][string]$Tokenizer
+    )
+
+    $source = Join-Path $repoRoot "tests\phase18_external_access_smoke.c"
+    $object = Join-Path $Runtime.Root "phase18-external-access.obj"
+    $executable = Join-Path $Runtime.Root "phase18-external-access.exe"
+    Invoke-VcCommand -Name "phase18-external-compile-$($Runtime.Version)" -Command "cd /d `"$($Runtime.Root)`" && cl /nologo /c /std:c11 /W4 /WX /I`"$($Runtime.Include)`" `"$source`" /Fo`"$object`""
+    Invoke-VcCommand -Name "phase18-external-link-$($Runtime.Version)" -Command "cd /d `"$($Runtime.Root)`" && link /nologo `"$object`" `"$($Runtime.Obj)`" /OUT:`"$executable`""
+    & $executable $extension $SyntheticProvider $Tokenizer
+    if ($LASTEXITCODE -ne 0) {
+        throw "Phase 18 external-access smoke failed with $($Runtime.Exe)"
+    }
+}
+
+function Invoke-Phase18SqlSmoke {
+    foreach ($fixture in @("phase18_access_sql.py", "phase18_load_csv_access.py")) {
+        # The SQL fixture requires SQLite 3.45+, actual extension loading and
+        # FTS5. Missing Python/runtime capabilities fail this gate, never skip it.
+        & python -B (Join-Path $repoRoot "tests\$fixture") $extension
+        if ($LASTEXITCODE -ne 0) {
+            throw "Phase 18 real SQLite SQL fixture failed: $fixture"
+        }
+    }
+}
+
+function Invoke-ProviderCacheSmoke {
+    param(
+        [Parameter(Mandatory = $true)]$Runtime,
+        [Parameter(Mandatory = $true)][string]$Probe
+    )
+
+    $previousSqlite3 = $env:LITHOGRAPH_SQLITE3
+    $previousLibDir = $env:SQLITE3_LIB_DIR
+    $previousIncludeDir = $env:SQLITE3_INCLUDE_DIR
+    $previousStatic = $env:SQLITE3_STATIC
+    try {
+        $env:LITHOGRAPH_SQLITE3 = $Runtime.Exe
+        $env:SQLITE3_LIB_DIR = $Runtime.LibDir
+        $env:SQLITE3_INCLUDE_DIR = $Runtime.Include
+        $env:SQLITE3_STATIC = "1"
+        & cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase15-provider-cache -- $openaiProvider $Probe $extension
+        if ($LASTEXITCODE -ne 0) {
+            throw "Provider cache first-use/concurrency smoke failed with $($Runtime.Exe)"
+        }
+    } finally {
+        $env:LITHOGRAPH_SQLITE3 = $previousSqlite3
+        $env:SQLITE3_LIB_DIR = $previousLibDir
+        $env:SQLITE3_INCLUDE_DIR = $previousIncludeDir
+        $env:SQLITE3_STATIC = $previousStatic
+    }
+}
+
 $minimum = Build-SqliteRuntime -Version "3.45.0" -ArchiveVersion "3450000" -Year "2024" -Sha256 "72887d57a1d8f89f52be38ef84a6353ce8c3ed55ada7864eb944abd9a495e436"
 $current = Build-SqliteRuntime -Version "3.53.4" -ArchiveVersion "3530400" -Year "2026" -Sha256 "0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c"
 $lithographInclude = Join-Path $repoRoot "include"
 $syntheticSource = Join-Path $repoRoot "tests\synthetic_embedding_provider.c"
 $syntheticProvider = Join-Path $root "phase13_synthetic_embedding_provider.dll"
 Invoke-VcCommand -Name "phase13-synthetic-provider" -Command "cd /d `"$root`" && cl /nologo /LD /std:c11 /W4 /WX /I`"$lithographInclude`" /I`"$($minimum.Include)`" `"$syntheticSource`" /Fe`"$syntheticProvider`""
+$tokenizerSource = Join-Path $repoRoot "tests\phase12_tokenizer.c"
+$tokenizer = Join-Path $root "phase12_tokenizer.dll"
+Invoke-VcCommand -Name "phase12-tokenizer" -Command "cd /d `"$root`" && cl /nologo /LD /std:c11 /W4 /WX /I`"$($minimum.Include)`" `"$tokenizerSource`" /Fe`"$tokenizer`""
+$cacheProbe = Join-Path $root "provider-cache-probe.dll"
+if ($openaiProvider) {
+    $cacheProbeSource = Join-Path $repoRoot "tests\provider_cache_probe.c"
+    Invoke-VcCommand -Name "provider-cache-probe" -Command "cd /d `"$root`" && cl /nologo /LD /std:c11 /W4 /WX /I`"$lithographInclude`" /I`"$($minimum.Include)`" `"$cacheProbeSource`" /Fe`"$cacheProbe`""
+}
 
-Invoke-Phase09Regressions -Runtime $minimum
+Invoke-VersionAndAccessRegressions -Runtime $minimum
+Invoke-Phase18SqlSmoke
 
 foreach ($runtime in @($minimum, $current)) {
     $loadResult = (& $runtime.Exe -batch -noheader -cmd ".load `"$extensionForSqlite`"" ":memory:" "SELECT json_valid(lithograph_version());").Trim()
@@ -237,6 +315,10 @@ foreach ($runtime in @($minimum, $current)) {
         }
     }
     Invoke-Phase13Probe -Runtime $runtime -SyntheticProvider $syntheticProvider -OpenAIProvider $openaiProvider
+    Invoke-Phase18ExternalSmoke -Runtime $runtime -SyntheticProvider $syntheticProvider -Tokenizer $tokenizer
+    if ($openaiProvider) {
+        Invoke-ProviderCacheSmoke -Runtime $runtime -Probe $cacheProbe
+    }
 }
 
 Invoke-SqlTxSmoke -Runtime $minimum -Name "sqlite-3.45.0"
@@ -341,4 +423,4 @@ if ($openaiProvider) {
     }
 }
 
-Write-Host "Windows Phase 14 release artifact smoke passed ($architecture): $extension"
+Write-Host "Windows release artifact and access-control smoke passed ($architecture): $extension"

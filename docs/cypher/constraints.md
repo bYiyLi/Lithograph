@@ -1,6 +1,6 @@
 # Constraint
 
-适用 Lithograph v0.3.1、`CY25-2026.08`。[Cypher 手册](index.md) · [兼容范围](../reference/cypher-compatibility.md) · [Schema 操作指南](../guide/schema-and-indexes.md)
+适用 Lithograph v0.3.2、`CY25-2026.08`。[Cypher 手册](index.md) · [兼容范围](../reference/cypher-compatibility.md) · [Schema 操作指南](../guide/schema-and-indexes.md)
 
 Constraint 在写入或 Schema 变更时验证图数据。它可以单独创建，也可以由 [Graph Type](graph-types.md) 声明产生；规则和定义随 Commit 版本化。
 

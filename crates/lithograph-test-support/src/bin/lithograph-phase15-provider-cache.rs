@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+#[path = "lithograph-phase15-provider-cache/initialization.rs"]
+mod initialization;
+
 use lithograph_test_support::sqlite::{
     FileDatabaseFixture, execute_script, extension_load_command,
 };
@@ -65,6 +68,13 @@ fn run() -> Result<ProbeResult, Box<dyn Error>> {
     checks.push("provider-cache-busy-cancellation");
     check_concurrent_publish(&provider_load, &probe_load)?;
     checks.push("provider-cache-multi-process-concurrent-publish");
+    checks.extend(initialization::check(&provider_load, &probe_load)?);
+    if let Some(engine) = std::env::args().nth(3) {
+        let engine = fs::canonicalize(engine)?;
+        let engine_load = load_command(&engine, "sqlite3_lithograph_init")?;
+        check_warm_cache_access_boundary(&provider_load, &probe_load, &engine_load)?;
+        checks.push("provider-cache-warm-hit-access-denied-before-provider");
+    }
 
     Ok(ProbeResult {
         phase: "15-provider-owned-cache",
@@ -72,6 +82,80 @@ fn run() -> Result<ProbeResult, Box<dyn Error>> {
         probe: probe.display().to_string(),
         checks,
     })
+}
+
+fn check_warm_cache_access_boundary(
+    provider_load: &str,
+    probe_load: &str,
+    engine_load: &str,
+) -> Result<(), Box<dyn Error>> {
+    let fixture = FileDatabaseFixture::new(0x1805_0001)?;
+    let cache = fixture.directory().join("provider-cache.db");
+    let (base_url, server) = embedding_server(1)?;
+    let config = provider_config(&base_url, &cache, 8);
+    require_status(
+        &fixture,
+        provider_load,
+        probe_load,
+        &config,
+        "warm-cache",
+        0,
+    )?;
+    // Stop the HTTP endpoint before querying through Lithograph. The same
+    // source/query String can now succeed only through the Provider-owned cache.
+    require_server_requests(server, 1)?;
+    require_cache_state(&cache, 1, 8)?;
+    let params = json!({"config": serde_json::from_str::<serde_json::Value>(&config)?});
+    let create = "CALL db.index.semantic.createNodeIndex('warm_sem',['Doc'],'text',\
+                  {provider:'openai-compatible',providerConfig:$config,dimensions:2,similarity:'cosine'})";
+    let query = "CALL db.index.semantic.queryNodes('warm_sem','warm-cache',{limit:1}) \
+                 YIELD node RETURN node.text";
+    let loads = format!("{engine_load}\n{provider_load}");
+    let output = fixture.execute_script(&format!(
+        "{loads}\nSELECT lithograph_init();\n\
+         SELECT lithograph('CREATE (:Doc {{text:''warm-cache''}}) FINISH');\n\
+         SELECT lithograph({create},{params});\n\
+         SELECT 'warm=' || json_extract(lithograph({query}),'$.rows[0][0]');",
+        create = sql_literal(create),
+        params = sql_literal(&params.to_string()),
+        query = sql_literal(query),
+    ))?;
+    require(
+        output.lines().any(|line| line.trim() == "warm=warm-cache"),
+        &format!("offline Provider-owned cache hit failed: {output}"),
+    )?;
+    let before = fs::read(&cache)?;
+    let locker = Connection::open(&cache)?;
+    locker.execute_batch("BEGIN EXCLUSIVE")?;
+    for surface in [
+        format!("SELECT lithograph({},'{{}}',?1);", sql_literal(query)),
+        format!(
+            "SELECT data FROM lithograph_rows({},'{{}}',?1);",
+            sql_literal(query)
+        ),
+    ] {
+        let options = sql_literal(r#"{"readAccess":{"allowExternalIO":false}}"#);
+        let statement = surface.replace("?1", &options);
+        let output = fixture.execute_script(&format!(
+            "{loads}\n{probe_load}\nSELECT provider_cache_probe_sql_error({});\n\
+             SELECT 'recovered=' || json_extract(lithograph('RETURN 1'),'$.rows[0][0]');",
+            sql_literal(&statement),
+        ))?;
+        require(
+            output.starts_with("code=23;error=LITHOGRAPH_ACCESS_DENIED:"),
+            &format!("expected ACCESS_DENIED/SQLITE_AUTH before cache access: {output}"),
+        )?;
+        require(
+            output.lines().any(|line| line == "recovered=1"),
+            &format!("connection unusable after denied execution/finalize: {output}"),
+        )?;
+    }
+    locker.execute_batch("ROLLBACK")?;
+    require(
+        fs::read(&cache)? == before,
+        "denied query modified Provider cache",
+    )?;
+    require_cache_state(&cache, 1, 8)
 }
 
 fn check_reopen_budget_and_secret_storage(

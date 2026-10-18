@@ -12,6 +12,7 @@ import tempfile
 from python_quickstart import open_graph, query, require
 from version_workflow import expect_error, head
 from doc_runtime import DocGraph, python_sqlite_supported
+from access_controls import verify_access_controls
 
 
 GUIDE = Path(__file__).resolve().parent.parent
@@ -19,7 +20,7 @@ SQL_PAGES = (
     "installation.md", "getting-started.md", "graph-and-cypher.md",
     "schema-and-indexes.md", "search.md", "versioning.md",
     "transactions.md", "graph-views.md", "operations.md",
-    "import.md", "safe-execution.md",
+    "import.md", "safe-execution.md", "access-controls.md",
 )
 SQL_REFERENCE_PAGES = ("sql-api.md", "values.md")
 
@@ -189,6 +190,7 @@ def main():
     if not args.inventory_only:
         verify_guides(args.extension, args.sqlite3)
         verify_boundaries(args.extension)
+        verify_access_controls(args.extension)
 
 
 if __name__ == "__main__":

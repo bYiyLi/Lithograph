@@ -183,7 +183,13 @@ fn expand_load_csv_input(
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<()> {
     let (source, delimiter) = evaluate_csv_source(spec, |value| {
-        expression::evaluate(value, snapshot, &input_row, context.params)
+        expression::evaluate_with_access(
+            value,
+            snapshot,
+            &input_row,
+            context.params,
+            &context.access.read.query,
+        )
     })?;
     let guard = stream_csv_binding_rows(
         spec,

@@ -210,7 +210,7 @@ visible Property Subgraph for this clause
 Executor / Search
 ```
 
-Planner 持有规范化的 selector / execution context，不把 Graph View 预展开成固定 element-ID allowlist；Physical operator 在对应 clause 的实际 graph state 上执行 visibility check。Graph View v1 使用[Query Options](interfaces.md#query-options)的 Label selector：Node 在当前 clause graph state 中满足全部 `requireAllLabels` 且不命中任何 `excludeAnyLabels` 时可见；Relationship 当且仅当两个端点都可见时可见。Graph View v1 是 element-level visibility，不提供 Property masking：一个 element 可见时，它在当前 graph state 中可见的 Label / Relationship Type / Property 仍按正常 Cypher 语义可见。NodeId / RelationshipId、Label、Type、Property 与 Schema 本身不因 view 改写或复制。
+Planner 持有规范化的 selector / execution context，不把 Graph View 预展开成固定 element-ID allowlist；Physical operator 在对应 clause 的实际 graph state 上执行 visibility check。Graph View v1 使用[Query Options](interfaces.md#query-options)的 Label selector：Node 在当前 clause graph state 中满足全部 `requireAllLabels` 且不命中任何 `excludeAnyLabels` 时可见；Relationship 当且仅当两个端点都可见时可见。Graph View v1 自身是 element-level visibility；属性可见性另由 [Access Control Execution Boundary](#query-access-controls) 约束，未配置 query 属性规则时，一个 element 的 Property 按正常 Cypher 语义可见。NodeId / RelationshipId、Label、Type、Property 与 Schema 本身不因 view 改写或复制。
 
 所有会观察 graph data 的 execution path 必须把该可见子图当作本次 Cypher 的输入图，而不是执行完成后再过滤结果。至少包括：
 
@@ -235,6 +235,28 @@ Graph-data mutation 在同一个 boundary 内执行：
 Graph View **不投影 Schema / Constraint / Index definition**。当前 Commit 的完整 versioned Schema 仍是该 execution 的唯一 Schema；Graph Type、property type、KEY / UNIQUE / existence 等 validation 按原 Cypher/Lithograph contract 对 mutation 的完整 candidate canonical graph state 执行，包括 Graph View 外的 element。`MERGE` 的 match 部分只看到 view 内 element；如果它因此尝试创建一个与 view 外 element 冲突的 UNIQUE / KEY value，最终返回正常的 `CONSTRAINT_ERROR` 并回滚，而不是把 constraint 解释成 view-local constraint。由这种 validation 产生的间接存在性信号不违反 Graph View contract，因为 Graph View 明确不是 authorization boundary。
 
 Graph View 是执行语义，不是认证或权限系统。持有原始 Lithograph execution surface 的调用方可以省略 `graphView` 访问完整 graph；上层产品若把它用于租户或内部数据隔离，必须控制调用方能提交的 options。Lithograph 只保证在**已经选择的** Graph View 内没有 query/operator/Search/write bypass。
+
+<a id="query-access-controls"></a>
+
+### Access Control Execution Boundary
+
+访问配置与错误编码由 [接口合同](interfaces.md#query-access-controls) 拥有。本边界在正式 AST、query-local execution context 和对外结果编码中落实，不使用 query text 正则识别 Cypher，不新增 parser bridge，也不改变 Cypher grammar、storage format、Commit identity 或 Provider SPI。
+
+一次 execution 共享规范化的访问规则和已编译 matcher；PreparedQuery、嵌套子查询、字符串插值、transaction batch 与 concurrent worker 传递同一策略，不使用 process-global mutable policy。省略或空配置使用现有执行路径，不为无规则执行建立全图拷贝或逐返回 batch 重新解析。
+
+`readAccess.query` 是图属性的逻辑可见性：Node/Relationship 的受限属性在每个 clause 实际 graph state 中按不存在处理。静态和动态属性访问、pattern property predicate、`keys()`、`properties()`、Map projection、Path 中的 graph object、条件、排序、聚合及嵌套表达式都使用该视图。普通 Map/scalar 保留正常语义。物化出的图对象不含受限属性；Canonical Snapshot、内部完整性与 Schema/Constraint validation 始终读取真实状态，不把 masking 后的值作为 storage correctness source。
+
+Planner 不能用隐藏属性的原始 index seek/ordering/statistics 产生未受限的匹配结果。必要时退回受限求值，未受限字段继续复用正常索引。Full-text/Vector/Managed Semantic Search 依赖隐藏属性时返回 `ACCESS_DENIED`，不能通过命中、排序、score 或枚举泄露。图数据 Procedure 适用同一 query 规则；必须完整返回 Patch/Diff/conflict data 的版本读取若包含被 query 规则禁止的属性，返回 `ACCESS_DENIED`，不伪造删减后仍声称完整的版本对象。Schema、Commit Data 等 metadata 不按 key 伪装成 graph property 过滤。
+
+`readAccess.result` 在 scalar/rows 共用的最终公开 JSON 编码边界递归过滤图对象属性。List、普通 Map 中的 Node/Relationship 和 Path 的元素同样受控；普通 Map 自身的 key、alias 和已提取 scalar 不变。因此 result-only 模式允许显式取值，`properties(n)`、`n{.*}` 产生的普通 Map 也保留真实字段。内部 spill、排序、去重与表达式 value encoding 不受结果规则影响。可检测的过滤/编码失败必须发生在既有最终成功/发布边界之前，保持普通 invocation 的 rollback 与 staged transaction abort 合同。
+
+`writeAccess` 在实际属性 mutation 前检查；显式向禁止属性写入相同值也必须拒绝，不能被 no-op 优化跳过。Map 替换先检查隐含删除，Map 合并和动态 key/null 移除逐目标检查。创建、删除、Label、Schema、版本和维护权限独立叠加；允许删除对象时，对象删除带来的属性清理不被误判为单独的属性修改。
+
+Patch、Revert、Reset、Merge、Rebase、Squash 按操作前后目标 Branch 的有效 graph/Schema 变化检查创建、删除、Label、Schema 和受保护属性。属性最终状态的相同/不同沿用 [Storage 的 canonical value encoding](storage.md#canonical-value-encoding) 和 [版本 logical-slot 合同](versioning.md#diff-and-patch)，不以 Cypher 数值相等或宿主浮点比较替代。历史重组的内部 Layer replay 不单独作为受保护属性写入：Rebase/Squash 的最终有效属性未改变时允许，实际最终值改变则拒绝。复用已有 Layer/Delta/touched diff 路径，不引入第二套 storage model 或每查询全图复制。Merge 的显式 candidate 修改受本次权限约束；`finalize` 必须用本次 execution 的策略重新验证 candidate、fast-forward 与发布效果，不能信任 Session 创建或上一次 inspection 的权限。拒绝不能留下新 Commit、Branch move、Schema 或半完成 Session mutation。
+
+读取能力开关与 `denyFunctions` 在完整、已完成正常 semantic validation 的 AST 上检查，包含所有嵌套结构和字符串插值；Schema command 与已知 Procedure 的固定能力效果也在准备阶段分类。对这些准备阶段禁令，未运行的 branch、零结果与 `EXPLAIN`/`PROFILE` 不豁免。普通图写入的 `allowCreate` / `allowDelete` / `allowLabelChanges` 则检查实际发生的效果：例如 `MERGE` 命中既有对象而未创建时不因 allowCreate=false 拒绝，零行输入未产生创建也不报创建禁令；对真实目标显式写回同一保护属性值仍按属性禁令拒绝。命名 Procedure 按真实 graph/Schema/version/maintenance/external-I/O 效果分类；`allowExternalIO=false` 必须在文件/HTTP、Provider 或宿主 tokenizer 被调用前拒绝，即使 Provider 可能 cache hit。当前 SQLite graph 读取、TEMP/spill 和不调用外部能力的 derived work 不受 external-I/O 禁令影响。
+
+普通 execution、explicit staged execution、独立与 concurrent batch 使用同一语义。每次 explicit execution 的初始 staged state 是本次写入校验基线，后续策略不追溯否定前次已授权变更。transaction subquery 按现有 `ON ERROR` 和独立 commit 合同处理拒绝：失败 batch 不发布，已 durable 的 earlier batch 保留，结果失败或取消不能伪装成整体 rollback。只读 Snapshot、Graph View 和旧 `readOnlyNoExternalIO` 始终取权限交集。
 
 <a id="query-scoped-resolved-state"></a>
 

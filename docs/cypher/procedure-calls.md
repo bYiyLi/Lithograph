@@ -2,7 +2,7 @@
 
 [语言手册](index.md) · [版本与范围](../reference/cypher-compatibility.md)
 
-适用于 Lithograph v0.3.1，Cypher Profile `CY25-2026.08`。本章拥有调用语法、行组合和作用域。每个 Procedure 的完整参数、返回、错误与副作用由 [Procedure Reference](../reference/procedures.md) 维护；`CALL { ... }` 语言子查询见 [Subqueries](subqueries.md)。
+适用于 Lithograph v0.3.2，Cypher Profile `CY25-2026.08`。本章拥有调用语法、行组合和作用域。每个 Procedure 的完整参数、返回、错误与副作用由 [Procedure Reference](../reference/procedures.md) 维护；`CALL { ... }` 语言子查询见 [Subqueries](subqueries.md)。
 
 <a id="procedure-call-syntax"></a>
 

@@ -199,7 +199,10 @@ pub(super) fn execution_options(text: &str, branch: &str) -> LithographResult<St
         .as_object()
         .ok_or_else(|| LithographError::invalid_argument("options must be a JSON object"))?;
     for key in object.keys() {
-        if !matches!(key.as_str(), "graphView" | "readOnlyNoExternalIO") {
+        if !matches!(
+            key.as_str(),
+            "graphView" | "readOnlyNoExternalIO" | "readAccess" | "writeAccess"
+        ) {
             return Err(LithographError::invalid_argument(format!(
                 "explicit transaction execution does not accept option {key}"
             )));
@@ -207,11 +210,15 @@ pub(super) fn execution_options(text: &str, branch: &str) -> LithographResult<St
     }
     let mut options = serde_json::Map::new();
     options.insert("branch".to_owned(), Value::String(branch.to_owned()));
-    if let Some(graph_view) = object.get("graphView") {
-        options.insert("graphView".to_owned(), graph_view.clone());
-    }
-    if let Some(safety) = object.get("readOnlyNoExternalIO") {
-        options.insert("readOnlyNoExternalIO".to_owned(), safety.clone());
+    for key in [
+        "graphView",
+        "readOnlyNoExternalIO",
+        "readAccess",
+        "writeAccess",
+    ] {
+        if let Some(value) = object.get(key) {
+            options.insert(key.to_owned(), value.clone());
+        }
     }
     Ok(Value::Object(options).to_string())
 }

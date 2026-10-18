@@ -236,7 +236,13 @@ pub(crate) fn validate_transition(
         if definition.kind != StandardIndexKind::Semantic {
             continue;
         }
-        if previous.indexes.get(name) == Some(definition) {
+        if previous
+            .indexes
+            .get(name)
+            .map(|previous| previous.canonical_eq(definition))
+            .transpose()?
+            .unwrap_or(false)
+        {
             continue;
         }
         validate_definition(connection, definition)?;
@@ -252,6 +258,7 @@ pub(crate) fn query(
     input: &ManagedQueryInput<'_>,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<Vec<SemanticHit>> {
+    super::semantic_index::validate_query_index_access(index, graph_view)?;
     let work = ExecutionEmbeddingWork::create(connection)?;
     let result = query_with_work(
         connection,
@@ -653,7 +660,13 @@ fn validate_rebuild_definition(
     expected: &IndexDefinition,
 ) -> QueryResult<()> {
     let current = SchemaState::load(connection, commit)?;
-    if current.indexes.get(index_name) == Some(expected) {
+    if current
+        .indexes
+        .get(index_name)
+        .map(|current| current.canonical_eq(expected))
+        .transpose()?
+        .unwrap_or(false)
+    {
         return Ok(());
     }
     Err(QueryError::new(

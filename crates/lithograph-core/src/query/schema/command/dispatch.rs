@@ -11,6 +11,7 @@ use super::{
     apply_graph_type, schema_error, semantic,
 };
 use crate::query::QueryError;
+use crate::query::access::PropertyRules;
 
 pub(super) enum SchemaCommand<'a> {
     Semantic(&'a AstNode, semantic::SemanticCreateKind),
@@ -47,6 +48,7 @@ pub(super) fn apply_schema_command(
     command: SchemaCommand<'_>,
     source: &str,
     params: &BTreeMap<String, Value>,
+    query_access: &PropertyRules,
 ) -> QueryResult<ClauseKind> {
     match command {
         SchemaCommand::Semantic(clause, semantic_kind) => {
@@ -57,6 +59,7 @@ pub(super) fn apply_schema_command(
                 clause,
                 semantic_kind,
                 params,
+                query_access,
             )?;
             Ok(ClauseKind::CreateIndex)
         }

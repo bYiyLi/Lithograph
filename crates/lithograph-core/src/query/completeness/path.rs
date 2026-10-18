@@ -6,8 +6,9 @@ use crate::cypher::{
 };
 use crate::storage::{self, OwnerKind, RelationshipRecord, Snapshot};
 
+use super::super::access::PropertyRules;
 use super::super::expression::{
-    self, BindingRow, BindingValue, Expr, binding_value, compile_expression,
+    self, BindingRow, BindingValue, Expr, binding_value_with_access, compile_expression,
 };
 use super::super::graph::ResolvedGraphView;
 use super::super::{QueryError, QueryErrorKind, QueryMetrics, QueryResult, check_interrupted};
@@ -840,6 +841,7 @@ fn complete_repeated_state(
             variable,
             collected,
             prebound_group,
+            &context.graph_view.query_access,
         )?
     {
         return Ok(None);
@@ -853,10 +855,11 @@ fn bind_repeated_relationship_values(
     variable: &str,
     values: &[BindingValue],
     prebound_group: Option<&BindingValue>,
+    rules: &PropertyRules,
 ) -> QueryResult<bool> {
     let values = values
         .iter()
-        .map(|value| binding_value(snapshot, value))
+        .map(|value| binding_value_with_access(snapshot, value, rules))
         .collect::<QueryResult<Vec<_>>>()?;
     let value = Value::List(values);
     match prebound_group.or_else(|| row.values.get(variable)) {
@@ -950,7 +953,13 @@ fn complete_quantified_state(
 ) -> QueryResult<PathState> {
     let mut completed = state.clone();
     for (name, values) in collected {
-        bind_group_values(context.snapshot, &mut completed.row, name, values)?;
+        bind_group_values(
+            context.snapshot,
+            &mut completed.row,
+            name,
+            values,
+            &context.graph_view.query_access,
+        )?;
     }
     Ok(completed)
 }
@@ -989,11 +998,12 @@ fn quantified_predicate_matches(
     row: &BindingRow,
 ) -> QueryResult<bool> {
     match predicate {
-        Some(predicate) => expression::predicate(expression::evaluate(
+        Some(predicate) => expression::predicate(expression::evaluate_with_access(
             predicate,
             context.snapshot,
             row,
             context.params,
+            &context.graph_view.query_access,
         )?),
         None => Ok(true),
     }
@@ -1177,11 +1187,12 @@ fn name_expression_matches(
     row: &BindingRow,
 ) -> QueryResult<bool> {
     super::super::name_expression::matches(node, names, |dynamic| {
-        expression::evaluate(
+        expression::evaluate_with_access(
             &compile_expression(dynamic)?,
             context.snapshot,
             row,
             context.params,
+            &context.graph_view.query_access,
         )
     })
 }
@@ -1193,8 +1204,13 @@ fn properties_match(
     owner: OwnerKind,
     owner_id: i64,
 ) -> QueryResult<bool> {
-    let Value::Map(expected) =
-        expression::evaluate(expression, context.snapshot, row, context.params)?
+    let Value::Map(expected) = expression::evaluate_with_access(
+        expression,
+        context.snapshot,
+        row,
+        context.params,
+        &context.graph_view.query_access,
+    )?
     else {
         return Err(QueryError::new(
             QueryErrorKind::Type,
@@ -1202,6 +1218,9 @@ fn properties_match(
         ));
     };
     for (name, expected) in expected {
+        if context.graph_view.query_access.denies(&name) {
+            return Ok(false);
+        }
         let actual = storage::find_property_key(context.snapshot.connection_for_query(), &name)?
             .map(|key| context.snapshot.property(owner, owner_id, key))
             .transpose()?
@@ -1222,11 +1241,12 @@ fn predicate_matches(
     row: &BindingRow,
 ) -> QueryResult<bool> {
     predicate.map_or(Ok(true), |predicate| {
-        expression::predicate(expression::evaluate(
+        expression::predicate(expression::evaluate_with_access(
             predicate,
             context.snapshot,
             row,
             context.params,
+            &context.graph_view.query_access,
         )?)
     })
 }
@@ -1299,10 +1319,11 @@ fn bind_group_values(
     row: &mut BindingRow,
     variable: &str,
     values: &[BindingValue],
+    rules: &PropertyRules,
 ) -> QueryResult<()> {
     let values = values
         .iter()
-        .map(|value| binding_value(snapshot, value))
+        .map(|value| binding_value_with_access(snapshot, value, rules))
         .collect::<QueryResult<Vec<_>>>()?;
     row.insert(
         variable.to_owned(),

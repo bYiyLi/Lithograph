@@ -401,6 +401,12 @@ impl ConstraintDefinition {
 }
 
 impl IndexDefinition {
+    /// Index identity follows the persisted Schema encoding, including opaque
+    /// Provider JSON values whose signed zero is collapsed by JSON equality.
+    pub(crate) fn canonical_eq(&self, other: &Self) -> StorageResult<bool> {
+        Ok(self.canonical_identity_blob()? == other.canonical_identity_blob()?)
+    }
+
     pub(crate) fn canonical_identity_blob(&self) -> StorageResult<Vec<u8>> {
         encode_schema_object(SchemaObject::Index {
             definition: self.clone(),

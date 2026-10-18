@@ -1,4 +1,5 @@
 use super::*;
+use crate::query::access::PropertyRules;
 
 pub(super) fn match_pattern(
     connection: &Connection,
@@ -149,6 +150,7 @@ fn path_relationship_candidates(
         context.snapshot,
         row,
         context.params,
+        &context.graph_view.query_access,
     )?;
     if names.len() != 1 {
         return Err(QueryError::semantic(
@@ -202,7 +204,14 @@ fn relationship_is_usable(
     {
         return Ok(false);
     }
-    relationship_properties_match(context.snapshot, row, spec, relationship.id, context.params)
+    relationship_properties_match(
+        context.snapshot,
+        row,
+        spec,
+        relationship.id,
+        context.params,
+        &context.graph_view.query_access,
+    )
 }
 
 fn relationship_binding_matches(
@@ -323,7 +332,13 @@ fn node_matches(
         return Ok(false);
     }
     let labels = snapshot.labels(id)?;
-    for label in resolve_write_names(&spec.labels, snapshot, row, params)? {
+    for label in resolve_write_names(
+        &spec.labels,
+        snapshot,
+        row,
+        params,
+        &graph_view.query_access,
+    )? {
         let Some(label_id) = storage::find_label(connection, &label)? else {
             return Ok(false);
         };
@@ -334,8 +349,15 @@ fn node_matches(
     let Some(properties) = &spec.properties else {
         return Ok(true);
     };
-    let expected = evaluate_map(properties, snapshot, row, params)?;
-    properties_match(connection, snapshot, OwnerKind::Node, id, &expected)
+    let expected = evaluate_map(properties, snapshot, row, params, &graph_view.query_access)?;
+    properties_match(
+        connection,
+        snapshot,
+        OwnerKind::Node,
+        id,
+        &expected,
+        &graph_view.query_access,
+    )
 }
 
 fn relationship_properties_match(
@@ -344,17 +366,19 @@ fn relationship_properties_match(
     spec: &RelationshipWriteSpec,
     id: i64,
     params: &BTreeMap<String, Value>,
+    query_access: &PropertyRules,
 ) -> QueryResult<bool> {
     let Some(properties) = &spec.properties else {
         return Ok(true);
     };
-    let expected = evaluate_map(properties, snapshot, row, params)?;
+    let expected = evaluate_map(properties, snapshot, row, params, query_access)?;
     properties_match(
         snapshot.connection_for_query(),
         snapshot,
         OwnerKind::Relationship,
         id,
         &expected,
+        query_access,
     )
 }
 
@@ -364,8 +388,12 @@ fn properties_match(
     owner_kind: OwnerKind,
     id: i64,
     expected: &BTreeMap<String, Value>,
+    query_access: &PropertyRules,
 ) -> QueryResult<bool> {
     for (key, expected) in expected {
+        if query_access.denies(key) {
+            return Ok(false);
+        }
         let Some(key_id) = storage::find_property_key(connection, key)? else {
             return Ok(false);
         };

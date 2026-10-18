@@ -15,9 +15,9 @@ Lithograph 为 SQLite 提供版本化 Property Graph 数据库能力。
 
 ## 安装与 Quickstart
 
-本版本为 **v0.3.1**，提供 Linux/macOS/Windows x64/arm64 六个平台的预编译包。运行时需要 SQLite 3.45.0+、loadable extension、FTS5 和线程安全支持。每包包含主 extension、OpenAI-compatible Provider、许可证和 VERSION，Release 附带 SHA256SUMS。
+本版本为 **v0.3.2**，目标发行平台为 Linux/macOS/Windows x64/arm64。运行时需要 SQLite 3.45.0+、loadable extension、FTS5 和线程安全支持。标准发行包包含主 extension、OpenAI-compatible Provider、许可证和 VERSION，并通过 SHA256SUMS 校验；实际发布进度见 [Phase 18](https://github.com/bYiyLi/Lithograph/blob/main/docs/development/phases/18-query-access-controls.md#v032-release-delivery)。
 
-从 [v0.3.1 Release](https://github.com/bYiyLi/Lithograph/releases/tag/v0.3.1) 选择平台资产，并按 [安装指南](https://github.com/bYiyLi/Lithograph/blob/v0.3.1/docs/guide/installation.md) 校验加载。源码构建使用 Rust 1.98.1：
+正式发布后，从 [v0.3.2 Release](https://github.com/bYiyLi/Lithograph/releases/tag/v0.3.2) 选择平台资产，并按 [安装指南](https://github.com/bYiyLi/Lithograph/blob/v0.3.2/docs/guide/installation.md) 校验加载。源码构建使用 Rust 1.98.1：
 
 ```sh
 cargo build --locked --release -p lithograph-extension -p lithograph-openai-compatible
@@ -38,22 +38,22 @@ FROM lithograph_rows('MATCH (p:Person) RETURN p.name AS name');
 
 `.load` 注册接口，`lithograph_init()` 初始化或迁移当前 main database。应用通过标准 SQLite SQL 调用；`lithograph()` 返回完整结果，`lithograph_rows()` 以 columns → row* → summary 增量执行读写。多个 execution 可以通过 SQL explicit transaction 共同形成一个 graph Commit。
 
-v0.3.1 增加 query-local `readOnlyNoExternalIO`，并提供完整开发者手册与执行验证的 Cypher 示例。语言 Profile 为 `CY25-2026.08`，fresh/current storage format 为 3，Provider SPI 为 V1。升级与历史 format 4 边界见 [发布说明](https://github.com/bYiyLi/Lithograph/blob/v0.3.1/docs/releases/v0.3.1.md)。
+v0.3.2 增加 query-local `readAccess` / `writeAccess`，并修复 canonical 状态重组、表达式作用域和 Provider cache 首次并发初始化。既有 `readOnlyNoExternalIO` 继续可用。语言 Profile 为 `CY25-2026.08`，fresh/current storage format 为 3，Provider SPI 为 V1。完整变化与历史 format 4 边界见 [发布说明](https://github.com/bYiyLi/Lithograph/blob/v0.3.2/docs/releases/v0.3.2.md)。
 
 ## 开发者文档
 
 | 任务 | 固定版本入口 |
 | --- | --- |
-| 安装、快速入门、集成、事务、Graph View、安全与运维 | [完整产品手册](https://github.com/bYiyLi/Lithograph/blob/v0.3.1/docs/guide/README.md) |
-| 完整 Cypher 语法、类型、表达式、路径、修改、Schema、搜索与函数 | [Cypher 25 使用手册](https://github.com/bYiyLi/Lithograph/blob/v0.3.1/docs/cypher/index.md) |
-| SQL/options/JSON、Procedure、Provider、错误与限制 | [接口参考](https://github.com/bYiyLi/Lithograph/blob/v0.3.1/docs/reference/README.md) |
-| Python/C 和真实执行验证 | [可运行示例](https://github.com/bYiyLi/Lithograph/blob/v0.3.1/docs/guide/examples/README.md) |
+| 安装、快速入门、集成、事务、Graph View、安全与运维 | [完整产品手册](https://github.com/bYiyLi/Lithograph/blob/v0.3.2/docs/guide/README.md) |
+| 完整 Cypher 语法、类型、表达式、路径、修改、Schema、搜索与函数 | [Cypher 25 使用手册](https://github.com/bYiyLi/Lithograph/blob/v0.3.2/docs/cypher/index.md) |
+| SQL/options/JSON、Procedure、Provider、错误与限制 | [接口参考](https://github.com/bYiyLi/Lithograph/blob/v0.3.2/docs/reference/README.md) |
+| Python/C 和真实执行验证 | [可运行示例](https://github.com/bYiyLi/Lithograph/blob/v0.3.2/docs/guide/examples/README.md) |
 
-同仓库维护的 [设计](https://github.com/bYiyLi/Lithograph/blob/v0.3.1/docs/design.md) 和 [开发计划](https://github.com/bYiyLi/Lithograph/blob/v0.3.1/docs/development/README.md) 分别记录产品合同与验收证据。用户手册包含正常使用所需说明；已知问题与适用版本在 Reference 中明确列出。
+这些固定入口随 v0.3.2 tag 提供。同仓库维护的 [设计](https://github.com/bYiyLi/Lithograph/blob/v0.3.2/docs/design.md) 和 [开发计划](https://github.com/bYiyLi/Lithograph/blob/main/docs/development/README.md) 分别记录产品合同与验收证据。用户手册包含正常使用所需说明；已知问题与适用版本在 Reference 中明确列出。
 
 ## 项目状态
 
-v0.3.1 的发布范围包括安全 execution option、完整开发者手册与示例驱动的正确性修复。实现、质量、兼容和实际发布证据见 [开发计划](https://github.com/bYiyLi/Lithograph/blob/v0.3.1/docs/development/README.md) 和 [发布说明](https://github.com/bYiyLi/Lithograph/blob/v0.3.1/docs/releases/v0.3.1.md)。历史 Release Notes 保留对应版本事实。
+v0.3.2 的实现、完整本机质量与制品验收已经完成；提交、远端 CI、六平台与正式发布按 [Phase 18 发布交付记录](https://github.com/bYiyLi/Lithograph/blob/main/docs/development/phases/18-query-access-controls.md#v032-release-delivery) 分别记录实际结果。版本变化见 [发布说明](https://github.com/bYiyLi/Lithograph/blob/v0.3.2/docs/releases/v0.3.2.md)，历史 Release Notes 保留对应版本事实。
 
 ## 许可
 

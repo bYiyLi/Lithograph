@@ -263,8 +263,12 @@ impl StepCursor {
                     continue;
                 }
                 let passes = match &self.step.predicate {
-                    Some(predicate) => expression::predicate(expression::evaluate(
-                        predicate, snapshot, &row, params,
+                    Some(predicate) => expression::predicate(expression::evaluate_with_access(
+                        predicate,
+                        snapshot,
+                        &row,
+                        params,
+                        &graph_view.query_access,
                     )?)?,
                     None => true,
                 };

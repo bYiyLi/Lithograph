@@ -1,6 +1,6 @@
 # Procedure Reference
 
-适用于 Lithograph v0.3.1 · [产品手册](../guide/README.md) · [接口参考](README.md) · [运行时签名清单](procedure-inventory.md)
+适用于 Lithograph v0.3.2 · [产品手册](../guide/README.md) · [接口参考](README.md) · [运行时签名清单](procedure-inventory.md)
 
 本入口按职责连接全部公开 Procedure。每个专题给出真实输入类型、默认值、输出、关键失败和版本/事务影响。[CALL 与 YIELD](../cypher/procedure-calls.md) 解释语言调用规则；[SQL API](sql-api.md) 解释如何在 SQLite 内执行。[版本共享对象](versioning.md) 拥有 Descriptor、Commit Data、Patch 与冲突对象的字段说明。
 

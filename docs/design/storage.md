@@ -145,6 +145,8 @@ Storage format 1 的 canonical explicit index inventory 除 table primary key �
 
 `Property` 使用 tagged union storage：`type_tag` 决定 payload column 与 `aux_value` 的解释。复杂 property type 使用 canonical binary representation，不能因 JSON serialization 损失类型。
 
+<a id="canonical-value-encoding"></a>
+
 Lithograph Canonical Encoding v1（`LCE1`）固定所有进入 Layer/Schema/Commit hash 的字节表示：
 
 - 所有整数使用 little-endian two's-complement fixed-width；ID 与 Cypher Integer 使用 64 bit；

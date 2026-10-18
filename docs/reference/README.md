@@ -2,7 +2,7 @@
 
 # Lithograph 接口参考
 
-适用版本：**v0.3.1**。本目录提供公开接口的精确说明；操作流程见 [产品手册](../guide/README.md)，语言规则见 [Cypher 手册](../cypher/index.md)。
+适用版本：**v0.3.2**；v0.3.1 不接受新增 readAccess/writeAccess。本目录提供公开接口的精确说明；操作流程见 [产品手册](../guide/README.md)，语言规则见 [Cypher 手册](../cypher/index.md)。
 
 | 查找内容 | 正文 |
 | --- | --- |
@@ -23,4 +23,4 @@
 
 应用通过标准 SQLite SQL 调用 Lithograph；Provider SPI 面向 Provider 作者。SQL options、Cypher 参数和 Procedure 的 options 是不同输入，以各自正文为准。每个接口说明的限制与事务语义也适用于清单中已登记的名称。
 
-固定版本入口：[v0.3.1 Reference](https://github.com/bYiyLi/Lithograph/blob/v0.3.1/docs/reference/README.md)。
+固定版本入口：[v0.3.2 Reference](https://github.com/bYiyLi/Lithograph/blob/v0.3.2/docs/reference/README.md)；tag 与发布进度见 [Phase 18](https://github.com/bYiyLi/Lithograph/blob/main/docs/development/phases/18-query-access-controls.md#v032-release-delivery)。

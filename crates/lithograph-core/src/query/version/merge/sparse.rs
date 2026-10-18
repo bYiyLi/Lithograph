@@ -296,7 +296,7 @@ impl SparsePropertyMerge<'_> {
         let mut layer = LayerBuilder::default();
         for (slot, property_slot) in &self.slots {
             let decision = self.slot_decision(slot, property_slot)?.0;
-            if decision == property_slot.ours {
+            if same_optional_value(decision.as_ref(), property_slot.ours.as_ref()) {
                 continue;
             }
             match decision {

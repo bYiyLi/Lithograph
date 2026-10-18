@@ -129,6 +129,24 @@ pub(crate) fn resolve_semantic_index(
     Ok(index.clone())
 }
 
+pub(crate) fn validate_query_index_access(
+    index: &IndexDefinition,
+    graph_view: &ResolvedGraphView,
+) -> QueryResult<()> {
+    if graph_view.query_access.is_empty() {
+        return Ok(());
+    }
+    if index_properties(index)?
+        .iter()
+        .any(|property| graph_view.query_access.denies(property))
+    {
+        return Err(QueryError::access_denied(
+            "Search cannot depend on a query-restricted graph property",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn vector_candidates(
     connection: &Connection,
     snapshot: &Snapshot<'_>,
@@ -138,6 +156,7 @@ pub(crate) fn vector_candidates(
     candidate_limit: usize,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<VectorCandidateResult> {
+    validate_query_index_access(index, graph_view)?;
     let query_vector = vector_numbers(query)?;
     let similarity = validate_vector_search_input(index, &query_vector)?;
     let input = VectorSearchInput {
@@ -507,6 +526,7 @@ pub(crate) fn fulltext_query(
     input: &FullTextQueryInput<'_>,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<Vec<SemanticHit>> {
+    validate_query_index_access(index, graph_view)?;
     validate_fulltext_target(index, input.relationship_query)?;
     let configured_analyzer = fulltext_configuration(index)?;
     if let Some(analyzer) = input.analyzer
@@ -731,7 +751,14 @@ pub(crate) fn validate_fulltext_transition(
     next: &SchemaState,
 ) -> QueryResult<()> {
     for (name, index) in &next.indexes {
-        if index.kind != StandardIndexKind::FullText || previous.indexes.get(name) == Some(index) {
+        if index.kind != StandardIndexKind::FullText
+            || previous
+                .indexes
+                .get(name)
+                .map(|previous| previous.canonical_eq(index))
+                .transpose()?
+                .unwrap_or(false)
+        {
             continue;
         }
         let analyzer = fulltext_configuration(index)?;
