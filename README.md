@@ -15,9 +15,9 @@ Lithograph 为 SQLite 提供版本化 Property Graph 数据库能力。
 
 ## 安装与 Quickstart
 
-本版本为 **v0.3.4**，目标发行平台为 Linux/macOS/Windows x64/arm64。运行时需要 SQLite 3.45.0+、loadable extension、FTS5 和线程安全支持。标准发行包包含主 extension、OpenAI-compatible Provider、许可证和 VERSION，并通过 SHA256SUMS 校验；本版本的源码与交付进度见 [Phase 20](docs/development/phases/20-graph-view-label-union.md)。
+本版本为 **v0.3.4**，已正式发布，目标发行平台为 Linux/macOS/Windows x64/arm64。运行时需要 SQLite 3.45.0+、loadable extension、FTS5 和线程安全支持。标准发行包包含主 extension、OpenAI-compatible Provider、许可证和 VERSION，并通过 SHA256SUMS 校验；本版本的源码与实际发布验收见 [Phase 20](docs/development/phases/20-graph-view-label-union.md#6-v034-正式发布与制品回验)。
 
-正式发布后，从 [v0.3.4 Release](https://github.com/bYiyLi/Lithograph/releases/tag/v0.3.4) 选择平台资产，并按 [安装指南](https://github.com/bYiyLi/Lithograph/blob/v0.3.4/docs/guide/installation.md) 校验加载。源码构建使用 Rust 1.98.1：
+从已发布的 [v0.3.4 Release](https://github.com/bYiyLi/Lithograph/releases/tag/v0.3.4) 选择平台资产，并按 [安装指南](https://github.com/bYiyLi/Lithograph/blob/v0.3.4/docs/guide/installation.md) 校验加载。源码构建使用 Rust 1.98.1：
 
 ```sh
 cargo build --locked --release -p lithograph-extension -p lithograph-openai-compatible
@@ -53,7 +53,7 @@ v0.3.4 新增 Graph View `requireAnyLabels` 多 Label OR 并集筛选，可与 `
 
 ## 项目状态
 
-Phase 20 的实现和本机完整质量验收已完成；v0.3.4 的提交、tag CI、六平台 Release Matrix 与正式制品将按真实结果独立验收，当前进度见 [Phase 20](docs/development/phases/20-graph-view-label-union.md) 与 [Releases](https://github.com/bYiyLi/Lithograph/releases)。完整变化见 [发布说明](https://github.com/bYiyLi/Lithograph/blob/v0.3.4/docs/releases/v0.3.4.md)，历史 Release Notes 保留对应版本事实。
+v0.3.4 已正式发布：实现提交 `622cece9`、Tag CI **4/4**、六平台 Release Matrix **6/6** 和发布工作流全部成功。从 GitHub Release 实际下载的六个平台包均通过 SHA256 校验，macOS arm64 发行二进制通过 SQLite 3.51.0 的真实 Graph View OR/事务回归。首轮 Tag macOS CI 曾有既有 Phase 08 锁竞争测试失败，失败 Job 完整重跑通过，未修改 Tag；精确 run、发布与下载回验证据见 [Phase 20 发布记录](docs/development/phases/20-graph-view-label-union.md#6-v034-正式发布与制品回验)。完整变化见 [发布说明](https://github.com/bYiyLi/Lithograph/blob/v0.3.4/docs/releases/v0.3.4.md)，历史 Release Notes 保留对应版本事实。
 
 ## 许可
 

@@ -17,7 +17,7 @@ Lithograph 的用户可见版本变化记录在此文件。版本遵循 Semantic
 
 - 更新 `rustls-webpki` 0.103.16 和 `webpki-roots` 1.0.10，修复两项 TLS 证书验证相关安全公告。
 - v0.3.3 及更早版本不支持 `requireAnyLabels`；省略新字段的旧调用保持兼容。Cypher 25 Profile、storage format 3、Commit identity、Provider SPI V1 与 application-facing SQL 接口均未改变。
-- Phase 20 本机完整 quality / CI、适用 TCK 3,777/3,777、三个 SQLite 运行时和 Provider 专项验证通过；Tag CI、六平台制品与正式下载验收以实际发布记录为准。
+- Phase 20 本机完整 quality / CI、适用 TCK 3,777/3,777、三个 SQLite 运行时和 Provider 专项验证通过；v0.3.4 正式 Tag CI **4/4**、六平台 Matrix **6/6**、Release 发布与下载资产 SHA256/真实 SQLite 回验全部成功。首轮 Tag macOS 锁竞争测试失败，重跑相同源码完整通过；准确证据见 [Phase 20 发布记录](docs/development/phases/20-graph-view-label-union.md#6-v034-正式发布与制品回验)。
 
 ## 0.3.3
 

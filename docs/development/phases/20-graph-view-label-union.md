@@ -1,6 +1,6 @@
 # Phase 20：Graph View 多 Label 并集筛选
 
-**状态：`done`（源码实现、本机完整 quality / CI、专项测试与 Phase-level review 已通过；尚未提交、推送或发布）**
+**状态：`done`（源码与本机验收完成；v0.3.4 正式发布、Tag CI、六平台 Matrix 与下载制品回验均完成）**
 
 ## 1. 目标、范围与依赖
 
@@ -70,4 +70,14 @@
 - **本机 CI：** `sh scripts/ci.sh` **exit 0**；覆盖 SQLite 3.45 / 3.51 / 3.53.4 真实扩展加载、Provider SPI、SQL / 资源 / 事务、文档可执行示例与兼容清单。日志：`target/phase20-check/ci-after-reboot.log`。
 - **门禁环境与安全：** 使用 Homebrew Python 3.14（内置 SQLite 3.51）替代测试环境中自带旧 SQLite 3.41 的 Conda Python；另以最小 `Cargo.lock` 补丁升级 `rustls-webpki` 到 `0.103.16`、`webpki-roots` 到 `1.0.10`，`cargo deny` 通过。未放宽验收阈值。
 
-`done` 仅代表**本地源码实现与验收**。本轮没有 commit、push、远端 CI、Release Matrix 或正式发布；已发布的 v0.3.3 二进制不包含 `requireAnyLabels`。日志和编译制品位于 Git 忽略的 `target/`，不是发行物。
+`done` 的本机验收证据如上；随后发生的代码提交、远端 CI 与正式发行见下节。已发布的 v0.3.3 二进制不包含 `requireAnyLabels`；该字段从 v0.3.4 提供。日志和本机构建制品位于 Git 忽略的 `target/`，不是发行物。
+
+## 6. v0.3.4 正式发布与制品回验
+
+- **源码与 Tag：** 实现/版本准备提交 [`622cece9e85628423a2b6dfa44341b6eed5d755a`](https://github.com/bYiyLi/Lithograph/commit/622cece9e85628423a2b6dfa44341b6eed5d755a) 已推送至 `origin/main`；不可变 [`v0.3.4` Tag](https://github.com/bYiyLi/Lithograph/tree/v0.3.4) 指向同一源码，没有重写 Tag。
+- **Pre-tag：** 该提交在 `main` 上的 [完整 CI `41060889890`](https://github.com/bYiyLi/Lithograph/actions/runs/41060889890) 为 **4/4 jobs success**，[六平台 Matrix `41060889929`](https://github.com/bYiyLi/Lithograph/actions/runs/41060889929) 为 **6/6 平台成功**。
+- **正式 Tag CI：** [`41065176000`](https://github.com/bYiyLi/Lithograph/actions/runs/41065176000) 最终 **4/4 success**。首轮 macOS canonical gate 的既有 Phase 08 `transaction_subquery_retry_recovers_from_transient_sqlite_busy` 曾返回 `SQLITE_BUSY` (5)；本地定向 **25/25** 通过，GitHub 只重跑失败 macOS Job 后完整 canonical gate 成功，未修改测试、放宽门禁或改变 Tag。该现象是时序敏感失败的证据，单次 green 不构成已排除潜在偶发性的证明。
+- **正式六平台：** [Release Matrix `41065176135`](https://github.com/bYiyLi/Lithograph/actions/runs/41065176135) 的 storage fixture、Linux/macOS/Windows × x64/arm64 六个构建/真实运行时/ABI/互操作与打包 Job 全部 **success**；`publish-release` 亦 **success**，在核对 Tag CI、六个包与 SHA256 后公开 [v0.3.4 Release](https://github.com/bYiyLi/Lithograph/releases/tag/v0.3.4)。
+- **正式下载回验：** Release 为非 Draft、非预发布，提供六个安装包与 `SHA256SUMS` 共 **7 assets**。从正式 Release 下载全部资产后，六包的 `shasum -a 256 -c SHA256SUMS` **6/6 OK**；解压 macOS arm64 包确认 `VERSION=0.3.4`，再由 SQLite **3.51.0** 真实加载其中的 `lithograph.dylib`，执行 `tests/phase20_release_sql.py` 的 Graph View OR/去重/关系端点、scalar/rows 与显式事务回滚检查，结果 **passed**。下载回验在本机 `target/phase20-release/downloaded-v034/` 留存。
+
+正式发行源 Tag 与本节后续文档记录提交是不同的 Git 对象。历史 v0.3.3 发布证据不变，v0.3.4 不改变 `CY25-2026.08`、storage format 3、Provider SPI V1 或 Commit identity。

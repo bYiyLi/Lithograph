@@ -58,7 +58,7 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 
 **Phase 19 为 `done` / v0.3.3 正式发布与制品回验完成：本轮 review 修复与开发复验完成。** [查询正确性、取消与执行内存限额](phases/19-query-correctness-resources.md) 的新证据使用 `target/phase19-review/`：quality / 本机 CI 均 exit 0、TCK **3,777/3,777**、Phase 19 七组 **42/42**、Core lib **282/282**、Extension 独立 invocation **20/20**、三套 SQLite release SQL **24/24**、固定预算百万行和文档 **528×2 Cypher / 138 SQL** 全部通过；最新 line coverage **88.13%**。旧 `target/phase19/` 只保留历史，不替代当前结果。transaction batch 的既有实现边界和最新预算拒绝实证由 Phase 19 透明记录。Phase 18/v0.3.2 的发布历史保持不变，v0.3.2 发行库不支持新内存选项。实现 revision `d7602c24b7c1bc399a6d12fdefb9f610c62c2e07` 已提交并推送，精确 SHA 的 CI **4/4** 与 Matrix **6/6 平台**全部成功，详见 [Phase 19 远端验收](phases/19-query-correctness-resources.md#phase19-remote-acceptance)；后续验收记录文档 commit 与该实现 SHA 分开记录，v0.3.3 的发布状态见 [发布交付记录](phases/19-query-correctness-resources.md#v033-release-delivery)，Loreweft 接入不在本轮范围。
 
-**Phase 20 已完成本机开发与验收，状态为 `done`，尚未发布。** [Graph View 多 Label 并集筛选](phases/20-graph-view-label-union.md) 为既有 query-local Graph View 扩展 `requireAnyLabels`，并通过图读写、搜索范围内 Top-K、历史与 SQL 集成专项验证及完整本机 quality / CI。v0.3.3 发行版仍只包含此前 Phase 00–19 能力，不宣称支持这一新增参数。
+**Phase 20 为 `done`，v0.3.4 已正式发布并完成下载制品回验。** [Graph View 多 Label 并集筛选](phases/20-graph-view-label-union.md) 为既有 query-local Graph View 扩展 `requireAnyLabels`，通过图读写、搜索范围内 Top-K、历史与 SQL 集成专项、本机完整 quality / CI、正式 Tag CI、六平台 Matrix 与下载后二进制回验。v0.3.3 发行版仍不支持这一新增参数。
 
 当前 Design 进一步确认了通用版本化状态能力：Commit 保持 immutable；Commit Data 是可修改 JSON sidecar；Tag 是显式可移动但不会随写入自动前进的 named ref；允许显式创建 empty-delta Commit；History 需要 opaque cursor 做 bounded DAG traversal；SQL explicit transaction 可以把多个标准 Cypher current-graph execution 组合为一个最终 Commit，并通过 `expectedHead` 提供 transaction-start CAS；Merge 使用 durable Merge Session，把大量 conflict 的分页/逐步 resolution 与最终 Commit/Branch move 分开，并通过 session revision + target-head CAS 支持上层在 finalize 前验证 exact candidate。它们不回开已完成的 Phase 02/05：Phase 05 保持“一次普通 top-level mutating query -> 一个 Commit”的 auto-commit foundation，Phase 08 的 `IN TRANSACTIONS` 继续“每个 mutating batch -> 一个 Commit”，多 execution 单 Commit与 Merge Session 的 version-atomicity foundation来自 Phase 09，Phase 15 负责把 normal SQL execution surface 接到同一 staged lifecycle。Phase 09 同时把 storage format 从 development baseline `1` 显式迁移到首个公开 release 的 format `2`；Phase 10 负责当时的 migration/scale/recovery closure。
 
@@ -82,7 +82,7 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 - Phase 17：`done`；
 - Phase 18：`done`（含追加 Provider cache 初始化修复与新候选验收）；
 - Phase 19：`done`（查询正确性、取消与执行内存预算；本轮 review 修复与开发复验完成，v0.3.3 正式发布与制品回验完成）；
-- Phase 20：`done`（Graph View 多 Label 并集筛选；本机源码 / quality / CI / Review 完成，未提交、推送或发布，不属于 v0.3.3 已发布能力）；
+- Phase 20：`done`（Graph View 多 Label 并集筛选；本机与正式 Tag CI、六平台 Matrix、v0.3.4 Release 及实际下载资产回验完成；v0.3.3 不支持）；
 - `docs/development/cypher25-compatibility.md` 保留各 Phase 已执行证据；Full-text family、Phase 12 provider、Phase 13 Managed Semantic 与 Phase 15 SQL execution / Provider cache supplemental inventory 均已闭合为 `done`。Phase 14/15/19 都不改变冻结 Cypher 语言 coverage 分母。
 
 ## 4. 路线总览
@@ -109,7 +109,7 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 | [17 完整开发者手册与 v0.3.1 发布](phases/17-developer-documentation-release.md) | `done` | 完整用户文档、可执行示例、覆盖/生成/链接 CI 与 v0.3.1 真实发布验收 | 16 |
 | [18 查询、返回与写入访问控制](phases/18-query-access-controls.md) | `done` | Query/result/write、canonical/插值与 Provider cache 初始化修复；v0.3.2 正式发布与发布制品回验完成 | 15–17 |
 | [19 查询正确性、取消与执行内存限额](phases/19-query-correctness-resources.md) | `done` | 反引号名称、表达式取消与 SQLite 中断恢复、显式 execution 内存预算；本轮 review 修复、quality / CI / 三套 release SQL 复验完成，v0.3.3 正式发布与制品回验完成；保留既有 batch 边界 | 15、18 |
-| [20 Graph View 多 Label 并集筛选](phases/20-graph-view-label-union.md) | `done` | `requireAnyLabels`；图读写、范围内 Top-K、历史与 SQL/Provider 集成，本机完整 quality / CI 通过，尚未发布 | 04–08、13、15、18–19 |
+| [20 Graph View 多 Label 并集筛选](phases/20-graph-view-label-union.md) | `done` | `requireAnyLabels`；图读写、范围内 Top-K、历史与 SQL/Provider 集成；v0.3.4 正式发布及六平台/下载制品验收通过 | 04–08、13、15、18–19 |
 
 Phase 15 的 EX15-01–19 已全部闭合。实现 revision `b0d5a3da9c5c0266218e01c51d6d34a1be0a6b9d` 的 repository CI `35586275713` 与 hosted Release Matrix `35586275736` 均成功，Linux/macOS/Windows x64/arm64 六目标 artifact build/load/symbol/runtime 全部通过；10M streaming/resource 与本地 acceptance 数值见 Phase 15 计划。
 
@@ -138,7 +138,7 @@ Commit / push 是独立 repository action。只有真实执行后才记录对应
 
 “完整 Cypher 25”不按总代码量或 clause 名单主观判断，而按 `docs/development/cypher25-compatibility.md` 的冻结 Profile 判断。
 
-`graphView` 是 Lithograph-specific execution option，不属于 Cypher grammar/compatibility inventory；既有 selector 的 correctness 由 Phase 04–10 acceptance 验证，新增 OR selector 已由 [Phase 20](phases/20-graph-view-label-union.md) 的本机完整质量与集成验收闭合。没有修改 Cypher 25 语法、`USE` 语义或兼容矩阵的语言覆盖分母；v0.3.3 发布基线保持不变。
+`graphView` 是 Lithograph-specific execution option，不属于 Cypher grammar/compatibility inventory；既有 selector 的 correctness 由 Phase 04–10 acceptance 验证，新增 OR selector 已由 [Phase 20](phases/20-graph-view-label-union.md) 的本机、正式 Tag CI、六平台与发布制品验收闭合。没有修改 Cypher 25 语法、`USE` 语义或兼容矩阵的语言覆盖分母；v0.3.3 发布历史保持不变，新能力自 v0.3.4 提供。
 
 Phase 10 当时的 compatibility closure 必须同时满足：
 

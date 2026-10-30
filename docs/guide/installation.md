@@ -6,7 +6,7 @@
 
 本文适用 **v0.3.4**（`CY25-2026.08`，storage format `3`）。
 
-本页按固定 v0.3.4 tag 编排安装路径；下列下载入口在正式发布后使用，当前进度由 [Phase 20](../development/phases/20-graph-view-label-union.md) 记录。版本变化与升级边界见 [v0.3.4 发布说明](../releases/v0.3.4.md)。
+本页按已正式发布的 v0.3.4 tag 编排安装路径；下列下载入口已开放，六个平台包与 SHA256SUMS 已完成正式下载回验，证据由 [Phase 20](../development/phases/20-graph-view-label-union.md#6-v034-正式发布与制品回验) 记录。版本变化与升级边界见 [v0.3.4 发布说明](../releases/v0.3.4.md)。
 
 目标：在自己的 SQLite connection 中加载 v0.3.4，并确认版本、运行时和数据库格式。新手先用全新的演示文件；已有数据库的初始化可能触发 migration，先阅读 [备份与升级](operations.md)。
 
