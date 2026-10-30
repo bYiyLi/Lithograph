@@ -118,7 +118,8 @@ jobs:
             --test phase18_mutation_access \
             --test phase18_mutation_reads \
             --test phase18_schema_canonical \
-            --test phase18_version_access
+            --test phase18_version_access \
+            --test phase20_graph_view
       - name: Run release load, ABI, runtime, and interoperability gates
         run: scripts/release-artifact-smoke.sh "${{ matrix.artifact }}" target/phase10-interop/interop.sqlite "${{ matrix.provider_artifact }}"
       - name: Package distributable release asset

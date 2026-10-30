@@ -245,6 +245,7 @@ Lithograph 不导出 application-facing Cypher execution / validation / transact
   "memoryLimitBytes": 67108864,
   "graphView": {
     "requireAllLabels": ["tenant_acme"],
+    "requireAnyLabels": ["Article", "Note"],
     "excludeAnyLabels": ["internal"]
   }
 }
@@ -261,12 +262,14 @@ Lithograph 不导出 application-facing Cypher execution / validation / transact
 - 安全模式允许普通 graph/history/Schema `SHOW`、已分类的只读 Version Procedure 与 Raw Vector `SEARCH`。它不禁止读取当前 SQLite database、SQLite 自己的 TEMP/spill/derived-state 工作，也不约束同一 connection 上由调用方直接发出的其它 SQL、`lithograph_init()` 或单独调用的 transaction lifecycle API；能自行构造 options 或直接调用其它 SQL 的主体仍拥有相应宿主权限。要把它用于不可信 Cypher，上层必须强制设置此选项并控制 SQL execution surface；
 - `memoryLimitBytes` 是可选的正 JSON 整数，范围为 `1..9223372036854775807` bytes；省略时不增加 execution 内存限额，已有函数、SQLite 和宿主资源限制仍生效。显式 `null`、零、负数、小数、Boolean、字符串及越界值返回 `INVALID_ARGUMENT`。该选项适用于两个 SQL execution surface 和 active explicit transaction 内的每次 execution，也可与其它合法 query-local options 组合；它不是 `lithograph_tx_begin()` option。预算归属、分配和回收由 [Execution Resource State](query-engine.md#execution-resources) 定义，覆盖范围及宿主责任见 [Runtime](runtime.md#execution-memory-boundary)；
 - `graphView` 是 query-local Graph View specification；省略或 `{}` 表示完整 Snapshot graph。它不持久化、不命名、不进入 Commit/Layer/Schema hash，也不改变 connection checkout；
-- `graphView.requireAllLabels` 是 Node 必须同时拥有的 Label 集合；省略或空数组表示没有正向 Label 限制；
+- `graphView.requireAllLabels` 是 Node 必须同时拥有的 Label 集合（AND）；省略或空数组表示不施加该条件；
+- `graphView.requireAnyLabels` 是 Node 至少拥有其中一个 Label 的集合（OR）；省略或空数组表示不施加该条件。它不是多个 Label 的 AND，也不是多次查询结果的应用层合并；
 - `graphView.excludeAnyLabels` 是 Node 不能拥有的 Label 集合；命中任意一个即不可见；省略或空数组表示没有排除 Label；
-- `graphView` 必须是 object，当前只允许 `requireAllLabels` / `excludeAnyLabels` 两个成员；成员值必须是 string array。其它成员、错误 JSON type 或非 string item 返回 `INVALID_ARGUMENT`；显式 `null` 不等价于省略；
-- 两个 Label array 按精确 Label name 的 set 语义规范化，同一数组中的重复项去重；同一 Label 在规范化后同时出现在 `requireAllLabels` 与 `excludeAnyLabels` 时返回 `INVALID_ARGUMENT`；
-- Label 按 Lithograph Label dictionary 的精确名称语义比较，不做 case folding 或 Unicode normalization。解析 Graph View 本身不得创建 Label dictionary entry：当前 graph state 中尚不存在的 required Label 使既有 Node 均不可见，尚不存在的 excluded Label 当前没有过滤效果；如果后续合法 Cypher write 通过正常 Label mutation 创建该名称，后续 clause 按更新后的 graph state 重新计算 visibility；
-- Graph View v1 不定义独立 Relationship selector：Relationship 只有在其 source 和 target Node 都可见时才可见，因此 view 是由 Node visibility 诱导出的 Property Subgraph；
+- 三组条件对同一个 Node 同时成立才可见：拥有全部 `requireAllLabels`，在 `requireAnyLabels` 非空时拥有其中至少一个，且不拥有任何 `excludeAnyLabels`。例如 `requireAnyLabels: ["Article", "Note"]` 选择两类 Node 的并集；同时配置 `requireAllLabels: ["tenant_acme"]` 时，只保留也具有 `tenant_acme` Label 的 Node，不代表权限隔离；
+- `graphView` 必须是 object，只允许 `requireAllLabels` / `requireAnyLabels` / `excludeAnyLabels` 三个成员；成员值必须是 string array。其它成员、错误 JSON type 或非 string item 返回 `INVALID_ARGUMENT`；显式 `null` 不等价于省略；
+- 三个 Label array 按精确 Label name 的 set 语义规范化，各数组内部重复项去重。原有 `requireAllLabels` 与 `excludeAnyLabels` 的交集仍返回 `INVALID_ARGUMENT`；`requireAnyLabels` 与 `excludeAnyLabels` 可以重叠，排除条件优先，只有被排除的候选不再产生可见 Node；即使所有 OR 候选都被排除，也只得到空可见子图，不新增错误类型；
+- Label 按 Lithograph Label dictionary 的精确名称语义比较，不做 case folding 或 Unicode normalization。解析 Graph View 本身不得创建 Label dictionary entry：不存在的 `requireAllLabels` Label 使既有 Node 不可见；`requireAnyLabels` 中不存在的 Label 不产生匹配，全部不存在时当前可见 Node 集为空；不存在的 `excludeAnyLabels` Label 没有过滤效果。如果后续合法 Cypher write 通过正常 Label mutation 创建了该名称，后续 clause 必须根据更新后的 graph state 重新判断 visibility；
+- Graph View 不定义独立 Relationship selector：Relationship 只有在其 source 和 target Node 都可见时才可见，因此 view 是由 Node visibility 诱导出的 Property Subgraph；
 - `graphView` 可以与 `branch` 或只读 `at` 组合；它们决定 base Snapshot，初始 visibility 按该 Snapshot 计算，read-write query 的后续 clause 再按[Graph View Execution Boundary](query-engine.md#graph-view)基于前序 staged writes 后的 graph state 重新计算；
 - `graphView` 只约束 graph-data query / mutation / Search 的可见数据。Schema、Constraint、Index definition 和 Version Procedure 不属于 Graph View；这些 command/procedure 与 `graphView` 同时出现时返回 `INVALID_ARGUMENT`，避免把子图错误解释成独立 Schema 或 Version repository。
 

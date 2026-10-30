@@ -91,6 +91,8 @@ fn run_primary_checks(
     checks.push("execution-local-exact-text-dedup");
     check_graph_view_nodes(lithograph, synthetic)?;
     checks.push("node-graph-view-before-provider");
+    check_graph_view_or_nodes(lithograph, synthetic)?;
+    checks.push("or-node-graph-view-before-top-k-and-provider");
     Ok(())
 }
 
@@ -103,6 +105,8 @@ fn run_boundary_checks(
     checks.push("safe-execution-blocks-provider-before-embedding");
     check_graph_view_relationships(lithograph, synthetic)?;
     checks.push("relationship-endpoint-graph-view");
+    check_graph_view_or_relationships(lithograph, synthetic)?;
+    checks.push("or-relationship-endpoints-provider-and-top-k");
     check_history_provider_selection(lithograph, synthetic)?;
     checks.push("historical-provider-selection");
     versioning::check_semantic_diff_patch(lithograph, synthetic)?;
@@ -123,6 +127,8 @@ fn run_boundary_checks(
     checks.push("read-only-query-and-rebuild");
     check_explicit_transaction_staged_semantic(lithograph, synthetic)?;
     checks.push("explicit-transaction-staged-semantic");
+    check_or_graph_view_sql_surfaces(lithograph, synthetic)?;
+    checks.push("or-graph-view-scalar-rows-explicit-transaction");
     Ok(())
 }
 
@@ -488,6 +494,28 @@ fn require_positive_value(output: &str, prefix: &str) -> Result<(), Box<dyn Erro
     )
 }
 
+fn check_or_graph_view_sql_surfaces(
+    lithograph: &str,
+    provider: &str,
+) -> Result<(), Box<dyn Error>> {
+    let fixture = FileDatabaseFixture::new(0x1321)?;
+    let query = "MATCH (n) RETURN n.name ORDER BY n.name";
+    let or = r#"{"graphView":{"requireAnyLabels":["A","B"]}}"#;
+    let output = fixture.execute_script(&format!(
+        "{lithograph}\n{provider}\n         SELECT lithograph_init();\n         SELECT lithograph_tx_begin('{{}}');\n         SELECT lithograph('CREATE (:A {{name:''alpha''}}), (:B {{name:''beta''}}), (:Outside {{name:''outside''}}) FINISH');\n         SELECT 'staged=' || lithograph({query}, '{{}}', {or});\n         SELECT 'rows=' || group_concat(json_extract(data,'$[0]'), ',') FROM lithograph_rows({query}, '{{}}', {or}) WHERE event='row';\n         SELECT lithograph_tx_commit();\n         SELECT 'committed=' || lithograph({query}, '{{}}', {or});",
+        query = sql_literal(query),
+        or = sql_literal(or),
+    ))?;
+    for prefix in ["staged=", "committed="] {
+        require(
+            prefixed_json(&output, prefix)?["rows"] == json!([["alpha"], ["beta"]]),
+            &format!("{prefix} OR query returned incorrect rows"),
+        )?;
+    }
+    require_line(&output, "rows=alpha,beta")?;
+    Ok(())
+}
+
 fn check_graph_view_nodes(lithograph: &str, provider: &str) -> Result<(), Box<dyn Error>> {
     let fixture = FileDatabaseFixture::new(0x1305)?;
     let create = semantic_node_create("view_sem", "Doc", "text", "synthetic-a", "{}", 4, "cosine");
@@ -536,6 +564,68 @@ fn check_graph_view_nodes(lithograph: &str, provider: &str) -> Result<(), Box<dy
     Ok(())
 }
 
+fn check_graph_view_or_nodes(lithograph: &str, provider: &str) -> Result<(), Box<dyn Error>> {
+    let fixture = FileDatabaseFixture::new(0x1320)?;
+    let create = semantic_node_create("or_sem", "Doc", "text", "synthetic-a", "{}", 4, "cosine");
+    let query = "CALL db.index.semantic.queryNodes('or_sem','probe',{limit:10}) YIELD node RETURN node.name ORDER BY node.name";
+    let limited =
+        "CALL db.index.semantic.queryNodes('or_sem','probe',{limit:1}) YIELD node RETURN node.name";
+    let or = r#"{"graphView":{"requireAnyLabels":["A","B"]}}"#;
+    let b = r#"{"graphView":{"requireAnyLabels":["B","Unknown"]}}"#;
+    let output = fixture.execute_script(&format!(
+        "{lithograph}\n{provider}\n         SELECT lithograph_init();\n         SELECT lithograph('CREATE (:Doc:A {{name:''alpha'', text:''alpha-unique''}}), (:Doc:B {{name:''beta'', text:''beta-unique''}}), (:Doc:Outside {{name:''outside'', text:''outside-unique''}}) FINISH');\n         SELECT lithograph({create});\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT 'or=' || lithograph({query}, '{{}}', {or});\n         SELECT 'or-inputs=' || synthetic_embedding_last_inputs('synthetic-a');\n         SELECT 'or-hnsw=' || count(*) FROM temp._lithograph_vector_cache_meta;\n         SELECT 'limited=' || lithograph({limited}, '{{}}', {or});\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT 'full=' || lithograph({query});\n         SELECT 'full-hnsw=' || count(*) || ':' || COALESCE(sum(entry_count),0) FROM temp._lithograph_vector_cache_meta;\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT 'or-reuse=' || lithograph({query}, '{{}}', {or});\n         SELECT 'or-reuse-calls=' || synthetic_embedding_embed_calls('synthetic-a');\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT 'b=' || lithograph({query}, '{{}}', {b});\n         SELECT 'b-inputs=' || synthetic_embedding_last_inputs('synthetic-a');",
+        create = sql_literal(&create),
+        query = sql_literal(query),
+        limited = sql_literal(limited),
+        or = sql_literal(or),
+        b = sql_literal(b),
+    ))?;
+    verify_graph_view_or_nodes(&output)
+}
+
+fn verify_graph_view_or_nodes(output: &str) -> Result<(), Box<dyn Error>> {
+    for key in ["or=", "or-reuse="] {
+        require(
+            prefixed_json(output, key)?["rows"] == json!([["alpha"], ["beta"]]),
+            &format!("{key} OR view failed to select both Labels"),
+        )?;
+    }
+    require(
+        prefixed_json(output, "limited=")?["rows"]
+            .as_array()
+            .is_some_and(|rows| rows.len() == 1 && rows[0][0] != "outside"),
+        "OR-limited Semantic Top-K returned a hidden owner",
+    )?;
+    let inputs = prefixed_value(output, "or-inputs=")?;
+    require(
+        inputs.contains("alpha-unique")
+            && inputs.contains("beta-unique")
+            && !inputs.contains("outside-unique"),
+        "OR scoped Semantic Provider input differs from visible owner set",
+    )?;
+    require_line(output, "or-hnsw=0")?;
+    require(
+        prefixed_json(output, "full=")?["rows"] == json!([["alpha"], ["beta"], ["outside"]]),
+        "full Semantic query did not observe all owners",
+    )?;
+    require_line(output, "full-hnsw=1:3")?;
+    require_line(output, "or-reuse-calls=1")?;
+    verify_or_narrower_view(output)
+}
+
+fn verify_or_narrower_view(output: &str) -> Result<(), Box<dyn Error>> {
+    require(
+        prefixed_json(output, "b=")?["rows"] == json!([["beta"]]),
+        "B-only OR selector incorrectly reused a broader owner materialization",
+    )?;
+    let b_inputs = prefixed_value(output, "b-inputs=")?;
+    require(
+        !b_inputs.contains("outside-unique") && !b_inputs.contains("alpha-unique"),
+        "B-only OR selector leaked another Label to the Provider",
+    )?;
+    Ok(())
+}
+
 fn check_graph_view_relationships(lithograph: &str, provider: &str) -> Result<(), Box<dyn Error>> {
     let fixture = FileDatabaseFixture::new(0x1306)?;
     let create =
@@ -576,6 +666,52 @@ fn check_graph_view_relationships(lithograph: &str, provider: &str) -> Result<()
     )?;
     require_line(&output, "hnsw-rel-reuse=1:2")?;
     require_line(&output, "view-reuse-calls=1")
+}
+
+fn check_graph_view_or_relationships(
+    lithograph: &str,
+    provider: &str,
+) -> Result<(), Box<dyn Error>> {
+    let fixture = FileDatabaseFixture::new(0x1322)?;
+    let create =
+        semantic_relationship_create("or_rel", "LINK", "text", "synthetic-a", "{}", 4, "cosine");
+    let query = "CALL db.index.semantic.queryRelationships('or_rel','probe',{limit:1}) YIELD relationship RETURN relationship.text";
+    let view = r#"{"graphView":{"requireAnyLabels":["A","B"]}}"#;
+    let only_b = r#"{"graphView":{"requireAnyLabels":["B","Unknown"]}}"#;
+    let output = fixture.execute_script(&format!(
+        "{lithograph}\n{provider}\n         SELECT lithograph_init();\n         SELECT lithograph('CREATE (a:A), (b:B), (x:Outside) CREATE (a)-[:LINK {{text:''allowed-text''}}]->(b), (a)-[:LINK {{text:''outside-text''}}]->(x) FINISH');\n         SELECT lithograph({create});\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT 'or=' || lithograph({query}, '{{}}', {view});\n         SELECT 'or-inputs=' || synthetic_embedding_last_inputs('synthetic-a');\n         SELECT 'or-hnsw=' || count(*) FROM temp._lithograph_vector_cache_meta;\n         SELECT synthetic_embedding_reset('synthetic-a');\n         SELECT 'full=' || lithograph({query});\n         SELECT 'full-hnsw=' || count(*) || ':' || COALESCE(sum(entry_count),0) FROM temp._lithograph_vector_cache_meta;\n         SELECT 'or-reuse=' || lithograph({query}, '{{}}', {view});\n         SELECT 'only-b=' || lithograph({query}, '{{}}', {only_b});",
+        create = sql_literal(&create),
+        query = sql_literal(query),
+        view = sql_literal(view),
+        only_b = sql_literal(only_b),
+    ))?;
+    verify_graph_view_or_relationships(&output)
+}
+
+fn verify_graph_view_or_relationships(output: &str) -> Result<(), Box<dyn Error>> {
+    for key in ["or=", "or-reuse="] {
+        require(
+            prefixed_json(output, key)?["rows"] == json!([["allowed-text"]]),
+            &format!("{key} unexpectedly includes a Relationship with an invisible endpoint"),
+        )?;
+    }
+    let inputs = prefixed_value(output, "or-inputs=")?;
+    require(
+        inputs.contains("allowed-text") && !inputs.contains("outside-text"),
+        "OR relationship query sent hidden endpoint source text to Provider",
+    )?;
+    require_line(output, "or-hnsw=0")?;
+    require_line(output, "full-hnsw=1:2")?;
+    require(
+        prefixed_json(output, "full=")?["rows"]
+            .as_array()
+            .is_some_and(|rows| rows.len() == 1),
+        "full-graph Semantic top-k did not return a result",
+    )?;
+    require(
+        prefixed_json(output, "only-b=")?["rows"] == json!([]),
+        "B-only OR view leaked a Relationship with an A-only endpoint",
+    )
 }
 
 fn check_history_provider_selection(

@@ -1,6 +1,6 @@
 # Error Reference
 
-适用版本：**v0.3.3**；ACCESS_DENIED 从 v0.3.3 新增 · [产品手册](../guide/README.md) · [接口参考](README.md)
+适用版本：**v0.3.4**；ACCESS_DENIED 从 v0.3.4 新增 · [产品手册](../guide/README.md) · [接口参考](README.md)
 
 SQL 异常前缀为 `LITHOGRAPH_<CATEGORY>:`，parse/semantic 等定位信息以可选 `[line=N,column=N]` suffix 保留；调用方同时检查 SQLite primary result code，不要只匹配英语 message。
 

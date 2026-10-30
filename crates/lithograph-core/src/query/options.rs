@@ -21,11 +21,14 @@ pub struct MergeSessionSelector {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GraphViewSelector {
     pub require_all_labels: BTreeSet<String>,
+    pub require_any_labels: BTreeSet<String>,
     pub exclude_any_labels: BTreeSet<String>,
 }
 impl GraphViewSelector {
     pub fn is_full_graph(&self) -> bool {
-        self.require_all_labels.is_empty() && self.exclude_any_labels.is_empty()
+        self.require_all_labels.is_empty()
+            && self.require_any_labels.is_empty()
+            && self.exclude_any_labels.is_empty()
     }
 }
 
@@ -306,13 +309,17 @@ fn parse_at(value: &str) -> QueryResult<SnapshotSelector> {
 
 fn parse_graph_view(object: &Map<String, JsonValue>) -> QueryResult<GraphViewSelector> {
     for key in object.keys() {
-        if !matches!(key.as_str(), "requireAllLabels" | "excludeAnyLabels") {
+        if !matches!(
+            key.as_str(),
+            "requireAllLabels" | "requireAnyLabels" | "excludeAnyLabels"
+        ) {
             return Err(QueryError::invalid_argument(format!(
                 "unknown options.graphView member {key}"
             )));
         }
     }
     let require_all_labels = label_set(object, "requireAllLabels")?;
+    let require_any_labels = label_set(object, "requireAnyLabels")?;
     let exclude_any_labels = label_set(object, "excludeAnyLabels")?;
     if let Some(label) = require_all_labels.intersection(&exclude_any_labels).next() {
         return Err(QueryError::invalid_argument(format!(
@@ -321,6 +328,7 @@ fn parse_graph_view(object: &Map<String, JsonValue>) -> QueryResult<GraphViewSel
     }
     Ok(GraphViewSelector {
         require_all_labels,
+        require_any_labels,
         exclude_any_labels,
     })
 }

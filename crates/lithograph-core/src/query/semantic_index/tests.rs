@@ -124,6 +124,7 @@ fn search_visibility_checks_current_control_inside_node_label_scan() {
         &GraphViewSelector {
             require_all_labels: BTreeSet::from(["L0".to_owned()]),
             exclude_any_labels: BTreeSet::new(),
+            ..GraphViewSelector::default()
         },
     )
     .unwrap();

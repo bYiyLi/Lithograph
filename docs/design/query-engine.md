@@ -224,7 +224,9 @@ visible Property Subgraph for this clause
 Executor / Search
 ```
 
-Planner 持有规范化的 selector / execution context，不把 Graph View 预展开成固定 element-ID allowlist；Physical operator 在对应 clause 的实际 graph state 上执行 visibility check。Graph View v1 使用[Query Options](interfaces.md#query-options)的 Label selector：Node 在当前 clause graph state 中满足全部 `requireAllLabels` 且不命中任何 `excludeAnyLabels` 时可见；Relationship 当且仅当两个端点都可见时可见。Graph View v1 自身是 element-level visibility；属性可见性另由 [Access Control Execution Boundary](#query-access-controls) 约束，未配置 query 属性规则时，一个 element 的 Property 按正常 Cypher 语义可见。NodeId / RelationshipId、Label、Type、Property 与 Schema 本身不因 view 改写或复制。
+Planner 持有规范化的 selector / execution context，不把 Graph View 预展开成固定 element-ID allowlist；Physical operator 在对应 clause 的实际 graph state 上执行 visibility check。Graph View 使用[Query Options](interfaces.md#query-options)的三组 Label selector。对 Node 的 Label 集合 `L`，visibility 当且仅当 `requireAllLabels ⊆ L`、`requireAnyLabels` 为空或与 `L` 有交集、且 `excludeAnyLabels` 与 `L` 无交集。三组条件之间取交集；OR 仅作用于 `requireAnyLabels` 内部。Relationship 当且仅当两个端点都可见时可见。Graph View 自身是 element-level visibility；属性可见性另由 [Access Control Execution Boundary](#query-access-controls) 约束，未配置 query 属性规则时，一个 element 的 Property 按正常 Cypher 语义可见。NodeId / RelationshipId、Label、Type、Property 与 Schema 本身不因 view 改写或复制。
+
+多 Label 的 OR 不能被错误地降低为单个 Label 的匹配：若只有 `requireAnyLabels` 提供正向条件，扫描起点必须覆盖**全部**候选 Label，且同一个 Node 即使具有多个候选 Label，也只作为一个图元素参与一次匹配；不能因为多个 LabelScan 而复制其行或改变 Cypher 原有多行语义。可复用现有 Label membership / 索引访问并在有界执行状态下完成并集去重，不建立持久 view-local index 或全量 NodeId allowlist。已有 `requireAllLabels` 或 Cypher pattern 提供必需 Label 时，可以继续从该 Label seek/scan 并在 visibility check 中判定 OR；显式 element lookup、Relationship traversal、path、子查询和聚合走同一规则。不得以任一 OR 成员独占扫描起点导致漏检，也不得使已有可用 seek 的查询退化为无条件全图扫描。
 
 所有会观察 graph data 的 execution path 必须把该可见子图当作本次 Cypher 的输入图，而不是执行完成后再过滤结果。至少包括：
 
@@ -235,6 +237,8 @@ Planner 持有规范化的 selector / execution context，不把 Graph View 预�
 - full-text、vector、`SEARCH` 及其它返回 graph element 的 Search path。
 
 因此隐藏 Node 不参与 aggregation/cardinality，隐藏 Relationship 不能作为 path 的中间边，Search 的 `skip` / `limit` / top-k 不能先让隐藏结果占用名额后再做 post-filter。Index/Search 可以在物理层产生更宽的 candidate set，但在任何 Cypher-visible semantic step 前必须执行 Graph View visibility check。
+
+`requireAnyLabels` 对 Full-text、Raw Vector `SEARCH`、Managed Semantic 的 Node/Relationship 候选都使用同一 visibility；候选去重和范围限制必须在各通道的分页 / top-k 之前生效，不得先取得全图 Top-K 再按 OR 结果后过滤。继续沿用各 Search 通道已定义的评分和 ANN 召回合同，不创建 view-local FTS 语料或新评分规则；受限 Semantic query 的文本 Provider 调用及 TEMP owner/HNSW materialization 仍按当前可见子图与 graph-state revision 隔离，不能跨不同 Graph View 复用不兼容的候选集。以上规则既适用于 pinned historical Snapshot，也适用于已完成前序写入后的 staged graph state。
 
 Graph View 不要求把整个子图预先 materialize。Planner / Storage 应利用现有 Label membership 与 seek/adjacency 结构按需检查 visibility；view 本身不建立第二套 canonical storage 或 per-view derived history。
 

@@ -4,6 +4,21 @@ Lithograph 的用户可见版本变化记录在此文件。版本遵循 Semantic
 
 ## Unreleased
 
+## 0.3.4
+
+完整变化见 [发布说明](docs/releases/v0.3.4.md)，开发和发布验收分别由 [Phase 20](docs/development/phases/20-graph-view-label-union.md) 维护。
+
+### Added
+
+- Graph View `requireAnyLabels`：多 Node Label OR 并集筛选，支持与 `requireAllLabels`（AND）和 `excludeAnyLabels`（NOT）同时使用；同一 Node 去重，Relationship 两端可见性一致。
+- 普通图查询、路径、索引、Full-text、Raw Vector `SEARCH` 与 Managed Semantic 在范围内执行，Top-K 和分页不会先被范围外候选占用；保留历史、staged write、SQL scalar/rows 与 explicit transaction 的同一 Graph View 合同。
+
+### Security and compatibility
+
+- 更新 `rustls-webpki` 0.103.16 和 `webpki-roots` 1.0.10，修复两项 TLS 证书验证相关安全公告。
+- v0.3.3 及更早版本不支持 `requireAnyLabels`；省略新字段的旧调用保持兼容。Cypher 25 Profile、storage format 3、Commit identity、Provider SPI V1 与 application-facing SQL 接口均未改变。
+- Phase 20 本机完整 quality / CI、适用 TCK 3,777/3,777、三个 SQLite 运行时和 Provider 专项验证通过；Tag CI、六平台制品与正式下载验收以实际发布记录为准。
+
 ## 0.3.3
 
 完整变化见 [发布说明](docs/releases/v0.3.3.md)；版本提交、tag、远端验收与正式资产见 [Phase 19 发布交付记录](https://github.com/bYiyLi/Lithograph/blob/main/docs/development/phases/19-query-correctness-resources.md#v033-release-delivery)。

@@ -2,7 +2,7 @@
 
 [产品手册](README.md) · [Cypher 语言手册](../cypher/index.md) · [接口参考](../reference/README.md)
 
-本文适用 **v0.3.3**（`CY25-2026.08`，storage format `3`）。目标：宿主允许调用方提交 Cypher query，但由宿主强制禁止本次 execution 的写入、文件读取、HTTP 和 Provider 调用。需要先具备 [应用集成](integration.md) 的 SQLite connection；以下 SQL 在新的演示库依次执行。
+本文适用 **v0.3.4**（`CY25-2026.08`，storage format `3`）。目标：宿主允许调用方提交 Cypher query，但由宿主强制禁止本次 execution 的写入、文件读取、HTTP 和 Provider 调用。需要先具备 [应用集成](integration.md) 的 SQLite connection；以下 SQL 在新的演示库依次执行。
 
 <a id="force-options"></a>
 

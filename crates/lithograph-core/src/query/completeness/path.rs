@@ -382,16 +382,18 @@ fn candidate_start_nodes(
         },
         None => None,
     };
-    let scan_label = pattern_label.or_else(|| context.graph_view.scan_label());
     let mut ids = Vec::new();
     let mut after = 0_i64;
     loop {
         context.control.check()?;
         let _page_memory = context.control.reserve(allocation_bytes::<i64>(256)?)?;
-        let page = match scan_label {
-            Some(label_id) => context.snapshot.scan_label_after(label_id, after, 256)?,
-            None => context.snapshot.scan_nodes_after(after, 256)?,
-        };
+        let (page, _) = context.graph_view.scan_nodes_after(
+            context.snapshot,
+            pattern_label,
+            after,
+            256,
+            context.control,
+        )?;
         context.metrics.record_db_hits(page.items.len() as u64);
         memory.grow(allocation_bytes::<i64>(page.items.len().saturating_mul(2))?)?;
         ids.extend(page.items);

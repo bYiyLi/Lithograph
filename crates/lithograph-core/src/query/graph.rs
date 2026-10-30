@@ -2,7 +2,7 @@ use chrono::{Offset, TimeZone, Utc};
 use rusqlite::Connection;
 
 use crate::cypher::{Value, format_date_from_days, format_local_time, format_offset};
-use crate::storage::{self, HashId, LabelId, OwnerKind, RelationshipRecord, Snapshot};
+use crate::storage::{self, HashId, LabelId, OwnerKind, RelationshipRecord, ScanPage, Snapshot};
 
 use super::access::PropertyRules;
 use super::options::{GraphViewSelector, SnapshotSelector};
@@ -19,6 +19,8 @@ pub(crate) use controlled::{
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ResolvedGraphView {
     required: Vec<LabelId>,
+    any: Vec<LabelId>,
+    any_required: bool,
     excluded: Vec<LabelId>,
     required_unknown: bool,
     pub(crate) query_access: PropertyRules,
@@ -37,6 +39,13 @@ impl ResolvedGraphView {
                 None => required_unknown = true,
             }
         }
+        let any_required = !selector.require_any_labels.is_empty();
+        let mut any = Vec::new();
+        for name in &selector.require_any_labels {
+            if let Some(id) = storage::find_label(connection, name)? {
+                any.push(id);
+            }
+        }
         let mut excluded = Vec::new();
         for name in &selector.exclude_any_labels {
             if let Some(id) = storage::find_label(connection, name)? {
@@ -45,6 +54,8 @@ impl ResolvedGraphView {
         }
         Ok(Self {
             required,
+            any,
+            any_required,
             excluded,
             required_unknown,
             query_access: PropertyRules::default(),
@@ -106,14 +117,17 @@ impl ResolvedGraphView {
         if self.required_unknown {
             return Ok(false);
         }
-        if self.required.is_empty() && self.excluded.is_empty() {
+        if self.is_full_graph() {
             return Ok(true);
         }
         if let Some(label) = known_label {
             if contains_label(&self.excluded, label, control)? {
                 return Ok(false);
             }
-            if self.excluded.is_empty() && only_known_label(&self.required, label, control)? {
+            if self.excluded.is_empty()
+                && only_known_label(&self.required, label, control)?
+                && (!self.any_required || contains_label(&self.any, label, control)?)
+            {
                 return Ok(true);
             }
         }
@@ -127,6 +141,7 @@ impl ResolvedGraphView {
         control: Option<&ExecutionControl<'_>>,
     ) -> QueryResult<bool> {
         let mut required_matches = 0;
+        let mut any_matches = false;
         let mut excluded = false;
         let check = || {
             control
@@ -138,26 +153,102 @@ impl ResolvedGraphView {
                 control.work(1)?;
             }
             required_matches += usize::from(contains_label(&self.required, id, control)?);
+            any_matches |= contains_label(&self.any, id, control)?;
             excluded |= contains_label(&self.excluded, id, control)?;
             Ok::<_, QueryError>(())
         })?;
-        Ok(required_matches == self.required.len() && !excluded)
+        Ok(required_matches == self.required.len()
+            && (!self.any_required || any_matches)
+            && !excluded)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.required_unknown
+        self.required_unknown || (self.any_required && self.any.is_empty())
     }
 
     pub(crate) fn is_full_graph(&self) -> bool {
-        !self.required_unknown && self.required.is_empty() && self.excluded.is_empty()
+        !self.required_unknown
+            && self.required.is_empty()
+            && !self.any_required
+            && self.excluded.is_empty()
     }
 
     pub(crate) fn scan_label(&self) -> Option<LabelId> {
         if self.required_unknown {
             None
         } else {
-            self.required.first().copied()
+            self.required
+                .first()
+                .copied()
+                .or_else(|| (self.any_required && self.any.len() == 1).then(|| self.any[0]))
         }
+    }
+
+    /// Scan the union in NodeId order, with a bounded batch and no duplicate
+    /// elements even when the same Node carries several selected Labels.
+    pub(crate) fn scan_nodes_after(
+        &self,
+        snapshot: &Snapshot<'_>,
+        pattern_label: Option<LabelId>,
+        after: i64,
+        limit: usize,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<(ScanPage<i64>, Option<LabelId>)> {
+        control.check()?;
+        let limit = limit.max(1);
+        if self.is_empty() {
+            return Ok((
+                ScanPage {
+                    items: Vec::new(),
+                    next_after: None,
+                },
+                None,
+            ));
+        }
+        if let Some(label) = pattern_label.or_else(|| self.scan_label()) {
+            return Ok((snapshot.scan_label_after(label, after, limit)?, Some(label)));
+        }
+        if !self.any_required {
+            return Ok((snapshot.scan_nodes_after(after, limit)?, None));
+        }
+        Ok((
+            self.scan_any_labels_after(snapshot, after, limit, control)?,
+            None,
+        ))
+    }
+
+    fn scan_any_labels_after(
+        &self,
+        snapshot: &Snapshot<'_>,
+        after: i64,
+        limit: usize,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<ScanPage<i64>> {
+        // The merge set is bounded by one scan page, but its tree nodes are
+        // still query-owned working memory and must respect the byte budget.
+        let _union_memory = control.reserve(super::resources::allocation_bytes::<(
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+        )>(limit)?)?;
+        let mut candidates = std::collections::BTreeSet::new();
+        for label in &self.any {
+            control.check()?;
+            let page = snapshot.scan_label_after(*label, after, limit)?;
+            for node in page.items {
+                control.work(1)?;
+                candidates.insert(node);
+                if candidates.len() > limit {
+                    candidates.pop_last();
+                }
+            }
+        }
+        let items: Vec<_> = candidates.into_iter().collect();
+        let next_after = (items.len() == limit).then(|| items[items.len() - 1]);
+        Ok(ScanPage { items, next_after })
     }
 
     pub(crate) fn visible_relationship(

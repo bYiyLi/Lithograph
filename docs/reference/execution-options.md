@@ -1,6 +1,6 @@
 # Execution Options
 
-适用版本：**v0.3.3**；v0.3.1 不接受新增 readAccess/writeAccess · [产品手册](../guide/README.md) · [接口参考](README.md)
+适用版本：**v0.3.4**；本版本新增 `graphView.requireAnyLabels`；v0.3.3 及更早发行版不支持该字段，v0.3.1 不接受新增 readAccess/writeAccess · [产品手册](../guide/README.md) · [接口参考](README.md)
 
 v0.3.3 增加 `memoryLimitBytes`，v0.3.2 发行库不支持该 key；实施与验收状态见 [Phase 19](../development/phases/19-query-correctness-resources.md)。
 
@@ -20,7 +20,7 @@ options 是 `lithograph()` / `lithograph_rows()` 第三个参数的 JSON object 
 | `memoryLimitBytes` | 正 JSON INTEGER，`1..9223372036854775807`；省略不新增限制；v0.3.3 | 单次 execution 的引擎计账内存预算，见下文 |
 | `readAccess` | object；默认无附加限制；v0.3.2 | query 属性隐藏、返回图对象过滤与读取能力开关，见下文 |
 | `writeAccess` | object；默认无附加限制；v0.3.2 | 属性、创建/删除/Label/Schema/版本/维护限制，见下文 |
-| `graphView` | object；默认完整图 | `{requireAllLabels:[STRING],excludeAnyLabels:[STRING]}` |
+| `graphView` | object；默认完整图 | `{requireAllLabels:[STRING],requireAnyLabels:[STRING],excludeAnyLabels:[STRING]}`；`requireAnyLabels` 从 v0.3.4 提供 |
 | `mergeSession` | object；默认无 | `{id:"merge-session/<id>",revision:INTEGER}`，revision 为正整数 |
 
 `branch` 与 `at` 互斥。`mergeSession` 与 `branch` / `at` / `author` / `message` 互斥，包括显式给出的 null metadata；它可以与 `graphView`、`readOnlyNoExternalIO` 组合。`branch` / `at` / `graphView` / `mergeSession` 的显式 null 均不表示省略。
@@ -171,12 +171,13 @@ Patch、Reset、Revert、Merge、Rebase、Squash 按操作前后目标 Branch �
 
 ## `graphView`
 
-两个数组可以各自省略，`{}` 等价完整图。字段只能为 `requireAllLabels`、`excludeAnyLabels`，值只能为 STRING 数组；未知字段、null、非字符串元素返回 `INVALID_ARGUMENT`。
+三个数组可以各自省略或为空，`{}` 等价完整图。`requireAnyLabels` 从 v0.3.4 发行包提供，v0.3.3 及更早发行版只接受原有两个字段。各支持版本中的未知字段、null、非字符串元素返回 `INVALID_ARGUMENT`。
 
 - `requireAllLabels`：Node 必须同时拥有全部 Label。
+- `requireAnyLabels`：Node 至少拥有一个指定 Label（OR）；省略或空数组不施加该条件。
 - `excludeAnyLabels`：命中任意 Label 即不可见。
-- 每个数组按精确名称的集合语义去重，不做 case folding 或 Unicode normalization；同一 Label 同时 required/excluded 为非法 selector。
-- 不存在的 required Label 使当前 Node 均不可见；不存在的 excluded Label 无效果。解析 selector 不创建 Label。
+- 三组条件同时成立才可见；每个数组按精确名称的集合语义去重，不做 case folding 或 Unicode normalization。Label 同时在 `requireAllLabels` 和 `excludeAnyLabels` 中非法；OR 与 exclude 重叠允许，排除优先。
+- 不存在的 `requireAllLabels` 使当前 Node 均不可见；不存在的 OR 候选没有匹配，OR 集合全未知时也没有可见 Node；不存在的 excluded Label 无效果。解析 selector 不创建 Label。
 - Relationship 仅在两端 Node 均可见时可见；没有独立 Relationship selector。
 - 后续 clause 按前面 staged writes 后的 graph state 重新计算 visibility。写入越界报 `GRAPH_VIEW_VIOLATION`。
 

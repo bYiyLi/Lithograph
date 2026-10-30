@@ -1,6 +1,6 @@
 # 事务与 Execution 生命周期参考
 
-适用版本：**v0.3.3** · [产品手册](../guide/README.md) · [接口参考](README.md)
+适用版本：**v0.3.4** · [产品手册](../guide/README.md) · [接口参考](README.md)
 
 本页定义宿主调用的生命周期；[事务指南](../guide/transactions.md) 提供任务流程，Cypher 的 batch 语法与部分提交规则见 [Transaction Subqueries](../cypher/transaction-subqueries.md)。所有生命周期调用都必须使用同一 SQLite connection，不能在连接池的不同连接间传递事务。
 

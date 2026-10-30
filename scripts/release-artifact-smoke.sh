@@ -28,6 +28,7 @@ done
 
 python3 scripts/check-extension-artifact.py "$extension"
 scripts/sql-surface-smoke.sh "$extension"
+python3 -B tests/phase20_release_sql.py "$extension"
 python3 -B tests/phase18_access_sql.py "$extension"
 python3 -B tests/phase18_load_csv_access.py "$extension"
 scripts/phase18-external-access-smoke.sh "$extension"

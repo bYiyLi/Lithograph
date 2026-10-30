@@ -2,9 +2,9 @@
 
 # Lithograph 接口参考
 
-适用版本：**v0.3.3**；v0.3.1 不接受新增 readAccess/writeAccess。本目录提供公开接口的精确说明；操作流程见 [产品手册](../guide/README.md)，语言规则见 [Cypher 手册](../cypher/index.md)。
+适用版本：**v0.3.4**；v0.3.1 不接受新增 readAccess/writeAccess。本目录提供公开接口的精确说明；操作流程见 [产品手册](../guide/README.md)，语言规则见 [Cypher 手册](../cypher/index.md)。
 
-v0.3.3 增加 [memoryLimitBytes](execution-options.md#memory-limit) 和长表达式取消改进；v0.3.2 发行库不接受新 option。实际交付状态见 [Phase 19](../development/phases/19-query-correctness-resources.md)。
+v0.3.4 新增 `graphView.requireAnyLabels` 多 Label OR 筛选；v0.3.3 增加 [memoryLimitBytes](execution-options.md#memory-limit) 和长表达式取消改进。v0.3.3 及更早发行版不接受新的 OR 字段；实际交付状态见 [Phase 20](../development/phases/20-graph-view-label-union.md)。
 
 | 查找内容 | 正文 |
 | --- | --- |
@@ -25,4 +25,4 @@ v0.3.3 增加 [memoryLimitBytes](execution-options.md#memory-limit) 和长表达
 
 应用通过标准 SQLite SQL 调用 Lithograph；Provider SPI 面向 Provider 作者。SQL options、Cypher 参数和 Procedure 的 options 是不同输入，以各自正文为准。每个接口说明的限制与事务语义也适用于清单中已登记的名称。
 
-固定版本入口：[v0.3.3 Reference](https://github.com/bYiyLi/Lithograph/blob/v0.3.3/docs/reference/README.md)；tag 与发布进度见 [Phase 19](https://github.com/bYiyLi/Lithograph/blob/main/docs/development/phases/19-query-correctness-resources.md#v033-release-delivery)。
+固定版本入口：[v0.3.4 Reference](https://github.com/bYiyLi/Lithograph/blob/v0.3.4/docs/reference/README.md)；tag 与发布进度见 [Phase 20](https://github.com/bYiyLi/Lithograph/blob/main/docs/development/phases/20-graph-view-label-union.md)。

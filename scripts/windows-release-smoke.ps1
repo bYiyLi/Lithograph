@@ -289,6 +289,10 @@ if ($openaiProvider) {
 
 Invoke-VersionAndAccessRegressions -Runtime $minimum
 Invoke-Phase18SqlSmoke
+& python -B (Join-Path $repoRoot "tests\phase20_release_sql.py") $extension
+if ($LASTEXITCODE -ne 0) {
+    throw "Phase 20 real SQLite release artifact smoke failed"
+}
 
 foreach ($runtime in @($minimum, $current)) {
     $loadResult = (& $runtime.Exe -batch -noheader -cmd ".load `"$extensionForSqlite`"" ":memory:" "SELECT json_valid(lithograph_version());").Trim()

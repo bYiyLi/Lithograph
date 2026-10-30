@@ -680,18 +680,14 @@ impl PartCursor {
                 self.start_index_cursor = page.next_cursor;
                 self.start_done = self.start_index_cursor.is_none();
             } else {
-                let scan_label = self
-                    .part
-                    .start
-                    .scan_label
-                    .or_else(|| graph_view.scan_label());
-                let page = if let Some(label) = scan_label {
-                    self.start_known_label = Some(label);
-                    snapshot.scan_label_after(label, self.start_after, PIPELINE_BATCH)?
-                } else {
-                    self.start_known_label = None;
-                    snapshot.scan_nodes_after(self.start_after, PIPELINE_BATCH)?
-                };
+                let (page, known_label) = graph_view.scan_nodes_after(
+                    snapshot,
+                    self.part.start.scan_label,
+                    self.start_after,
+                    PIPELINE_BATCH,
+                    control,
+                )?;
+                self.start_known_label = known_label;
                 metrics.record_db_hits(page.items.len() as u64);
                 self.start_buffer = page.items;
                 self.start_index = 0;

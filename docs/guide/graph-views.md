@@ -2,7 +2,7 @@
 
 [产品手册](README.md) · [Cypher 语言手册](../cypher/index.md) · [接口参考](../reference/README.md)
 
-本文适用 **v0.3.3**（`CY25-2026.08`，storage format `3`）。
+本文适用于 **v0.3.4**（`CY25-2026.08`，storage format `3`）。`requireAnyLabels` 从本版本开始支持；v0.3.3 及更早发行二进制不接受该参数。
 
 Graph View 是一次 execution 的 Label selector，不是另一张图、另一份数据库或授权系统。以下在独立空库中运行。
 
@@ -30,6 +30,25 @@ SELECT lithograph(
 只看到 `a`，关系数为 `0`，因为两个端点必须都可见。所有 required labels 都要满足，命中任一 excluded label 就不可见。空 selector 等价于完整图。
 
 Graph View 在 MATCH、路径、aggregation、subquery、索引和 Search 内生效；不是查询后过滤。可见 Node 的 Property 不被遮罩，Schema 也不投影成 view-local Schema。
+
+<a id="label-union"></a>
+
+## 多 Label 并集（v0.3.4）
+
+在上述独立测试库中，`requireAnyLabels` 选择 TenantA **或** TenantB；其中任何节点只返回一次，两个端点都在范围内的 `LINKS_TO` 关系也可见。它不等于把多个 Label 放进 `requireAllLabels` 的 AND 条件：
+
+```sql
+SELECT lithograph(
+  'MATCH (n:Item) RETURN n.id AS id ORDER BY id',
+  '{}', '{"graphView":{"requireAnyLabels":["TenantA","TenantB"]}}'
+);
+SELECT lithograph(
+  'MATCH ()-[r:LINKS_TO]->() RETURN count(r) AS relationships',
+  '{}', '{"graphView":{"requireAnyLabels":["TenantA","TenantB"]}}'
+);
+```
+
+两条查询分别返回 `a`、`b` 和关系数 `1`。可以同时使用 `requireAllLabels`（与 OR 求交）及 `excludeAnyLabels`（过滤命中的节点），三个数组全空仍为完整图。Graph View 在 Full-text、Raw Vector 和 Managed Semantic 的候选排序及 Top-K 之前应用，不把全图 Top-K 结果取回后再过滤；它只选 Label 子图，不能直接表达任意 Relationship 路径或每个实例的业务领域归属。
 
 <a id="visible-writes"></a>
 
