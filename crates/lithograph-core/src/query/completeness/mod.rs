@@ -1253,6 +1253,9 @@ fn physical_operator(operator: &LogicalOperator) -> PhysicalOperator {
         LogicalOperator::NodeScan { variable } => PhysicalOperator::NodeScan {
             variable: variable.clone(),
         },
+        LogicalOperator::NodeIdSeek { variable } => PhysicalOperator::NodeIdSeek {
+            variable: variable.clone(),
+        },
         LogicalOperator::LabelScan { variable, label } => PhysicalOperator::LabelIndexScan {
             variable: variable.clone(),
             label: label.clone(),

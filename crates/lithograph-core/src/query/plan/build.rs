@@ -48,6 +48,13 @@ pub(crate) fn append_pattern_operators(
             operators.push(LogicalOperator::Cartesian);
         }
         append_pattern_operator(part, bound, operators);
+        if step
+            .early_predicates
+            .get(index)
+            .is_some_and(|items| !items.is_empty())
+        {
+            operators.push(LogicalOperator::Filter);
+        }
     }
 }
 
@@ -65,7 +72,11 @@ fn append_pattern_operator(
         .is_none_or(|variable| !bound.contains(variable))
     {
         let variable = start.clone().unwrap_or_else(|| "_anon".to_owned());
-        operators.push(if let Some(seek) = &part.start.index_seek {
+        operators.push(if part.start.id_seek.is_some() {
+            LogicalOperator::NodeIdSeek {
+                variable: variable.clone(),
+            }
+        } else if let Some(seek) = &part.start.index_seek {
             LogicalOperator::IndexSeek {
                 variable: variable.clone(),
                 index: seek.index_name.clone(),
@@ -161,6 +172,11 @@ pub(super) fn build_physical(
             LogicalOperator::NodeScan { variable } => operators.push(PhysicalOperator::NodeScan {
                 variable: variable.clone(),
             }),
+            LogicalOperator::NodeIdSeek { variable } => {
+                operators.push(PhysicalOperator::NodeIdSeek {
+                    variable: variable.clone(),
+                })
+            }
             LogicalOperator::LabelScan { variable, label } => {
                 operators.push(PhysicalOperator::LabelIndexScan {
                     variable: variable.clone(),

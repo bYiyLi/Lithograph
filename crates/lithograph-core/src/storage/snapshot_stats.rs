@@ -214,3 +214,7 @@ fn adjust_type_count(
         *count = count.saturating_sub(1);
     }
 }
+
+#[cfg(test)]
+#[path = "snapshot_stats/tests.rs"]
+mod tests;

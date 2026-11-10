@@ -16,8 +16,13 @@ use super::stats::PlannerStatistics;
 use super::{AccessPolicy, ExecutionOptions, QueryError, QueryResult};
 
 mod build;
+mod predicate;
+#[cfg(test)]
+#[path = "plan/statistics_tests.rs"]
+mod statistics_tests;
 pub(crate) use build::append_pattern_operators;
 use build::{build_logical, build_physical};
+pub(crate) use predicate::select_node_id_seeks;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LogicalOperator {
@@ -32,6 +37,9 @@ pub enum LogicalOperator {
         variable: String,
         index: String,
         kind: StandardIndexKind,
+    },
+    NodeIdSeek {
+        variable: String,
     },
     RelationshipScan {
         variable: Option<String>,
@@ -95,6 +103,9 @@ pub enum PhysicalOperator {
         index: String,
         kind: StandardIndexKind,
     },
+    NodeIdSeek {
+        variable: String,
+    },
     VectorSearch {
         variable: String,
         index: String,
@@ -140,6 +151,7 @@ impl PhysicalOperator {
             Self::NodeScan { .. } => "NodeScan",
             Self::LabelIndexScan { .. } => "LabelIndexScan",
             Self::IndexSeek { .. } => "IndexSeek",
+            Self::NodeIdSeek { .. } => "NodeIdSeek",
             Self::VectorSearch { .. } => "VectorSearch",
             Self::RelationshipScan { .. } => "RelationshipScan",
             Self::AdjacencySeek { .. } => "AdjacencySeek",
@@ -171,6 +183,7 @@ impl PhysicalOperator {
             Self::NodeScan { .. }
                 | Self::LabelIndexScan { .. }
                 | Self::IndexSeek { .. }
+                | Self::NodeIdSeek { .. }
                 | Self::VectorSearch { .. }
                 | Self::RelationshipScan { .. }
                 | Self::AdjacencySeek { .. }
@@ -209,6 +222,7 @@ pub(crate) struct NodeSpec {
     pub scan_label: Option<LabelId>,
     pub scan_label_name: Option<String>,
     pub index_seek: Option<super::schema::StandardIndexSeek>,
+    pub id_seek: Option<i64>,
     pub impossible: bool,
 }
 #[derive(Debug, Clone)]
@@ -232,6 +246,7 @@ pub(crate) struct MatchStep {
     pub optional: bool,
     pub parts: Vec<PatternPart>,
     pub predicate: Option<Expr>,
+    pub early_predicates: Vec<Vec<Expr>>,
 }
 #[derive(Debug, Clone)]
 pub(crate) struct Projection {
@@ -553,6 +568,9 @@ fn prepare_read_query(
     control: &super::ExecutionControl<'_>,
 ) -> QueryResult<PreparedQuery> {
     let (mut matches, return_clause) = lower_clauses(connection, single)?;
+    for step in &mut matches {
+        select_node_id_seeks(step, &context.params);
+    }
     let ProjectionPlan {
         projections,
         order,
@@ -580,8 +598,6 @@ fn prepare_read_query(
         )?,
     };
     let snapshot = storage::Snapshot::from_resolved_state(connection, &resolved_state);
-    let statistics = planner_statistics(&snapshot, &context.graph_view, &matches)?;
-    optimize_node_scans(&mut matches, &statistics);
     let schema = resolved_state.query_schema_state().ok_or_else(|| {
         QueryError::internal("read query resolved state is missing its versioned Schema")
     })?;
@@ -593,6 +609,8 @@ fn prepare_read_query(
         &snapshot,
         control,
     )?;
+    let statistics = planner_statistics(&snapshot, &context.graph_view, &matches)?;
+    optimize_node_scans(&mut matches, &statistics);
     let columns = output_columns(context.mode, &projections);
     let logical = build_logical(
         &matches,
@@ -842,11 +860,23 @@ fn planner_statistics(
     graph_view: &ResolvedGraphView,
     matches: &[MatchStep],
 ) -> QueryResult<PlannerStatistics> {
-    if matches.is_empty() || graph_view.is_empty() {
+    if matches.is_empty()
+        || graph_view.is_empty()
+        || !matches.iter().any(|step| {
+            step.parts.iter().any(|part| {
+                node_needs_scan_statistics(&part.start)
+                    || part.end.as_ref().is_some_and(node_needs_scan_statistics)
+            })
+        })
+    {
         Ok(PlannerStatistics::default())
     } else {
         collect_statistics(snapshot, matches)
     }
+}
+
+fn node_needs_scan_statistics(node: &NodeSpec) -> bool {
+    node.id_seek.is_none() && node.index_seek.is_none() && !node.impossible && node.labels.len() > 1
 }
 
 fn output_columns(mode: ExecutionMode, projections: &[Projection]) -> Vec<String> {
@@ -901,11 +931,14 @@ pub(crate) fn lower_match(
         .find(|node| matches!(node.kind, AstKind::Where))
         .map(|where_node| first_surface_expression(where_node).and_then(compile_expression))
         .transpose()?;
-    Ok(MatchStep {
+    let mut step = MatchStep {
         optional,
         parts,
         predicate,
-    })
+        early_predicates: Vec::new(),
+    };
+    predicate::route_safe_predicates(&mut step);
+    Ok(step)
 }
 
 fn lower_pattern_part(connection: &Connection, part: &AstNode) -> QueryResult<PatternPart> {
@@ -994,6 +1027,7 @@ fn lower_node(connection: &Connection, node: &AstNode) -> QueryResult<NodeSpec> 
         scan_label: labels.first().copied(),
         scan_label_name: label_names.first().cloned(),
         index_seek: None,
+        id_seek: None,
         labels,
         label_names,
         impossible,
@@ -1263,29 +1297,20 @@ fn collect_statistics(
     matches: &[MatchStep],
 ) -> QueryResult<PlannerStatistics> {
     let mut labels = BTreeSet::new();
-    let mut relationship_types = BTreeSet::new();
-    let mut need_relationships = false;
+    let relationship_types = BTreeSet::new();
     for step in matches {
         for part in &step.parts {
-            labels.extend(part.start.labels.iter().copied());
-            if let Some(end) = &part.end {
-                labels.extend(end.labels.iter().copied());
+            if node_needs_scan_statistics(&part.start) {
+                labels.extend(part.start.labels.iter().copied());
             }
-            if let Some(relationship) = &part.relationship {
-                need_relationships = true;
-                if let Some(type_id) = relationship.type_id {
-                    relationship_types.insert(type_id);
-                }
+            if let Some(end) = &part.end
+                && node_needs_scan_statistics(end)
+            {
+                labels.extend(end.labels.iter().copied());
             }
         }
     }
-    PlannerStatistics::collect(
-        snapshot,
-        &labels,
-        &relationship_types,
-        true,
-        need_relationships,
-    )
+    PlannerStatistics::collect(snapshot, &labels, &relationship_types, true, false)
 }
 
 fn optimize_node_scans(matches: &mut [MatchStep], statistics: &PlannerStatistics) {

@@ -102,6 +102,17 @@ impl StepCursor {
         })
     }
 
+    fn initialize(&mut self, control: &ExecutionControl<'_>) -> QueryResult<()> {
+        if !self.initialized {
+            if let Some(part) = self.step.parts.first() {
+                self.stack
+                    .push(PartCursor::new(part.clone(), &self.base, control)?);
+            }
+            self.initialized = true;
+        }
+        Ok(())
+    }
+
     pub(super) fn next_row(
         &mut self,
         snapshot: &Snapshot<'_>,
@@ -110,13 +121,7 @@ impl StepCursor {
         metrics: &mut QueryMetrics,
         control: &ExecutionControl<'_>,
     ) -> QueryResult<Option<BindingRow>> {
-        if !self.initialized {
-            if let Some(part) = self.step.parts.first() {
-                self.stack
-                    .push(PartCursor::new(part.clone(), &self.base, control)?);
-            }
-            self.initialized = true;
-        }
+        self.initialize(control)?;
         loop {
             control.work(1)?;
             let depth = self.stack.len();
@@ -126,7 +131,20 @@ impl StepCursor {
             let Some(frame) = self.stack.last_mut() else {
                 return self.optional_or_done(control);
             };
-            if let Some(row) = frame.next_row(snapshot, graph_view, metrics, control)? {
+            let access = frame.profile_access_operator();
+            let previous_access = access.and_then(|(variable, operator)| {
+                metrics.activate_access_for_operator(Some(variable), operator)
+            });
+            let next = frame.next_row(snapshot, graph_view, metrics, control);
+            metrics.restore_access_operator(previous_access);
+            if let Some(row) = next? {
+                if let Some(predicates) = self.step.early_predicates.get(depth - 1)
+                    && early_prefix_rejects(
+                        predicates, snapshot, graph_view, &row, params, control,
+                    )?
+                {
+                    continue;
+                }
                 if depth < self.step.parts.len() {
                     self.stack.push(PartCursor::new(
                         self.step.parts[depth].clone(),
@@ -388,6 +406,41 @@ impl PartCursor {
         self.next_relationship_row(snapshot, graph_view, metrics, control)
     }
 
+    fn profile_access_operator(&self) -> Option<(&str, &'static str)> {
+        if let Some(relationship) = &self.part.relationship
+            && relationship.index_seek.is_some()
+        {
+            return Some((
+                relationship.variable.as_deref().unwrap_or("_anon_rel"),
+                "IndexSeek",
+            ));
+        }
+        let start = self.part.start.variable.as_deref().unwrap_or("_anon");
+        if self
+            .part
+            .start
+            .variable
+            .as_deref()
+            .is_some_and(|variable| self.base.values.contains_key(variable))
+        {
+            return self
+                .part
+                .relationship
+                .as_ref()
+                .map(|_| (start, "AdjacencySeek"));
+        }
+        if self.part.start.id_seek.is_some() {
+            return Some((start, "NodeIdSeek"));
+        }
+        if self.part.start.index_seek.is_some() {
+            return Some((start, "IndexSeek"));
+        }
+        if self.part.start.scan_label.is_some() {
+            return Some((start, "LabelIndexScan"));
+        }
+        Some((start, "NodeScan"))
+    }
+
     fn next_relationship_row(
         &mut self,
         snapshot: &Snapshot<'_>,
@@ -400,9 +453,13 @@ impl PartCursor {
             if self.relationship_index < self.relationships.len() {
                 let rel = self.relationships[self.relationship_index];
                 self.relationship_index += 1;
-                if let Some(row) =
-                    self.match_relationship(snapshot, graph_view, rel, metrics, control)?
-                {
+                let access = metrics.activate_access_for_operator(
+                    Some(self.part.start.variable.as_deref().unwrap_or("_anon")),
+                    "AdjacencySeek",
+                );
+                let matched = self.match_relationship(snapshot, graph_view, rel, metrics, control);
+                metrics.restore_access_operator(access);
+                if let Some(row) = matched? {
                     return Ok(Some(row));
                 }
                 continue;
@@ -410,13 +467,19 @@ impl PartCursor {
             if let Some(start) = self.current_start
                 && !self.relationship_done
             {
+                let access = metrics.activate_access_for_operator(
+                    Some(self.part.start.variable.as_deref().unwrap_or("_anon")),
+                    "AdjacencySeek",
+                );
                 let page = self.load_relationship_page(
                     snapshot,
                     start,
                     self.relationship_cursor,
                     metrics,
                     control,
-                )?;
+                );
+                metrics.restore_access_operator(access);
+                let page = page?;
                 self.relationships = page.items;
                 self.relationship_index = 0;
                 if let Some(cursor) = page.next_cursor {
@@ -642,6 +705,9 @@ impl PartCursor {
         metrics: &mut QueryMetrics,
         control: &ExecutionControl<'_>,
     ) -> QueryResult<Option<i64>> {
+        if self.part.start.id_seek.is_some() {
+            return self.next_id_start(snapshot, graph_view, metrics, control);
+        }
         loop {
             control.work(1)?;
             while self.start_index < self.start_buffer.len() {
@@ -697,6 +763,29 @@ impl PartCursor {
                     self.start_done = true;
                 }
             }
+        }
+    }
+
+    fn next_id_start(
+        &mut self,
+        snapshot: &Snapshot<'_>,
+        graph_view: &ResolvedGraphView,
+        metrics: &mut QueryMetrics,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<Option<i64>> {
+        let Some(id) = self.part.start.id_seek else {
+            return Ok(None);
+        };
+        if self.start_done {
+            return Ok(None);
+        }
+        self.start_done = true;
+        control.work(1)?;
+        metrics.record_db_hits(1);
+        if node_matches(snapshot, graph_view, &self.part.start, id, metrics, control)? {
+            Ok(Some(id))
+        } else {
+            Ok(None)
         }
     }
 
@@ -831,4 +920,47 @@ fn bind_path(
             Ok(Some(row))
         }
     }
+}
+
+// Do not expose errors from a partial Pattern Part. An original WHERE evaluates
+// only after all Parts have bound and performs lazy AND left-to-right.
+// Deferring a failing prefix (including Type errors) preserves that behavior;
+// interruption/resource rejection still obey the immediate execution contract.
+fn early_prefix_rejects(
+    expressions: &[crate::query::expression::Expr],
+    snapshot: &Snapshot<'_>,
+    graph_view: &ResolvedGraphView,
+    row: &BindingRow,
+    params: &std::collections::BTreeMap<String, Value>,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<bool> {
+    for expression in expressions {
+        let result = expression::evaluate_with_access_control(
+            expression,
+            snapshot,
+            row,
+            params,
+            &graph_view.query_access,
+            control,
+        );
+        let evaluated = match result {
+            Ok(value) => value,
+            Err(error)
+                if !matches!(
+                    error.kind,
+                    crate::query::QueryErrorKind::Resource
+                        | crate::query::QueryErrorKind::Interrupted
+                ) =>
+            {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        };
+        match evaluated.value {
+            Value::Boolean(false) => return Ok(true),
+            Value::Boolean(true) | Value::Null => {}
+            _ => return Ok(false),
+        }
+    }
+    Ok(false)
 }

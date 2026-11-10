@@ -5,6 +5,7 @@ default_to_workspace = false
 description = "Run the complete Lithograph maintainability and supply-chain quality gate."
 dependencies = [
     "quality-vendor",
+    "quality-sqlite-host-abi",
     "quality-lce1-golden",
     "quality-file-budget",
     "quality-format",
@@ -22,6 +23,10 @@ dependencies = [
 [tasks.quality-vendor]
 command = "python3"
 args = ["scripts/check-vendor.py"]
+
+[tasks.quality-sqlite-host-abi]
+command = "sh"
+args = ["scripts/check-sqlite-host-abi.sh"]
 
 [tasks.quality-lce1-golden]
 command = "scripts/lce1-golden.sh"
@@ -98,6 +103,7 @@ args = [
     "tests/phase18_external_access_smoke.c",
     "tests/phase18_external_access_version.c",
     "tests/phase19_execution_resources.c",
+    "tests/phase21_vm_work.c",
     "tests/phase15_streaming_resource.c",
     "tests/openai_compatible_provider_smoke.c",
     "tests/phase13_semantic_concurrency.c",

@@ -146,6 +146,56 @@ Physical Planner 使用规则重写与 cost estimate 联合选择访问路径。
 
 Planner 可以把 filter、projection、typed comparison 与部分 index seek 下推给 SQLite，但不能为了 SQL 转译便利改变 Cypher semantics。复杂 path、merge、version snapshot 与 semantic barriers 由 Lithograph executor 原生执行。
 
+<a id="optimizer-and-budgeted-executor"></a>
+
+### 可扩展 Optimizer 与可预算 Executor
+
+本节是 [Phase 22 单一开发计划](../development/phases/22-high-performance-query-optimizer.md)（内部 S22.1–S22.8）的统一目标合同；Phase 21 已交付的 NodeIdSeek、安全单变量 AND 路由、Graph View、streaming、transaction、existing Standard Index 和 resource budget 继续沿用，不建立第二个 frontend、plan representation、executor、SQLite 扩展或公开 query API。实施顺序与外部依据分别见 [开发计划](../development/phases/22-high-performance-query-optimizer.md) 和 [算法研究](../research/query-optimizer-roadmap-evidence.md)。
+
+- **逻辑边界**：Frontend 的已验证变量身份、可用绑定集合、Pattern/Relationship uniqueness、投影/聚合、OPTIONAL、Apply/Subquery、Path、写入与 transaction barrier 进入同一优化流程。只有有等价证明的内连接组件允许交换顺序；外连接、错误求值时序、时间/非确定性表达式、可观察 side effect 和提前限制结果数量的 barrier 不跨越重排。不可证明安全时回退到当前经过 Cypher 25 验收的计划。
+- **规则与候选**：在既有 Logical/Physical Planner 内组织可检查的 rewrite、估算和物理候选选择。每个候选要能说明所需已绑定变量、执行时数据/类型前置条件、预计基数、I/O/CPU、工作内存/TEMP、是否改变输出顺序和中间行形状。目标是依据代价选择 Node/Relationship ID Seek、Label/Type/Property Index、Adjacency、受控 Scan、Index Nested Loop、Hash Join、Semi-mask/SIP、Factorized/ASP-Join 和多路交集，不向任意子计划附加无用的通用抽象。
+- **估算有效性**：统计来自目标 pinned Snapshot、其 versioned Schema/IndexDefinition 与相应 derived generation；不存在、过期、缺少类型证明或无法可靠估计时返回 unknown/保守区间，不以 `0` 伪装精确零行，不读取当前 main head 的统计替代历史 Commit。成本不得为了估算而每次完整重放 Snapshot、全图扫描或外发 Provider 请求。
+- **有界计划搜索**：只在安全的内连接 Pattern 组件建立 Join Graph。小组件使用 DPhyp/动态规划枚举连接子集，大组件或超出内部时间/候选状态/内存预算时使用确定性的 Greedy/Fallback；不暴露新 public tuning option，不允许 Planner 自身的组合数失控。计划是按状态/schema/参数类型/selector 选择的执行选择，不作为版本图的持久真源。
+- **同一执行合同**：所有新增物理算子继续通过既有 pull-based row cursor、query-local `QueryResources`、`memoryLimitBytes`、`sqlite3_interrupt` 与 TEMP 管理执行；包括 Hash table、partition、Candidate Bitmap、factorized buffer、intersection cursor、TopK heap、输入输出状态均需计账。只在内部有上限的执行 barrier 分批 spill，预算不足且不可安全 spill 时返回既有 RESOURCE_ERROR 并按 read/write 失败语义回滚。不能以一个在内存中无限增长的 `Vec<Row>` 替代 streaming。
+- **Cost + 结果一致性**：统计/Planner 决策只影响访问路径与工作量，不能改变 Cypher 值比较、错误、NULL、行数/重复行、完整排序与 Tie、Graph View/读写访问、Search 的范围内 TopK、历史/staged visibility、Commit identity、写入时机、取消/回滚。EXPLAIN 和 PROFILE 必须显示**实际执行**算子与真实工作量，不能通过修改名称虚构优化；未命中可用路径时使用保守 Scan/Fallback。
+
+<a id="join-algorithms-and-graph-optimizations"></a>
+
+### Join 与图专用优化的适用顺序
+
+1. **统计、Identity 与谓词**：先完善有界的 versioned Label/Type、组合选择性、NDistinct/MCV、degree skew、Index cardinality；只针对已观察到的访问路径使用相应统计，不预建任意属性组合的全域直方图。增加 Relationship Element ID Seek，按 `r:<positive-int>` 解码，使用同一 historical/staged Snapshot 的 RelationshipId 入口和端点可见性检查，保留跨类型、NULL、错误及 residual 的正确顺序。拓展谓词只在可证明确定性、可提前求值、类型与权限安全时移动。
+2. **Join Order / Index Nested Loop**：安全内连接组件用小规模 DPhyp、大组件 Greedy；先比较 existing Node/Relationship/Property/Adjacency Seek 的参数化 Nested Loop 是否比独立 Scan 更优。重复 outer row 和 parallel relationships 不得被错误去重；连接键的 NULL/类型异常、OPTIONAL 边界及 read-write clause 顺序必须保持。
+3. **有界 Hash Join**：对于已证明与 Cypher equality 等价的 inner equijoin，选择较合适一侧建立 Hash 表；倾斜/超预算时采用 partitioned Grace Hash Join 与有限 TEMP 工作状态。键必须有 type compatibility 证明并保留 residual；碰撞、重复键、NULL、真实 equality TYPE_ERROR、Graph View、staged revision、错误/取消和 spill cleanup 都由既有执行合同验收。无足够条件或预算时安全回退，不要求每个 Join 都 Hash。
+4. **Semi-mask / SIP / Dynamic Filter**：在 Join/邻接已产生有限候选时，把 Node/RelationshipId、typed min/max 或 TopK cutoff 作为**query-scoped advisory** 传给有能力跳过 SQLite 实际读取的上游 Scan/Seek。过滤器绑定 pinned Commit、staged revision、Graph View selector 与访问权限；从不取代最终 residual 或造成 false negative。对已提交与 staged 数据都需要正确覆盖或安全回退，不借用 LadybugDB 专有存储布局；没有实际物理 skip 能力就不开启。TopK 必须保留 ORDER BY/NULL/ties/score 和范围内 Search 排名，仅在上下界能证明不会改变结果时提前剪枝。
+5. **Factorized Execution / ASP-Join**：对于多对多连接、重复共享前缀或 Star/Path 中间值，将可证明独立的分支保留为带 multiplicity 的内部 factorized group，并让相邻过滤、Join、适用聚合按组执行；只在必须输出、排序、含相关表达式、写 barrier 或要求扁平行的边界延迟展开。公开 `lithograph_rows()` 保持严格的一行一结果、重复行及 deterministic order/tie 契约；所需 buffer、乘积计数溢出、取消与 TEMP 均受预算控制。不整体重写已经可用的 flat row executor。
+6. **WCOJ / 多路交集**：对具有可用 typed/directed 邻接访问的三角形、环形和更一般的多边循环模式，在计划中选择多路有序候选交集（Generic Join / Leapfrog 风格），只在满足适用性和成本证明时替代可能爆炸的连续二元 Join；其它 Pattern 使用已经验证的二元 Join/Expand。节点重复、parallel Relationship identity、Path 与 per-MATCH relationship uniqueness、0/1/多结果、方向与类型、Graph View、历史/staged state 必须与普通 Cypher 完全一致。不声称任意 Cypher 查询都达到理论 worst-case optimal 上界。
+
+**分阶段门槛**：可用的访问路径、统一执行预算和稳定估算先成立，才能启用 DPhyp/Index Nested Loop；它们通过真实 Physical Plan、成本与语义验证后才能启用 Hash Join；Hash Join 有 bounded spill 与反例测试之后，才实现 SIP/Dynamic Filter → Factorized/ASP-Join → WCOJ。每一阶段都同时保留旧计划作为正确性 Oracle 和遇到不可安全优化条件时的 fallback，不以某次微基准成功自动扩大适用范围。
+
+<a id="predicate-routing-and-identity-seek"></a>
+
+### 谓词下推与 Element ID 直接访问
+
+本节把既有 [Physical Planning](#physical-planning)、[Streaming](#streaming)、[Snapshot](#snapshot-pinning) 和 [Execution Resources](#execution-resources) 合同落实到独立 Pattern Part 的执行路径。2026-11-09 KG OS 生产容器确因 OOM 被终止；同类写查询的 EXPLAIN 为 NodeScan → Cartesian → NodeScan → Filter。该计划是已确认的低效路径，但理论组合数**不是**实际内存驻留量，OOM 的唯一代码诱因尚待隔离复现。依据见 [外部源码与事故研究](../research/query-optimization-evidence.md)，实施验收归 [Phase 21](../development/phases/21-predicate-routing-identity-seek.md)。
+
+**安全的谓词下推**：
+
+- 普通非 OPTIONAL MATCH 中，只对经 AND 拆分、仅依赖一个 Pattern Part 与其可用外层输入、且可证明安全提前求值的谓词，在该 Part 产生绑定后、下一个 Part 迭代前执行。依赖多个 Part 的谓词仍在全部依赖可用时执行；无法证明安全时保留原位置。
+- 判定必须基于 AST 的真实变量身份/作用域、依赖与表达式求值语义，不凭字符串名称判断；OR、OPTIONAL、NULL 三值逻辑、非确定性函数、可能改变错误出现时序的表达式、子查询、聚合、路径/变量重绑定、写 barrier 默认不下推，除非后续有专门等价性证明。不能为了优化改变 Cypher 25 的结果、重复行、异常、写入可见性和事务边界。
+- 合法且确实无选择性条件的 Cartesian 仍执行；优化不是禁止 Cartesian。EXPLAIN/PROFILE 要反映真实物理/执行路径，read-only MATCH 与 MATCH 后 CREATE/SET/DELETE 的实际执行必须一致；不能只修改计划展示而在 Write MATCH 仍先组合后过滤。
+
+**Node Element ID Seek**：
+
+- 识别 elementId(n) = $id（左右对称，参数/稳定常量；IN 仅在其去重、NULL 和类型语义有独立测试后扩大）；使用同一 pinned Commit 或 transaction-local staged Snapshot 的 NodeId access，不把 elementId 解释为业务属性或额外 Index，也不引入新的 SQL/Cypher API。
+- 仅在类型、Element ID 形状与既有表达式语义均允许时选择 ID Seek；其它输入必须按原 Scan + Filter 的类型/NULL/无匹配规则处理，不能因为内部 Seek 解码失败额外抛错。命中后验证当前 Snapshot 存在性、Graph View、Label、访问约束与残余谓词；历史已删除、当前尚未提交、不可见或缺失目标都与未优化路径精确一致，不能借用只反映当前 main 的全局 mutable lookup。
+- 访问工作量应取决于目标个数与必要的 Snapshot overlay，而不是无关节点总量；真正的 ID Seek 需要物理访问和计数证据，不能仅出现 Seek 字样。Relationship Element ID Seek 与通用 Join 重排序暂不属于本次最小实现。
+
+**资源、诊断与边界**：
+
+- Read/Write MATCH 的高选择性过滤不得生成并长期保存全量中间组合；保留现有 streaming/TEMP spill、取消检查、memoryLimitBytes 与 RESOURCE_ERROR/SQLITE_TOOBIG 语义。该预算不是进程 RSS/容器硬上限；仍测 native/SQLite/宿主峰值及 1 GiB 容器是否 OOM。
+- 复用 EXPLAIN/PROFILE、已有 QueryMetrics、内部测试访问计数、资源预留峰值和 SQLite/TEMP 计量定位实际执行；没有经过观测的算子/语句不得推定为崩溃现场。Lithograph 是嵌入式 SQLite extension，不默认写宿主 stderr/JSONL、增加常驻日志库、导出原始 Cypher/参数或自建 Trace 服务。宿主调用边界负责 Request ID、Operation ID 与安全执行阶段日志，扩展以既有错误/取消契约返回可信终态。
+- 固定目标和结果，扩大无关数据 10 倍比较访问量、RSS、TEMP、失败/取消/回滚；留存构建 SHA、Commit、SQLite 版本、资源限制和真实结果。此工作不是新增 Hash Join、SIP/Bitmap、全局 Cost-Based Planner 或第二套 Graph 查询接口。
+
 <a id="streaming"></a>
 
 ### Streaming

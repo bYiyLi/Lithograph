@@ -1,7 +1,7 @@
 use crate::cypher::ExecutionMode;
 
 use super::super::QueryResult;
-use super::super::plan::PhysicalPlan;
+use super::super::plan::{PhysicalOperator, PhysicalPlan};
 use super::super::resources::{MemoryReservation, QueryResources, allocation_bytes, checked_add};
 
 #[derive(Debug, Default)]
@@ -26,6 +26,7 @@ pub struct OperatorRuntimeMetrics {
 struct QueryProfileState {
     operators: Vec<OperatorRuntimeMetrics>,
     access_operators: Vec<usize>,
+    access_variables: Vec<Option<String>>,
     active_operator: Option<usize>,
     next_access_operator: usize,
     unattributed_db_hits: u64,
@@ -57,6 +58,7 @@ impl QueryMetrics {
         let memory = resources.reserve(bytes)?;
         let mut operators = Vec::with_capacity(physical.operators.len());
         let mut access_operators = Vec::with_capacity(access_count);
+        let mut access_variables = Vec::with_capacity(access_count);
         for (id, operator) in physical.operators.iter().enumerate() {
             operators.push(OperatorRuntimeMetrics {
                 id: u64::try_from(id).unwrap_or(u64::MAX),
@@ -66,6 +68,7 @@ impl QueryMetrics {
             });
             if operator.is_storage_access() {
                 access_operators.push(id);
+                access_variables.push(access_variable(operator).map(str::to_owned));
             }
         }
         let active_operator = access_operators
@@ -75,6 +78,7 @@ impl QueryMetrics {
         metrics.profile = Some(QueryProfileState {
             operators,
             access_operators,
+            access_variables,
             active_operator,
             next_access_operator: 0,
             unattributed_db_hits: 0,
@@ -121,6 +125,42 @@ impl QueryMetrics {
             operator.db_hits = operator.db_hits.saturating_add(count);
         } else {
             profile.unattributed_db_hits = profile.unattributed_db_hits.saturating_add(count);
+        }
+    }
+
+    /// Temporarily attribute physical access to this Pattern Part's variable.
+    /// Return a token only if a matching access operator is present; a caller
+    /// must restore it even if the cursor returns an error.
+    pub(crate) fn activate_access_for_operator(
+        &mut self,
+        variable: Option<&str>,
+        operator_name: &str,
+    ) -> Option<Option<usize>> {
+        let variable = variable?;
+        let profile = self.profile.as_mut()?;
+        let access_index = profile.access_operators.iter().enumerate().find_map(
+            |(access_index, operator_id)| {
+                let variable_matches = profile
+                    .access_variables
+                    .get(access_index)
+                    .and_then(Option::as_deref)
+                    == Some(variable);
+                let operator_matches = profile
+                    .operators
+                    .get(*operator_id)
+                    .is_some_and(|operator| operator.operator == operator_name);
+                (variable_matches && operator_matches).then_some(access_index)
+            },
+        )?;
+        let access_operator = *profile.access_operators.get(access_index)?;
+        let previous = profile.active_operator;
+        profile.active_operator = Some(access_operator);
+        Some(previous)
+    }
+
+    pub(crate) fn restore_access_operator(&mut self, token: Option<Option<usize>>) {
+        if let Some(previous) = token {
+            self.restore_active_operator(previous);
         }
     }
 
@@ -196,22 +236,50 @@ impl Eq for QueryMetrics {}
 fn profile_vectors_bytes(operators: usize, access: usize) -> QueryResult<u64> {
     checked_add(
         allocation_bytes::<OperatorRuntimeMetrics>(operators)?,
-        allocation_bytes::<usize>(access)?,
+        checked_add(
+            allocation_bytes::<usize>(access)?,
+            allocation_bytes::<Option<String>>(access)?,
+        )?,
     )
+}
+
+fn access_variable(operator: &PhysicalOperator) -> Option<&str> {
+    match operator {
+        PhysicalOperator::NodeScan { variable }
+        | PhysicalOperator::LabelIndexScan { variable, .. }
+        | PhysicalOperator::IndexSeek { variable, .. }
+        | PhysicalOperator::NodeIdSeek { variable }
+        | PhysicalOperator::VectorSearch { variable, .. } => Some(variable),
+        PhysicalOperator::RelationshipScan { variable } => variable.as_deref(),
+        PhysicalOperator::AdjacencySeek { from, .. } => Some(from),
+        _ => None,
+    }
 }
 
 fn initial_profile_bytes(physical: &PhysicalPlan, access_count: usize) -> QueryResult<u64> {
     physical.operators.iter().try_fold(
         profile_vectors_bytes(physical.operators.len(), access_count)?,
-        |bytes, operator| checked_add(bytes, operator.profile_name().len() as u64),
+        |bytes, operator| {
+            let bytes = checked_add(bytes, operator.profile_name().len() as u64)?;
+            checked_add(
+                bytes,
+                access_variable(operator).map_or(0, |variable| variable.len() as u64),
+            )
+        },
     )
 }
 
 fn cloned_profile_bytes(profile: &QueryProfileState) -> QueryResult<u64> {
-    profile.operators.iter().try_fold(
+    let bytes = profile.operators.iter().try_fold(
         profile_vectors_bytes(profile.operators.len(), profile.access_operators.len())?,
         |bytes, operator| checked_add(bytes, operator.operator.len() as u64),
-    )
+    )?;
+    profile
+        .access_variables
+        .iter()
+        .try_fold(bytes, |bytes, name| {
+            checked_add(bytes, name.as_ref().map_or(0, |name| name.len() as u64))
+        })
 }
 
 fn clone_profile(profile: &QueryProfileState) -> QueryProfileState {
@@ -229,6 +297,7 @@ fn clone_profile(profile: &QueryProfileState) -> QueryProfileState {
     QueryProfileState {
         operators,
         access_operators,
+        access_variables: profile.access_variables.clone(),
         active_operator: profile.active_operator,
         next_access_operator: profile.next_access_operator,
         unattributed_db_hits: profile.unattributed_db_hits,

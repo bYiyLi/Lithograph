@@ -292,7 +292,7 @@ fn lower_plan_clause(
     };
     let lowered = match kind {
         ClauseKind::Match | ClauseKind::OptionalMatch => {
-            lower_match_clause(connection, clause, kind)?
+            lower_match_clause(connection, clause, kind, params)?
         }
         ClauseKind::Create | ClauseKind::Insert => {
             mutation_clause(WriteClause::Create(lower_write_pattern(clause)?), kind)
@@ -333,9 +333,11 @@ fn lower_match_clause(
     connection: &Connection,
     clause: &AstNode,
     kind: ClauseKind,
+    params: &BTreeMap<String, Value>,
 ) -> QueryResult<LoweredClause> {
     let optional = kind == ClauseKind::OptionalMatch;
-    let explain_match = lower_match(connection, clause, optional)?;
+    let mut explain_match = lower_match(connection, clause, optional)?;
+    crate::query::plan::select_node_id_seeks(&mut explain_match, params);
     Ok(LoweredClause {
         write: Some(WriteClause::Match {
             clause: clause.clone(),

@@ -197,7 +197,8 @@ fn execute_match_clause_spilled(
     check_interrupted(is_interrupted)?;
     let snapshot = context.staged_snapshot()?;
     let graph_view = context.graph_view()?;
-    let step = lower_match(context.connection, clause, optional)?;
+    let mut step = lower_match(context.connection, clause, optional)?;
+    crate::query::plan::select_node_id_seeks(&mut step, context.params);
     let mut output =
         BindingSpill::create_with_resources(spill_connection, context.control.resources().clone())?;
     input.for_each_batch(

@@ -31,6 +31,8 @@ Rust 负责 parser/semantic model、planner、executor、version engine、typed 
 
 Lithograph 不静默修改宿主的 journal mode、synchronous level 或其它 durability PRAGMA。
 
+**SQLite 安全版本与兼容基线分开判断。** CVE-2026-119375 / RUSTSEC-2026-0459 影响 3.54.0 之前的 SQLite：当进程打开主数据库及同目录 WAL，且 WAL page size 与主数据库不一致时，可能把未初始化 page-cache bytes 返回给普通查询。该缺陷位于宿主 SQLite runtime；本仓库不启用 `libsqlite3-sys/bundled`，不代表宿主 runtime 自动免疫。若数据库文件或相邻 `-wal` 文件可能由较低信任主体创建、替换或修改，宿主必须使用 SQLite **3.54.1+** 或发行版明确回补该修复的版本；3.45.0+ 仅是 API/ABI 兼容基线，不是允许打开不可信 SQLite 文件的安全承诺。数据库文件由受信任宿主独占管理时，仍按其自身 SQLite 更新与文件访问策略评估风险。
+
 <a id="sqlite-interrupt-recovery"></a>
 
 ### SQLite Interrupt 后的事务恢复
@@ -119,6 +121,18 @@ Benchmark 报告至少保存：Git commit 与 dirty-tree digest、fixture seed/v
 性能诊断保存底层 SQL template/绑定条件、`EXPLAIN QUERY PLAN`、公开 `sqlite3_stmt_status` 的 VM_STEP / FULLSCAN_STEP / SORT 等以及 Engine 的 resolved-state 构造次数、Layer 加载数、base/delta owner 检查数、generation build 次数。后者是 internal/test instrumentation，不增加公开 query options 或承诺新的 ABI metrics 字段。FULLSCAN_STEP 为零不能排除错误的宽 index-range scan；必须结合 VM work 和无关数据规模增长实验。SQLite 32-bit statement counters 在溢出前分段采样/reset 并聚合到宽计数，溢出/不可用标为无效证据，不能报告小值通过门禁；可选 scanstatus 不成为 stock runtime 的必需编译选项。
 
 固定 degree/result/相关 delta，将无关图数据增至原来的10倍时，邻接与 ready index path 的实际读取工作不得近似线性增长。工程门禁为 `work(10×unrelated) ≤ 2×work(unrelated) + 1000 VM steps`，汇总一次query的全部相关SQLite statement，配合正确endpoint/type plan和不必要SORT检查；允许B-tree的对数变化，不允许宽主键范围扫描。大结果集 memory 包含 resolver、overlay、visibility、index candidates、row buffers、SQLite cache 与 TEMP spill；报告 process peak RSS、增量 RSS、TEMP/WAL/disk bytes。不能只证明输出256行一批，就声称整个 executor 的内存有界。
+
+<a id="optimizer-join-stress"></a>
+
+### Planner / Join / 图专用优化的性能证据
+
+后续 [Phase 22 单一开发计划](../development/phases/22-high-performance-query-optimizer.md)（八个 Stage）的性能验收沿用本节统一证据合同，不允许通过更换 SQLite/构建模式、偷偷提前物化缓存、降低实际输出/Graph View 约束或删除失败样本宣称优化。各算法均有真实可观察的启用场景、拒绝场景和旧计划回退。
+
+- **规划器**：固定相同的查询语义、相关数据分布与 Pattern Part 的不同书写顺序，对比 Logical/Physical plan、候选访问路径、estimated vs actual rows、规划 CPU/内存/耗时、DPhyp 搜索状态数量和大组件 Greedy fallback；优化器超限不能出现指数级规划耗时或资源 OOM。
+- **访问与 Join**：以 1k→10k→100k→1M Node 的同类 fixture 逐档扩充，固定目标、实际输出规模和有无索引；测试均匀/重度倾斜 keys、0/1/重复输出、小/大 build side、Index Nested Loop、Hash partition/spill、SIP 与 WCOJ 的 VM_STEP/FULLSCAN_STEP、Core work、P50/P95 和首行/完整 drain。可定位目标的 Scan/Seek 不应随无关 Node 数呈近似线性增长；确实无索引的属性过滤要求不引入额外平方开销，而不虚构常数成本。
+- **图形状**：对 Chain、Star、Fan-out、parallel Relationship、自环、Triangle、4-cycle 和复杂循环，构造 Oracle 比较 Cypher 行数、重复性、方向/Type、Relationship uniqueness、Graph View、historical/staged Snapshot 和 NULL/error；Factorized / WCOJ 的专属 benchmark 同时报告扁平中间结果与因子化/交集的真实工作量，不能把漏掉输出算作速度提升。
+- **内存与维护**：在真实 Linux amd64 的 1 GiB/no-swap cgroup 内记录 `memory.peak`、`oom_kill`、Engine 计账、Rust/SQLite RSS、TEMP、spill bytes/batches、WAL 与 cleanup；数据大到超过 build-side 内存时必须成功 spill 或按原合同返回 RESOURCE_ERROR/rollback。Snapshot Checkpoint 另分别记录 Layer depth/bytes、准备时间、build/writer-hold/disk amplification、历史/重启/并发，不把 maintenance 费用藏在读写计时之外。
+- **性能回退**：每一算法至少有一个已约定结果不变且真实工作量有改善的目标 workload，与一个拒绝优化的反例；基准对照保存环境、dirty-tree/Commit、warm/cold 定义、参数、种子和样本。持续遵守已有 10M Node / 100M Relationship release tier 和非回退门槛，新 Phases 的小规模功能通过不能代替大规模验收。
 
 <a id="performance-targets"></a>
 

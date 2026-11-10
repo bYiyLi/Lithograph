@@ -368,6 +368,7 @@ impl ClauseStreamBuilder<'_, '_> {
         ) else {
             return Ok(None);
         };
+        crate::query::plan::select_node_id_seeks(&mut step, self.params);
         let index_memory = if let Ok(schema) = self.snapshot.schema_state() {
             crate::query::schema::select_standard_index_seeks(
                 &schema,

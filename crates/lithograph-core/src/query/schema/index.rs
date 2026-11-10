@@ -80,13 +80,17 @@ pub(crate) fn select_standard_index_seeks(
         evaluation.check()?;
         for part in &mut step.parts {
             let _copy_memory = evaluation.copy_workspace(schema, &candidates)?;
-            part.start.index_seek = choose_node_seek(
-                schema,
-                part.start.variable.as_deref(),
-                &part.start.label_names,
-                &candidates,
-                &evaluation,
-            );
+            part.start.index_seek = if part.start.id_seek.is_some() {
+                None
+            } else {
+                choose_node_seek(
+                    schema,
+                    part.start.variable.as_deref(),
+                    &part.start.label_names,
+                    &candidates,
+                    &evaluation,
+                )
+            };
             if let Some(relationship) = part.relationship.as_mut() {
                 relationship.index_seek = choose_relationship_seek(
                     schema,

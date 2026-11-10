@@ -47,6 +47,7 @@ select_sqlite
 echo "Using SQLite: $LITHOGRAPH_SQLITE3 ($($LITHOGRAPH_SQLITE3 --version))"
 
 python3 scripts/check-vendor.py
+sh scripts/check-sqlite-host-abi.sh
 scripts/lce1-golden.sh
 cargo fmt --check
 cargo clippy --locked --workspace --all-targets --all-features
@@ -99,6 +100,34 @@ if [ -n "$extension" ]; then
   scripts/sql-tx-smoke.sh "$extension"
   scripts/phase19-execution-resources.sh "$extension"
   python3 -B tests/phase19_resources_sql.py "$extension"
+  python3 -B tests/phase21_predicate_routing_sql.py "$extension"
+  python3 -B tests/phase21_predicate_routing_bench.py "$extension" 1000
+  vm_results="$target_dir/phase21/vm-work-results.jsonl"
+  mkdir -p "$target_dir/phase21"
+  : > "$vm_results"
+  for size in 1000 10000; do
+    vm_fixture="$target_dir/phase21/vm-work-$size.sqlite3"
+    rm -f "$vm_fixture" "$vm_fixture-wal" "$vm_fixture-shm"
+    python3 -B tests/phase21_predicate_routing_bench.py \
+      --seed-worker "$extension" "$vm_fixture" "$size" >/dev/null
+    cargo run --locked --quiet -p lithograph-test-support \
+      --bin lithograph-phase21-checkpoint -- "$vm_fixture" >/dev/null
+    sh scripts/phase21-vm-work.sh "$extension" "$vm_fixture" >> "$vm_results"
+  done
+  python3 -B - "$vm_results" <<'PY'
+import json
+import sys
+
+small, large = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+assert small["sqlite"] == large["sqlite"], "SQLite runtime changed during VM comparison"
+assert large["vm_steps"] <= 2 * small["vm_steps"] + 1000, (
+    "10x unrelated nodes inflated SQLite VM work", small, large
+)
+assert large["fullscan_steps"] <= 2 * small["fullscan_steps"] + 1000, (
+    "10x unrelated nodes inflated SQLite full scans", small, large
+)
+print("Phase 21 checkpointed SQLite VM scaling: passed", small, large)
+PY
   scripts/openai-compatible-provider-smoke.sh "$openai_provider"
   scripts/sqlite-345-smoke.sh "$extension" "$openai_provider"
   scripts/sqlite-3534-smoke.sh "$extension" "$openai_provider"

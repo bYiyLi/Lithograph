@@ -85,6 +85,10 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 - Phase 20：`done`（Graph View 多 Label 并集筛选；本机与正式 Tag CI、六平台 Matrix、v0.3.4 Release 及实际下载资产回验完成；v0.3.3 不支持）；
 - `docs/development/cypher25-compatibility.md` 保留各 Phase 已执行证据；Full-text family、Phase 12 provider、Phase 13 Managed Semantic 与 Phase 15 SQL execution / Provider cache supplemental inventory 均已闭合为 `done`。Phase 14/15/19 都不改变冻结 Cypher 语言 coverage 分母。
 
+当前 [Phase 21：MATCH 谓词下推与 Element ID Seek](phases/21-predicate-routing-identity-seek.md) 为 `done（本地实现与验收）`：Read/Write MATCH 谓词安全路由、版本化 Snapshot Node ID Seek、真实 EXPLAIN/PROFILE、1k/10k/100k 节点回归、Linux amd64 1 GiB/no-swap 运行时测试以及本仓库完整 Quality/CI 均通过。**计划进入 v0.3.5 发行基线，远端 CI/Tag/Release 和制品验收须单独完成**；v0.3.4 发行资产不包含 Phase 21 改动。正式合同见 [Query Engine](../design/query-engine.md#predicate-routing-and-identity-seek)，外部证据见 [GitHub 算法研究](../research/query-optimization-evidence.md)。
+
+后续性能优化统一为 **[Phase 22：高性能查询优化器与可预算执行引擎](phases/22-high-performance-query-optimizer.md)**，状态 `ready`，其内部八个 Stage **S22.1–S22.8 均为必实现内容**：先形成真实可用的 Planner / Executor（S22.1），再实现 Tiered Checkpoint / Snapshot、Versioned Statistics、Relationship ID Seek 与 Predicate/Scan（S22.2–3）；待访问/成本/预算路径正确后引入 DPhyp/Greedy Join Order、Index Nested Loop、Grace Hash/Spill（S22.4–5）；**只有 Join 与资源验收通过后**才开发 Semi-mask/SIP、Join Dynamic Filter/TopK、Factorized/ASP-Join、WCOJ/Multiway Intersection（S22.6–8）。八个 Stage 不拥有单独的 Phase 状态，任何一个算法不得因合并计划而取消；Phase 22 只有全部局部与统一验收通过才可 `done`。正式行为见 [Query Engine](../design/query-engine.md#optimizer-and-budgeted-executor)、[Storage](../design/storage.md#tiered-checkpoint-policy)，参考证据见 [Optimizer Research](../research/query-optimizer-roadmap-evidence.md)，整体压力见 [Runtime](../design/runtime.md#optimizer-join-stress)。Phase 21 本地 `done` 不等于远端 Release 验收；v0.3.5 发布结果须单独记录。
+
 ## 4. 路线总览
 
 | Phase | 状态 | 交付结果 | 主要依赖 |
@@ -110,6 +114,8 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 | [18 查询、返回与写入访问控制](phases/18-query-access-controls.md) | `done` | Query/result/write、canonical/插值与 Provider cache 初始化修复；v0.3.2 正式发布与发布制品回验完成 | 15–17 |
 | [19 查询正确性、取消与执行内存限额](phases/19-query-correctness-resources.md) | `done` | 反引号名称、表达式取消与 SQLite 中断恢复、显式 execution 内存预算；本轮 review 修复、quality / CI / 三套 release SQL 复验完成，v0.3.3 正式发布与制品回验完成；保留既有 batch 边界 | 15、18 |
 | [20 Graph View 多 Label 并集筛选](phases/20-graph-view-label-union.md) | `done` | `requireAnyLabels`；图读写、范围内 Top-K、历史与 SQL/Provider 集成；v0.3.4 正式发布及六平台/下载制品验收通过 | 04–08、13、15、18–19 |
+| [21 MATCH 谓词下推与 Element ID Seek](phases/21-predicate-routing-identity-seek.md) | `done` | Read/Write 提前过滤、版本化 Node ID Seek、正确性/100k 规模/VM 工作量、Linux amd64 1 GiB/no-swap、Quality 与 CI 本地验收通过；目标 v0.3.5 | 04–07、15、19–20 |
+| [22 高性能查询优化器与可预算执行引擎](phases/22-high-performance-query-optimizer.md) | `ready` | 单一 Phase、八个必交付 Stage：Planner/Executor → Tiered Checkpoint/Snapshot → Statistics/Relationship ID/Predicate → DPhyp/Index Nested Loop → Grace Hash/Spill → SIP/Dynamic Filter/TopK → Factorized/ASP-Join → WCOJ；统一正确性/资源/10M/100M 与仓库门禁，代码尚未开发 | 21 |
 
 Phase 15 的 EX15-01–19 已全部闭合。实现 revision `b0d5a3da9c5c0266218e01c51d6d34a1be0a6b9d` 的 repository CI `35586275713` 与 hosted Release Matrix `35586275736` 均成功，Linux/macOS/Windows x64/arm64 六目标 artifact build/load/symbol/runtime 全部通过；10M streaming/resource 与本地 acceptance 数值见 Phase 15 计划。
 
@@ -223,6 +229,9 @@ full repository gates
 - [Phase 17](phases/17-developer-documentation-release.md)
 - [Phase 18](phases/18-query-access-controls.md)
 - [Phase 19](phases/19-query-correctness-resources.md)
+- [Phase 20](phases/20-graph-view-label-union.md)
+- [Phase 21](phases/21-predicate-routing-identity-seek.md)
+- [谓词下推与 ID Seek 外部研究](../research/query-optimization-evidence.md)
 - [FTS5 Tokenizer 研究证据](../research/fts5-tokenizer-contract.md)
 - [Embedding Provider / Cypher Vector 研究证据](../research/embedding-provider-contract.md)
 - [性能证据与测量限制](../research/phase11-performance-evidence.md)

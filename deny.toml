@@ -9,7 +9,9 @@ targets = [
 ]
 
 [advisories]
-ignore = []
+ignore = [
+    { id = "RUSTSEC-2026-0459", reason = "Scoped to rusqlite 0.40.1 only: the all-features Cargo graph enables loadable_extension and min_sqlite_version_3_34_1, but not libsqlite3-sys/bundled; the extension links the host SQLite API. This suppresses the crate's bundled-copy advisory only; host SQLite security is separately constrained by docs/design/runtime.md. Re-review by 2027-02-08 or when a compatible 0.38 backport is published." },
+]
 
 [licenses]
 allow = [

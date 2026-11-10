@@ -15,9 +15,9 @@ Lithograph 为 SQLite 提供版本化 Property Graph 数据库能力。
 
 ## 安装与 Quickstart
 
-本版本为 **v0.3.4**，已正式发布，目标发行平台为 Linux/macOS/Windows x64/arm64。运行时需要 SQLite 3.45.0+、loadable extension、FTS5 和线程安全支持。标准发行包包含主 extension、OpenAI-compatible Provider、许可证和 VERSION，并通过 SHA256SUMS 校验；本版本的源码与实际发布验收见 [Phase 20](docs/development/phases/20-graph-view-label-union.md#6-v034-正式发布与制品回验)。
+本版本为 **v0.3.5**（正式发布状态以 GitHub Release 为准），目标发行平台为 Linux/macOS/Windows x64/arm64。运行时需要 SQLite 3.45.0+、loadable extension、FTS5 和线程安全支持。标准发行包包含主 extension、OpenAI-compatible Provider、许可证和 VERSION，并通过 SHA256SUMS 校验；本版本的本地实现与验收见 [Phase 21](docs/development/phases/21-predicate-routing-identity-seek.md)。
 
-从已发布的 [v0.3.4 Release](https://github.com/bYiyLi/Lithograph/releases/tag/v0.3.4) 选择平台资产，并按 [安装指南](https://github.com/bYiyLi/Lithograph/blob/v0.3.4/docs/guide/installation.md) 校验加载。源码构建使用 Rust 1.98.1：
+从 [v0.3.5 Release](https://github.com/bYiyLi/Lithograph/releases/tag/v0.3.5) 选择平台资产，并按 [安装指南](https://github.com/bYiyLi/Lithograph/blob/v0.3.5/docs/guide/installation.md) 校验加载。源码构建使用 Rust 1.98.1：
 
 ```sh
 cargo build --locked --release -p lithograph-extension -p lithograph-openai-compatible
@@ -38,22 +38,22 @@ FROM lithograph_rows('MATCH (p:Person) RETURN p.name AS name');
 
 `.load` 注册接口，`lithograph_init()` 初始化或迁移当前 main database。应用通过标准 SQLite SQL 调用；`lithograph()` 返回完整结果，`lithograph_rows()` 以 columns → row* → summary 增量执行读写。多个 execution 可以通过 SQL explicit transaction 共同形成一个 graph Commit。
 
-v0.3.4 新增 Graph View `requireAnyLabels` 多 Label OR 并集筛选，可与 `requireAllLabels` / `excludeAnyLabels` 组合，普通查询、全文/向量/语义检索与版本化读写使用同一可见范围；修复 TLS 依赖安全公告。v0.3.3 起提供的 `memoryLimitBytes` 及既有 `readOnlyNoExternalIO`、`readAccess` / `writeAccess` 均保留。语言 Profile 为 `CY25-2026.08`，fresh/current storage format 为 3，Provider SPI 为 V1。详细变化见 [发布说明](https://github.com/bYiyLi/Lithograph/blob/v0.3.4/docs/releases/v0.3.4.md)。
+v0.3.5 新增 Read/Write MATCH 的安全谓词提前过滤和版本化 Node Element ID Seek，并使 EXPLAIN/PROFILE 展示真实执行工作量；继承 v0.3.4 的 Graph View `requireAnyLabels` 多 Label OR 并集筛选与 TLS 依赖修复。v0.3.3 起提供的 `memoryLimitBytes` 及既有 `readOnlyNoExternalIO`、`readAccess` / `writeAccess` 均保留。语言 Profile 为 `CY25-2026.08`，fresh/current storage format 为 3，Provider SPI 为 V1。详细变化见 [发布说明](https://github.com/bYiyLi/Lithograph/blob/v0.3.5/docs/releases/v0.3.5.md)。
 
 ## 开发者文档
 
 | 任务 | 固定版本入口 |
 | --- | --- |
-| 安装、快速入门、集成、事务、Graph View、安全与运维 | [完整产品手册](https://github.com/bYiyLi/Lithograph/blob/v0.3.4/docs/guide/README.md) |
-| 完整 Cypher 语法、类型、表达式、路径、修改、Schema、搜索与函数 | [Cypher 25 使用手册](https://github.com/bYiyLi/Lithograph/blob/v0.3.4/docs/cypher/index.md) |
-| SQL/options/JSON、Procedure、Provider、错误与限制 | [接口参考](https://github.com/bYiyLi/Lithograph/blob/v0.3.4/docs/reference/README.md) |
-| Python/C 和真实执行验证 | [可运行示例](https://github.com/bYiyLi/Lithograph/blob/v0.3.4/docs/guide/examples/README.md) |
+| 安装、快速入门、集成、事务、Graph View、安全与运维 | [完整产品手册](https://github.com/bYiyLi/Lithograph/blob/v0.3.5/docs/guide/README.md) |
+| 完整 Cypher 语法、类型、表达式、路径、修改、Schema、搜索与函数 | [Cypher 25 使用手册](https://github.com/bYiyLi/Lithograph/blob/v0.3.5/docs/cypher/index.md) |
+| SQL/options/JSON、Procedure、Provider、错误与限制 | [接口参考](https://github.com/bYiyLi/Lithograph/blob/v0.3.5/docs/reference/README.md) |
+| Python/C 和真实执行验证 | [可运行示例](https://github.com/bYiyLi/Lithograph/blob/v0.3.5/docs/guide/examples/README.md) |
 
-这些固定入口随 v0.3.4 tag 提供。同仓库维护的 [设计](https://github.com/bYiyLi/Lithograph/blob/v0.3.4/docs/design.md) 和 [开发计划](https://github.com/bYiyLi/Lithograph/blob/main/docs/development/README.md) 分别记录产品合同与验收证据。用户手册包含正常使用所需说明；已知问题与适用版本在 Reference 中明确列出。
+这些固定入口随 v0.3.5 tag 提供。同仓库维护的 [设计](https://github.com/bYiyLi/Lithograph/blob/v0.3.5/docs/design.md) 和 [开发计划](https://github.com/bYiyLi/Lithograph/blob/main/docs/development/README.md) 分别记录产品合同与验收证据。用户手册包含正常使用所需说明；已知问题与适用版本在 Reference 中明确列出。
 
 ## 项目状态
 
-v0.3.4 已正式发布：实现提交 `622cece9`、Tag CI **4/4**、六平台 Release Matrix **6/6** 和发布工作流全部成功。从 GitHub Release 实际下载的六个平台包均通过 SHA256 校验，macOS arm64 发行二进制通过 SQLite 3.51.0 的真实 Graph View OR/事务回归。首轮 Tag macOS CI 曾有既有 Phase 08 锁竞争测试失败，失败 Job 完整重跑通过，未修改 Tag；精确 run、发布与下载回验证据见 [Phase 20 发布记录](docs/development/phases/20-graph-view-label-union.md#6-v034-正式发布与制品回验)。完整变化见 [发布说明](https://github.com/bYiyLi/Lithograph/blob/v0.3.4/docs/releases/v0.3.4.md)，历史 Release Notes 保留对应版本事实。
+v0.3.5 的 Phase 21 本地验收已完成（Read/Write、TCK、SQLite 真实加载、1k/10k/100k 节点及 Linux amd64 1 GiB/no-swap）。GitHub Tag CI、六平台 Release Matrix、正式 Release 与下载制品验证分别以实际发布结果为准，不将本地验收视作已发布。完整变化见 [发布说明](https://github.com/bYiyLi/Lithograph/blob/v0.3.5/docs/releases/v0.3.5.md)。
 
 ## 许可
 

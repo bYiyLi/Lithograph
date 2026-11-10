@@ -14,6 +14,50 @@ fn plan() -> PhysicalPlan {
     }
 }
 
+fn access_plan() -> PhysicalPlan {
+    PhysicalPlan {
+        operators: vec![
+            PhysicalOperator::NodeScan {
+                variable: "n".to_owned(),
+            },
+            PhysicalOperator::AdjacencySeek {
+                from: "n".to_owned(),
+                relationship_type: None,
+                direction: crate::query::plan::Direction::Outgoing,
+            },
+            PhysicalOperator::NodeIdSeek {
+                variable: "m".to_owned(),
+            },
+        ],
+    }
+}
+
+#[test]
+fn profile_hits_are_attributed_to_the_exact_access_operator() {
+    let physical = access_plan();
+    let resources = QueryResources::new(None);
+    let mut metrics =
+        QueryMetrics::for_execution_with_resources(ExecutionMode::Profile, &physical, &resources)
+            .expect("profile metrics");
+
+    let adjacency = metrics
+        .activate_access_for_operator(Some("n"), "AdjacencySeek")
+        .expect("adjacency operator");
+    metrics.record_db_hits(3);
+    metrics.restore_access_operator(Some(adjacency));
+
+    let identity = metrics
+        .activate_access_for_operator(Some("m"), "NodeIdSeek")
+        .expect("identity operator");
+    metrics.record_db_hits(2);
+    metrics.restore_access_operator(Some(identity));
+
+    let operators = metrics.operator_profile().expect("profile");
+    assert_eq!(operators[0].db_hits, 0);
+    assert_eq!(operators[1].db_hits, 3);
+    assert_eq!(operators[2].db_hits, 2);
+}
+
 #[test]
 fn profile_arrays_and_names_are_reserved_before_construction() {
     let physical = plan();
