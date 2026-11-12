@@ -4,6 +4,34 @@ use crate::storage::{LabelId, RelationshipTypeId, Snapshot};
 
 use super::QueryResult;
 
+/// Planning advice only. Even an exact zero must never suppress execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CardinalityEstimate {
+    pub expected: u64,
+    pub lower: u64,
+    pub upper: u64,
+}
+
+impl CardinalityEstimate {
+    pub(crate) fn exact(rows: u64) -> Self {
+        Self {
+            expected: rows,
+            lower: rows,
+            upper: rows,
+        }
+    }
+}
+
+/// Bounded, query-local observations of one compatible immutable generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct IndexEstimate {
+    pub rows: CardinalityEstimate,
+    pub indexed_owners: u64,
+    pub ndistinct: Option<u64>,
+    pub mcv_rows: Option<u64>,
+    pub sampled_owners: usize,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PlannerStatistics {
     pub node_count: u64,
@@ -14,59 +42,28 @@ pub struct PlannerStatistics {
 }
 
 impl PlannerStatistics {
-    pub(crate) fn collect(
+    pub(crate) fn bounded(
         snapshot: &Snapshot<'_>,
         labels: &BTreeSet<LabelId>,
-        relationship_types: &BTreeSet<RelationshipTypeId>,
-        need_nodes: bool,
+        types: &BTreeSet<RelationshipTypeId>,
         need_relationships: bool,
+        max_work: usize,
     ) -> QueryResult<Self> {
-        let Some(snapshot_statistics) =
-            snapshot.statistics(labels, relationship_types, need_nodes, need_relationships)?
+        let Some(statistics) =
+            snapshot.bounded_statistics(labels, types, need_relationships, max_work, 60 * 1024)?
         else {
             return Ok(Self::default());
         };
-        let node_count = if need_nodes {
-            snapshot_statistics.node_count
-        } else {
-            0
-        };
-        let label_counts = labels
-            .iter()
-            .filter_map(|label_id| {
-                snapshot_statistics
-                    .label_counts
-                    .get(label_id)
-                    .copied()
-                    .map(|count| (*label_id, count))
-            })
-            .collect::<BTreeMap<_, _>>();
-        let relationship_count = if need_relationships {
-            snapshot_statistics.relationship_count
-        } else {
-            0
-        };
-        let type_counts = relationship_types
-            .iter()
-            .filter_map(|type_id| {
-                snapshot_statistics
-                    .type_counts
-                    .get(type_id)
-                    .copied()
-                    .map(|count| (*type_id, count))
-            })
-            .collect::<BTreeMap<_, _>>();
-        let average_out_degree = if node_count == 0 {
-            0.0
-        } else {
-            relationship_count as f64 / node_count as f64
-        };
         Ok(Self {
-            node_count,
-            relationship_count,
-            average_out_degree,
-            label_counts,
-            type_counts,
+            node_count: statistics.node_count,
+            relationship_count: statistics.relationship_count,
+            average_out_degree: if statistics.node_count > 0 {
+                statistics.relationship_count as f64 / statistics.node_count as f64
+            } else {
+                0.0
+            },
+            label_counts: statistics.label_counts,
+            type_counts: statistics.type_counts,
         })
     }
 

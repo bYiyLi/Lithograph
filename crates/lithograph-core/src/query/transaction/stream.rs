@@ -46,7 +46,7 @@ impl<'a> StreamExecution<'a, '_> {
 #[derive(Debug)]
 pub(crate) struct TransactionProgramStream {
     prefix: program::ProgramStream,
-    prefix_commit: HashId,
+    prefix_state: storage::ResolvedSnapshotState,
     prefix_graph_view: ResolvedGraphView,
     subquery: AstNode,
     spec: TransactionSpec,
@@ -141,7 +141,7 @@ fn transaction_stream_shape(
 fn transaction_stream_output_policy(
     connection: &Connection,
     program: &PreparedProgram,
-    initial_commit: HashId,
+    initial_snapshot: &Snapshot<'_>,
     params: &BTreeMap<String, Value>,
     call_columns: &[String],
     shape: &TransactionStreamShape,
@@ -154,7 +154,7 @@ fn transaction_stream_output_policy(
             || !suffix_prefix_streamable(
                 connection,
                 program,
-                initial_commit,
+                initial_snapshot,
                 params,
                 call_columns,
                 &suffix[..write_index],
@@ -175,7 +175,7 @@ fn transaction_stream_output_policy(
         && !suffix_stream_matches_program(
             connection,
             program,
-            initial_commit,
+            initial_snapshot,
             params,
             call_columns,
             suffix,
@@ -233,7 +233,7 @@ fn outer_write_suffix_supported(suffix: &[AstNode]) -> bool {
 fn suffix_prefix_streamable(
     connection: &Connection,
     program: &PreparedProgram,
-    initial_commit: HashId,
+    snapshot: &Snapshot<'_>,
     params: &BTreeMap<String, Value>,
     call_columns: &[String],
     prefix: &[AstNode],
@@ -242,12 +242,10 @@ fn suffix_prefix_streamable(
     if prefix.is_empty() {
         return Ok(true);
     }
-    let snapshot =
-        crate::query::graph::resolve_snapshot_with_control(connection, initial_commit, control)?;
     Ok(program::build_program_suffix_stream(
         connection,
         program,
-        &snapshot,
+        snapshot,
         params,
         RowSet {
             columns: call_columns.to_vec(),
@@ -263,18 +261,16 @@ fn suffix_prefix_streamable(
 fn suffix_stream_matches_program(
     connection: &Connection,
     program: &PreparedProgram,
-    initial_commit: HashId,
+    snapshot: &Snapshot<'_>,
     params: &BTreeMap<String, Value>,
     call_columns: &[String],
     suffix: &[AstNode],
     control: &ExecutionControl<'_>,
 ) -> QueryResult<bool> {
-    let snapshot =
-        crate::query::graph::resolve_snapshot_with_control(connection, initial_commit, control)?;
     let Some(stream) = program::build_program_suffix_stream(
         connection,
         program,
-        &snapshot,
+        snapshot,
         params,
         RowSet {
             columns: call_columns.to_vec(),
@@ -295,6 +291,7 @@ impl TransactionProgramStream {
         connection: &Connection,
         program: &PreparedProgram,
         initial_commit: HashId,
+        initial_state: Option<&storage::ResolvedSnapshotState>,
         params: &BTreeMap<String, Value>,
         control: &ExecutionControl<'_>,
     ) -> QueryResult<Option<Self>> {
@@ -310,11 +307,14 @@ impl TransactionProgramStream {
             return Ok(None);
         };
 
-        let prefix_snapshot = crate::query::graph::resolve_snapshot_with_control(
-            connection,
-            initial_commit,
-            control,
-        )?;
+        let prefix_snapshot = match initial_state {
+            Some(state) => Snapshot::from_resolved_state(connection, state),
+            None => crate::query::graph::resolve_snapshot_with_control(
+                connection,
+                initial_commit,
+                control,
+            )?,
+        };
         let prefix_graph_view = ResolvedGraphView::resolve(connection, &options.graph_view)?
             .with_query_access(options.access.read.query.clone());
         let Some(prefix) = program::build_program_prefix_stream(
@@ -334,7 +334,7 @@ impl TransactionProgramStream {
         let Some(output_policy) = transaction_stream_output_policy(
             connection,
             program,
-            initial_commit,
+            &prefix_snapshot,
             params,
             &call_columns,
             &shape,
@@ -346,7 +346,7 @@ impl TransactionProgramStream {
 
         Ok(Some(Self {
             prefix,
-            prefix_commit: initial_commit,
+            prefix_state: prefix_snapshot.resolved_state(),
             prefix_graph_view,
             subquery: shape.subquery,
             spec: shape.spec,
@@ -451,11 +451,7 @@ impl TransactionProgramStream {
         if self.upstream_done {
             return Ok(None);
         }
-        let snapshot = crate::query::graph::resolve_snapshot_with_control(
-            execution.connection,
-            self.prefix_commit,
-            execution.control,
-        )?;
+        let snapshot = Snapshot::from_resolved_state(execution.connection, &self.prefix_state);
         let next = self.prefix.next_binding(
             execution.connection,
             &snapshot,

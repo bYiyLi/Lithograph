@@ -17,7 +17,7 @@ use super::graph::ResolvedGraphView;
 use super::options::{ExecutionOptions, GraphViewSelector, writable_branch};
 use super::plan::{
     Direction, LogicalOperator, LogicalPlan, MatchStep, OrderItem, Projection, ProjectionPlan,
-    append_pattern_operators, lower_match, lower_projection,
+    lower_match, lower_projection,
 };
 use super::resources::{ExecutionControl, MemoryReservation};
 use super::stream::QueryMetrics;
@@ -31,7 +31,7 @@ pub(crate) use execute::{
     TransactionBatchOutcome, TransactionMutationContext, execute_program,
     execute_program_suffix_transaction, execute_spilled_outer_write_transaction,
     execute_transaction_batch, execute_write, materialize_binding_rows_to_spill,
-    property_from_value_controlled, spill_value_rows,
+    prepare_streamed_write, property_from_value_controlled, spill_value_rows,
 };
 
 #[derive(Debug, Clone)]
@@ -46,6 +46,25 @@ pub(crate) struct PreparedWrite {
     pub(crate) columns: Vec<String>,
     pub(crate) logical: LogicalPlan,
     pub(crate) matches_for_explain: Vec<MatchStep>,
+    pub(crate) profile_sites: Vec<super::plan::ProfileBinding>,
+}
+
+impl PreparedWrite {
+    pub(crate) fn constrain_fresh_identity_matches(&mut self, allowed: &[usize]) {
+        for clause in &mut self.clauses {
+            if let WriteClause::Match {
+                clause,
+                fresh_identity,
+                allow_legacy_node_id,
+                planned,
+                ..
+            } = clause
+            {
+                *fresh_identity &= allowed.contains(&clause.span.start);
+                *allow_legacy_node_id = allowed.contains(&clause.span.start) || planned.is_some();
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +72,9 @@ enum WriteClause {
     Match {
         clause: AstNode,
         optional: bool,
+        planned: Option<MatchStep>,
+        fresh_identity: bool,
+        allow_legacy_node_id: bool,
     },
     Create(Vec<WritePatternPart>),
     Set(Vec<SetItem>),
@@ -218,43 +240,69 @@ struct LoweredClause {
 }
 
 pub(crate) fn prepare_write(
-    connection: &Connection,
+    snapshot: &Snapshot<'_>,
     single: &AstNode,
     source: &str,
     params: &BTreeMap<String, Value>,
     options: &ExecutionOptions,
-) -> QueryResult<PreparedWrite> {
+    control: &ExecutionControl<'_>,
+) -> QueryResult<(PreparedWrite, MemoryReservation)> {
+    let connection = snapshot.connection_for_query();
     let branch = writable_branch(connection, options)?;
+    let view = ResolvedGraphView::resolve(connection, &options.graph_view)?
+        .with_query_access(options.access.read.query.clone());
+    let mut budget = super::plan::PlanningBudget::default();
+    let mut memory = control.reserve(0)?;
+    let mut mutated = false;
+    let mut fresh_identity_count = 0;
+    let mut incoming = Vec::new();
     let mut clauses = Vec::new();
     let mut projection = None;
     let mut logical = Vec::new();
     let mut matches_for_explain = Vec::new();
+    let mut profile_sites = Vec::new();
     let mut explain_bound = BTreeSet::new();
 
     for clause in &single.children {
-        let Some(lowered) = lower_plan_clause(connection, clause, source, params)? else {
+        control.check()?;
+        let Some(mut lowered) = lower_plan_clause(connection, clause, source, params)? else {
             continue;
         };
-        if let Some(step) = lowered.explain_match.as_ref() {
-            if step.optional {
-                logical.push(LogicalOperator::Optional);
-            }
-            append_pattern_operators(step, &mut explain_bound, &mut logical);
-            if step.predicate.is_some() {
-                logical.push(LogicalOperator::Filter);
-            }
+        let next_columns = super::completeness::infer_clause_columns(clause, &incoming, source)?;
+        if let Some(step) = lowered.explain_match.as_mut() {
+            super::plan::constrain_match_scope(step, &incoming);
         }
-        logical.extend(lowered.logical);
-        if let Some(write) = lowered.write {
-            bind_write_variables(&write, &mut explain_bound);
-            clauses.push(write);
+        if !mutated {
+            memory.merge(plan_lowered_match(
+                snapshot,
+                &view,
+                &mut lowered,
+                params,
+                control,
+                &mut budget,
+                (clause.span.start, &incoming, &next_columns),
+            )?)?;
+        } else {
+            memory.merge(plan_fresh_identity_match(
+                connection,
+                &mut lowered,
+                params,
+                control,
+                &mut budget,
+                &mut fresh_identity_count,
+                &incoming,
+            )?)?;
         }
-        if let Some(return_projection) = lowered.projection {
-            projection = Some(return_projection);
-        }
-        if let Some(step) = lowered.explain_match {
-            matches_for_explain.push(step);
-        }
+        mutated |= append_lowered_write_clause(
+            lowered,
+            &mut explain_bound,
+            &mut clauses,
+            &mut projection,
+            &mut logical,
+            &mut matches_for_explain,
+            &mut profile_sites,
+        );
+        incoming = next_columns;
     }
     logical.push(LogicalOperator::Commit);
     let columns = projection
@@ -267,18 +315,139 @@ pub(crate) fn prepare_write(
                 .collect()
         })
         .unwrap_or_default();
-    Ok(PreparedWrite {
-        clauses,
-        projection,
-        graph_view: options.graph_view.clone(),
-        access: options.access.clone(),
-        branch,
-        author: options.author.clone(),
-        message: options.message.clone(),
-        columns,
-        logical: LogicalPlan { operators: logical },
-        matches_for_explain,
-    })
+    Ok((
+        PreparedWrite {
+            clauses,
+            projection,
+            graph_view: options.graph_view.clone(),
+            access: options.access.clone(),
+            branch,
+            author: options.author.clone(),
+            message: options.message.clone(),
+            columns,
+            logical: LogicalPlan { operators: logical },
+            matches_for_explain,
+            profile_sites,
+        },
+        memory,
+    ))
+}
+
+fn append_lowered_write_clause(
+    lowered: LoweredClause,
+    bound: &mut BTreeSet<String>,
+    clauses: &mut Vec<WriteClause>,
+    projection: &mut Option<WriteProjection>,
+    logical: &mut Vec<LogicalOperator>,
+    matches_for_explain: &mut Vec<MatchStep>,
+    sites: &mut Vec<super::plan::ProfileBinding>,
+) -> bool {
+    append_lowered_match(&lowered, bound, logical, sites);
+    logical.extend(lowered.logical);
+    let mut mutated = false;
+    if let Some(write) = lowered.write {
+        mutated = !matches!(write, WriteClause::Match { .. });
+        bind_write_variables(&write, bound);
+        clauses.push(write);
+    }
+    if let Some(return_projection) = lowered.projection {
+        *projection = Some(return_projection);
+    }
+    if let Some(step) = lowered.explain_match {
+        matches_for_explain.push(step);
+    }
+    mutated
+}
+
+fn append_lowered_match(
+    lowered: &LoweredClause,
+    bound: &mut BTreeSet<String>,
+    logical: &mut Vec<LogicalOperator>,
+    sites: &mut Vec<super::plan::ProfileBinding>,
+) {
+    if let Some(step) = lowered.explain_match.as_ref() {
+        if step.optional {
+            logical.push(LogicalOperator::Optional);
+        }
+        super::plan::append_pattern_operators_with_sites(step, bound, logical, sites);
+        super::plan::append_match_residual(step, logical, sites);
+    }
+}
+
+fn plan_lowered_match(
+    snapshot: &Snapshot<'_>,
+    view: &ResolvedGraphView,
+    lowered: &mut LoweredClause,
+    params: &BTreeMap<String, Value>,
+    control: &ExecutionControl<'_>,
+    budget: &mut super::plan::PlanningBudget,
+    scope: (usize, &[String], &[String]),
+) -> QueryResult<MemoryReservation> {
+    let (clause_start, incoming, declared_columns) = scope;
+    let Some(step) = lowered.explain_match.as_mut() else {
+        return control.reserve(0);
+    };
+    if !super::plan::constrain_match_scope(step, incoming) {
+        return control.reserve(0);
+    }
+    let (_, mut memory) = super::plan::plan_access(
+        snapshot,
+        view,
+        std::slice::from_mut(step),
+        params,
+        control,
+        budget,
+        Some(&super::plan::join::JoinClauseScope {
+            clause_start,
+            snapshot_identity: snapshot.cache_identity(),
+            incoming,
+            declared_columns,
+        }),
+    )?;
+    if let Some(WriteClause::Match { planned, .. }) = lowered.write.as_mut() {
+        memory.merge(super::plan::reserve_match_seeks(step, control)?)?;
+        *planned = Some(step.clone());
+    }
+    Ok(memory)
+}
+
+fn plan_fresh_identity_match(
+    connection: &Connection,
+    lowered: &mut LoweredClause,
+    params: &BTreeMap<String, Value>,
+    control: &ExecutionControl<'_>,
+    budget: &mut super::plan::PlanningBudget,
+    count: &mut usize,
+    incoming: &[String],
+) -> QueryResult<MemoryReservation> {
+    let Some(WriteClause::Match {
+        clause,
+        fresh_identity,
+        ..
+    }) = lowered.write.as_mut()
+    else {
+        return control.reserve(0);
+    };
+    let Some((states, bytes)) =
+        super::completeness::execute::identity::identity_clause_size(clause)
+    else {
+        return control.reserve(0);
+    };
+    if *count >= 128 || !budget.work(states, bytes.saturating_mul(2)) {
+        return control.reserve(0);
+    }
+    if let Some(step) = lowered.explain_match.as_mut() {
+        super::plan::constrain_match_scope(step, incoming);
+    }
+    let Some(step) = super::completeness::execute::identity::lower_identity_match(
+        connection, clause, params, incoming,
+    ) else {
+        return control.reserve(0);
+    };
+    *fresh_identity = true;
+    *count += 1;
+    lowered.explain_match = Some(step);
+    control.reserve(0)
 }
 
 fn lower_plan_clause(
@@ -342,6 +511,9 @@ fn lower_match_clause(
         write: Some(WriteClause::Match {
             clause: clause.clone(),
             optional,
+            planned: None,
+            fresh_identity: false,
+            allow_legacy_node_id: true,
         }),
         projection: None,
         logical: vec![LogicalOperator::Eager],

@@ -11,6 +11,7 @@ use super::{QueryError, QueryErrorKind, QueryResult};
 
 mod encoding;
 mod sizing;
+mod snapshots;
 pub use encoding::{
     encoded_json_bytes, encoded_json_bytes_controlled, encoded_row_bytes,
     encoded_row_bytes_controlled,
@@ -34,6 +35,7 @@ struct ResourceState {
     limit: Option<u64>,
     used: AtomicU64,
     peak: AtomicU64,
+    snapshot_pins: snapshots::SnapshotPins,
 }
 
 impl QueryResources {
@@ -43,6 +45,7 @@ impl QueryResources {
                 limit,
                 used: AtomicU64::new(0),
                 peak: AtomicU64::new(0),
+                snapshot_pins: snapshots::SnapshotPins::default(),
             }),
         }
     }

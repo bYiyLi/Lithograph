@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use rusqlite::{Connection, OptionalExtension, Statement, params};
+use rusqlite::{Connection, OptionalExtension, Statement, params, types::ValueRef};
 
 use crate::storage::{
     self, HashId, IndexDefinition, IndexTarget, OwnerKind, SchemaState, Snapshot, StandardIndexKind,
@@ -12,8 +12,11 @@ use super::cache::{
     NODE_OWNER_KIND, RANGE_FAMILY_NUMBER, RANGE_FAMILY_STRING, RELATIONSHIP_OWNER_KIND,
     RangeOrderKey, range_order_key,
 };
+use crate::query::plan::PlanningBudget;
 
 mod controlled;
+mod distribution;
+mod statistics;
 use crate::query::resources::{
     ExecutionControl, MemoryReservation, checked_add, checked_mul, map_entry_bytes,
 };
@@ -21,6 +24,8 @@ pub(crate) use controlled::{
     build_persistent_generation, ensure_standard_indexes_for_commit_controlled,
 };
 pub(super) use controlled::{definition_workspace, equality_key};
+pub(crate) use distribution::{IndexDistribution, estimate_index_distribution};
+pub(crate) use statistics::estimate_index_access;
 
 #[cfg(not(test))]
 const GENERATION_COPY_PAGE_SIZE: i64 = 4_096;
@@ -39,6 +44,12 @@ const CACHE_LOOKUP_INSERT_SQL: &str = "INSERT OR REPLACE INTO temp._lithograph_s
 struct PersistentGeneration {
     id: i64,
     anchor: HashId,
+}
+
+enum CachedIndexBinding {
+    Local,
+    Persistent(PersistentGeneration),
+    Invalid,
 }
 
 pub(super) fn ensure_index_cache(
@@ -70,10 +81,10 @@ fn cached_index_binding_ready(
     let connection = snapshot.connection_for_query();
     let cached = connection
         .query_row(
-            "SELECT generation_id, CASE WHEN length(generation_anchor)=32 THEN generation_anchor END FROM temp._lithograph_standard_index_cache_meta \
+            "SELECT generation_id, generation_anchor FROM temp._lithograph_standard_index_cache_meta \
              WHERE snapshot_hash = ?1 AND index_name = ?2 AND complete = 1",
             params![snapshot.cache_identity().as_bytes().as_slice(), index.name],
-            |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<Vec<u8>>>(1)?)),
+            read_cached_index_binding,
         )
         .optional()?;
     if let Some(binding) = cached.as_ref()
@@ -85,6 +96,22 @@ fn cached_index_binding_ready(
         clear_query_index_cache(snapshot, index)?;
     }
     Ok(false)
+}
+
+fn read_cached_index_binding(row: &rusqlite::Row<'_>) -> rusqlite::Result<CachedIndexBinding> {
+    Ok(match (row.get_ref(0)?, row.get_ref(1)?) {
+        (ValueRef::Null, ValueRef::Null) => CachedIndexBinding::Local,
+        (ValueRef::Integer(id), ValueRef::Blob(anchor)) if id > 0 => {
+            match <[u8; 32]>::try_from(anchor) {
+                Ok(anchor) => CachedIndexBinding::Persistent(PersistentGeneration {
+                    id,
+                    anchor: HashId::from_bytes(anchor),
+                }),
+                Err(_) => CachedIndexBinding::Invalid,
+            }
+        }
+        _ => CachedIndexBinding::Invalid,
+    })
 }
 
 fn bind_persistent_generation(
@@ -111,24 +138,38 @@ fn bind_persistent_generation(
 fn cached_index_binding_valid(
     connection: &Connection,
     index: &IndexDefinition,
-    binding: &(Option<i64>, Option<Vec<u8>>),
+    binding: &CachedIndexBinding,
     control: &ExecutionControl<'_>,
 ) -> QueryResult<bool> {
-    let (Some(generation_id), Some(cached_anchor)) = binding else {
-        return Ok(binding.0.is_none() && binding.1.is_none());
+    let generation = match binding {
+        CachedIndexBinding::Local => return Ok(true),
+        CachedIndexBinding::Invalid => return Ok(false),
+        CachedIndexBinding::Persistent(generation) => generation,
     };
-    let expected = index.canonical_identity_blob()?;
+    let (expected, expected_hash) = index_definition_identity(index)?;
     let mut statement = connection.prepare(
         "SELECT anchor_commit, definition_blob FROM main._lithograph_index_generations \
-         WHERE generation_id = ?1 AND encoding_version = ?2 AND complete = 1",
+         WHERE generation_id = ?1 AND encoding_version = ?2 AND complete = 1 \
+         AND typeof(generation_id) = 'integer' AND typeof(encoding_version) = 'integer' \
+         AND typeof(complete) = 'integer' AND typeof(anchor_commit) = 'blob' \
+         AND length(anchor_commit) = 32 AND typeof(definition_blob) = 'blob' \
+         AND length(definition_blob) = ?3 AND typeof(definition_hash) = 'blob' \
+         AND definition_hash = ?4",
     )?;
-    let mut rows = statement.query(params![generation_id, INDEX_ENCODING_VERSION])?;
+    let mut rows = statement.query(params![
+        generation.id,
+        INDEX_ENCODING_VERSION,
+        expected.len() as i64,
+        expected_hash.as_bytes().as_slice()
+    ])?;
     let Some(row) = rows.next()? else {
         return Ok(false);
     };
-    let anchor = row.get_ref(0)?.as_blob().map_err(rusqlite::Error::from)?;
-    let definition = row.get_ref(1)?.as_blob().map_err(rusqlite::Error::from)?;
-    if anchor != cached_anchor || definition.len() != expected.len() {
+    let (ValueRef::Blob(anchor), ValueRef::Blob(definition)) = (row.get_ref(0)?, row.get_ref(1)?)
+    else {
+        return Ok(false);
+    };
+    if anchor != generation.anchor.as_bytes() || definition.len() != expected.len() {
         return Ok(false);
     }
     for (actual, expected) in definition.chunks(64 * 1024).zip(expected.chunks(64 * 1024)) {
@@ -721,7 +762,7 @@ fn compatible_persistent_generation(
     }
     let (definition_blob, definition_hash) = index_definition_identity(index)?;
     let (candidates, _candidates_memory) =
-        load_generation_candidates(connection, definition_hash, control)?;
+        load_generation_candidates(connection, definition_hash, definition_blob.len(), control)?;
     let mut current = snapshot.commit();
     loop {
         control.work(1)?;
@@ -747,13 +788,16 @@ type GenerationCandidate = (i64, Vec<u8>);
 fn load_generation_candidates(
     connection: &Connection,
     definition_hash: HashId,
+    definition_length: usize,
     control: &ExecutionControl<'_>,
 ) -> QueryResult<(BTreeMap<HashId, GenerationCandidate>, MemoryReservation)> {
     let mut memory = control.reserve(0)?;
     let mut statement = connection.prepare(
         "SELECT generation_id, anchor_commit, definition_blob \
          FROM main._lithograph_index_generations \
-         WHERE definition_hash = ?1 AND encoding_version = ?2 AND complete = 1",
+         WHERE definition_hash = ?1 AND encoding_version = ?2 AND complete = 1 \
+         AND typeof(definition_hash) = 'blob' AND typeof(encoding_version) = 'integer' \
+         AND typeof(complete) = 'integer'",
     )?;
     let mut rows = statement.query(params![
         definition_hash.as_bytes().as_slice(),
@@ -762,19 +806,32 @@ fn load_generation_candidates(
     let mut candidates = BTreeMap::new();
     while let Some(row) = rows.next()? {
         control.work(1)?;
-        let (anchor, candidate) = read_generation_candidate(row, &mut memory, control)?;
-        candidates.insert(anchor, candidate);
+        if let Some((anchor, candidate)) =
+            read_generation_candidate(row, definition_length, &mut memory, control)?
+        {
+            candidates.insert(anchor, candidate);
+        }
     }
     Ok((candidates, memory))
 }
 
 fn read_generation_candidate(
     row: &rusqlite::Row<'_>,
+    definition_length: usize,
     memory: &mut MemoryReservation,
     control: &ExecutionControl<'_>,
-) -> QueryResult<(HashId, GenerationCandidate)> {
-    let anchor = HashId::from_slice(row.get_ref(1)?.as_blob().map_err(rusqlite::Error::from)?)?;
-    let definition = row.get_ref(2)?.as_blob().map_err(rusqlite::Error::from)?;
+) -> QueryResult<Option<(HashId, GenerationCandidate)>> {
+    let (ValueRef::Integer(id), ValueRef::Blob(anchor), ValueRef::Blob(definition)) =
+        (row.get_ref(0)?, row.get_ref(1)?, row.get_ref(2)?)
+    else {
+        return Ok(None);
+    };
+    let Ok(anchor) = <[u8; 32]>::try_from(anchor) else {
+        return Ok(None);
+    };
+    if id <= 0 || definition.len() != definition_length {
+        return Ok(None);
+    }
     memory.grow(checked_add(
         map_entry_bytes::<GenerationCandidate>()?,
         definition.len() as u64,
@@ -784,7 +841,7 @@ fn read_generation_candidate(
         control.check()?;
         blob.extend_from_slice(chunk);
     }
-    Ok((anchor, (row.get(0)?, blob)))
+    Ok(Some((HashId::from_bytes(anchor), (id, blob))))
 }
 
 fn valid_generation_candidate(
@@ -802,7 +859,7 @@ fn valid_generation_candidate(
     })
 }
 
-fn index_definition_identity(index: &IndexDefinition) -> QueryResult<(Vec<u8>, HashId)> {
+pub(super) fn index_definition_identity(index: &IndexDefinition) -> QueryResult<(Vec<u8>, HashId)> {
     let definition_blob = index.canonical_identity_blob()?;
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"LITHOGRAPH_INDEX_DEFINITION_V1");
@@ -833,9 +890,7 @@ fn persistent_index_storage_available(connection: &Connection) -> QueryResult<bo
     Ok(exists == 1)
 }
 
-fn ensure_cache_tables(connection: &Connection) -> QueryResult<()> {
-    connection.execute_batch(
-        "CREATE TEMP TABLE IF NOT EXISTS _lithograph_standard_index_cache_meta(\
+const CACHE_TABLES_SQL: &str = "CREATE TEMP TABLE IF NOT EXISTS _lithograph_standard_index_cache_meta(\
              snapshot_hash BLOB NOT NULL, index_name TEXT NOT NULL, complete INTEGER NOT NULL, \
              generation_id INTEGER, generation_anchor BLOB,\
              PRIMARY KEY(snapshot_hash, index_name)) WITHOUT ROWID;\
@@ -850,8 +905,44 @@ fn ensure_cache_tables(connection: &Connection) -> QueryResult<()> {
              id INTEGER PRIMARY KEY CHECK(id = 1), storage_format INTEGER NOT NULL);\
          CREATE TEMP TABLE IF NOT EXISTS _lithograph_standard_index_changed_owners(\
              snapshot_hash BLOB NOT NULL, index_name TEXT NOT NULL, owner_kind INTEGER NOT NULL, owner_id INTEGER NOT NULL,\
-             PRIMARY KEY(snapshot_hash, index_name, owner_kind, owner_id)) WITHOUT ROWID;",
-    )?;
+             PRIMARY KEY(snapshot_hash, index_name, owner_kind, owner_id)) WITHOUT ROWID;";
+
+/// Compile the actual optional TEMP DDL without stepping it. A host authorizer
+/// can deny TEMP writes even when query_only is off. Only AUTH from these fixed
+/// initialization statements means unavailable advice; all other errors remain
+/// errors, and the host callback is never replaced.
+pub(super) fn cache_initialization_allowed(
+    connection: &Connection,
+    control: &ExecutionControl<'_>,
+    budget: &mut PlanningBudget,
+) -> QueryResult<bool> {
+    for sql in CACHE_TABLES_SQL
+        .split(';')
+        .filter(|sql| !sql.trim().is_empty())
+    {
+        control.work(1)?;
+        if !budget.work(1, 0) {
+            return Ok(false);
+        }
+        match connection.prepare(sql) {
+            // CREATE IF NOT EXISTS remains write-classified even for an
+            // existing table. A readonly compilation here means an authorizer
+            // ignored the required TEMP write, not a usable warm binding.
+            Ok(statement) if statement.readonly() => return Ok(false),
+            Ok(statement) => drop(statement),
+            Err(rusqlite::Error::SqliteFailure(code, _))
+                if code.extended_code == rusqlite::ffi::SQLITE_AUTH =>
+            {
+                return Ok(false);
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(true)
+}
+
+fn ensure_cache_tables(connection: &Connection) -> QueryResult<()> {
+    connection.execute_batch(CACHE_TABLES_SQL)?;
     let storage_format = connection
         .query_row(
             "SELECT storage_format FROM main._lithograph_meta WHERE id = 1",

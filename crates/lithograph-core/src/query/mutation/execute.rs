@@ -12,7 +12,7 @@ mod value;
 pub(crate) use program::{
     TransactionBatchOutcome, TransactionMutationContext, execute_program,
     execute_program_suffix_transaction, execute_spilled_outer_write_transaction,
-    execute_transaction_batch,
+    execute_transaction_batch, prepare_streamed_write,
 };
 pub(crate) use value::{
     materialize_binding_rows_to_spill, property_from_value_controlled, spill_value_rows,
@@ -48,17 +48,15 @@ struct MutationContext<'connection, 'query> {
 }
 
 pub(crate) fn execute_write(
-    connection: &Connection,
+    base: Snapshot<'_>,
     prepared: &PreparedWrite,
-    base_commit: HashId,
     params: &BTreeMap<String, Value>,
     metrics: &mut QueryMetrics,
     resources: &QueryResources,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<WriteOutcome> {
-    let mut context = MutationContext::new(
-        connection,
-        base_commit,
+    let mut context = MutationContext::from_base(
+        base,
         params,
         &prepared.graph_view,
         &prepared.access,
@@ -142,10 +140,21 @@ fn execute_clause_spilled(
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<BindingSpill> {
     match clause {
-        WriteClause::Match { clause, optional } => execute_match_clause_spilled(
-            context,
+        WriteClause::Match {
             clause,
-            *optional,
+            optional,
+            planned,
+            fresh_identity,
+            allow_legacy_node_id,
+        } => execute_match_clause_spilled(
+            context,
+            (
+                clause,
+                *optional,
+                planned.as_ref(),
+                *fresh_identity,
+                *allow_legacy_node_id,
+            ),
             spill_connection,
             input,
             metrics,
@@ -187,38 +196,65 @@ fn execute_clause_spilled(
 
 fn execute_match_clause_spilled(
     context: &MutationContext<'_, '_>,
-    clause: &AstNode,
-    optional: bool,
+    match_clause: (&AstNode, bool, Option<&MatchStep>, bool, bool),
     spill_connection: &Connection,
     input: BindingSpill,
     metrics: &mut QueryMetrics,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<BindingSpill> {
+    let (clause, optional, planned, fresh_identity, allow_legacy_node_id) = match_clause;
     check_interrupted(is_interrupted)?;
     let snapshot = context.staged_snapshot()?;
     let graph_view = context.graph_view()?;
-    let mut step = lower_match(context.connection, clause, optional)?;
-    crate::query::plan::select_node_id_seeks(&mut step, context.params);
+    let mut fallback;
+    let step = if let Some(planned) = planned {
+        planned
+    } else {
+        fallback = lower_match(context.connection, clause, optional)?;
+        if allow_legacy_node_id {
+            crate::query::plan::select_node_id_seeks(&mut fallback, context.params);
+        }
+        if fresh_identity
+            && let Some(identity) =
+                crate::query::completeness::execute::identity::lower_identity_match(
+                    context.connection,
+                    clause,
+                    context.params,
+                    &[],
+                )
+        {
+            fallback = identity;
+        }
+        &fallback
+    };
     let mut output =
         BindingSpill::create_with_resources(spill_connection, context.control.resources().clone())?;
+    let mut bindings = crate::query::stream::MatchReadBindings::default();
     input.for_each_batch(
         spill_connection,
         BINDING_SPILL_BATCH_ROWS,
         &context.control,
         |rows| {
+            let _step_memory = crate::query::plan::reserve_match_seeks(step, &context.control)?;
+            let mut scoped = step.clone();
+            if let Some(first) = rows.first() {
+                crate::query::plan::constrain_match_scope(&mut scoped, &first.order);
+            }
             crate::query::stream::spill_match_step(
                 &snapshot,
                 &graph_view,
                 context.params,
                 rows,
-                &step,
+                &scoped,
                 metrics,
                 &context.control,
                 spill_connection,
                 &mut output,
+                &mut bindings,
             )
         },
     )?;
+    bindings.finish(step, metrics)?;
     input.abort(spill_connection)?;
     Ok(output)
 }

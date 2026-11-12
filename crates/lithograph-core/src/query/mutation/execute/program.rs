@@ -18,6 +18,8 @@ use super::value::materialize_binding_rows_to_spill;
 use super::*;
 
 mod load_csv;
+mod streamed;
+pub(crate) use streamed::prepare_streamed_write;
 
 use load_csv::execute_load_csv_tail;
 
@@ -58,21 +60,24 @@ impl<'a> TransactionMutationContext<'a> {
 }
 
 pub(crate) fn execute_program(
-    connection: &Connection,
+    base: Snapshot<'_>,
     program: &PreparedProgram,
-    base_commit: HashId,
     params: &BTreeMap<String, Value>,
     metrics: &mut QueryMetrics,
     resources: &QueryResources,
     is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<WriteOutcome> {
+    if let Some(outcome) =
+        streamed::try_execute(&base, program, params, metrics, resources, is_interrupted)?
+    {
+        return Ok(outcome);
+    }
     let options = program
         .write_options
         .as_ref()
         .ok_or_else(|| QueryError::internal("mutating program is missing write options"))?;
-    let mut context = MutationContext::new(
-        connection,
-        base_commit,
+    let mut context = MutationContext::from_base(
+        base,
         params,
         &options.graph_view,
         &options.access,
@@ -642,10 +647,10 @@ fn execute_single_clause(
         }
         ClauseKind::Call => execute_call(context, program, clause, rows, metrics, is_interrupted),
         ClauseKind::With => {
-            let projected = execute_read(context, program, clause, rows, metrics, is_interrupted)?;
+            let projected = execute_read(context, program, clause, rows, metrics)?;
             restore_global_bindings(projected, &context.global_bindings, &context.control)
         }
-        _ => execute_read(context, program, clause, rows, metrics, is_interrupted),
+        _ => execute_read(context, program, clause, rows, metrics),
     }
 }
 
@@ -723,7 +728,6 @@ fn execute_read(
     clause: &AstNode,
     rows: RowSet,
     metrics: &mut QueryMetrics,
-    is_interrupted: &dyn Fn() -> bool,
 ) -> QueryResult<RowSet> {
     let snapshot = context.staged_snapshot()?;
     let graph_view = context.graph_view()?;
@@ -734,9 +738,9 @@ fn execute_read(
         context.params,
         &program.source,
         clause,
+        program.identity_match_spans.contains(&clause.span.start),
         rows,
         metrics,
-        is_interrupted,
         &context.control,
     )
 }
@@ -754,7 +758,7 @@ fn execute_call(
         .iter()
         .find(|node| node.kind == AstKind::Subquery(SubqueryKind::Call))
     else {
-        return execute_read(context, program, clause, input, metrics, is_interrupted);
+        return execute_read(context, program, clause, input, metrics);
     };
     let body = required_query_body(subquery, "CALL subquery is missing its query body")?;
     execute_call_subquery_rows(

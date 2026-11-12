@@ -6,7 +6,7 @@ use crate::storage::{
 };
 use rusqlite::Connection;
 
-fn storage() -> Connection {
+pub(super) fn storage() -> Connection {
     let connection = Connection::open_in_memory().expect("SQLite");
     connection
         .execute_batch(
@@ -23,7 +23,7 @@ fn storage() -> Connection {
     connection
 }
 
-fn metadata(at: i64) -> CommitMetadata {
+pub(super) fn metadata(at: i64) -> CommitMetadata {
     CommitMetadata {
         author: None,
         message: None,
@@ -136,12 +136,9 @@ fn checkpoint_and_overlay_statistics_handle_add_delete_and_type_changes() {
         )
         .unwrap();
     let snapshot = Snapshot::resolve(&connection, second).expect("metadata-free snapshot");
-    assert!(
-        snapshot
-            .statistics(&BTreeSet::from(labels), &BTreeSet::from(types), true, true)
-            .unwrap()
-            .is_none()
-    );
+    // Incompatible derived metadata now causes a full canonical replay, so
+    // the exact small-overlay counts remain available rather than unknown.
+    assert_counts(&snapshot, &labels, &types, [2, 1, 1, 1, 0, 1]);
     drop(snapshot);
 
     delete_checkpoint(&connection, first).expect("derived checkpoint deleted");

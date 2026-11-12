@@ -4,17 +4,11 @@ pub(crate) fn build_program_stream(
     connection: &Connection,
     program: &PreparedProgram,
     snapshot: &Snapshot<'_>,
-    mode: ExecutionMode,
+    _mode: ExecutionMode,
     params: &std::collections::BTreeMap<String, Value>,
     control: &ExecutionControl<'_>,
 ) -> QueryResult<Option<ProgramStream>> {
-    if mode == ExecutionMode::Profile
-        || !program.public_result
-        || program.writes
-        || program.version_operation
-        || program.transaction_options.is_some()
-        || has_nonstreamable_operator(program)
-    {
+    if !supports_read_stream(program) {
         return Ok(None);
     }
 
@@ -23,7 +17,7 @@ pub(crate) fn build_program_stream(
         &ClauseStreamBuilder {
             connection,
             program,
-            snapshot,
+            _snapshot: snapshot,
             params,
             control,
         },
@@ -36,6 +30,14 @@ pub(crate) fn build_program_stream(
         return Ok(None);
     }
     Ok(Some(stream))
+}
+
+pub(crate) fn supports_read_stream(program: &PreparedProgram) -> bool {
+    program.public_result
+        && !program.writes
+        && !program.version_operation
+        && program.transaction_options.is_none()
+        && !has_nonstreamable_operator(program)
 }
 
 fn build_query_stream(
@@ -173,7 +175,7 @@ pub(crate) fn build_program_prefix_stream(
         &ClauseStreamBuilder {
             connection,
             program,
-            snapshot,
+            _snapshot: snapshot,
             params,
             control,
         },
@@ -204,7 +206,7 @@ pub(crate) fn build_program_suffix_stream(
         &ClauseStreamBuilder {
             connection,
             program,
-            snapshot,
+            _snapshot: snapshot,
             params,
             control,
         },
@@ -236,7 +238,7 @@ pub(crate) fn build_program_spilled_suffix_stream(
         &ClauseStreamBuilder {
             connection,
             program,
-            snapshot,
+            _snapshot: snapshot,
             params,
             control,
         },
@@ -284,7 +286,7 @@ fn build_clause_stream(
 struct ClauseStreamBuilder<'a, 'snapshot> {
     connection: &'a Connection,
     program: &'a PreparedProgram,
-    snapshot: &'a Snapshot<'snapshot>,
+    _snapshot: &'a Snapshot<'snapshot>,
     params: &'a std::collections::BTreeMap<String, Value>,
     control: &'a ExecutionControl<'a>,
 }
@@ -352,6 +354,10 @@ impl ClauseStreamBuilder<'_, '_> {
             return Ok(Some(Box::new(BatchClauseSource {
                 upstream: source,
                 clause: clause.clone(),
+                identity_allowed: self
+                    .program
+                    .identity_match_spans
+                    .contains(&clause.span.start),
                 source: self.program.source.clone(),
                 input_columns: columns.to_vec(),
                 output_columns: next_columns.to_vec(),
@@ -361,31 +367,44 @@ impl ClauseStreamBuilder<'_, '_> {
                 input_batch_rows: 1,
             })));
         }
-        let Ok(mut step) = crate::query::plan::lower_match(
+        let Ok(mut fallback) = crate::query::plan::lower_match(
             self.connection,
             clause,
             kind == ClauseKind::OptionalMatch,
         ) else {
             return Ok(None);
         };
-        crate::query::plan::select_node_id_seeks(&mut step, self.params);
-        let index_memory = if let Ok(schema) = self.snapshot.schema_state() {
-            crate::query::schema::select_standard_index_seeks(
-                &schema,
-                std::slice::from_mut(&mut step),
-                self.params,
-                &self.program.options.access.read.query,
-                self.snapshot,
-                self.control,
-            )?
-        } else {
-            self.control.reserve(0)?
-        };
+        // No costed plan survives a preceding write/batch boundary. A stable
+        // relationship identity can still select the same scalar cursor when
+        // this builder lowers its current connection/Snapshot clause anew.
+        if self
+            .program
+            .identity_match_spans
+            .contains(&clause.span.start)
+            && let Some(identity) =
+                crate::query::completeness::execute::identity::lower_identity_match(
+                    self.connection,
+                    clause,
+                    self.params,
+                    columns,
+                )
+        {
+            fallback = identity;
+        }
+        let selected = self
+            .program
+            .match_plans
+            .get(&clause.span.start)
+            .unwrap_or(&fallback);
+        let index_memory = crate::query::plan::reserve_match_seeks(selected, self.control)?;
+        let mut step = selected.clone();
+        crate::query::plan::constrain_match_scope(&mut step, columns);
         Ok(Some(Box::new(MatchSource {
             _index_memory: index_memory,
             upstream: source,
             step,
             current: None,
+            read_bindings: super::super::MatchReadBindings::default(),
         })))
     }
 
@@ -631,6 +650,7 @@ fn batch_clause_source(
     Box::new(BatchClauseSource {
         upstream,
         clause: clause.clone(),
+        identity_allowed: program.identity_match_spans.contains(&clause.span.start),
         source: program.source.clone(),
         input_columns: input_columns.to_vec(),
         output_columns: output_columns.to_vec(),

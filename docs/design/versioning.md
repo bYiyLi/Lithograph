@@ -330,7 +330,9 @@ Squash 不聚合被压缩 Commit 的 Commit Data，也不移动 Tag。新 Commit
 
 Reset / Revert 不修改既有 Commit Data 或 Tag；Revert 创建的新 Commit 默认没有 Data。
 
-Canonical history 不自动 GC。`lithograph.gc()` 只删除从任何 Branch、Tag **或 open Merge Session** 都不可达的 Commit / Layer；derived checkpoint/index/cache 可以自动回收，因为可重建。
+Canonical history 不自动 GC。`lithograph.gc()` 只删除从任何 Branch、Tag、open Merge Session 或当前 execution 仍活跃的 immutable Snapshot 都不可达的 Commit / Layer；derived checkpoint/index/cache 可以自动回收，因为可重建。
+
+同一 execution 可以在固定初始 Snapshot 上读取实体并执行多个 Version Procedure。即使其中的 Reset/Branch move 使原 Commit 从持久 ref 不可达，后续 GC 也必须保留该 execution 仍需读取的 Commit、祖先及其依赖；不能因为存在 checkpoint 与否而改变同一查询的结果。活跃 Snapshot 仅作为 query-local 临时 GC root，不创建 Branch/Tag、不修改 canonical identity，引用释放后后续独立 GC 可以正常回收。其他 connection 的已有 SQLite read snapshot 继续遵守原有 Read Guard 与事务规则。
 
 GC 对 canonical objects 按 reachability 删除：Commit 不可达后，其 Commit Data sidecar 一起删除；其 Layer 只有在没有其它 reachable Commit 引用时才删除；Schema object 同理。Tag 与 open Merge Session 都提供 root；Tag 不由 GC 自动删除，Merge Session 只由 finalize/abort 删除。Dictionary identity/name 是 database-global append-only metadata，即使当前没有 reachable Snapshot 使用也不回收，避免 ID 重用和历史/patch 解释变化。
 

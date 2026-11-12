@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use rusqlite::Connection;
 
 use super::*;
+#[cfg(feature = "test-support")]
 use crate::performance;
 use crate::query::{ExecutionOptions, QueryCursor, prepare};
 use crate::storage::{
@@ -113,14 +114,22 @@ fn staged_snapshot_reuses_persistent_generation_with_query_local_delta() {
         predicates: vec![(0, StandardIndexPredicate::Equal(Value::Integer(value)))],
     };
 
-    performance::reset();
-    performance::set_enabled(true);
+    #[cfg(feature = "test-support")]
+    {
+        performance::reset();
+        performance::set_enabled(true);
+    }
     let old = scan_node_index_page(&staged, &seek(1), None, 16).expect("old value seek");
     let new = scan_node_index_page(&staged, &seek(99), None, 16).expect("new value seek");
-    let counters = performance::snapshot();
-    performance::set_enabled(false);
+    #[cfg(feature = "test-support")]
+    let counters = {
+        let counters = performance::snapshot();
+        performance::set_enabled(false);
+        counters
+    };
     assert!(!old.items.contains(&node));
     assert_eq!(new.items, vec![node]);
+    #[cfg(feature = "test-support")]
     assert_eq!(counters.standard_index_builds, 0);
 }
 
@@ -184,8 +193,11 @@ fn bounded_numeric_range_uses_composite_cursor_across_changed_owner_overlay() {
             },
         )],
     };
-    performance::reset();
-    performance::set_enabled(true);
+    #[cfg(feature = "test-support")]
+    {
+        performance::reset();
+        performance::set_enabled(true);
+    }
     let mut cursor = None;
     let mut owners = Vec::new();
     loop {
@@ -201,14 +213,21 @@ fn bounded_numeric_range_uses_composite_cursor_across_changed_owner_overlay() {
             Some(StandardIndexCursor::NumericRange { .. })
         ));
     }
-    let counters = performance::snapshot();
-    performance::set_enabled(false);
+    #[cfg(feature = "test-support")]
+    let counters = {
+        let counters = performance::snapshot();
+        performance::set_enabled(false);
+        counters
+    };
     assert_eq!(owners.len(), 100);
     assert_eq!(owners.iter().copied().collect::<BTreeSet<_>>().len(), 100);
     assert!(!owners.contains(&old_50));
     assert!(owners.contains(&old_120));
-    assert_eq!(counters.standard_index_builds, 0);
-    assert_eq!(counters.changed_owners, 2);
+    #[cfg(feature = "test-support")]
+    {
+        assert_eq!(counters.standard_index_builds, 0);
+        assert_eq!(counters.changed_owners, 2);
+    }
 }
 
 #[test]

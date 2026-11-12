@@ -86,6 +86,7 @@ pub(crate) fn commit_layer_checked(
         layer,
         metadata,
         CommitRead {
+            base: None,
             observer: None,
             check,
         },
@@ -155,6 +156,7 @@ pub(crate) fn commit_layer_with_schema_checked(
         input,
         metadata,
         CommitRead {
+            base: None,
             observer: None,
             check,
         },
@@ -162,6 +164,7 @@ pub(crate) fn commit_layer_with_schema_checked(
 }
 
 pub(crate) struct CommitRead<'a> {
+    base: Option<Snapshot<'a>>,
     observer: Option<Rc<dyn SnapshotReadObserver>>,
     check: &'a dyn Fn() -> StorageResult<()>,
 }
@@ -172,6 +175,21 @@ impl<'a> CommitRead<'a> {
         check: &'a dyn Fn() -> StorageResult<()>,
     ) -> Self {
         Self {
+            base: None,
+            observer: Some(observer),
+            check,
+        }
+    }
+
+    /// Reuse a pinned immutable base without bypassing candidate validation.
+    /// Staged changes remain in the candidate Layer, never in this base.
+    pub(crate) fn observed_base(
+        base: &Snapshot<'a>,
+        observer: Rc<dyn SnapshotReadObserver>,
+        check: &'a dyn Fn() -> StorageResult<()>,
+    ) -> Self {
+        Self {
+            base: Some(base.clone()),
             observer: Some(observer),
             check,
         }
@@ -263,6 +281,12 @@ fn commit_change_inner(
     (read.check)()?;
     compare_and_move_branch(connection, branch, expected_head, commit)?;
     (read.check)()?;
+    super::checkpoint::maybe_auto_checkpoint(
+        connection,
+        commit,
+        read.observer.as_deref(),
+        read.check,
+    )?;
     Ok(commit)
 }
 
@@ -273,15 +297,27 @@ fn validate_candidate_layer(
     read: &CommitRead<'_>,
 ) -> StorageResult<()> {
     if !layer.is_empty() {
-        let state = Snapshot::resolve_state_with_checkpoint_skip(
-            connection,
-            expected_head,
-            None,
-            read.observer.clone(),
-            read.check,
-        )?;
-        Snapshot::from_resolved_state(connection, &state)
-            .validate_layer_invariants_checked(layer, read.check)?;
+        let base = match read.base.as_ref() {
+            Some(base) => {
+                if base.commit() != expected_head || !std::ptr::eq(base.connection, connection) {
+                    return Err(StorageError::corrupt(
+                        "Commit validation base identity mismatch",
+                    ));
+                }
+                base.clone()
+            }
+            None => {
+                let state = Snapshot::resolve_state_with_checkpoint_skip(
+                    connection,
+                    expected_head,
+                    None,
+                    read.observer.clone(),
+                    read.check,
+                )?;
+                Snapshot::from_resolved_state(connection, &state)
+            }
+        };
+        base.validate_layer_invariants_checked(layer, read.check)?;
     }
     Ok(())
 }
@@ -581,6 +617,76 @@ mod tests {
             matches!(error, StorageError::Sqlite(rusqlite::Error::SqliteFailure(code, _)) if code.extended_code == rusqlite::ffi::SQLITE_TOOBIG)
         );
         assert_eq!(branch_head(&connection, "main").unwrap(), first);
+        assert_eq!(counts(&connection), baseline);
+    }
+
+    #[test]
+    fn reused_validation_base_must_match_connection_and_expected_commit() {
+        let (connection, root) = fixture();
+        let first = commit_layer(
+            &connection,
+            "main",
+            root,
+            None,
+            &property_layer(&connection),
+            &metadata(),
+        )
+        .unwrap();
+        let (other, _) = fixture();
+        let state = Snapshot::resolve(&connection, first)
+            .unwrap()
+            .resolved_state();
+        for base in [
+            Snapshot::resolve(&connection, root).unwrap(),
+            Snapshot::from_resolved_state(&other, &state),
+        ] {
+            let mut candidate = LayerBuilder::default();
+            candidate
+                .add_node(allocate_node_id(&connection).unwrap())
+                .unwrap();
+            let baseline = counts(&connection);
+            let error = commit_layer_observed(
+                &connection,
+                "main",
+                first,
+                None,
+                &candidate,
+                &metadata(),
+                CommitRead::observed_base(&base, Rc::new(SmallReadBudget), &|| Ok(())),
+            )
+            .unwrap_err();
+            assert!(matches!(error, StorageError::Corrupt(_)));
+            assert_eq!(branch_head(&connection, "main").unwrap(), first);
+            assert_eq!(counts(&connection), baseline);
+        }
+    }
+
+    #[test]
+    fn reused_validation_base_still_rejects_invalid_graph_changes() {
+        let (connection, root) = fixture();
+        let base = Snapshot::resolve(&connection, root).unwrap();
+        let mut invalid = LayerBuilder::default();
+        invalid
+            .set_property(
+                OwnerKind::Node,
+                99,
+                intern_property_key(&connection, "v").unwrap(),
+                PropertyValue::Integer(1),
+            )
+            .unwrap();
+        let baseline = counts(&connection);
+        let error = commit_layer_observed(
+            &connection,
+            "main",
+            root,
+            None,
+            &invalid,
+            &metadata(),
+            CommitRead::observed_base(&base, Rc::new(SmallReadBudget), &|| Ok(())),
+        )
+        .unwrap_err();
+        assert!(matches!(error, StorageError::Corrupt(_)));
+        assert_eq!(branch_head(&connection, "main").unwrap(), root);
         assert_eq!(counts(&connection), baseline);
     }
 }

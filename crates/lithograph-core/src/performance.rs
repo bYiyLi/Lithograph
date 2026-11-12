@@ -9,8 +9,20 @@ use std::cell::Cell;
 /// Internal counters collected by the Phase 11 performance harness.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PerformanceCounters {
+    pub planner_states: u64,
+    pub planner_candidates: u64,
+    pub planner_bytes: u64,
+    pub planner_depth: u64,
+    pub planner_fallbacks: u64,
+    pub join_dphyp_pairs: u64,
+    pub join_exact_completed: u64,
+    pub join_greedy_fallbacks: u64,
     pub resolved_state_builds: u64,
     pub lineage_layers_loaded: u64,
+    pub checkpoint_builds: u64,
+    pub checkpoint_layers_replayed: u64,
+    pub checkpoint_ancestor_copies: u64,
+    pub checkpoint_rows_copied: u64,
     pub standard_index_builds: u64,
     pub changed_owners: u64,
     pub standard_index_scan_micros: u64,
@@ -28,8 +40,20 @@ pub struct PerformanceCounters {
 thread_local! {
     static ENABLED: Cell<bool> = const { Cell::new(false) };
     static COUNTERS: Cell<PerformanceCounters> = const { Cell::new(PerformanceCounters {
+        planner_states: 0,
+        planner_candidates: 0,
+        planner_bytes: 0,
+        planner_depth: 0,
+        planner_fallbacks: 0,
+        join_dphyp_pairs: 0,
+        join_exact_completed: 0,
+        join_greedy_fallbacks: 0,
         resolved_state_builds: 0,
         lineage_layers_loaded: 0,
+        checkpoint_builds: 0,
+        checkpoint_layers_replayed: 0,
+        checkpoint_ancestor_copies: 0,
+        checkpoint_rows_copied: 0,
         standard_index_builds: 0,
         changed_owners: 0,
         standard_index_scan_micros: 0,
@@ -60,12 +84,67 @@ pub fn snapshot() -> PerformanceCounters {
     COUNTERS.get()
 }
 
+pub(crate) fn record_planning(
+    states: usize,
+    candidates: usize,
+    bytes: usize,
+    depth: usize,
+    fallback: bool,
+) {
+    if ENABLED.get() {
+        let mut counters = COUNTERS.get();
+        counters.planner_states += states as u64;
+        counters.planner_candidates += candidates as u64;
+        counters.planner_bytes = counters.planner_bytes.max(bytes as u64);
+        counters.planner_depth = counters.planner_depth.max(depth as u64);
+        counters.planner_fallbacks += u64::from(fallback);
+        COUNTERS.set(counters);
+    }
+}
+
+pub(crate) fn record_join_search(pairs: usize, exact_complete: bool, greedy_fallback: bool) {
+    if ENABLED.get() {
+        let mut counters = COUNTERS.get();
+        counters.join_dphyp_pairs = counters.join_dphyp_pairs.saturating_add(pairs as u64);
+        counters.join_exact_completed = counters
+            .join_exact_completed
+            .saturating_add(u64::from(exact_complete));
+        counters.join_greedy_fallbacks = counters
+            .join_greedy_fallbacks
+            .saturating_add(u64::from(greedy_fallback));
+        COUNTERS.set(counters);
+    }
+}
+
 pub(crate) fn record_resolved_state(layers: usize) {
     if ENABLED.get() {
         let mut counters = COUNTERS.get();
         counters.resolved_state_builds = counters.resolved_state_builds.saturating_add(1);
         counters.lineage_layers_loaded =
             counters.lineage_layers_loaded.saturating_add(layers as u64);
+        COUNTERS.set(counters);
+    }
+}
+
+pub(crate) fn record_checkpoint_build(layers: usize, ancestor: bool) {
+    if ENABLED.get() {
+        let mut counters = COUNTERS.get();
+        counters.checkpoint_builds = counters.checkpoint_builds.saturating_add(1);
+        counters.checkpoint_layers_replayed = counters
+            .checkpoint_layers_replayed
+            .saturating_add(layers as u64);
+        counters.checkpoint_ancestor_copies = counters
+            .checkpoint_ancestor_copies
+            .saturating_add(u64::from(ancestor));
+        COUNTERS.set(counters);
+    }
+}
+
+pub(crate) fn record_checkpoint_copy(rows: usize) {
+    if ENABLED.get() {
+        let mut counters = COUNTERS.get();
+        counters.checkpoint_rows_copied =
+            counters.checkpoint_rows_copied.saturating_add(rows as u64);
         COUNTERS.set(counters);
     }
 }

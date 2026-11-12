@@ -1,5 +1,7 @@
 use super::*;
 
+mod rss;
+
 pub(super) struct AdapterExecution {
     cursor: query::QueryCursor,
     columns: Vec<String>,
@@ -481,15 +483,37 @@ pub(super) fn adapter_metadata_bytes(
         .metrics
         .operator_profile()
         .map_or(Ok(0), |operators| {
-            operators.iter().try_fold(0_u64, |bytes, operator| {
-                query::resources::checked_add(operator.operator.len() as u64, 8192)
-                    .and_then(|additional| query::resources::checked_add(bytes, additional))
-            })
+            let bytes = operators.iter().try_fold(0_u64, |bytes, operator| {
+                query::resources::checked_add(bytes, operator_profile_metadata_bytes(operator)?)
+            })?;
+            if operators.iter().any(|operator| operator.hash.is_some()) {
+                query::resources::checked_add(bytes, hash_memory_metadata_bytes()?)
+            } else {
+                Ok(bytes)
+            }
         })
         .map_err(map_query_error)?;
     query::resources::checked_add(columns_bytes, profile_bytes)
         .and_then(|bytes| query::resources::checked_add(bytes, 65536))
         .map_err(map_query_error)
+}
+
+fn operator_profile_metadata_bytes(
+    operator: &query::OperatorRuntimeMetrics,
+) -> query::QueryResult<u64> {
+    let base = query::resources::checked_add(operator.operator.len() as u64, 8192)?;
+    if operator.hash.is_none() {
+        return Ok(base);
+    }
+    // Nine fixed counter keys and their containing `hash` key, each at most
+    // 32 key bytes. Prepay their map nodes before constructing any JSON.
+    let entries = query::resources::checked_mul(query::resources::map_entry_bytes::<Value>()?, 10)?;
+    query::resources::checked_add(base, query::resources::checked_add(entries, 512)?)
+}
+
+fn hash_memory_metadata_bytes() -> query::QueryResult<u64> {
+    let entries = query::resources::checked_mul(query::resources::map_entry_bytes::<Value>()?, 2)?;
+    query::resources::checked_add(entries, 64)
 }
 
 pub(super) fn ensure_scalar_result_fits(
@@ -541,16 +565,39 @@ pub(super) fn summary_json(summary: &query::QuerySummary) -> Value {
         value["profile"] = json!({
             "operators": operators.iter().map(operator_profile_json).collect::<Vec<_>>(),
         });
+        if operators.iter().any(|operator| operator.hash.is_some()) {
+            value["profile"]["executionMemoryPeakBytes"] =
+                json!(summary.metrics.execution_memory_peak_bytes());
+            value["profile"]["processPeakRssBytes"] = json!(rss::process_peak_rss_bytes());
+        }
     }
     value
 }
 
 fn operator_profile_json(operator: &query::OperatorRuntimeMetrics) -> Value {
-    json!({
+    let mut value = json!({
         "id": operator.id,
         "operator": operator.operator,
         "rows": operator.rows,
         "dbHits": operator.db_hits,
+    });
+    if let Some(hash) = operator.hash {
+        value["hash"] = hash_profile_json(hash);
+    }
+    value
+}
+
+fn hash_profile_json(hash: query::HashJoinRuntimeMetrics) -> Value {
+    json!({
+        "buildRows": hash.build_rows,
+        "probeRows": hash.probe_rows,
+        "hashCollisions": hash.hash_collisions,
+        "spillPartitions": hash.spill_partitions,
+        "spillBatches": hash.spill_batches,
+        "spillVmSteps": hash.spill_vm_steps,
+        "spillEncodedBytes": hash.spill_encoded_bytes,
+        "memoryPeakBytes": hash.memory_peak_bytes,
+        "tempAllocatedBytes": hash.temp_allocated_bytes,
     })
 }
 
@@ -629,3 +676,6 @@ pub(super) fn map_query_error(error: query::QueryError) -> LithographError {
     mapped.column = error.column.map(u64::from);
     mapped
 }
+
+#[cfg(test)]
+mod hash_profile_tests;

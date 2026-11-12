@@ -1,6 +1,10 @@
 use super::*;
 use serde_json::{Map, Value as JsonValue, json};
 
+mod finite;
+#[cfg(test)]
+mod tests;
+
 fn check(control: Option<&ExecutionControl<'_>>) -> QueryResult<()> {
     control.map_or(Ok(()), ExecutionControl::check)
 }
@@ -36,35 +40,58 @@ fn decode_value(value: &JsonValue, control: &ExecutionControl<'_>) -> QueryResul
     })
 }
 
-fn stringify(value: &JsonValue, control: Option<&ExecutionControl<'_>>) -> QueryResult<String> {
+fn stringify(mut value: JsonValue, control: Option<&ExecutionControl<'_>>) -> QueryResult<String> {
     check(control)?;
-    let result = serde_json::to_string(value)
-        .map_err(|error| QueryError::internal(format!("failed to encode spill row: {error}")))?;
-    check(control)?;
-    Ok(result)
+    let scratch = finite::encoding_bytes(&value, control)?;
+    let scratch_memory = control
+        .map(|control| control.reserve(scratch))
+        .transpose()?;
+    let result = (|| {
+        finite::encode(&mut value, control)?;
+        let result = serde_json::to_string(&value).map_err(|error| {
+            QueryError::internal(format!("failed to encode spill row: {error}"))
+        })?;
+        check(control)?;
+        Ok(result)
+    })();
+    drop(value);
+    drop(scratch_memory);
+    result
 }
 
 fn parse(text: &str, control: &ExecutionControl<'_>) -> QueryResult<JsonValue> {
     control.check()?;
-    let result = serde_json::from_str(text)
+    let mut result = serde_json::from_str(text)
         .map_err(|error| QueryError::internal(format!("failed to decode spill row: {error}")))?;
     control.check()?;
+    finite::decode(&mut result, control)?;
     Ok(result)
 }
 
 pub(super) fn encode_row(row: &[Value], control: &ExecutionControl<'_>) -> QueryResult<String> {
     control.check()?;
+    // Compact Vector coordinates can expand from one byte to a full JSON slot.
+    // The caller's serialization lease already has a DOM allowance. Supplement
+    // it before allocation, preserving half for escaped text and String growth.
+    let _dom = control.reserve(dom_supplement(
+        super::super::resources::encoded_row_bytes_controlled(row, control)?,
+        row_bytes_controlled(row, control)?,
+    )?)?;
     let mut values = Vec::with_capacity(row.len());
     for value in row {
         values.push(encode_value(value, Some(control))?);
     }
-    stringify(&JsonValue::Array(values), Some(control))
+    stringify(JsonValue::Array(values), Some(control))
 }
 
 pub(super) fn encode_binding_row(
     row: &BindingRow,
     control: &ExecutionControl<'_>,
 ) -> QueryResult<String> {
+    let _dom = control.reserve(dom_supplement(
+        binding_scalar_json_bytes(row, control)?,
+        super::super::expression::binding_row_bytes_controlled(row, Some(control))?,
+    )?)?;
     let mut values = Map::new();
     for (name, value) in &row.values {
         control.work(1)?;
@@ -91,7 +118,28 @@ pub(super) fn encode_binding_row(
         "loadCsvContext".to_owned(),
         encode_context(row.load_csv_context.as_ref(), control)?,
     );
-    stringify(&JsonValue::Object(object), Some(control))
+    stringify(JsonValue::Object(object), Some(control))
+}
+
+fn binding_scalar_json_bytes(row: &BindingRow, control: &ExecutionControl<'_>) -> QueryResult<u64> {
+    row.values.values().try_fold(0, |bytes, value| {
+        control.work(1)?;
+        match value {
+            BindingValue::Scalar(value) => checked_add(
+                bytes,
+                super::super::resources::encoded_json_bytes_controlled(value, control)?,
+            ),
+            _ => Ok(bytes),
+        }
+    })
+}
+
+fn dom_supplement(encoded_tree: u64, raw: u64) -> QueryResult<u64> {
+    // serialization_bytes(raw) is 16 * raw + 1024. Keep 8 * raw + 512 for
+    // escaped output/growth and use the other half for the original JSON DOM.
+    // Extra Float/string protection is reserved separately by stringify.
+    let existing_dom = checked_add(checked_mul(raw, 8)?, 512)?;
+    Ok(encoded_tree.saturating_sub(existing_dom))
 }
 
 fn encode_context(
@@ -362,12 +410,20 @@ pub(in crate::query) fn distinct_row_key(
     row: &[Value],
     control: Option<&ExecutionControl<'_>>,
 ) -> QueryResult<String> {
+    let _dom = control
+        .map(|control| {
+            control.reserve(dom_supplement(
+                super::super::resources::encoded_row_bytes_controlled(row, control)?,
+                row_bytes_controlled(row, control)?,
+            )?)
+        })
+        .transpose()?;
     check(control)?;
     let mut key = Vec::with_capacity(row.len());
     for value in row {
         key.push(distinct_value_key(value, control)?);
     }
-    stringify(&JsonValue::Array(key), control)
+    stringify(JsonValue::Array(key), control)
 }
 
 fn tagged_key(label: &str, value: JsonValue) -> JsonValue {

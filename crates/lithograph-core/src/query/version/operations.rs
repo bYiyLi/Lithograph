@@ -581,7 +581,12 @@ fn row_memory(fields: u64) -> QueryResult<u64> {
 }
 
 pub(super) fn gc(connection: &Connection) -> QueryResult<VersionRows> {
-    let counters = storage::collect_garbage(connection)?;
+    let database = storage::snapshot_pin_identity(connection)?;
+    let (roots, _roots_memory) = connection
+        .control()
+        .resources()
+        .pinned_snapshot_commits(database)?;
+    let counters = storage::collect_garbage_with_read_roots(connection, &roots)?;
     let memory = connection.reserve(row_memory(5)?)?;
     Ok(VersionRows {
         value: vec![row([

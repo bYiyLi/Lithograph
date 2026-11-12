@@ -16,6 +16,7 @@ use super::spill::{
 };
 use super::{ExecutionControl, MemoryReservation, QueryError, QueryResult, check_interrupted};
 
+mod hash_metrics;
 mod match_pipeline;
 mod node_match;
 mod profile;
@@ -26,8 +27,12 @@ mod project;
 mod resources_tests;
 mod transaction;
 mod write;
-pub(crate) use match_pipeline::spill_match_step;
-use match_pipeline::{MatchPipeline, StepCursor};
+pub use hash_metrics::HashJoinRuntimeMetrics;
+use match_pipeline::MatchPipeline;
+pub(crate) use match_pipeline::{
+    HashLayoutFacts, hash_layout, hash_resident_target, hash_table_peak_bytes,
+};
+pub(crate) use match_pipeline::{MatchReadBindings, StepCursor, spill_match_step};
 use node_match::{node_matches, node_matches_scanned};
 pub use profile::{OperatorRuntimeMetrics, QueryMetrics};
 use project::{order_values, project_row};
@@ -464,7 +469,7 @@ impl QueryCursor {
                 self.batch_memory = Some(memory);
                 return self.finish(rows);
             };
-            self.metrics.record_active_rows(1);
+            self.metrics.record_pipeline_rows(1);
             if self.skipped < self.prepared.skip {
                 self.skipped += 1;
                 continue;
@@ -474,6 +479,14 @@ impl QueryCursor {
             rows.push(projected.values);
             self.emitted += 1;
             self.metrics.rows = self.metrics.rows.saturating_add(1);
+            // The loaded producer and output batch share one hard budget.
+            // Yield only after a complete row, before consuming another one.
+            if resources
+                .limit()
+                .is_some_and(|limit| memory.bytes() >= limit.saturating_sub(resources.used()))
+            {
+                break;
+            }
         }
         self.batch_memory = Some(memory);
         Ok(QueryBatch {
@@ -615,7 +628,7 @@ impl QueryCursor {
         else {
             return Ok(None);
         };
-        self.metrics.record_active_rows(1);
+        self.metrics.record_pipeline_rows(1);
         let row = project_row(&self.prepared, snapshot, &binding, &control)?;
         Ok(Some((binding, row)))
     }

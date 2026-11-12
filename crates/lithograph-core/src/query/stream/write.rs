@@ -146,9 +146,12 @@ impl QueryCursor {
     ) -> QueryResult<CursorWriteOutcome> {
         if let Some(write) = self.prepared.write.as_ref() {
             return super::super::mutation::execute_write(
-                connection,
+                prepared_snapshot(
+                    connection,
+                    &self.prepared,
+                    &ExecutionControl::new(&self.prepared.resources, is_interrupted),
+                )?,
                 write,
-                self.prepared.commit,
                 &self.prepared.params,
                 &mut self.metrics,
                 &self.prepared.resources,
@@ -201,9 +204,12 @@ impl QueryCursor {
             });
         }
         super::super::mutation::execute_program(
-            connection,
+            prepared_snapshot(
+                connection,
+                &self.prepared,
+                &ExecutionControl::new(&self.prepared.resources, is_interrupted),
+            )?,
             program,
-            self.prepared.commit,
             &self.prepared.params,
             &mut self.metrics,
             &self.prepared.resources,

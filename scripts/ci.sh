@@ -101,6 +101,15 @@ if [ -n "$extension" ]; then
   scripts/phase19-execution-resources.sh "$extension"
   python3 -B tests/phase19_resources_sql.py "$extension"
   python3 -B tests/phase21_predicate_routing_sql.py "$extension"
+  python3 -B tests/phase22_access_sql.py "$extension"
+  python3 -B tests/phase22_checkpoint_sql.py "$extension"
+  python3 -B tests/phase22_statistics_sql.py "$extension"
+  python3 -B tests/phase22_query_only_sql.py "$extension"
+  python3 -B tests/phase22_relationship_work.py --semantics-only "$extension"
+  python3 -B tests/phase22_join_work.py --semantics-only "$extension"
+  python3 -B tests/phase22_hash_work.py --semantics-only "$extension"
+  python3 -B tests/phase22_join_manifest_sql.py "$extension"
+  sh scripts/phase22-access.sh "$extension"
   python3 -B tests/phase21_predicate_routing_bench.py "$extension" 1000
   vm_results="$target_dir/phase21/vm-work-results.jsonl"
   mkdir -p "$target_dir/phase21"
@@ -128,6 +137,10 @@ assert large["fullscan_steps"] <= 2 * small["fullscan_steps"] + 1000, (
 )
 print("Phase 21 checkpointed SQLite VM scaling: passed", small, large)
 PY
+  phase22_history_dir=$(mktemp -d "$target_dir/phase22-history.XXXXXX")
+  python3 -B tests/phase22_history_work.py "$extension" "$phase22_history_dir" \
+    --checkpoint-tool "$target_dir/debug/lithograph-phase21-checkpoint" \
+    --vm-tool "$target_dir/phase21/vm-work" --nodes 32 --commits 10 --reopens 2
   scripts/openai-compatible-provider-smoke.sh "$openai_provider"
   scripts/sqlite-345-smoke.sh "$extension" "$openai_provider"
   scripts/sqlite-3534-smoke.sh "$extension" "$openai_provider"

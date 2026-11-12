@@ -604,7 +604,10 @@ fn commit_create(
             .transpose()?,
         committed_at: now_micros()?,
     };
-    let commit = storage::create_empty_commit(connection, &branch, pinned_commit, &metadata)
+    let schema_hash = storage::schema_hash_for_commit(connection, pinned_commit)?;
+    let empty = connection.empty_layer()?;
+    let commit = connection
+        .commit_layer_with_schema(&branch, pinned_commit, None, &empty, schema_hash, &metadata)
         .map_err(|error| map_target_branch_error(error, &branch))?;
     if let Some(data) = args.first() {
         let data = value_to_json_controlled(data, Some(connection.control()))?;

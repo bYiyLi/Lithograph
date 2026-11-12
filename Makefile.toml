@@ -104,6 +104,10 @@ args = [
     "tests/phase18_external_access_version.c",
     "tests/phase19_execution_resources.c",
     "tests/phase21_vm_work.c",
+    "tests/phase22_statement_reuse.c",
+    "tests/phase22_noindex_read_work.c",
+    "tests/phase22_temp_capabilities.c",
+    "tests/phase22_hash_stream.c",
     "tests/phase15_streaming_resource.c",
     "tests/openai_compatible_provider_smoke.c",
     "tests/phase13_semantic_concurrency.c",
@@ -210,6 +214,14 @@ cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase08 -
 cargo run --locked --quiet -p lithograph-test-support --bin lithograph-phase09 -- "$extension"
 scripts/sql-tx-smoke.sh "$extension"
 scripts/phase19-execution-resources.sh "$extension"
+python3 -B tests/phase22_access_sql.py "$extension"
+python3 -B tests/phase22_checkpoint_sql.py "$extension"
+python3 -B tests/phase22_statistics_sql.py "$extension"
+python3 -B tests/phase22_query_only_sql.py "$extension"
+python3 -B tests/phase22_relationship_work.py --semantics-only "$extension"
+python3 -B tests/phase22_join_work.py --semantics-only "$extension"
+python3 -B tests/phase22_hash_work.py --semantics-only "$extension"
+python3 -B tests/phase22_join_manifest_sql.py "$extension"
 rm -rf "$CARGO_TARGET_DIR/phase11-search-coverage"
 LITHOGRAPH_PHASE11_SEARCH_DIR="$CARGO_TARGET_DIR/phase11-search-coverage" \
 LITHOGRAPH_PHASE11_SEARCH_DOCUMENTS=512 \

@@ -46,6 +46,7 @@ pub(crate) struct ResolvedSnapshotState {
     pub(super) read_observer: Option<Rc<dyn SnapshotReadObserver>>,
     pub(super) local_memory: Option<Rc<super::snapshot_staged::LocalLayerMemory>>,
     pub(super) schema_memory: Option<ReadLease>,
+    pub(super) _snapshot_pin: Option<ReadLease>,
 }
 
 impl ResolvedSnapshotState {
@@ -133,6 +134,16 @@ impl<'connection> Snapshot<'connection> {
                 check,
             )?;
         }
+        let snapshot_pin = match read_observer.as_ref() {
+            Some(observer) => observer
+                .pin_snapshot(
+                    super::checkpoint::snapshot_pin_identity(connection)?,
+                    commit,
+                    checkpoint,
+                )?
+                .map(Rc::from),
+            None => None,
+        };
         Ok(ResolvedSnapshotState {
             commit,
             cache_identity: commit,
@@ -144,6 +155,7 @@ impl<'connection> Snapshot<'connection> {
             read_observer,
             local_memory: None,
             schema_memory: None,
+            _snapshot_pin: snapshot_pin,
         })
     }
 

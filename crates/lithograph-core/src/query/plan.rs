@@ -15,14 +15,24 @@ use super::schema::PreparedSchema;
 use super::stats::PlannerStatistics;
 use super::{AccessPolicy, ExecutionOptions, QueryError, QueryResult};
 
+mod access;
+mod budget;
 mod build;
+pub(crate) mod join;
 mod predicate;
+mod read;
+use read::prepare_read_query;
+mod sites;
+pub(crate) use sites::{OperatorSite, ProfileBinding, ProfileRole};
 #[cfg(test)]
 #[path = "plan/statistics_tests.rs"]
 mod statistics_tests;
-pub(crate) use build::append_pattern_operators;
-use build::{build_logical, build_physical};
-pub(crate) use predicate::select_node_id_seeks;
+pub(crate) use access::{part_seek_bytes, plan_access, reserve_match_seeks};
+pub(crate) use budget::{MAX_DEPTH, PlanningBudget};
+use build::build_logical;
+pub(crate) use build::build_physical;
+pub(crate) use build::{append_match_residual, append_pattern_operators_with_sites};
+pub(crate) use predicate::{select_node_id_seeks, select_relationship_id_seeks};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LogicalOperator {
@@ -43,6 +53,9 @@ pub enum LogicalOperator {
     },
     RelationshipScan {
         variable: Option<String>,
+    },
+    RelationshipIdSeek {
+        variable: String,
     },
     TypeSeek {
         relationship_type: String,
@@ -66,6 +79,9 @@ pub enum LogicalOperator {
     Distinct,
     Optional,
     Cartesian,
+    NestedLoop,
+    IndexNestedLoop,
+    HashJoin,
     Let,
     Unwind,
     Union {
@@ -110,6 +126,9 @@ pub enum PhysicalOperator {
         variable: String,
         index: String,
     },
+    RelationshipIdSeek {
+        variable: String,
+    },
     RelationshipScan {
         variable: Option<String>,
     },
@@ -127,6 +146,9 @@ pub enum PhysicalOperator {
     Distinct,
     Optional,
     Cartesian,
+    NestedLoop,
+    IndexNestedLoop,
+    HashJoin,
     Let,
     Unwind,
     Union {
@@ -152,6 +174,7 @@ impl PhysicalOperator {
             Self::LabelIndexScan { .. } => "LabelIndexScan",
             Self::IndexSeek { .. } => "IndexSeek",
             Self::NodeIdSeek { .. } => "NodeIdSeek",
+            Self::RelationshipIdSeek { .. } => "RelationshipIdSeek",
             Self::VectorSearch { .. } => "VectorSearch",
             Self::RelationshipScan { .. } => "RelationshipScan",
             Self::AdjacencySeek { .. } => "AdjacencySeek",
@@ -164,6 +187,9 @@ impl PhysicalOperator {
             Self::Distinct => "Distinct",
             Self::Optional => "Optional",
             Self::Cartesian => "Cartesian",
+            Self::NestedLoop => "NestedLoop",
+            Self::IndexNestedLoop => "IndexNestedLoop",
+            Self::HashJoin => "HashJoin",
             Self::Let => "Let",
             Self::Unwind => "Unwind",
             Self::Union { .. } => "Union",
@@ -184,6 +210,7 @@ impl PhysicalOperator {
                 | Self::LabelIndexScan { .. }
                 | Self::IndexSeek { .. }
                 | Self::NodeIdSeek { .. }
+                | Self::RelationshipIdSeek { .. }
                 | Self::VectorSearch { .. }
                 | Self::RelationshipScan { .. }
                 | Self::AdjacencySeek { .. }
@@ -232,6 +259,7 @@ pub(crate) struct RelationshipSpec {
     pub type_name: Option<String>,
     pub direction: Direction,
     pub index_seek: Option<super::schema::StandardIndexSeek>,
+    pub id_seek: Option<i64>,
     pub impossible: bool,
 }
 #[derive(Debug, Clone)]
@@ -243,10 +271,76 @@ pub(crate) struct PatternPart {
 }
 #[derive(Debug, Clone)]
 pub(crate) struct MatchStep {
+    pub clause_start: usize,
     pub optional: bool,
     pub parts: Vec<PatternPart>,
     pub predicate: Option<Expr>,
     pub early_predicates: Vec<Vec<Expr>>,
+    pub join: Option<std::sync::Arc<join::JoinPlan>>,
+}
+
+/// Without an incoming entity type proof, narrowing can skip the original
+/// pattern's binding error. Keep the normal Label/Type producers and evaluate
+/// the pattern before its WHERE, including on empty and OPTIONAL inputs.
+/// Callers may select WHERE-based access only when this returns true; runtime
+/// builders also apply it after choosing any previously prepared description.
+pub(crate) fn constrain_match_scope(step: &mut MatchStep, incoming: &[String]) -> bool {
+    if incoming.is_empty() || step.parts.is_empty() {
+        return true;
+    }
+    let count = incoming.len().saturating_mul(step.parts.len());
+    let unproven = count > budget::MAX_STATES || {
+        // Inspect lengths before comparing names: count bounds alone cannot
+        // bound many equal-length identifiers with a long common prefix.
+        let incoming_bytes = incoming
+            .iter()
+            .fold(0_usize, |bytes, name| bytes.saturating_add(name.len()));
+        let pattern_bytes = step
+            .parts
+            .iter()
+            .flat_map(|part| {
+                [
+                    part.start.variable.as_deref(),
+                    part.end.as_ref().and_then(|node| node.variable.as_deref()),
+                    part.relationship
+                        .as_ref()
+                        .and_then(|rel| rel.variable.as_deref()),
+                    part.path_variable.as_deref(),
+                ]
+            })
+            .flatten()
+            .fold(0_usize, |bytes, name| bytes.saturating_add(name.len()));
+        let comparison_bytes = pattern_bytes
+            .saturating_mul(incoming.len())
+            .min(incoming_bytes.saturating_mul(step.parts.len().saturating_mul(4)));
+        incoming_bytes.saturating_add(pattern_bytes) > budget::MAX_BYTES
+            || comparison_bytes > budget::MAX_BYTES
+            || incoming.iter().any(|name| {
+                step.parts.iter().any(|part| {
+                    part.start.variable.as_ref() == Some(name)
+                        || part.end.as_ref().and_then(|node| node.variable.as_ref()) == Some(name)
+                        || part
+                            .relationship
+                            .as_ref()
+                            .and_then(|rel| rel.variable.as_ref())
+                            == Some(name)
+                        || part.path_variable.as_ref() == Some(name)
+                })
+            })
+    };
+    if unproven {
+        step.early_predicates.clear();
+        step.join = None;
+        for part in &mut step.parts {
+            part.start.id_seek = None;
+            part.start.index_seek = None;
+            if let Some(relationship) = &mut part.relationship {
+                relationship.id_seek = None;
+                relationship.index_seek = None;
+            }
+        }
+    }
+    !unproven
 }
 #[derive(Debug, Clone)]
 pub(crate) struct Projection {
@@ -277,6 +371,7 @@ pub struct PreparedQuery {
     pub(crate) resolved_state: Option<storage::ResolvedSnapshotState>,
     pub(crate) graph_view: ResolvedGraphView,
     pub(crate) matches: Vec<MatchStep>,
+    pub(crate) profile_sites: Vec<ProfileBinding>,
     pub(crate) projections: Vec<Projection>,
     pub(crate) order: Vec<OrderItem>,
     pub(crate) skip: usize,
@@ -380,6 +475,7 @@ pub fn prepare_with_resources_and_interrupt(
         &prepared.physical,
         &resources,
     )?;
+    prepared.install_match_profile_sites()?;
     prepared.resources = resources;
     if let Some(memory) = prepared.params_memory.take() {
         params_memory.merge(memory)?;
@@ -413,15 +509,39 @@ fn prepare_inner(
     }
     if super::completeness::requires_program(&ast.root) {
         let program = super::completeness::prepare_program(connection, &ast, query, &options)?;
-        return prepare_program_query(context, program);
+        return plan_program_query(connection, context, program, control);
     }
     reject_query_composition(&ast.root)?;
     let single = single_query(&ast.root)?;
     if contains_mutation(single) {
         reject_candidate_write(&context)?;
-        return prepare_write_query(connection, single, query, &options, context);
+        return prepare_write_query(connection, single, query, &options, context, control);
     }
     prepare_read_query(connection, single, query, context, control)
+}
+
+fn plan_program_query(
+    connection: &Connection,
+    context: PrepareContext,
+    mut program: super::completeness::PreparedProgram,
+    control: &super::ExecutionControl<'_>,
+) -> QueryResult<PreparedQuery> {
+    if !program.root.descendants().any(|node| {
+        matches!(
+            node.kind,
+            AstKind::Clause(ClauseKind::Match | ClauseKind::OptionalMatch)
+        )
+    }) {
+        return prepare_program_query(context, program);
+    }
+    let state = resolve_planning_state(connection, &context, control)?;
+    let snapshot = storage::Snapshot::from_resolved_state(connection, &state);
+    let memory =
+        program.plan_fixed_matches(&snapshot, &context.graph_view, &context.params, control)?;
+    let mut prepared = prepare_program_query(context, program)?;
+    prepared.resolved_state = Some(state);
+    prepared.params_memory = Some(memory);
+    Ok(prepared)
 }
 
 fn prepare_context(
@@ -522,9 +642,18 @@ fn prepare_write_query(
     query: &str,
     options: &ExecutionOptions,
     context: PrepareContext,
+    control: &super::ExecutionControl<'_>,
 ) -> QueryResult<PreparedQuery> {
-    let write =
-        super::mutation::prepare_write(connection, single, query, &context.params, options)?;
+    let snapshot =
+        super::graph::resolve_snapshot_with_control(connection, context.commit, control)?;
+    let (write, memory) = super::mutation::prepare_write(
+        &snapshot,
+        single,
+        query,
+        &context.params,
+        options,
+        control,
+    )?;
     let columns = if context.mode == ExecutionMode::Explain {
         vec!["plan".to_owned()]
     } else {
@@ -535,13 +664,14 @@ fn prepare_write_query(
     Ok(PreparedQuery {
         resources: super::QueryResources::default(),
         metrics: super::stream::QueryMetrics::default(),
-        params_memory: None,
+        params_memory: Some(memory),
         access: context.access,
         commit: context.commit,
         candidate: context.candidate,
-        resolved_state: None,
+        resolved_state: Some(snapshot.resolved_state()),
         graph_view: context.graph_view,
         matches: Vec::new(),
+        profile_sites: Vec::new(),
         projections: Vec::new(),
         order: Vec::new(),
         skip: 0,
@@ -560,28 +690,14 @@ fn prepare_write_query(
     })
 }
 
-fn prepare_read_query(
+fn resolve_planning_state(
     connection: &Connection,
-    single: &AstNode,
-    query: &str,
-    context: PrepareContext,
+    context: &PrepareContext,
     control: &super::ExecutionControl<'_>,
-) -> QueryResult<PreparedQuery> {
-    let (mut matches, return_clause) = lower_clauses(connection, single)?;
-    for step in &mut matches {
-        select_node_id_seeks(step, &context.params);
-    }
-    let ProjectionPlan {
-        projections,
-        order,
-        skip,
-        limit,
-        distinct,
-    } = lower_projection(return_clause, query, &context.params)?;
-    let aggregate = validate_aggregation(&projections)?;
+) -> QueryResult<storage::ResolvedSnapshotState> {
     let observer = super::graph::snapshot_observer(control.resources());
     let check = || control.check().map_err(QueryError::into_storage_error);
-    let resolved_state = match context.candidate.as_ref() {
+    Ok(match context.candidate.as_ref() {
         Some(candidate) => storage::Snapshot::resolve_query_state_with_layer_and_schema_observed(
             connection,
             context.commit,
@@ -596,56 +712,6 @@ fn prepare_read_query(
             observer,
             &check,
         )?,
-    };
-    let snapshot = storage::Snapshot::from_resolved_state(connection, &resolved_state);
-    let schema = resolved_state.query_schema_state().ok_or_else(|| {
-        QueryError::internal("read query resolved state is missing its versioned Schema")
-    })?;
-    let index_memory = super::schema::select_standard_index_seeks(
-        schema,
-        &mut matches,
-        &context.params,
-        &context.access.read.query,
-        &snapshot,
-        control,
-    )?;
-    let statistics = planner_statistics(&snapshot, &context.graph_view, &matches)?;
-    optimize_node_scans(&mut matches, &statistics);
-    let columns = output_columns(context.mode, &projections);
-    let logical = build_logical(
-        &matches,
-        !order.is_empty(),
-        skip > 0,
-        limit.is_some(),
-        distinct,
-        aggregate,
-    );
-    let physical = build_physical(&logical, &matches, !order.is_empty());
-    Ok(PreparedQuery {
-        resources: super::QueryResources::default(),
-        metrics: super::stream::QueryMetrics::default(),
-        params_memory: Some(index_memory),
-        access: context.access,
-        commit: context.commit,
-        candidate: context.candidate,
-        resolved_state: Some(resolved_state),
-        graph_view: context.graph_view,
-        matches,
-        projections,
-        order,
-        skip,
-        limit,
-        distinct,
-        aggregate,
-        params: context.params,
-        mode: context.mode,
-        write: None,
-        schema: None,
-        program: None,
-        logical,
-        physical,
-        statistics,
-        columns,
     })
 }
 
@@ -725,6 +791,7 @@ fn empty_prepared_query(
         resolved_state: None,
         graph_view,
         matches: Vec::new(),
+        profile_sites: Vec::new(),
         projections: Vec::new(),
         order: Vec::new(),
         skip: 0,
@@ -855,26 +922,6 @@ fn validate_aggregation(projections: &[Projection]) -> QueryResult<bool> {
     Ok(aggregate)
 }
 
-fn planner_statistics(
-    snapshot: &storage::Snapshot<'_>,
-    graph_view: &ResolvedGraphView,
-    matches: &[MatchStep],
-) -> QueryResult<PlannerStatistics> {
-    if matches.is_empty()
-        || graph_view.is_empty()
-        || !matches.iter().any(|step| {
-            step.parts.iter().any(|part| {
-                node_needs_scan_statistics(&part.start)
-                    || part.end.as_ref().is_some_and(node_needs_scan_statistics)
-            })
-        })
-    {
-        Ok(PlannerStatistics::default())
-    } else {
-        collect_statistics(snapshot, matches)
-    }
-}
-
 fn node_needs_scan_statistics(node: &NodeSpec) -> bool {
     node.id_seek.is_none() && node.index_seek.is_none() && !node.impossible && node.labels.len() > 1
 }
@@ -932,10 +979,12 @@ pub(crate) fn lower_match(
         .map(|where_node| first_surface_expression(where_node).and_then(compile_expression))
         .transpose()?;
     let mut step = MatchStep {
+        clause_start: clause.span.start,
         optional,
         parts,
         predicate,
         early_predicates: Vec::new(),
+        join: None,
     };
     predicate::route_safe_predicates(&mut step);
     Ok(step)
@@ -1091,6 +1140,7 @@ fn lower_relationship(connection: &Connection, node: &AstNode) -> QueryResult<Re
         type_name,
         direction,
         index_seek: None,
+        id_seek: None,
         impossible,
     })
 }
@@ -1290,53 +1340,4 @@ fn constant_usize(
             format!("{name} must be non-negative"),
         )
     })
-}
-
-fn collect_statistics(
-    snapshot: &storage::Snapshot<'_>,
-    matches: &[MatchStep],
-) -> QueryResult<PlannerStatistics> {
-    let mut labels = BTreeSet::new();
-    let relationship_types = BTreeSet::new();
-    for step in matches {
-        for part in &step.parts {
-            if node_needs_scan_statistics(&part.start) {
-                labels.extend(part.start.labels.iter().copied());
-            }
-            if let Some(end) = &part.end
-                && node_needs_scan_statistics(end)
-            {
-                labels.extend(end.labels.iter().copied());
-            }
-        }
-    }
-    PlannerStatistics::collect(snapshot, &labels, &relationship_types, true, false)
-}
-
-fn optimize_node_scans(matches: &mut [MatchStep], statistics: &PlannerStatistics) {
-    for step in matches {
-        for part in &mut step.parts {
-            optimize_node_scan(&mut part.start, statistics);
-            if let Some(end) = &mut part.end {
-                optimize_node_scan(end, statistics);
-            }
-        }
-    }
-}
-
-fn optimize_node_scan(node: &mut NodeSpec, statistics: &PlannerStatistics) {
-    let best = node
-        .labels
-        .iter()
-        .enumerate()
-        .filter_map(|(index, label_id)| {
-            statistics
-                .label_count(*label_id)
-                .map(|count| (index, label_id, count))
-        })
-        .min_by_key(|(_, _, count)| *count);
-    if let Some((index, label_id, _)) = best {
-        node.scan_label = Some(*label_id);
-        node.scan_label_name = node.label_names.get(index).cloned();
-    }
 }

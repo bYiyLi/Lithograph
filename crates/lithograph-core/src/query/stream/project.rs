@@ -25,7 +25,7 @@ impl QueryCursor {
                 else {
                     break;
                 };
-                self.metrics.record_active_rows(1);
+                self.metrics.record_pipeline_rows(1);
                 for (index, projection) in self.prepared.projections.iter().enumerate() {
                     if expression::count_contributes_with_access_control(
                         &projection.expression,

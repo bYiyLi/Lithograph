@@ -50,12 +50,13 @@ static int trace_profile(unsigned kind, void *context, void *statement, void *de
 }
 
 int main(int argc, char **argv) {
-    if (argc != 3) {
-        fprintf(stderr, "usage: phase21-vm-work <extension> <synthetic-database>\n");
+    if (argc != 3 && argc != 6) {
+        fprintf(stderr, "usage: phase21-vm-work <extension> <synthetic-database> [query parameters options]\n");
         return 2;
     }
     sqlite3 *db = NULL;
-    require(db, sqlite3_open(argv[2], &db) == SQLITE_OK, "open synthetic fixture");
+    require(db, sqlite3_open_v2(argv[2], &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK,
+            "open initialized synthetic fixture read-only");
     require(db, sqlite3_enable_load_extension(db, 1) == SQLITE_OK, "enable .load");
     char *load_error = NULL;
     int rc = sqlite3_load_extension(db, argv[1], "sqlite3_lithograph_init", &load_error);
@@ -68,22 +69,25 @@ int main(int argc, char **argv) {
     }
     sqlite3_free(load_error);
     require(db, sqlite3_enable_load_extension(db, 0) == SQLITE_OK, "disable .load");
-    require(db, sqlite3_exec(db, "SELECT lithograph_init()", NULL, NULL, NULL) == SQLITE_OK,
-            "initialize existing fixture");
+    // Fixtures are initialized by their seed worker. Running lithograph_init()
+    // here would perform a full integrity check and warm the database before
+    // the measured query, which hides deep-history startup work.
 
     Counters counters = {0};
     require(db, sqlite3_trace_v2(db, SQLITE_TRACE_PROFILE, trace_profile, &counters) == SQLITE_OK,
             "install SQLite VM trace");
     sqlite3_stmt *stmt = NULL;
     rc = sqlite3_prepare_v2(
-        db, "SELECT json_extract(lithograph(?1,?2),'$.rows[0][0]')", -1, &stmt, NULL
+        db, "SELECT json_extract(lithograph(?1,?2,?3),'$.rows[0][0]')", -1, &stmt, NULL
     );
     require(db, rc == SQLITE_OK, "prepare Node ID query");
     require(db, sqlite3_bind_text(stmt, 1,
-            "MATCH (a:Bench), (b:Bench) WHERE elementId(a)=$a AND elementId(b)=$b RETURN a.k",
+            argc == 6 ? argv[3] : "MATCH (a:Bench), (b:Bench) WHERE elementId(a)=$a AND elementId(b)=$b RETURN a.k",
             -1, SQLITE_STATIC) == SQLITE_OK, "bind query");
-    require(db, sqlite3_bind_text(stmt, 2, "{\"a\":\"n:1\",\"b\":\"n:2\"}",
+    require(db, sqlite3_bind_text(stmt, 2, argc == 6 ? argv[4] : "{\"a\":\"n:1\",\"b\":\"n:2\"}",
             -1, SQLITE_STATIC) == SQLITE_OK, "bind parameters");
+    require(db, sqlite3_bind_text(stmt, 3, argc == 6 ? argv[5] : "{}",
+            -1, SQLITE_STATIC) == SQLITE_OK, "bind options");
     require(db, sqlite3_step(stmt) == SQLITE_ROW
             && sqlite3_column_type(stmt, 0) == SQLITE_INTEGER
             && sqlite3_column_int64(stmt, 0) == 0, "single correct Node ID result");

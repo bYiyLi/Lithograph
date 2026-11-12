@@ -16,6 +16,8 @@ use crate::cypher::{
 mod effects;
 pub(crate) mod execute;
 mod path;
+mod planning;
+use planning::{append_program_match_operators, bind_program_relationships, physical_operator};
 mod validation;
 mod version;
 
@@ -27,6 +29,10 @@ pub(crate) use version::{retry_version_busy, suppress_version_summary_commit};
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedProgram {
+    pub(crate) streamed_write: Option<super::mutation::PreparedWrite>,
+    pub(crate) match_plans: BTreeMap<usize, super::plan::MatchStep>,
+    // Permission only: execution re-lowers the current clause after writes.
+    pub(crate) identity_match_spans: Vec<usize>,
     pub(crate) effects: ProgramEffects,
     pub(crate) root: AstNode,
     pub(crate) source: String,
@@ -39,6 +45,7 @@ pub(crate) struct PreparedProgram {
     pub(crate) options: ExecutionOptions,
     pub(crate) logical: LogicalPlan,
     pub(crate) physical: PhysicalPlan,
+    pub(crate) profile_sites: Vec<super::plan::ProfileBinding>,
     pub(crate) write_options: Option<ProgramWriteOptions>,
     pub(crate) transaction_options: Option<TransactionProgramOptions>,
 }
@@ -281,12 +288,23 @@ pub(crate) fn prepare_program(
     let transaction_options = transaction_owning
         .then(|| program_write_options(connection, options))
         .transpose()?;
-    let logical_operators = logical_operators(&ast.root);
-    let physical_operators = logical_operators
+    let (logical_operators, profile_sites) =
+        logical_operators_with_sites(&ast.root, &BTreeMap::new(), source)?;
+    let mut physical_operators = logical_operators
         .iter()
         .map(physical_operator)
         .collect::<Vec<_>>();
+    bind_program_relationships(
+        &ast.root,
+        &BTreeMap::new(),
+        &logical_operators,
+        &mut physical_operators,
+    );
     Ok(PreparedProgram {
+        profile_sites,
+        streamed_write: None,
+        match_plans: BTreeMap::new(),
+        identity_match_spans: Vec::new(),
         effects,
         root: ast.root.clone(),
         source: source.to_owned(),
@@ -1043,11 +1061,18 @@ fn schema_show_columns(
     }
 }
 
-fn logical_operators(root: &AstNode) -> Vec<LogicalOperator> {
+fn logical_operators_with_sites(
+    root: &AstNode,
+    matches: &BTreeMap<usize, super::plan::MatchStep>,
+    source: &str,
+) -> QueryResult<(Vec<LogicalOperator>, Vec<super::plan::ProfileBinding>)> {
     let mut operators = Vec::new();
+    let mut sites = Vec::new();
     let mut has_read_rows = false;
+    let mut bound = std::collections::BTreeSet::new();
     for node in root.descendants() {
         match node.kind {
+            AstKind::SingleQuery => bound.clear(),
             AstKind::Connector(crate::cypher::QueryConnector::Union)
             | AstKind::Connector(crate::cypher::QueryConnector::UnionDistinct) => {
                 operators.push(LogicalOperator::Union { distinct: true });
@@ -1060,7 +1085,20 @@ fn logical_operators(root: &AstNode) -> Vec<LogicalOperator> {
             }
             AstKind::ConditionalQuery => operators.push(LogicalOperator::When),
             AstKind::Clause(ClauseKind::Match | ClauseKind::OptionalMatch) => {
-                append_program_match_operators(node, &mut operators);
+                if let Some(step) = matches.get(&node.span.start) {
+                    if step.optional {
+                        operators.push(LogicalOperator::Optional);
+                    }
+                    super::plan::append_pattern_operators_with_sites(
+                        step,
+                        &mut bound,
+                        &mut operators,
+                        &mut sites,
+                    );
+                    super::plan::append_match_residual(step, &mut operators, &mut sites);
+                } else {
+                    append_program_match_operators(node, &mut bound, &mut operators, &mut sites);
+                }
                 has_read_rows = true;
             }
             AstKind::Clause(ClauseKind::Filter) => {
@@ -1069,14 +1107,17 @@ fn logical_operators(root: &AstNode) -> Vec<LogicalOperator> {
             }
             AstKind::Clause(ClauseKind::Return | ClauseKind::With) => {
                 append_program_projection_operators(node, &mut operators);
+                update_program_bound(&mut bound, node, source)?;
                 has_read_rows = true;
             }
             AstKind::Clause(ClauseKind::Let) => {
                 operators.push(LogicalOperator::Let);
+                update_program_bound(&mut bound, node, source)?;
                 has_read_rows = true;
             }
             AstKind::Clause(ClauseKind::Unwind | ClauseKind::For) => {
                 operators.push(LogicalOperator::Unwind);
+                update_program_bound(&mut bound, node, source)?;
                 has_read_rows = true;
             }
             AstKind::Clause(ClauseKind::Call) => {
@@ -1114,64 +1155,19 @@ fn logical_operators(root: &AstNode) -> Vec<LogicalOperator> {
     if contains_mutation(root) {
         operators.push(LogicalOperator::Commit);
     }
-    operators
+    Ok((operators, sites))
 }
 
-fn append_program_match_operators(clause: &AstNode, operators: &mut Vec<LogicalOperator>) {
-    if clause.kind == AstKind::Clause(ClauseKind::OptionalMatch) {
-        operators.push(LogicalOperator::Optional);
-    }
-    if let Some(search) = clause
-        .descendants()
-        .find(|node| node.kind == AstKind::Search)
-    {
-        let variable = decoded_descendant_name(search, AstKind::Variable)
-            .unwrap_or_else(|| "_search".to_owned());
-        let index = decoded_descendant_name(search, AstKind::IndexName)
-            .unwrap_or_else(|| "_vector_index".to_owned());
-        operators.push(LogicalOperator::IndexSeek {
-            variable,
-            index,
-            kind: crate::storage::StandardIndexKind::Vector,
-        });
-    }
-    for part in clause
-        .descendants()
-        .filter(|node| node.kind == AstKind::PatternPart)
-    {
-        let nodes = part
-            .descendants()
-            .filter(|node| node.kind == AstKind::NodePattern)
-            .collect::<Vec<_>>();
-        let Some(start) = nodes.first() else {
-            continue;
-        };
-        let variable = pattern_variable(start, "_anon");
-        if let Some(label) = start
-            .descendants()
-            .find(|node| node.kind == AstKind::LabelName)
-            .and_then(|node| node.text.as_deref())
-            .map(crate::cypher::unescape_identifier)
-        {
-            operators.push(LogicalOperator::LabelScan { variable, label });
-        } else {
-            operators.push(LogicalOperator::NodeScan { variable });
-        }
-        for (index, _) in part
-            .descendants()
-            .filter(|node| node.kind == AstKind::RelationshipPattern)
-            .enumerate()
-        {
-            operators.push(LogicalOperator::ExpandAll {
-                from: pattern_variable(nodes[index], "_anon"),
-                relationship: None,
-                to: pattern_variable(nodes[index + 1], "_anon_target"),
-            });
-        }
-    }
-    if clause.descendants().any(|node| node.kind == AstKind::Where) {
-        operators.push(LogicalOperator::Filter);
-    }
+fn update_program_bound(
+    bound: &mut std::collections::BTreeSet<String>,
+    clause: &AstNode,
+    source: &str,
+) -> QueryResult<()> {
+    let input = bound.iter().cloned().collect::<Vec<_>>();
+    *bound = infer_clause_columns(clause, &input, source)?
+        .into_iter()
+        .collect();
+    Ok(())
 }
 
 fn pattern_variable(node: &AstNode, fallback: &str) -> String {
@@ -1237,74 +1233,6 @@ fn projection_has_distinct(clause: &AstNode) -> bool {
             AstKind::SetQuantifier(crate::cypher::SetQuantifierKind::Distinct)
         ) && node.span.start < first_item
     })
-}
-
-fn physical_operator(operator: &LogicalOperator) -> PhysicalOperator {
-    match operator {
-        LogicalOperator::Union { distinct } => PhysicalOperator::Union {
-            distinct: *distinct,
-        },
-        LogicalOperator::Next => PhysicalOperator::Next,
-        LogicalOperator::When => PhysicalOperator::When,
-        LogicalOperator::Let => PhysicalOperator::Let,
-        LogicalOperator::Unwind => PhysicalOperator::Unwind,
-        LogicalOperator::Subquery => PhysicalOperator::Subquery,
-        LogicalOperator::Aggregate => PhysicalOperator::Aggregate,
-        LogicalOperator::NodeScan { variable } => PhysicalOperator::NodeScan {
-            variable: variable.clone(),
-        },
-        LogicalOperator::NodeIdSeek { variable } => PhysicalOperator::NodeIdSeek {
-            variable: variable.clone(),
-        },
-        LogicalOperator::LabelScan { variable, label } => PhysicalOperator::LabelIndexScan {
-            variable: variable.clone(),
-            label: label.clone(),
-        },
-        LogicalOperator::IndexSeek {
-            variable,
-            index,
-            kind,
-        } if *kind == crate::storage::StandardIndexKind::Vector => PhysicalOperator::VectorSearch {
-            variable: variable.clone(),
-            index: index.clone(),
-        },
-        LogicalOperator::IndexSeek {
-            variable,
-            index,
-            kind,
-        } => PhysicalOperator::IndexSeek {
-            variable: variable.clone(),
-            index: index.clone(),
-            kind: *kind,
-        },
-        LogicalOperator::ExpandAll { from, .. } | LogicalOperator::ExpandInto { from, .. } => {
-            PhysicalOperator::AdjacencySeek {
-                from: from.clone(),
-                relationship_type: None,
-                direction: super::plan::Direction::Outgoing,
-            }
-        }
-        LogicalOperator::Filter => PhysicalOperator::Filter,
-        LogicalOperator::Distinct => PhysicalOperator::Distinct,
-        LogicalOperator::Project => PhysicalOperator::Project,
-        LogicalOperator::Sort => PhysicalOperator::ExternalSort,
-        LogicalOperator::Skip => PhysicalOperator::Skip,
-        LogicalOperator::Limit => PhysicalOperator::Limit,
-        LogicalOperator::Eager => PhysicalOperator::Eager,
-        LogicalOperator::Optional => PhysicalOperator::Optional,
-        LogicalOperator::Cartesian => PhysicalOperator::Cartesian,
-        LogicalOperator::Mutation { kind } => PhysicalOperator::Mutation { kind: *kind },
-        LogicalOperator::Schema { kind } => PhysicalOperator::Schema { kind: *kind },
-        LogicalOperator::Commit => PhysicalOperator::Commit,
-        LogicalOperator::RelationshipScan { variable } => PhysicalOperator::RelationshipScan {
-            variable: variable.clone(),
-        },
-        LogicalOperator::TypeSeek { relationship_type } => PhysicalOperator::AdjacencySeek {
-            from: String::new(),
-            relationship_type: Some(relationship_type.clone()),
-            direction: super::plan::Direction::Outgoing,
-        },
-    }
 }
 
 #[allow(

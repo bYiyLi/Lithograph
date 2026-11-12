@@ -294,6 +294,7 @@ pub(crate) fn rows_for_next(previous: &AstNode, mut result: RowSet) -> RowSet {
 }
 
 struct ReadExecutor<'connection, 'query> {
+    identity_match_spans: &'query [usize],
     connection: &'connection Connection,
     snapshot: Snapshot<'connection>,
     graph_view: &'query ResolvedGraphView,
@@ -347,6 +348,7 @@ pub(super) fn execute_read_snapshot_with_version_summary(
 ) -> QueryResult<(Vec<Vec<Value>>, Option<HashId>, MemoryReservation)> {
     let is_interrupted = || control.check().is_err();
     let mut executor = ReadExecutor {
+        identity_match_spans: &program.identity_match_spans,
         connection,
         snapshot,
         graph_view,
@@ -387,19 +389,26 @@ pub(crate) fn execute_read_clause<'connection>(
     params: &BTreeMap<String, Value>,
     source: &str,
     clause: &AstNode,
+    identity_allowed: bool,
     input: RowSet,
     metrics: &mut QueryMetrics,
-    is_interrupted: &dyn Fn() -> bool,
     control: &ExecutionControl<'_>,
 ) -> QueryResult<RowSet> {
+    let is_interrupted = || control.check().is_err();
+    let identity_span = [clause.span.start];
     let mut executor = ReadExecutor {
+        identity_match_spans: if identity_allowed {
+            &identity_span
+        } else {
+            &[]
+        },
         connection,
         snapshot,
         graph_view,
         params,
         source,
         metrics,
-        is_interrupted,
+        is_interrupted: &is_interrupted,
         control,
         expression_reservation: control.reserve(0)?,
         global_bindings: BindingRow::default(),
@@ -623,6 +632,12 @@ impl ReadExecutor<'_, '_> {
         optional: bool,
         input: RowSet,
     ) -> QueryResult<RowSet> {
+        if self.identity_match_spans.contains(&clause.span.start)
+            && let Some(step) =
+                identity::lower_identity_match(self.connection, clause, self.params, &input.columns)
+        {
+            return self.execute_identity_match(clause, &step, input);
+        }
         let columns = self.match_columns(clause, &input.columns)?;
         let predicate = match_predicate(clause)?;
         let access_operator_count = usize::from(
@@ -641,7 +656,7 @@ impl ReadExecutor<'_, '_> {
             .sum::<usize>();
         let previous_operator = self
             .metrics
-            .activate_access_operator_group(access_operator_count);
+            .activate_match_clause_access(clause.span.start, access_operator_count);
         let result = (|| {
             let mut rows = Vec::new();
             let mut memory = self.control.reserve(0)?;
@@ -656,14 +671,7 @@ impl ReadExecutor<'_, '_> {
                 )?;
                 let produced = self.expression_reservation.bytes() - baseline;
                 let mut matched_memory = self.expression_reservation.split(produced)?;
-                let mut bytes = 0;
-                for row in &matched {
-                    bytes = crate::query::resources::checked_add(
-                        bytes,
-                        expression::binding_row_bytes_controlled(row, Some(self.control))?,
-                    )?;
-                }
-                matched_memory.resize(bytes)?;
+                matched_memory.resize(matched_binding_bytes(&matched, self.control)?)?;
                 memory.merge(matched_memory)?;
                 rows.extend(matched);
             }
@@ -674,8 +682,10 @@ impl ReadExecutor<'_, '_> {
             })
         })();
         if let Ok(output) = &result {
-            self.metrics
-                .record_active_rows(output.rows.len().try_into().unwrap_or(u64::MAX));
+            self.metrics.record_eager_match_rows(
+                clause.span.start,
+                output.rows.len().try_into().unwrap_or(u64::MAX),
+            );
         }
         self.metrics.restore_active_operator(previous_operator);
         result
@@ -1078,6 +1088,15 @@ fn preserve_common_load_csv_context(group: &[BindingRow], output: &mut BindingRo
     }
 }
 
+fn matched_binding_bytes(rows: &[BindingRow], control: &ExecutionControl<'_>) -> QueryResult<u64> {
+    rows.iter().try_fold(0, |bytes, row| {
+        crate::query::resources::checked_add(
+            bytes,
+            expression::binding_row_bytes_controlled(row, Some(control))?,
+        )
+    })
+}
+
 mod aggregation;
 mod rowset;
 mod sorting;
@@ -1087,6 +1106,7 @@ mod call;
 pub(crate) use call::{append_call_columns, merge_call_result, project_call_bindings};
 mod graph_expression;
 mod helpers;
+pub(crate) mod identity;
 mod load_csv;
 mod registry;
 mod search;

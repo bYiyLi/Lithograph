@@ -1,6 +1,54 @@
 use super::*;
 
 #[test]
+fn reset_and_gc_preserve_the_executions_lazy_snapshot_only_until_completion() {
+    for checkpoint in [false, true] {
+        let connection = fresh_storage();
+        let root = branch_head(&connection, "main").unwrap();
+        call(&connection, "CREATE (:Keep {k:7}) FINISH");
+        let original = branch_head(&connection, "main").unwrap();
+        if checkpoint {
+            lithograph_core::storage::create_checkpoint(&connection, original).unwrap();
+        }
+        let rows = call(
+            &connection,
+            &format!(
+                "MATCH (n:Keep) CALL lithograph.reset('{}') YIELD to \
+                 CALL lithograph.gc() YIELD commits,checkpoints RETURN n.k,commits,checkpoints",
+                descriptor(root)
+            ),
+        );
+        assert_eq!(
+            rows,
+            vec![vec![
+                Value::Integer(7),
+                Value::Integer(0),
+                Value::Integer(0)
+            ]],
+            "checkpoint={checkpoint}"
+        );
+        assert_eq!(branch_head(&connection, "main").unwrap(), root);
+        assert!(commit_exists(&connection, original).unwrap());
+
+        // The previous query has completed and dropped all Snapshot leases.
+        // A fresh GC must collect its now-unreachable history, without tags
+        // or a persistent pin registry keeping the old graph alive.
+        assert_eq!(
+            call(
+                &connection,
+                "CALL lithograph.gc() YIELD commits,checkpoints RETURN commits,checkpoints"
+            ),
+            vec![vec![
+                Value::Integer(1),
+                Value::Integer(i64::from(checkpoint))
+            ]]
+        );
+        assert!(!commit_exists(&connection, original).unwrap());
+        assert!(call(&connection, "MATCH (n:Keep) RETURN n.k").is_empty());
+    }
+}
+
+#[test]
 fn reset_revert_and_gc_respect_tag_roots() {
     let connection = fresh_storage();
     execute(

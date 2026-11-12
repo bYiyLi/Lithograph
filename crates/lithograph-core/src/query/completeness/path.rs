@@ -197,7 +197,8 @@ pub(super) fn execute_match(
     for mut row in input {
         control.checkpoint(1)?;
         row.used_relationships.clear();
-        let (rows, rows_memory) = execute_match_parts(&mut context, &parts, row)?;
+        let (rows, rows_memory) =
+            execute_match_parts(&mut context, &parts, row, clause.span.start)?;
         output_memory.merge(rows_memory)?;
         output.extend(rows);
     }
@@ -208,16 +209,26 @@ fn execute_match_parts(
     context: &mut PathContext<'_, '_>,
     parts: &[PatternPartSpec],
     row: BindingRow,
+    clause: usize,
 ) -> QueryResult<(Vec<BindingRow>, MemoryReservation)> {
     let control = context.control;
     let mut rows = vec![row];
     let mut rows_memory = control.reserve(0)?;
-    for part in parts {
+    for (ordinal, part) in parts.iter().enumerate() {
         let mut expanded = Vec::new();
         let mut expanded_memory = control.reserve(0)?;
+        let point = context.metrics.node_point_slot(clause, ordinal);
         for row in rows {
             context.control.checkpoint(1)?;
-            let (matches, memory) = execute_part(context, part, row)?;
+            let previous = point.and_then(|slot| context.metrics.activate_profile_slot(Some(slot)));
+            let result = execute_part(context, part, row);
+            if let Ok((matches, _)) = &result {
+                context
+                    .metrics
+                    .record_profile_rows(point, matches.len().try_into().unwrap_or(u64::MAX));
+            }
+            context.metrics.restore_access_operator(previous);
+            let (matches, memory) = result?;
             expanded_memory.merge(memory)?;
             expanded.extend(matches);
         }

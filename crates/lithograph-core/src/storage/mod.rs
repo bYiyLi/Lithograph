@@ -38,6 +38,7 @@ use std::fmt;
 
 use rusqlite::Error as SqliteError;
 
+pub(crate) use checkpoint::snapshot_pin_identity;
 pub use checkpoint::{create_checkpoint, delete_checkpoint};
 pub(crate) use commit::{CommitRead, commit_layer_observed, commit_layer_with_schema_observed};
 pub use commit::{
@@ -77,6 +78,7 @@ pub(crate) use snapshot_read::SnapshotReadObserver;
 pub(crate) use snapshot_read::clone_value_checked as clone_property_value_checked;
 pub(crate) use snapshot_scan::{AdjacencyCursor, AdjacencyScanPage};
 pub use value::{PointValue, PropertyValue, VectorCoordinateType, VectorValue, ZonedDateTimeValue};
+pub(crate) use version::collect_garbage_with_read_roots;
 pub(crate) use version::layer_between_checked;
 pub use version::{
     AllocationState, CommitRecord, GcCounters, MergeSessionRecord, NamedRef, SnapshotState,

@@ -33,4 +33,5 @@ pub use session::{
     load_merge_resolutions, load_merge_session, merge_session_roots, update_merge_resolutions,
 };
 
+pub(crate) use gc::collect_garbage_with_read_roots;
 pub use gc::{GcCounters, collect_garbage};

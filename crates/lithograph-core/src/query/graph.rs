@@ -184,6 +184,18 @@ impl ResolvedGraphView {
         }
     }
 
+    /// Each returned label is required of every visible node. An OR selector
+    /// with multiple alternatives must retain its existing union scan.
+    pub(crate) fn required_scan_labels(&self) -> &[LabelId] {
+        if !self.required.is_empty() {
+            &self.required
+        } else if self.any_required && self.any.len() == 1 {
+            &self.any
+        } else {
+            &[]
+        }
+    }
+
     /// Scan the union in NodeId order, with a bounded batch and no duplicate
     /// elements even when the same Node carries several selected Labels.
     pub(crate) fn scan_nodes_after(

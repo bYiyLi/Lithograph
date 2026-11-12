@@ -1,16 +1,56 @@
 use super::*;
 
+mod cursor;
+mod hash;
+mod join;
+mod output;
+use super::profile::MatchProfileSlots;
+use crate::query::plan::ProfileRole;
+use cursor::MatchFrame;
+pub(crate) use hash::{HashLayoutFacts, hash_layout, hash_resident_target, hash_table_peak_bytes};
+pub(crate) use join::MatchReadBindings;
+
 #[derive(Debug)]
 pub(super) struct MatchPipeline {
     steps: Vec<MatchStep>,
     stack: Vec<StepCursor>,
     initialized: bool,
     empty_seed_emitted: bool,
+    read_bindings: Vec<MatchReadBindings>,
+    read_memory: Option<MemoryReservation>,
+    fallback_read_bindings: MatchReadBindings,
 }
 
 impl MatchPipeline {
     pub(super) fn clear(&mut self) {
         self.stack.clear();
+        self.read_bindings = Vec::new();
+        self.read_memory = None;
+    }
+
+    fn reserve_bindings(
+        &mut self,
+        depth: usize,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<()> {
+        if self.read_bindings.len() < depth {
+            let additional = depth - self.read_bindings.len();
+            let memory = self.read_memory.get_or_insert(control.reserve(0)?);
+            memory.grow(crate::query::resources::allocation_bytes::<
+                MatchReadBindings,
+            >(additional)?)?;
+            self.read_bindings.reserve_exact(additional);
+            self.read_bindings
+                .resize_with(depth, MatchReadBindings::default);
+        }
+        Ok(())
+    }
+
+    fn finish_bindings(&mut self, metrics: &mut QueryMetrics) -> QueryResult<()> {
+        for (step, bindings) in self.steps.iter().zip(&mut self.read_bindings) {
+            bindings.finish(step, metrics)?;
+        }
+        Ok(())
     }
 
     pub(super) fn new(steps: Vec<MatchStep>) -> Self {
@@ -19,6 +59,9 @@ impl MatchPipeline {
             stack: Vec::new(),
             initialized: false,
             empty_seed_emitted: false,
+            read_bindings: Vec::new(),
+            read_memory: None,
+            fallback_read_bindings: MatchReadBindings::default(),
         }
     }
 
@@ -39,7 +82,7 @@ impl MatchPipeline {
         }
         if !self.initialized {
             self.stack.push(StepCursor::new(
-                self.steps[0].clone(),
+                &self.steps[0],
                 BindingRow::default(),
                 control,
             )?);
@@ -48,15 +91,30 @@ impl MatchPipeline {
         loop {
             control.work(1)?;
             let depth = self.stack.len();
+            let joined = self
+                .stack
+                .last()
+                .is_some_and(|frame| frame.step.join.is_some());
+            if joined {
+                self.reserve_bindings(depth, control)?;
+            }
             let Some(frame) = self.stack.last_mut() else {
+                self.finish_bindings(metrics)?;
                 return Ok(None);
             };
-            if let Some(row) = frame.next_row(snapshot, graph_view, params, metrics, control)? {
+            let bindings = if joined {
+                &mut self.read_bindings[depth - 1]
+            } else {
+                &mut self.fallback_read_bindings
+            };
+            if let Some(row) =
+                frame.next_row(snapshot, graph_view, params, metrics, bindings, control)?
+            {
                 if depth == self.steps.len() {
                     return Ok(Some(row));
                 }
                 self.stack
-                    .push(StepCursor::new(self.steps[depth].clone(), row, control)?);
+                    .push(StepCursor::new(&self.steps[depth], row, control)?);
                 continue;
             }
             self.stack.pop();
@@ -65,20 +123,21 @@ impl MatchPipeline {
 }
 
 #[derive(Debug)]
-pub(super) struct StepCursor {
+pub(crate) struct StepCursor {
     step: MatchStep,
     base: BindingRow,
-    stack: Vec<PartCursor>,
+    stack: Vec<MatchFrame>,
     initialized: bool,
     matched: bool,
     optional_emitted: bool,
     _memory: MemoryReservation,
     output_memory: Option<MemoryReservation>,
+    _seek_memory: MemoryReservation,
 }
 
 impl StepCursor {
-    pub(super) fn new(
-        step: MatchStep,
+    pub(crate) fn new(
+        step: &MatchStep,
         mut base: BindingRow,
         control: &ExecutionControl<'_>,
     ) -> QueryResult<Self> {
@@ -86,95 +145,69 @@ impl StepCursor {
         // later MATCH clause may legally traverse a Relationship used by an
         // earlier MATCH while still inheriting its variable bindings.
         base.used_relationships.clear();
-        let memory = control.reserve(expression::binding_row_bytes_controlled(
-            &base,
-            Some(control),
+        let seek_memory = crate::query::plan::reserve_match_seeks(step, control)?;
+        let memory = control.reserve(crate::query::resources::checked_add(
+            expression::binding_row_bytes_controlled(&base, Some(control))?,
+            crate::query::resources::allocation_bytes::<MatchFrame>(step.parts.len())?,
         )?)?;
         Ok(Self {
-            step,
+            step: step.clone(),
             base,
-            stack: Vec::new(),
+            stack: Vec::with_capacity(step.parts.len()),
             initialized: false,
             matched: false,
             optional_emitted: false,
             _memory: memory,
             output_memory: None,
+            _seek_memory: seek_memory,
         })
     }
 
-    fn initialize(&mut self, control: &ExecutionControl<'_>) -> QueryResult<()> {
+    fn initialize(
+        &mut self,
+        snapshot: &Snapshot<'_>,
+        view: &ResolvedGraphView,
+        metrics: &mut QueryMetrics,
+        bindings: &mut MatchReadBindings,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<()> {
         if !self.initialized {
-            if let Some(part) = self.step.parts.first() {
-                self.stack
-                    .push(PartCursor::new(part.clone(), &self.base, control)?);
+            if !self.step.parts.is_empty() {
+                let frame =
+                    self.frame(0, &self.base, (snapshot, view), metrics, bindings, control)?;
+                self.stack.push(MatchFrame::part(frame)?);
             }
             self.initialized = true;
         }
         Ok(())
     }
 
-    pub(super) fn next_row(
+    pub(crate) fn next_row(
         &mut self,
         snapshot: &Snapshot<'_>,
         graph_view: &ResolvedGraphView,
         params: &std::collections::BTreeMap<String, Value>,
         metrics: &mut QueryMetrics,
+        bindings: &mut MatchReadBindings,
         control: &ExecutionControl<'_>,
     ) -> QueryResult<Option<BindingRow>> {
-        self.initialize(control)?;
-        loop {
-            control.work(1)?;
-            let depth = self.stack.len();
-            if depth == 0 {
-                return self.optional_or_done(control);
+        self.initialize(snapshot, graph_view, metrics, bindings, control)?;
+        while let Some(mut row) = self.advance_to(
+            self.step.parts.len(),
+            (snapshot, graph_view),
+            params,
+            metrics,
+            bindings,
+            control,
+        )? {
+            if self.full_match_passes(&row, snapshot, graph_view, params, control)? {
+                metrics.record_profile_rows(metrics.match_residual_slot(self.step.clause_start), 1);
+                self.matched = true;
+                self.restore_declared_order(&mut row);
+                return Ok(Some(row));
             }
-            let Some(frame) = self.stack.last_mut() else {
-                return self.optional_or_done(control);
-            };
-            let access = frame.profile_access_operator();
-            let previous_access = access.and_then(|(variable, operator)| {
-                metrics.activate_access_for_operator(Some(variable), operator)
-            });
-            let next = frame.next_row(snapshot, graph_view, metrics, control);
-            metrics.restore_access_operator(previous_access);
-            if let Some(row) = next? {
-                if let Some(predicates) = self.step.early_predicates.get(depth - 1)
-                    && early_prefix_rejects(
-                        predicates, snapshot, graph_view, &row, params, control,
-                    )?
-                {
-                    continue;
-                }
-                if depth < self.step.parts.len() {
-                    self.stack.push(PartCursor::new(
-                        self.step.parts[depth].clone(),
-                        &row,
-                        control,
-                    )?);
-                    continue;
-                }
-                let passes = match &self.step.predicate {
-                    Some(predicate) => expression::predicate(
-                        expression::evaluate_with_access_control(
-                            predicate,
-                            snapshot,
-                            &row,
-                            params,
-                            &graph_view.query_access,
-                            control,
-                        )?
-                        .value,
-                    )?,
-                    None => true,
-                };
-                if passes {
-                    self.matched = true;
-                    return Ok(Some(row));
-                }
-                continue;
-            }
-            self.stack.pop();
         }
+        self.optional_or_done(control)
     }
 
     fn optional_or_done(
@@ -245,13 +278,16 @@ pub(crate) fn spill_match_step(
     control: &ExecutionControl<'_>,
     spill_connection: &Connection,
     output: &mut BindingSpill,
+    bindings: &mut MatchReadBindings,
 ) -> QueryResult<()> {
     for row in input {
-        let mut cursor = StepCursor::new(step.clone(), row, control)?;
+        let mut cursor = StepCursor::new(step, row, control)?;
         loop {
             control.work(1)?;
             control.check()?;
-            let Some(row) = cursor.next_row(snapshot, graph_view, params, metrics, control)? else {
+            let Some(row) =
+                cursor.next_row(snapshot, graph_view, params, metrics, bindings, control)?
+            else {
                 break;
             };
             output.push(spill_connection, &row, control)?;
@@ -262,6 +298,11 @@ pub(crate) fn spill_match_step(
 
 #[derive(Debug)]
 struct PartCursor {
+    profile: Option<MatchProfileSlots>,
+    probe_template: Option<usize>,
+    probe_value: Option<Value>,
+    probe_memory: Option<MemoryReservation>,
+    probe_empty: bool,
     part: PatternPart,
     base: BindingRow,
     start_after: i64,
@@ -287,7 +328,7 @@ struct PartCursor {
 
 impl PartCursor {
     fn new(
-        part: PatternPart,
+        part: &PatternPart,
         base: &BindingRow,
         control: &ExecutionControl<'_>,
     ) -> QueryResult<Self> {
@@ -297,10 +338,16 @@ impl PartCursor {
             crate::query::resources::allocation_bytes::<i64>(PIPELINE_BATCH * 2)?,
         )?;
         let memory = control.reserve(crate::query::resources::checked_add(
-            base_bytes, page_bytes,
+            crate::query::resources::checked_add(base_bytes, page_bytes)?,
+            crate::query::plan::part_seek_bytes(part, control)?,
         )?)?;
         Ok(Self {
-            part,
+            profile: None,
+            probe_template: None,
+            probe_value: None,
+            probe_memory: None,
+            probe_empty: false,
+            part: part.clone(),
             base: base.clone(),
             start_after: 0,
             start_index_cursor: None,
@@ -324,72 +371,27 @@ impl PartCursor {
         })
     }
 
-    fn reserve_output(&mut self, control: &ExecutionControl<'_>) -> QueryResult<()> {
-        let mut output_bytes = expression::binding_row_bytes_controlled(&self.base, Some(control))?;
-        for name in [
-            self.part.path_variable.as_ref(),
-            self.part.start.variable.as_ref(),
-            self.part
-                .relationship
-                .as_ref()
-                .and_then(|spec| spec.variable.as_ref()),
-            self.part
-                .end
-                .as_ref()
-                .and_then(|spec| spec.variable.as_ref()),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            output_bytes = crate::query::resources::checked_add(
-                output_bytes,
-                crate::query::resources::checked_add(
-                    crate::query::resources::map_entry_bytes::<BindingValue>()?,
-                    name.capacity() as u64,
-                )?,
-            )?;
-        }
-        output_bytes = crate::query::resources::checked_add(output_bytes, 256)?;
-        // An undirected index seek can retain both endpoint orientations.
-        let output_copies = if self
-            .part
-            .relationship
-            .as_ref()
-            .is_some_and(|relationship| relationship.index_seek.is_some())
-        {
-            2
-        } else {
-            1
-        };
-        let output_bytes = crate::query::resources::checked_mul(output_bytes, output_copies)?;
-        match &mut self.output_memory {
-            Some(memory) => memory.resize(output_bytes)?,
-            None => self.output_memory = Some(control.reserve(output_bytes)?),
-        }
-        Ok(())
-    }
-
     fn next_row(
         &mut self,
         snapshot: &Snapshot<'_>,
         graph_view: &ResolvedGraphView,
         metrics: &mut QueryMetrics,
+        bindings: &MatchReadBindings,
         control: &ExecutionControl<'_>,
     ) -> QueryResult<Option<BindingRow>> {
-        if self.part_is_impossible(graph_view) {
+        if self.probe_empty || self.part_is_impossible(graph_view) {
             return Ok(None);
         }
         self.reserve_output(control)?;
-        if self
-            .part
-            .relationship
-            .as_ref()
-            .is_some_and(|relationship| relationship.index_seek.is_some())
-        {
-            return self.next_indexed_relationship_row(snapshot, graph_view, metrics, control);
+        if self.part.relationship.as_ref().is_some_and(|relationship| {
+            relationship.index_seek.is_some() || relationship.id_seek.is_some()
+        }) {
+            return self
+                .next_indexed_relationship_row(snapshot, graph_view, metrics, bindings, control);
         }
         if self.part.relationship.is_none() {
-            let Some(id) = self.next_start(snapshot, graph_view, metrics, control)? else {
+            let Some(id) = self.next_start(snapshot, graph_view, metrics, bindings, control)?
+            else {
                 return Ok(None);
             };
             let Some(row) = bind_node(self.base.clone(), self.part.start.variable.as_deref(), id)?
@@ -403,10 +405,18 @@ impl PartCursor {
                 Vec::new(),
             );
         }
-        self.next_relationship_row(snapshot, graph_view, metrics, control)
+        self.next_relationship_row(snapshot, graph_view, metrics, bindings, control)
     }
 
     fn profile_access_operator(&self) -> Option<(&str, &'static str)> {
+        if let Some(relationship) = &self.part.relationship
+            && relationship.id_seek.is_some()
+        {
+            return Some((
+                relationship.variable.as_deref().unwrap_or("_anon_rel"),
+                "RelationshipIdSeek",
+            ));
+        }
         if let Some(relationship) = &self.part.relationship
             && relationship.index_seek.is_some()
         {
@@ -423,11 +433,14 @@ impl PartCursor {
             .as_deref()
             .is_some_and(|variable| self.base.values.contains_key(variable))
         {
-            return self
-                .part
-                .relationship
-                .as_ref()
-                .map(|_| (start, "AdjacencySeek"));
+            return Some((
+                start,
+                if self.part.relationship.is_some() {
+                    "AdjacencySeek"
+                } else {
+                    "NodeIdSeek"
+                },
+            ));
         }
         if self.part.start.id_seek.is_some() {
             return Some((start, "NodeIdSeek"));
@@ -446,6 +459,7 @@ impl PartCursor {
         snapshot: &Snapshot<'_>,
         graph_view: &ResolvedGraphView,
         metrics: &mut QueryMetrics,
+        bindings: &MatchReadBindings,
         control: &ExecutionControl<'_>,
     ) -> QueryResult<Option<BindingRow>> {
         loop {
@@ -453,11 +467,16 @@ impl PartCursor {
             if self.relationship_index < self.relationships.len() {
                 let rel = self.relationships[self.relationship_index];
                 self.relationship_index += 1;
-                let access = metrics.activate_access_for_operator(
-                    Some(self.part.start.variable.as_deref().unwrap_or("_anon")),
-                    "AdjacencySeek",
-                );
+                let access = if self.profile.is_some() {
+                    self.activate_role(metrics, ProfileRole::RelationshipAccess)
+                } else {
+                    metrics.activate_access_for_operator(
+                        Some(self.part.start.variable.as_deref().unwrap_or("_anon")),
+                        "AdjacencySeek",
+                    )
+                };
                 let matched = self.match_relationship(snapshot, graph_view, rel, metrics, control);
+                self.record_fallback_relationship_rows(metrics, &matched, false);
                 metrics.restore_access_operator(access);
                 if let Some(row) = matched? {
                     return Ok(Some(row));
@@ -467,10 +486,14 @@ impl PartCursor {
             if let Some(start) = self.current_start
                 && !self.relationship_done
             {
-                let access = metrics.activate_access_for_operator(
-                    Some(self.part.start.variable.as_deref().unwrap_or("_anon")),
-                    "AdjacencySeek",
-                );
+                let access = if self.profile.is_some() {
+                    self.activate_role(metrics, ProfileRole::RelationshipAccess)
+                } else {
+                    metrics.activate_access_for_operator(
+                        Some(self.part.start.variable.as_deref().unwrap_or("_anon")),
+                        "AdjacencySeek",
+                    )
+                };
                 let page = self.load_relationship_page(
                     snapshot,
                     start,
@@ -491,7 +514,8 @@ impl PartCursor {
                     continue;
                 }
             }
-            let Some(start) = self.next_start(snapshot, graph_view, metrics, control)? else {
+            let Some(start) = self.next_start(snapshot, graph_view, metrics, bindings, control)?
+            else {
                 return Ok(None);
             };
             self.current_start = Some(start);
@@ -507,6 +531,7 @@ impl PartCursor {
         snapshot: &Snapshot<'_>,
         graph_view: &ResolvedGraphView,
         metrics: &mut QueryMetrics,
+        bindings: &MatchReadBindings,
         control: &ExecutionControl<'_>,
     ) -> QueryResult<Option<BindingRow>> {
         loop {
@@ -524,6 +549,12 @@ impl PartCursor {
                 let Some(spec) = self.part.relationship.as_ref() else {
                     return Ok(None);
                 };
+                if spec
+                    .type_id
+                    .is_some_and(|type_id| type_id != relationship.type_id)
+                {
+                    continue;
+                }
                 let orientations = match spec.direction {
                     Direction::Outgoing => vec![(relationship.source, relationship.target)],
                     Direction::Incoming => vec![(relationship.target, relationship.source)],
@@ -554,29 +585,57 @@ impl PartCursor {
             if self.indexed_relationship_done {
                 return Ok(None);
             }
-            let Some(spec) = self.part.relationship.as_ref() else {
-                return Ok(None);
-            };
-            let Some(seek) = spec.index_seek.as_ref() else {
-                return Ok(None);
-            };
-            let page = crate::query::schema::scan_relationship_index_page(
+            self.load_next_indexed_relationship_ids(snapshot, metrics, bindings, control)?;
+        }
+    }
+
+    fn load_next_indexed_relationship_ids(
+        &mut self,
+        snapshot: &Snapshot<'_>,
+        metrics: &mut QueryMetrics,
+        bindings: &MatchReadBindings,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<()> {
+        let Some(spec) = self.part.relationship.as_ref() else {
+            self.indexed_relationship_done = true;
+            return Ok(());
+        };
+        if let Some(id) = spec.id_seek {
+            metrics.record_db_hits(1);
+            self.indexed_relationship_ids.push(id);
+            self.indexed_relationship_index = 0;
+            self.indexed_relationship_done = true;
+            return Ok(());
+        }
+        let Some(seek) = spec.index_seek.as_ref() else {
+            self.indexed_relationship_done = true;
+            return Ok(());
+        };
+        let page = match self.scan_bound_page(
+            snapshot,
+            bindings,
+            self.indexed_relationship_cursor.as_ref(),
+            control,
+        )? {
+            Some(page) => page,
+            None => crate::query::schema::scan_relationship_index_page(
                 snapshot,
                 seek,
                 spec.type_id,
                 self.indexed_relationship_cursor.as_ref(),
                 PIPELINE_BATCH,
                 control,
-            )?;
-            metrics.record_db_hits(page.items.len() as u64);
-            self.indexed_relationship_ids = page.items;
-            self.indexed_relationship_index = 0;
-            if let Some(cursor) = page.next_cursor {
-                self.indexed_relationship_cursor = Some(cursor);
-            } else {
-                self.indexed_relationship_done = true;
-            }
+            )?,
+        };
+        metrics.record_db_hits(page.items.len() as u64);
+        self.indexed_relationship_ids = page.items;
+        self.indexed_relationship_index = 0;
+        if let Some(cursor) = page.next_cursor {
+            self.indexed_relationship_cursor = Some(cursor);
+        } else {
+            self.indexed_relationship_done = true;
         }
+        Ok(())
     }
 
     fn match_indexed_relationship_orientation(
@@ -668,8 +727,36 @@ impl PartCursor {
     fn next_start(
         &mut self,
         snapshot: &Snapshot<'_>,
+        view: &ResolvedGraphView,
+        metrics: &mut QueryMetrics,
+        bindings: &MatchReadBindings,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<Option<i64>> {
+        let next = self.next_start_value(snapshot, view, metrics, bindings, control)?;
+        if next.is_some() {
+            if let Some(slots) = self.profile {
+                metrics.record_profile_rows(slots.slot(ProfileRole::NodeAccess), 1);
+            } else if metrics.has_explicit_profile_sites()
+                || (self.part.relationship.is_none()
+                    && self
+                        .part
+                        .start
+                        .variable
+                        .as_ref()
+                        .is_some_and(|variable| self.base.values.contains_key(variable)))
+            {
+                metrics.record_active_rows(1);
+            }
+        }
+        Ok(next)
+    }
+
+    fn next_start_value(
+        &mut self,
+        snapshot: &Snapshot<'_>,
         graph_view: &ResolvedGraphView,
         metrics: &mut QueryMetrics,
+        bindings: &MatchReadBindings,
         control: &ExecutionControl<'_>,
     ) -> QueryResult<Option<i64>> {
         if let Some(variable) = self.part.start.variable.as_deref()
@@ -695,7 +782,7 @@ impl PartCursor {
                 Ok(None)
             };
         }
-        self.next_scanned_start(snapshot, graph_view, metrics, control)
+        self.next_scanned_start(snapshot, graph_view, metrics, bindings, control)
     }
 
     fn next_scanned_start(
@@ -703,6 +790,7 @@ impl PartCursor {
         snapshot: &Snapshot<'_>,
         graph_view: &ResolvedGraphView,
         metrics: &mut QueryMetrics,
+        bindings: &MatchReadBindings,
         control: &ExecutionControl<'_>,
     ) -> QueryResult<Option<i64>> {
         if self.part.start.id_seek.is_some() {
@@ -729,41 +817,65 @@ impl PartCursor {
             if self.start_done {
                 return Ok(None);
             }
-            if let Some(seek) = &self.part.start.index_seek
-                && seek.kind != crate::storage::StandardIndexKind::Lookup
-            {
-                self.start_known_label = self.part.start.scan_label;
-                let page = crate::query::schema::scan_node_index_page(
+            self.load_start_page(snapshot, graph_view, metrics, bindings, control)?;
+        }
+    }
+
+    fn load_start_page(
+        &mut self,
+        snapshot: &Snapshot<'_>,
+        graph_view: &ResolvedGraphView,
+        metrics: &mut QueryMetrics,
+        bindings: &MatchReadBindings,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<()> {
+        if let Some(seek) = &self.part.start.index_seek
+            && seek.kind != crate::storage::StandardIndexKind::Lookup
+        {
+            self.start_known_label = if self.probe_template.is_some() {
+                None
+            } else {
+                self.part.start.scan_label
+            };
+            let page = match self.scan_bound_page(
+                snapshot,
+                bindings,
+                self.start_index_cursor.as_ref(),
+                control,
+            )? {
+                Some(page) => page,
+                None => crate::query::schema::scan_node_index_page(
                     snapshot,
                     seek,
                     self.start_index_cursor.as_ref(),
                     PIPELINE_BATCH,
                     control,
-                )?;
-                metrics.record_db_hits(page.items.len() as u64);
-                self.start_buffer = page.items;
-                self.start_index = 0;
-                self.start_index_cursor = page.next_cursor;
-                self.start_done = self.start_index_cursor.is_none();
+                )?,
+            };
+            metrics.record_db_hits(page.items.len() as u64);
+            self.start_buffer = page.items;
+            self.start_index = 0;
+            self.start_index_cursor = page.next_cursor;
+            self.start_done = self.start_index_cursor.is_none();
+        } else {
+            let (page, known_label) = graph_view.scan_nodes_after(
+                snapshot,
+                self.part.start.scan_label,
+                self.start_after,
+                PIPELINE_BATCH,
+                control,
+            )?;
+            self.start_known_label = known_label;
+            metrics.record_db_hits(page.items.len() as u64);
+            self.start_buffer = page.items;
+            self.start_index = 0;
+            if let Some(after) = page.next_after {
+                self.start_after = after;
             } else {
-                let (page, known_label) = graph_view.scan_nodes_after(
-                    snapshot,
-                    self.part.start.scan_label,
-                    self.start_after,
-                    PIPELINE_BATCH,
-                    control,
-                )?;
-                self.start_known_label = known_label;
-                metrics.record_db_hits(page.items.len() as u64);
-                self.start_buffer = page.items;
-                self.start_index = 0;
-                if let Some(after) = page.next_after {
-                    self.start_after = after;
-                } else {
-                    self.start_done = true;
-                }
+                self.start_done = true;
             }
         }
+        Ok(())
     }
 
     fn next_id_start(

@@ -25,6 +25,19 @@ mod tests;
 pub(crate) trait SnapshotReadObserver: Debug {
     fn reserve(&self, bytes: u64) -> StorageResult<Box<dyn Debug>>;
 
+    fn pin_snapshot(
+        &self,
+        _database: HashId,
+        _commit: HashId,
+        _checkpoint: Option<HashId>,
+    ) -> StorageResult<Option<Box<dyn Debug>>> {
+        Ok(None)
+    }
+
+    fn checkpoint_is_pinned(&self, _database: HashId, _checkpoint: HashId) -> StorageResult<bool> {
+        Ok(false)
+    }
+
     fn checkpoint(&self) -> StorageResult<()> {
         Ok(())
     }
@@ -360,6 +373,48 @@ impl Snapshot<'_> {
                 owner_kind as i64,
                 owner_id,
                 key_id
+            ])
+            .map_err(StorageError::from)?;
+        let Some(row) = rows.next().map_err(StorageError::from)? else {
+            return visitor(None);
+        };
+        let property = property_from_row(row, 0, self.state.read_observer.as_deref(), check)?;
+        visitor(Some(&property.value))
+    }
+
+    pub(crate) fn with_named_property_checked<T, E: From<StorageError>>(
+        &self,
+        owner_kind: OwnerKind,
+        owner_id: i64,
+        name: &str,
+        check: &dyn Fn() -> StorageResult<()>,
+        visitor: impl FnOnce(Option<&PropertyValue>) -> Result<T, E>,
+    ) -> Result<T, E> {
+        check()?;
+        // Overlay/cache values take precedence without decoding a shadowed base
+        // value. A plain checkpoint can resolve the dictionary and property in
+        // one indexed statement, without retaining a name-to-id cache.
+        let Some(checkpoint) = self.state.checkpoint.filter(|_| {
+            self.state.overlay.properties.is_empty()
+                && self.state.property_cache.borrow().is_empty()
+        }) else {
+            let Some(key) = super::find_property_key(self.connection, name)? else {
+                return visitor(None);
+            };
+            return self.with_property_checked(owner_kind, owner_id, key, check, visitor);
+        };
+        let mut statement = self.connection.prepare_cached(
+            "SELECT p.type_tag, p.int_value, p.real_value, p.text_value, p.blob_value, p.aux_value \
+             FROM main._lithograph_prop_keys AS k \
+             JOIN main._lithograph_cp_properties AS p ON p.key_id=k.id \
+             WHERE k.name=?1 AND p.commit_id=?2 AND p.owner_kind=?3 AND p.owner_id=?4",
+        ).map_err(StorageError::from)?;
+        let mut rows = statement
+            .query(params![
+                name,
+                checkpoint.as_bytes().as_slice(),
+                owner_kind as i64,
+                owner_id
             ])
             .map_err(StorageError::from)?;
         let Some(row) = rows.next().map_err(StorageError::from)? else {

@@ -12,7 +12,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
-PACKAGE_FILES = ("README.md", "LICENSE", "COMMERCIAL-LICENSE.md")
+PACKAGE_FILES = ("README.md", "LICENSE", "COMMERCIAL-LICENSE.md", "THIRD_PARTY_NOTICES.md")
 
 
 def parse_args() -> argparse.Namespace:

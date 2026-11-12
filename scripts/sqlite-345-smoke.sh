@@ -57,6 +57,17 @@ if [ "$version" != "3.45.0" ]; then
   exit 1
 fi
 
+# Link the public C API regression to this same minimum-runtime amalgamation.
+# No Cargo feature unification or system SQLite may replace the host under test.
+temp_capabilities_sqlite="$root/phase22-temp-capabilities-sqlite.o"
+temp_capabilities_bin="$root/phase22-temp-capabilities"
+${CC:-cc} -O2 -DSQLITE_THREADSAFE=1 -DSQLITE_ENABLE_FTS5 \
+  -c "$source_dir/sqlite3.c" -o "$temp_capabilities_sqlite"
+${CC:-cc} -std=c11 -O2 -Wall -Wextra -Werror -I"$source_dir" \
+  tests/phase22_temp_capabilities.c "$temp_capabilities_sqlite" \
+  -lpthread -lm $dynamic_loader_lib -o "$temp_capabilities_bin"
+"$temp_capabilities_bin" "$extension"
+
 case "$(uname -s)" in
   Darwin) tokenizer_extension="$root/phase12_tokenizer.dylib" ;;
   Linux) tokenizer_extension="$root/phase12_tokenizer.so" ;;

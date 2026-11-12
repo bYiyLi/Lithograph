@@ -10,6 +10,89 @@ use super::snapshot::Snapshot;
 use super::{LabelId, NodeId, RelationshipId, RelationshipTypeId, StorageError, StorageResult};
 
 impl<'connection> Snapshot<'connection> {
+    /// Constant-time work admission for the caller's shared planning budget.
+    /// No SQL, allocation, or overlay traversal is performed here.
+    pub(crate) fn bounded_statistics_work(
+        &self,
+        labels_len: usize,
+        types_len: usize,
+        need_relationships: bool,
+    ) -> usize {
+        self.state
+            .overlay
+            .nodes
+            .len()
+            .saturating_add(4)
+            .saturating_add(labels_len)
+            .saturating_add(types_len)
+            .saturating_add(self.state.overlay.labels.len().saturating_mul(labels_len))
+            .saturating_add(if need_relationships || types_len > 0 {
+                self.state.overlay.relationships.len()
+            } else {
+                0
+            })
+    }
+
+    /// Inspect one indexed BLOB length without fetching or decoding its content.
+    /// Callers charge this probe, then charge one work unit per encoded byte.
+    pub(crate) fn bounded_statistics_decode_work(&self) -> StorageResult<Option<usize>> {
+        self.read_checkpoint()?;
+        let Some(checkpoint) = self.state.checkpoint else {
+            return Ok(Some(0));
+        };
+        let bytes: Option<i64> = self.connection.query_row(
+            "SELECT CASE WHEN typeof(metadata)='blob' THEN length(metadata) ELSE NULL END FROM main._lithograph_checkpoints WHERE commit_id = ?1",
+            [checkpoint.as_bytes().as_slice()],
+            |row| row.get(0),
+        ).optional()?.flatten();
+        self.read_checkpoint()?;
+        Ok(bytes.and_then(|bytes| usize::try_from(bytes).ok()))
+    }
+
+    /// Optional estimates must not replay a large overlay or decode unbounded
+    /// derived metadata. Unknown changes plan quality, never graph membership.
+    pub(crate) fn bounded_statistics(
+        &self,
+        labels: &BTreeSet<LabelId>,
+        relationship_types: &BTreeSet<RelationshipTypeId>,
+        need_relationships: bool,
+        max_work: usize,
+        max_bytes: usize,
+    ) -> StorageResult<Option<SnapshotStatistics>> {
+        self.read_checkpoint()?;
+        let work = self.bounded_statistics_work(
+            labels.len(),
+            relationship_types.len(),
+            need_relationships,
+        );
+        if work > max_work {
+            return Ok(None);
+        }
+        let requested_bytes = labels
+            .len()
+            .saturating_add(relationship_types.len())
+            .saturating_mul(128);
+        let Some(metadata_bytes) = max_bytes.checked_sub(requested_bytes) else {
+            return Ok(None);
+        };
+        let Some(decode_work) = self.bounded_statistics_decode_work()? else {
+            return Ok(None);
+        };
+        // JSON Values and BTreeMap entries coexist during decoding. Bound
+        // their conservative working capacity, not just encoded bytes, and
+        // charge decoding to the same global work grant as overlay reads.
+        if decode_work > metadata_bytes / 32
+            || work
+                .checked_add(decode_work)
+                .is_none_or(|work| work > max_work)
+        {
+            return Ok(None);
+        }
+        let statistics = self.statistics(labels, relationship_types, true, need_relationships)?;
+        self.read_checkpoint()?;
+        Ok(statistics)
+    }
+
     pub(crate) fn statistics(
         &self,
         labels: &BTreeSet<LabelId>,
@@ -48,6 +131,7 @@ impl<'connection> Snapshot<'connection> {
         checkpoint_max_node: NodeId,
     ) -> StorageResult<()> {
         for (&node_id, &op) in &self.state.overlay.nodes {
+            self.read_checkpoint()?;
             let before = if node_id > checkpoint_max_node {
                 false
             } else {
@@ -65,6 +149,7 @@ impl<'connection> Snapshot<'connection> {
         checkpoint_max_node: NodeId,
     ) -> StorageResult<()> {
         for &label_id in labels {
+            self.read_checkpoint()?;
             let count = statistics.label_counts.entry(label_id).or_default();
             for (&(_, node_id), &op) in self
                 .state
@@ -72,6 +157,7 @@ impl<'connection> Snapshot<'connection> {
                 .labels_by_label
                 .range((label_id, 0)..=(label_id, i64::MAX))
             {
+                self.read_checkpoint()?;
                 let before = if node_id > checkpoint_max_node {
                     false
                 } else {
@@ -91,6 +177,7 @@ impl<'connection> Snapshot<'connection> {
     ) -> StorageResult<()> {
         let checkpoint_max_relationship = self.checkpoint_max_relationship_id()?;
         for (&relationship_id, delta) in &self.state.overlay.relationships {
+            self.read_checkpoint()?;
             let before_type = if relationship_id > checkpoint_max_relationship {
                 None
             } else {
@@ -190,6 +277,9 @@ impl<'connection> Snapshot<'connection> {
     }
 }
 
+#[path = "snapshot_stats/sampling.rs"]
+mod sampling;
+
 fn adjust_count(count: &mut u64, before: bool, after: bool) {
     match (before, after) {
         (false, true) => *count = count.saturating_add(1),
@@ -218,3 +308,7 @@ fn adjust_type_count(
 #[cfg(test)]
 #[path = "snapshot_stats/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "snapshot_stats/sampling_tests.rs"]
+mod sampling_tests;

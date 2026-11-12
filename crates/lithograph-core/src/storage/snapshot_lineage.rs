@@ -52,7 +52,9 @@ pub(super) fn resolve_lineage(
         check()?;
         let row = load_lineage_row(&mut statement, current)?;
         check()?;
-        if Some(current) != skip_checkpoint && row.has_checkpoint {
+        // A partially built or incompatible derived checkpoint must never
+        // become a correctness source. Replay its canonical Layer instead.
+        if has_usable_base(connection, current, skip_checkpoint, row.has_checkpoint)? {
             return Ok((Some(current), layers, memory));
         }
         record_lineage_layer(&row, empty_layer_hash, &mut layers, check)?;
@@ -61,6 +63,17 @@ pub(super) fn resolve_lineage(
         };
         current = parent;
     }
+}
+
+fn has_usable_base(
+    connection: &Connection,
+    current: HashId,
+    skip_checkpoint: Option<HashId>,
+    has_checkpoint: bool,
+) -> StorageResult<bool> {
+    Ok(Some(current) != skip_checkpoint
+        && has_checkpoint
+        && super::checkpoint::usable_checkpoint(connection, current)?)
 }
 
 fn reserve_lineage_entry(

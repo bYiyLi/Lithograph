@@ -16,8 +16,15 @@ use super::resources::{
 use super::{QueryError, QueryErrorKind, QueryResult};
 
 mod codec;
+mod grace;
 pub(super) use codec::distinct_row_key;
 use codec::{decode_binding_row, decode_row, encode_binding_row, encode_row};
+pub(super) use grace::{
+    FANOUT as GRACE_PARTITION_FANOUT, GraceCounters, GracePartitions, HashSide,
+    MAX_DEPTH as GRACE_MAX_REPARTITION_DEPTH, PartitionId,
+    RECORD_FIXED_VALUE_BYTES as GRACE_RECORD_FIXED_VALUE_BYTES, RepartitionOutcome,
+    ReservedSpillBatch, SpillReadLimit, SpilledBinding, resident_bound as grace_resident_bound,
+};
 
 const SORT_RUN_ROWS: usize = 1_024;
 static NEXT_SPILL_ID: AtomicU64 = AtomicU64::new(1);
@@ -686,7 +693,7 @@ pub(super) fn drop_temp_table(connection: &Connection, table: &str) -> QueryResu
 
 // Includes the transient JSON DOM, escaped output and String growth. These are
 // conservative working-memory allowances, rather than a serialized-size quota.
-fn serialization_bytes(bytes: u64) -> QueryResult<u64> {
+pub(in crate::query) fn serialization_bytes(bytes: u64) -> QueryResult<u64> {
     checked_add(checked_mul(bytes, 16)?, 1024)
 }
 

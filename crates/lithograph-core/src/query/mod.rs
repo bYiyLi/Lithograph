@@ -27,6 +27,8 @@ mod version;
 
 pub use access::{AccessPolicy, PropertyRules, ReadAccess, WriteAccess};
 pub use error::{QueryError, QueryErrorKind, QueryResult};
+#[cfg(test)]
+pub(crate) use graph::{resolve_snapshot_with_control, snapshot_observer};
 pub use options::{ExecutionOptions, GraphViewSelector, MergeSessionSelector, SnapshotSelector};
 pub use plan::{
     LogicalOperator, LogicalPlan, PhysicalOperator, PhysicalPlan, PreparedQuery, prepare,
@@ -35,8 +37,8 @@ pub use plan::{
 pub use resources::{ExecutionControl, MemoryReservation, QueryResources};
 pub use stats::PlannerStatistics;
 pub use stream::{
-    OperatorRuntimeMetrics, QueryBatch, QueryCounters, QueryCursor, QueryMetrics, QuerySummary,
-    QueryType,
+    HashJoinRuntimeMetrics, OperatorRuntimeMetrics, QueryBatch, QueryCounters, QueryCursor,
+    QueryMetrics, QuerySummary, QueryType,
 };
 
 #[doc(hidden)]

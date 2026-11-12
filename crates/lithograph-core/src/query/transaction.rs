@@ -348,9 +348,12 @@ fn execute_read_clause_at_commit(
         runtime.params,
         &runtime.program.source,
         clause,
+        runtime
+            .program
+            .identity_match_spans
+            .contains(&clause.span.start),
         input,
         runtime.metrics,
-        runtime.is_interrupted,
         &ExecutionControl::new(runtime.resources, runtime.is_interrupted),
     )
 }

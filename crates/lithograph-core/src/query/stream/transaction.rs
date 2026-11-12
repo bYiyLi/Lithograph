@@ -28,6 +28,7 @@ impl QueryCursor {
                 connection,
                 program,
                 self.prepared.commit,
+                self.prepared.resolved_state.as_ref(),
                 &self.prepared.params,
                 &ExecutionControl::new(&self.prepared.resources, is_interrupted),
             )?;

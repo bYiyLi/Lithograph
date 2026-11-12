@@ -122,6 +122,8 @@ options = {"branch":"main","readOnlyNoExternalIO":true}
 
 `PROFILE` 执行实际查询，额外返回 `summary.profile.operators`，每项 `{id,operator,rows,dbHits}`；id 为零基，operator 顺序与 physical plan 一致，各 operator dbHits 之和等于 metrics.dbHits。普通查询和 EXPLAIN 不返回 profile。`EXPLAIN` 只编译/验证和展示计划，不执行 graph mutation，也不构建索引缓存；安全 options 仍检查它包含的 AST。
 
+**开发中、尚未发布：** Phase 22 当前工作树为实际选择的 Hash Join 增加可选 PROFILE 统计；这不属于本页的 v0.3.4 发行基线。字段与计量范围由 [Interfaces 的结果合同](../design/interfaces.md#lithograph-json) 定义，实际开发与验收状态见 [Phase 22](../development/phases/22-high-performance-query-optimizer.md)。
+
 <a id="sql-explicit-transactions"></a>
 
 ## SQL 显式事务

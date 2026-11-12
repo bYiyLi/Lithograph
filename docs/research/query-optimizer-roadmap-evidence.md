@@ -4,7 +4,7 @@
 
 ## Lithograph 已有基础与真实缺口
 
-- 本地仓库当前为 HEAD `e245555` 加尚未提交的 Phase 21 工作区修改；Phase 21 的 `done` 仅代表本地验收，不等于 v0.3.4 已发行功能。
+- 初次研究时的源码基线为 `e245555` 加未提交的 Phase 21 工作区；2026-11-10 继续复核时，仓库已更新至 `main@3f1f31e`，本地 `v0.3.5` Tag 指向同一 Commit，Phase 21 已包含在该源码中。此前的“未提交”仅属于历史研究时点；本地 Tag 不等于已验证远端 Release 平台资产。
 - 已有 AST / LogicalPlan / PhysicalPlan、Node/Relationship scan、Standard Index、NodeIdSeek、AdjacencySeek、流式 MatchCursor、query-scoped resource budget、TEMP spill、Checkpoint + Layer Overlay 与统计。不能将它们描述为缺失并重复实现。
 - `query/plan/build.rs` 对分离 Pattern Part 仍存在简单 Cartesian 串行组合；没有完整的 DPhyp Join Enumerator、选择性 Join 算法集合或通用多路交集。
 - `storage/snapshot.rs` 在 Snapshot resolve 时按 lineage 重建 Overlay；`storage/checkpoint.rs` 有 `create_checkpoint`，但当前常规写入路径未找到自动 Tiered 维护调用。Phase 21 的 100k Node 固定 ID 点查在无 Checkpoint 时比有 Checkpoint 慢得多，需分开治理版本解析和算子执行。
@@ -15,6 +15,7 @@
 | 参考及来源 | 可借鉴机制 | Lithograph 的目标实现与限制 |
 | --- | --- | --- |
 | [DuckDB Internals](https://duckdb.org/docs/current/internals/overview)；[Join Operations](https://duckdb.org/docs/current/guides/performance/join_operations)（访问 2026-11-10） | Binder → Logical Planner → Rewrite → Join Order；DPhyp 对较小 Join Graph 做 DP 搜索，大图退化 Greedy 并有搜索预算 | 在现有 AST/Plan 中标注不可跨越的 Cypher scope、OPTIONAL、Apply、写 barrier；仅对证明可重排的 inner Join 组件枚举，不整套迁移 DuckDB Planner |
+| [Moerkotte / Neumann：Dynamic Programming Strikes Back，SIGMOD 2008](https://15721.courses.cs.cmu.edu/spring2020/papers/20-optimizer2/p539-moerkotte.pdf)（访问 2026-11-11） | hypergraph 的连接端点、connected subgraph/complement，以及按邻域和排除集合生长的 DPhyp；区别全子集测试与真正连通枚举 | 独立实现有界 CSG/CMP 枚举；拓扑与当前可执行的左深物理 memo 分离，不复制外部代码，不将未执行的 bushy 成本冒充实际计划 |
 | [PostgreSQL Planner Statistics](https://www.postgresql.org/docs/current/planner-stats-details.html)；[Extended Statistics](https://www.postgresql.org/docs/current/planner-stats.html)（访问 2026-11-10） | 基数、NDistinct、MCV、correlation / functional dependency 改善过滤估计 | Derived statistics 按 Snapshot / index definition 选取；样本和数据偏斜有界，缺失回退 unknown；不把估算当作正确性真源或暴露用户属性值 |
 | [SQLite Query Optimizer](https://www.sqlite.org/optoverview.html)；[ANALYZE](https://www.sqlite.org/lang_analyze.html)（访问 2026-11-10） | 访问路径选择、统计驱动、B-tree seek 和 `sqlite3_stmt_status` 访问度量 | 尽量复用现有 SQLite keyed access 和 `EXPLAIN QUERY PLAN`；SQLite `stat1/stat4` 不直接等同 Lithograph 历史 Graph Snapshot 的完整统计，不要求宿主额外编译选项 |
 | [PostgreSQL Hash Join 执行源码](https://github.com/postgres/postgres/blob/master/src/backend/executor/nodeHashjoin.c)；[EXPLAIN](https://www.postgresql.org/docs/current/using-explain.html)（访问 2026-11-10） | 小 build 侧、分批 Hash Join、磁盘 partition spill、peak/batches 诊断 | 使用现有 query budget、SQLite TEMP / cancel / rollback；不新增第二套 `work_mem` 或不受控的进程级 Hash Table |

@@ -1,3 +1,5 @@
+mod bound;
+pub(crate) use bound::{BoundStandardIndexRead, bind_standard_index_read, scan_bound_index_page};
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
@@ -9,18 +11,24 @@ use crate::storage::{
 
 use super::super::access::PropertyRules;
 use super::super::expression::{BinaryOp, Expr};
-use super::super::plan::MatchStep;
+use super::super::plan::{MatchStep, PatternPart, PlanningBudget};
 use super::super::{ExecutionControl, MemoryReservation, QueryResult};
 use crate::storage::Snapshot;
 
+mod join_proof;
+pub(crate) use join_proof::{join_index_cache_allowed, join_index_definition_hash};
 mod cache;
 mod constant;
 use constant::SeekEvaluation;
 mod persistent;
+mod safety;
 
-pub(crate) use cache::{StandardIndexCursor, scan_node_index_page, scan_relationship_index_page};
+pub(crate) use cache::{
+    StandardIndexCursor, StandardIndexPage, scan_node_index_page, scan_relationship_index_page,
+};
 pub(crate) use persistent::{
-    build_persistent_generation, ensure_standard_indexes_for_commit_controlled,
+    IndexDistribution, build_persistent_generation, ensure_standard_indexes_for_commit_controlled,
+    estimate_index_access, estimate_index_distribution,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -28,6 +36,21 @@ pub(crate) struct StandardIndexSeek {
     pub(crate) index_name: String,
     pub(crate) kind: StandardIndexKind,
     pub(crate) predicates: Vec<(usize, StandardIndexPredicate)>,
+}
+
+pub(crate) fn seek_bytes(
+    seek: &StandardIndexSeek,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<u64> {
+    seek.predicates.iter().try_fold(
+        seek.index_name.capacity() as u64,
+        |bytes, (_, predicate)| {
+            crate::query::resources::checked_add(
+                bytes,
+                constant::predicate_bytes(predicate, control)?,
+            )
+        },
+    )
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -63,43 +86,99 @@ pub(crate) fn select_standard_index_seeks(
     query_access: &PropertyRules,
     snapshot: &Snapshot<'_>,
     control: &ExecutionControl<'_>,
+    budget: &mut PlanningBudget,
 ) -> QueryResult<MemoryReservation> {
-    let mut evaluation = SeekEvaluation::new(snapshot, params, query_access, control)?;
+    control.check()?;
+    if !schema.indexes.values().any(|index| {
+        matches!(
+            index.kind,
+            StandardIndexKind::Range | StandardIndexKind::Text | StandardIndexKind::Point
+        ) || matches!(index.target, IndexTarget::RelationshipLookup)
+    }) || budget.exhausted()
+        || !matches.iter().any(standard_index_consumer)
+        || !standard_index_cache_allowed(snapshot, control, budget)?
+    {
+        for step in matches {
+            clear_step_index_seeks(step);
+        }
+        return control.reserve(0);
+    }
+    let mut evaluation = SeekEvaluation::new(snapshot, params, query_access, control, budget)?;
     for step in matches {
-        let candidates = step
-            .predicate
+        select_step_index_seeks(schema, step, query_access, &mut evaluation)?;
+    }
+    evaluation.finish()
+}
+
+fn standard_index_consumer(step: &MatchStep) -> bool {
+    step.parts.iter().any(|part| {
+        part.relationship
             .as_ref()
-            .map(|predicate| {
-                let mut candidates = predicate_candidates(predicate, &evaluation);
-                if !query_access.is_empty() {
-                    candidates.retain(|(_, property, _)| !query_access.denies(property));
-                }
-                candidates
-            })
-            .unwrap_or_default();
-        evaluation.check()?;
-        for part in &mut step.parts {
-            let _copy_memory = evaluation.copy_workspace(schema, &candidates)?;
-            part.start.index_seek = if part.start.id_seek.is_some() {
-                None
-            } else {
-                choose_node_seek(
-                    schema,
-                    part.start.variable.as_deref(),
-                    &part.start.label_names,
-                    &candidates,
-                    &evaluation,
-                )
-            };
-            if let Some(relationship) = part.relationship.as_mut() {
-                relationship.index_seek = choose_relationship_seek(
-                    schema,
-                    relationship.variable.as_deref(),
-                    relationship.type_name.as_deref(),
-                    &candidates,
-                    &evaluation,
-                );
+            .is_none_or(|rel| rel.id_seek.is_none())
+            && part.start.id_seek.is_none()
+    })
+}
+
+fn standard_index_cache_allowed(
+    snapshot: &Snapshot<'_>,
+    control: &ExecutionControl<'_>,
+    budget: &mut PlanningBudget,
+) -> QueryResult<bool> {
+    control.work(1)?;
+    if !budget.work(1, 0) {
+        return Ok(false);
+    }
+    // Property and Relationship Lookup cursors bind query-local TEMP state,
+    // even with a complete persistent generation. Node Lookup is consumed by
+    // the canonical Label path. main read-only mode permits TEMP; query_only
+    // explicitly forbids it.
+    let query_only =
+        snapshot
+            .connection_for_query()
+            .pragma_query_value(None, "query_only", |row| row.get::<_, bool>(0))?;
+    if query_only {
+        return Ok(false);
+    }
+    persistent::cache_initialization_allowed(snapshot.connection_for_query(), control, budget)
+}
+
+fn clear_step_index_seeks(step: &mut MatchStep) {
+    for part in &mut step.parts {
+        part.start.index_seek = None;
+        if let Some(relationship) = &mut part.relationship {
+            relationship.index_seek = None;
+        }
+    }
+}
+
+fn select_step_index_seeks(
+    schema: &SchemaState,
+    step: &mut MatchStep,
+    query_access: &PropertyRules,
+    evaluation: &mut SeekEvaluation<'_, '_>,
+) -> QueryResult<()> {
+    let candidates = step
+        .predicate
+        .as_ref()
+        .map(|predicate| {
+            let mut candidates = safety::safe_candidates(step, schema, predicate, evaluation);
+            if !query_access.is_empty() {
+                candidates.retain(|(_, property, _)| !query_access.denies(property));
             }
+            candidates
+        })
+        .unwrap_or_default();
+    evaluation.check()?;
+    for part in &mut step.parts {
+        if evaluation.exhausted() {
+            break;
+        }
+        select_part_index_seeks(schema, part, &candidates, evaluation)?;
+    }
+    if evaluation.exhausted() {
+        clear_step_index_seeks(step);
+    } else {
+        for part in &step.parts {
             evaluation.retain(part.start.index_seek.as_ref())?;
             evaluation.retain(
                 part.relationship
@@ -107,10 +186,43 @@ pub(crate) fn select_standard_index_seeks(
                     .and_then(|relationship| relationship.index_seek.as_ref()),
             )?;
         }
-        drop(candidates);
-        evaluation.release_folded()?;
     }
-    evaluation.finish()
+    drop(candidates);
+    evaluation.release_folded()
+}
+
+fn select_part_index_seeks(
+    schema: &SchemaState,
+    part: &mut PatternPart,
+    candidates: &[(String, String, StandardIndexPredicate)],
+    evaluation: &SeekEvaluation<'_, '_>,
+) -> QueryResult<()> {
+    let _copy_memory = evaluation.copy_workspace(schema, candidates)?;
+    part.start.index_seek = if part.start.id_seek.is_some() {
+        None
+    } else {
+        choose_node_seek(
+            schema,
+            part.start.variable.as_deref(),
+            &part.start.label_names,
+            candidates,
+            evaluation,
+        )
+    };
+    if let Some(relationship) = part.relationship.as_mut() {
+        relationship.index_seek = if relationship.id_seek.is_some() {
+            None
+        } else {
+            choose_relationship_seek(
+                schema,
+                relationship.variable.as_deref(),
+                relationship.type_name.as_deref(),
+                candidates,
+                evaluation,
+            )
+        };
+    }
+    Ok(())
 }
 
 fn choose_node_seek(
@@ -336,6 +448,9 @@ fn predicate_supported(
     predicate: &StandardIndexPredicate,
     evaluation: &SeekEvaluation<'_, '_>,
 ) -> bool {
+    if !evaluation.check_work() {
+        return false;
+    }
     match (index.kind, predicate) {
         (StandardIndexKind::Range, StandardIndexPredicate::Equal(value)) => {
             range_equality_value(schema, index, property, value, evaluation)
@@ -351,18 +466,18 @@ fn predicate_supported(
             StandardIndexPredicate::Less(value, _) | StandardIndexPredicate::Greater(value, _),
         ) => {
             range_order_value(value)
-                && property_type_proves(schema, index, property, |property_type| {
+                && property_type_proves(schema, index, property, evaluation, |property_type| {
                     property_type_order_compatible(property_type, value)
                 })
         }
         (StandardIndexKind::Range, StandardIndexPredicate::IsNotNull) => true,
         (StandardIndexKind::Range, StandardIndexPredicate::StartsWith(_)) => {
-            property_type_proves(schema, index, property, |property_type| {
+            property_type_proves(schema, index, property, evaluation, |property_type| {
                 matches!(property_type, PropertyType::String)
             })
         }
         (StandardIndexKind::Point, StandardIndexPredicate::Equal(Value::Point(_))) => {
-            property_type_proves(schema, index, property, |property_type| {
+            property_type_proves(schema, index, property, evaluation, |property_type| {
                 matches!(property_type, PropertyType::Point)
             })
         }
@@ -371,25 +486,25 @@ fn predicate_supported(
                 && values
                     .iter()
                     .all(|value| evaluation.check_work() && matches!(value, Value::Point(_)))
-                && property_type_proves(schema, index, property, |property_type| {
+                && property_type_proves(schema, index, property, evaluation, |property_type| {
                     matches!(property_type, PropertyType::Point)
                 })
         }
         (StandardIndexKind::Point, StandardIndexPredicate::WithinBBox { lower, upper }) => {
             matches!((lower, upper), (Value::Point(_), Value::Point(_)))
-                && property_type_proves(schema, index, property, |property_type| {
+                && property_type_proves(schema, index, property, evaluation, |property_type| {
                     matches!(property_type, PropertyType::Point)
                 })
         }
         (StandardIndexKind::Point, StandardIndexPredicate::Distance { center, radius, .. }) => {
             matches!(center, Value::Point(_))
                 && matches!(radius, Value::Integer(_) | Value::Float(_))
-                && property_type_proves(schema, index, property, |property_type| {
+                && property_type_proves(schema, index, property, evaluation, |property_type| {
                     matches!(property_type, PropertyType::Point)
                 })
         }
         (StandardIndexKind::Text, StandardIndexPredicate::Equal(Value::String(_))) => {
-            property_type_proves(schema, index, property, |property_type| {
+            property_type_proves(schema, index, property, evaluation, |property_type| {
                 matches!(property_type, PropertyType::String)
             })
         }
@@ -398,7 +513,7 @@ fn predicate_supported(
             StandardIndexPredicate::StartsWith(_)
             | StandardIndexPredicate::EndsWith(_)
             | StandardIndexPredicate::Contains(_),
-        ) => property_type_proves(schema, index, property, |property_type| {
+        ) => property_type_proves(schema, index, property, evaluation, |property_type| {
             matches!(property_type, PropertyType::String)
         }),
         (StandardIndexKind::Text, StandardIndexPredicate::In(values)) => {
@@ -406,7 +521,7 @@ fn predicate_supported(
                 && values
                     .iter()
                     .all(|value| evaluation.check_work() && matches!(value, Value::String(_)))
-                && property_type_proves(schema, index, property, |property_type| {
+                && property_type_proves(schema, index, property, evaluation, |property_type| {
                     matches!(property_type, PropertyType::String)
                 })
         }
@@ -418,16 +533,17 @@ fn property_type_proves(
     schema: &SchemaState,
     index: &IndexDefinition,
     property: &str,
+    evaluation: &SeekEvaluation<'_, '_>,
     accepts: impl Fn(&PropertyType) -> bool,
 ) -> bool {
-    schema.constraints.values().any(|constraint| {
+    schema.constraints.values().take_while(|_| evaluation.check_work()).any(|constraint| {
         constraint.properties.len() == 1
             && constraint.properties[0] == property
             && constraint_target_matches_index(&constraint.target, &index.target)
             && matches!(
                 &constraint.kind,
                 ConstraintDefinitionKind::Type { rule }
-                    if property_type_all_members_match(&rule.property_type, &accepts)
+                    if property_type_all_members_match(&rule.property_type, &accepts, evaluation)
             )
     })
 }
@@ -456,13 +572,17 @@ fn constraint_target_matches_index(target: &SchemaTarget, index_target: &IndexTa
 fn property_type_all_members_match(
     property_type: &PropertyType,
     accepts: &impl Fn(&PropertyType) -> bool,
+    evaluation: &SeekEvaluation<'_, '_>,
 ) -> bool {
+    if !evaluation.check_work() {
+        return false;
+    }
     match property_type {
         PropertyType::Union { members } => {
             !members.is_empty()
                 && members
                     .iter()
-                    .all(|member| property_type_all_members_match(member, accepts))
+                    .all(|member| property_type_all_members_match(member, accepts, evaluation))
         }
         property_type => accepts(property_type),
     }
@@ -499,7 +619,7 @@ fn range_equality_value(
     if !evaluation.is_property_value(value) {
         return false;
     }
-    property_type_proves(schema, index, property, |property_type| {
+    property_type_proves(schema, index, property, evaluation, |property_type| {
         property_type_equality_compatible(property_type, value, evaluation)
     })
 }
@@ -884,7 +1004,9 @@ mod tests {
         let control = ExecutionControl::new(&resources, &interrupted);
         let params = BTreeMap::new();
         let access = PropertyRules::default();
-        let evaluation = SeekEvaluation::new(&snapshot, &params, &access, &control).unwrap();
+        let mut budget = PlanningBudget::default();
+        let evaluation =
+            SeekEvaluation::new(&snapshot, &params, &access, &control, &mut budget).unwrap();
         let schema = list_index_schema();
         let index = &schema.indexes["values_range"];
         let predicate =
@@ -930,7 +1052,9 @@ mod tests {
         let control = ExecutionControl::new(&resources, &|| false);
         let params = BTreeMap::new();
         let access = PropertyRules::default();
-        let evaluation = SeekEvaluation::new(&snapshot, &params, &access, &control).unwrap();
+        let mut budget = PlanningBudget::default();
+        let evaluation =
+            SeekEvaluation::new(&snapshot, &params, &access, &control, &mut budget).unwrap();
         let mut schema = list_index_schema();
         let labels = vec!["Probe".into()];
         for (value, expected) in [
@@ -990,7 +1114,9 @@ mod tests {
         let control = ExecutionControl::new(&resources, &|| false);
         let params = BTreeMap::new();
         let access = PropertyRules::default();
-        let evaluation = SeekEvaluation::new(&snapshot, &params, &access, &control).unwrap();
+        let mut budget = PlanningBudget::default();
+        let evaluation =
+            SeekEvaluation::new(&snapshot, &params, &access, &control, &mut budget).unwrap();
         assert_eq!(
             predicate_candidates(&equality, &evaluation),
             vec![(

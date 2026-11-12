@@ -25,6 +25,13 @@ allow = [
 ]
 confidence-threshold = 0.8
 
+[[licenses.exceptions]]
+# Required by rusqlite/cache -> hashlink -> hashbrown. The reviewed upstream
+# notice is retained in THIRD_PARTY_NOTICES.md; this exception is version-bound.
+name = "foldhash"
+version = "=0.2.0"
+allow = ["Zlib"]
+
 [licenses.private]
 ignore = false
 

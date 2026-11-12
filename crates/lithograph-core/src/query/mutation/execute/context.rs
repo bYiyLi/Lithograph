@@ -15,11 +15,30 @@ impl<'connection, 'query> MutationContext<'connection, 'query> {
             base_commit,
             &ExecutionControl::new(resources, is_interrupted),
         )?;
+        Self::from_base(
+            base,
+            params,
+            graph_view_selector,
+            access,
+            resources,
+            is_interrupted,
+        )
+    }
+
+    pub(super) fn from_base(
+        base: Snapshot<'connection>,
+        params: &'query BTreeMap<String, Value>,
+        graph_view_selector: &'query GraphViewSelector,
+        access: &'query super::super::super::access::AccessPolicy,
+        resources: &'query QueryResources,
+        is_interrupted: &'query dyn Fn() -> bool,
+    ) -> QueryResult<Self> {
+        check_interrupted(is_interrupted)?;
         Ok(Self {
-            connection,
+            connection: base.connection_for_query(),
+            base_commit: base.commit(),
             staged: base.clone(),
             base,
-            base_commit,
             params,
             graph_view_selector,
             access,
@@ -66,7 +85,8 @@ impl<'connection, 'query> MutationContext<'connection, 'query> {
             None,
             layer,
             metadata,
-            storage::CommitRead::observed(
+            storage::CommitRead::observed_base(
+                &self.base,
                 crate::query::graph::snapshot_observer(self.control.resources()),
                 &|| storage_checkpoint(&self.control),
             ),

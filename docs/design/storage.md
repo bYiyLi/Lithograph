@@ -281,6 +281,7 @@ Statistics、range/text index materialization、FTS index、vector HNSW graph �
 - 维护策略综合 first-parent chain depth、累计结构/属性 delta bytes、Overlay 解析成本与近期观察到的读取放大评估是否需要创建新的 derived checkpoint；不应只按 Commit 个数，也不要求任何一个大 Layer 读前都先重放 Root。触发阈值属于内部可校准策略，不形成存储格式或新的 public option。
 - 只在已有受权 SQLite writer / 明确 maintenance 边界执行 checkpoint build/publish；构建前 pin 目标 Commit 和 Schema，数据从 canonical snapshot 确定性重建；发布必须原子、可中断、失败无半成品且不移动 Branch、不创建 Commit。不允许 read-only query、EXPLAIN、validation、历史只读 Snapshot 或没有 writer 所有权的调用偷偷改写 main/另开隐藏 connection。
 - 对当前热点 Branch 可以按成本决定分层 checkpoint，允许多个不可变历史点各自保留可重建 base；选择只在目标 Commit 的 first-parent ancestry 里找最近可用者。Checkpoint 删除、损坏、过期、GC 与跨 Branch 同源共享时遵守原有 Snapshot 和 GC 语义；不得把派生层当成新的历史父节点、合并其它 Branch 数据或重写旧 Commit/Layer。
+- 自动淘汰不得删除当前 execution 仍活跃的 resolved Snapshot 所依赖的 checkpoint，包括冷 Branch 的 base 与同一 query 多次 Version Procedure 之后仍需延迟读取的初始 base。相关引用属于有预算、随 Snapshot 生命周期释放的 query-local state；没有可安全淘汰项时延期维护，不能突破维护数量上限或使合法查询失败。Canonical GC 的临时 Snapshot root 由 [Versioning](versioning.md#reset-revert-history) 拥有。
 - 限制每次 maintenance 的工作/空间、writer-hold 时间、并行 checkpoint 数量和磁盘放大；压力高时可延期而不能阻塞正常请求直至 OOM。读路径仍必须能够 checkpoint-miss fallback，且不为优化自行升级数据库格式。
 - 同一 query 的 Snapshot 继续只 resolve 一次；任何 query-scoped/reusable resolved-state 缓存必须绑定 database / pinned Commit / Schema、Graph View、权限与 staged revision（或只存与它们无关且可证明安全的纯 immutable base），按预算逐出，连接关闭/GC/异常和 staged revision 变化需释放或失效；不允许进程全局保存跨 SQLite connection 的可变授权视图。
 - 是否真正省工作由 Snapshot resolve Layer 数量、结构/属性 delta 解析、SQLite VM、RSS、TEMP/磁盘、Checkpoint 维护写入放大、不同历史点 reopen 的端到端延迟共同验证，不得只比较已完成隐藏预热的点查时间。

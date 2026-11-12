@@ -456,6 +456,23 @@ indexesRemoved
 
 `profile.operators` 与该 execution 的 Physical Plan 使用相同 operator 顺序和 zero-based `id`；`operator` 是 Lithograph Physical Operator 的稳定类别名，`rows` 是该 operator runtime boundary 实际产出的 row 数，`dbHits` 是归属于该 boundary 的底层 graph/index access 数。Planner-only annotation 不伪造 runtime count；如果一个 plan operator 被 executor 融合且没有独立可观察的 storage access，则其 `dbHits` 可以为 `0`，不能通过平均分摊或估算制造计数。所有 operator `dbHits` 之和必须等于 `summary.metrics.dbHits`。普通 execution 和 `EXPLAIN` 省略 `summary.profile`；`EXPLAIN` 不执行 graph/storage operator，因此除计划输出自身的 row accounting 外不得伪造 storage hits。
 
+实际选择 `HashJoin` 的 PROFILE operator 额外包含 `hash` object；没有进入 Hash 计划的其它 operator 和 fallback 省略该字段。选中 Hash 但 outer 为零行时仍有 `hash` object，其所有未发生计数为 `0`。该 object 只有以下固定计量，不包含 Join key、属性值、参数或原始 query：
+
+| 字段 | 含义 |
+| --- | --- |
+| `buildRows` / `probeRows` | 各侧实际消费的输入行数，包含已消费但 key 无法匹配的行；不是 Join 最终输出行数 |
+| `hashCollisions` | 完整 hash 相同但由真实 equality 拒绝的 key 比较次数；相等的重复 key 不作为 collision |
+| `spillPartitions` | 实际创建的 spill partition 累计数，包含已创建的空分区；不同分区轮次分别计数 |
+| `spillBatches` | 实际完成的 spill 读取、重分区和处理 batch 累计数 |
+| `spillVmSteps` | 本 Hash operator 的 spill SQLite statements 实际 VM step 累计数；不混入 graph access 或外层 SQL adapter work |
+| `spillEncodedBytes` | 写入 spill 的 typed payload 编码字节累计量，不包含 SQLite page/B-tree 开销，不作为设备累计写入量 |
+| `memoryPeakBytes` | Hash 自身 retained state 的实际 reservation 高水位：table、buckets、typed keys、retained rows、probe 与分区目录；table 重分配期间 old/new 同时存活的 claims 都计入。不包含私有 SQLite pager，不等同于进程 RSS |
+| `tempAllocatedBytes` | 该 Hash 所拥有 TEMP store 的已分配页字节峰值，包含 SQLite page 开销；不是累计设备写入量 |
+
+有实际选中的 Hash operator 时，`summary.profile` 另有 `executionMemoryPeakBytes` 和 `processPeakRssBytes`。前者在 Core terminal-ready 时只冻结一次，是整个 execution 共同 `QueryResources` 的实际同时存活 reservation 峰值，包含 codec/decode/输出等工作区；不能通过相加各组件在不同时刻出现的历史峰值构造，也不包含 SQLite pager 或未被 Engine ledger 计账的宿主内存。Hash 的输入 graph/index access 仍归原 producer boundary；Hash CPU、collision、TEMP read/write 与 VM 计量不重复计入 `dbHits`，不改变其求和合同。
+
+`processPeakRssBytes` 只在 SQL scalar/rows 共用的 summary JSON 编码边界读取一次 `getrusage(RUSAGE_SELF)`，统一换算为 bytes；它是宿主**整个进程生命周期**的 RSS 高水位，可能包含更早 execution、其它连接/线程、SQLite 和宿主分配，不是本 Hash 独占值、当前 RSS 或本 execution 的增量。macOS/Linux 使用其真实平台单位；不支持的平台、系统调用失败或单位换算溢出返回 JSON `null`，不改变 query 成败。Standalone Core 的 summary 不携带 process RSS，不能将缺失值伪造为 `0`。没有 Hash 的 PROFILE 省略这两个额外字段。`lithograph()` 的 envelope 与 `lithograph_rows()` 的 summary event 始终使用同一编码；[Runtime 压测](runtime.md#optimizer-join-stress) 仍独立测量 cgroup/process RSS、TEMP/disk 和 cleanup，不能以 Engine ledger 或单个进程高水位字段替代。
+
 Lithograph JSON v1 的 value encoding：
 
 - `null`、Boolean、String 使用普通 JSON；

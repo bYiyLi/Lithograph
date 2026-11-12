@@ -17,5 +17,8 @@ lithograph-embedding-provider.workspace = true
 rusqlite = { workspace = true, features = ["functions", "loadable_extension", "vtab"] }
 serde_json.workspace = true
 
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+libc = "=0.2.189"
+
 [lints]
 workspace = true

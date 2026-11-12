@@ -23,6 +23,28 @@ impl storage::SnapshotReadObserver for QuerySnapshotObserver {
             .map_err(storage_error)
     }
 
+    fn pin_snapshot(
+        &self,
+        database: storage::HashId,
+        commit: storage::HashId,
+        checkpoint: Option<storage::HashId>,
+    ) -> StorageResult<Option<Box<dyn Debug>>> {
+        self.0
+            .pin_snapshot(database, commit, checkpoint)
+            .map(Some)
+            .map_err(storage_error)
+    }
+
+    fn checkpoint_is_pinned(
+        &self,
+        database: storage::HashId,
+        checkpoint: storage::HashId,
+    ) -> StorageResult<bool> {
+        self.0
+            .checkpoint_is_pinned(database, checkpoint)
+            .map_err(storage_error)
+    }
+
     fn checkpoint(&self) -> StorageResult<()> {
         // The retained observer owns no borrowed host callback. Each observed
         // operation receives its current callback separately through *_checked.
@@ -274,15 +296,8 @@ fn element_property(
             control.reserve(std::mem::size_of::<Value>() as u64)?,
         ));
     }
-    let key_id = storage::find_property_key(snapshot_connection(snapshot), key)?;
-    let Some(key_id) = key_id else {
-        return Ok((
-            Value::Null,
-            control.reserve(std::mem::size_of::<Value>() as u64)?,
-        ));
-    };
     let check = || control.check().map_err(storage_error);
-    snapshot.with_property_checked(kind, id, key_id, &check, |value| match value {
+    snapshot.with_named_property_checked(kind, id, key, &check, |value| match value {
         Some(value) => borrowed_property(value, control),
         None => Ok((
             Value::Null,

@@ -104,7 +104,7 @@ struct DistinctBindingSource {
 enum DistinctBindingState {
     Pending,
     Ready {
-        connection: Connection,
+        connection: Box<Connection>,
         output: SpillOutput,
     },
     Done,
@@ -132,7 +132,7 @@ impl BindingSource for DistinctBindingSource {
                 runtime.expression_memory.resize(0)?;
             }
             self.state = DistinctBindingState::Ready {
-                connection,
+                connection: Box::new(connection),
                 output: spill.output(),
             };
         }
@@ -152,6 +152,7 @@ impl BindingSource for DistinctBindingSource {
 struct BatchClauseSource {
     upstream: Box<dyn BindingSource>,
     clause: AstNode,
+    identity_allowed: bool,
     source: String,
     input_columns: Vec<String>,
     output_columns: Vec<String>,
@@ -191,13 +192,13 @@ impl BindingSource for BatchClauseSource {
                 runtime.params,
                 &self.source,
                 &self.clause,
+                self.identity_allowed,
                 super::super::completeness::execute::RowSet {
                     columns: self.input_columns.clone(),
                     rows: input,
                     memory: None,
                 },
                 runtime.metrics,
-                runtime.is_interrupted,
                 runtime.control,
             )?;
             if result.columns != self.output_columns {
@@ -287,6 +288,7 @@ struct MatchSource {
     upstream: Box<dyn BindingSource>,
     step: MatchStep,
     current: Option<StepCursor>,
+    read_bindings: super::MatchReadBindings,
     _index_memory: MemoryReservation,
 }
 
@@ -300,6 +302,7 @@ impl BindingSource for MatchSource {
                     runtime.graph_view,
                     runtime.params,
                     runtime.metrics,
+                    &mut self.read_bindings,
                     runtime.control,
                 )? {
                     return Ok(Some(row));
@@ -307,9 +310,10 @@ impl BindingSource for MatchSource {
                 self.current = None;
             }
             let Some(input) = self.upstream.next(runtime)? else {
+                self.read_bindings.finish(&self.step, runtime.metrics)?;
                 return Ok(None);
             };
-            self.current = Some(StepCursor::new(self.step.clone(), input, runtime.control)?);
+            self.current = Some(StepCursor::new(&self.step, input, runtime.control)?);
         }
     }
 }
@@ -557,7 +561,7 @@ struct BarrierProjectionSource {
 enum BarrierProjectionState {
     Pending,
     Ready {
-        connection: Connection,
+        connection: Box<Connection>,
         output: SpillOutput,
         skipped: usize,
         emitted: usize,
@@ -611,7 +615,7 @@ impl BarrierProjectionSource {
             self.build_sorted(&connection, runtime)?
         };
         self.state = BarrierProjectionState::Ready {
-            connection,
+            connection: Box::new(connection),
             output,
             skipped: 0,
             emitted: 0,
@@ -874,6 +878,7 @@ impl ProgramStream {
 
 mod builder;
 pub(super) use builder::build_program_stream;
+pub(crate) use builder::supports_read_stream;
 pub(crate) use builder::{
     build_program_prefix_stream, build_program_spilled_suffix_stream, build_program_suffix_stream,
 };

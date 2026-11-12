@@ -18,7 +18,16 @@ pub struct GcCounters {
 }
 
 pub fn collect_garbage(connection: &Connection) -> StorageResult<GcCounters> {
-    let unreachable = unreachable_commits(connection)?;
+    collect_garbage_with_read_roots(connection, &[])
+}
+
+/// Query-owned GC also preserves the immutable Snapshots still needed by its
+/// own execution. These roots are borrowed for this operation, never persisted.
+pub(crate) fn collect_garbage_with_read_roots(
+    connection: &Connection,
+    read_roots: &[HashId],
+) -> StorageResult<GcCounters> {
+    let unreachable = unreachable_commits(connection, read_roots)?;
     if unreachable.is_empty() {
         return Ok(GcCounters::default());
     }
@@ -33,7 +42,10 @@ pub fn collect_garbage(connection: &Connection) -> StorageResult<GcCounters> {
     Ok(counters)
 }
 
-fn unreachable_commits(connection: &Connection) -> StorageResult<Vec<HashId>> {
+fn unreachable_commits(
+    connection: &Connection,
+    read_roots: &[HashId],
+) -> StorageResult<Vec<HashId>> {
     let mut roots = Vec::new();
     roots.extend(
         list_branches(connection)?
@@ -42,6 +54,7 @@ fn unreachable_commits(connection: &Connection) -> StorageResult<Vec<HashId>> {
     );
     roots.extend(list_tags(connection)?.into_iter().map(|item| item.commit));
     roots.extend(merge_session_roots(connection)?);
+    roots.extend_from_slice(read_roots);
     let reachable = reachable_commits(connection, roots)?;
     let all = all_commits(connection)?;
     Ok(all.difference(&reachable).copied().collect())

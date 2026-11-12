@@ -101,11 +101,33 @@ impl Validation<'_, '_, '_> {
                         .is_some_and(|id| impact.relationship_types.contains(id))
                 }
             };
-            if affected {
+            if affected && self.constraint_properties_changed(constraint, impact)? {
                 self.constraint(constraint)?;
             }
         }
         Ok(())
+    }
+
+    fn constraint_properties_changed(
+        &self,
+        constraint: &ConstraintDefinition,
+        impact: &LayerImpact,
+    ) -> QueryResult<bool> {
+        // A property-only Layer cannot change target membership. The previous
+        // state already satisfied this versioned constraint, so disjoint keys
+        // leave its complete validation domain and values unchanged.
+        if impact.structural_changes || constraint.properties.is_empty() {
+            return Ok(true);
+        }
+        for property in &constraint.properties {
+            self.control.work(1)?;
+            if storage::find_property_key(self.connection, property)?
+                .is_some_and(|id| impact.property_keys.contains(id))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 
@@ -113,6 +135,8 @@ struct LayerImpact {
     node_labels: ObservedIds,
     relationship_types: ObservedIds,
     changed_labels: ObservedIds,
+    property_keys: ObservedIds,
+    structural_changes: bool,
 }
 
 impl LayerImpact {
@@ -125,12 +149,20 @@ impl LayerImpact {
             node_labels: ObservedIds::new(control)?,
             relationship_types: ObservedIds::new(control)?,
             changed_labels: ObservedIds::new(control)?,
+            property_keys: ObservedIds::new(control)?,
+            structural_changes: false,
         };
         let mut nodes = ObservedIds::new(control)?;
         let mut relationships = ObservedIds::new(control)?;
         impact.collect_node_changes(layer, &mut nodes, control)?;
         impact.collect_relationship_changes(layer, &mut relationships, control)?;
-        collect_property_owners(layer, &mut nodes, &mut relationships, control)?;
+        collect_property_changes(
+            layer,
+            &mut nodes,
+            &mut relationships,
+            &mut impact.property_keys,
+            control,
+        )?;
         impact.resolve_nodes(snapshot, &nodes, control)?;
         impact.resolve_relationships(snapshot, &relationships, control)?;
         Ok(impact)
@@ -143,9 +175,11 @@ impl LayerImpact {
         control: &ExecutionControl<'_>,
     ) -> QueryResult<()> {
         for (node, _) in layer.node_changes() {
+            self.structural_changes = true;
             nodes.insert(node, control)?;
         }
         for (node, label, _) in layer.label_changes() {
+            self.structural_changes = true;
             nodes.insert(node, control)?;
             self.changed_labels.insert(label, control)?;
         }
@@ -159,6 +193,7 @@ impl LayerImpact {
         control: &ExecutionControl<'_>,
     ) -> QueryResult<()> {
         for (relationship, added) in layer.relationship_changes() {
+            self.structural_changes = true;
             relationships.insert(relationship.id, control)?;
             if added {
                 self.relationship_types
@@ -202,13 +237,15 @@ impl LayerImpact {
     }
 }
 
-fn collect_property_owners(
+fn collect_property_changes(
     layer: &LayerBuilder,
     nodes: &mut ObservedIds,
     relationships: &mut ObservedIds,
+    property_keys: &mut ObservedIds,
     control: &ExecutionControl<'_>,
 ) -> QueryResult<()> {
-    for (owner, id, _, _) in layer.property_changes() {
+    for (owner, id, key, _) in layer.property_changes() {
+        property_keys.insert(key, control)?;
         match owner {
             OwnerKind::Node => nodes.insert(id, control)?,
             OwnerKind::Relationship => relationships.insert(id, control)?,
@@ -280,6 +317,8 @@ mod tests {
         assert!(!impact.node_labels.contains(a));
         assert!(!impact.node_labels.contains(deleted_label));
         assert!(impact.changed_labels.contains(a));
+        assert!(impact.structural_changes);
+        assert!(impact.property_keys.values.is_empty());
         assert!(impact.relationship_types.values.is_empty());
         drop(impact);
         assert_eq!(resources.used(), retained);
@@ -359,8 +398,65 @@ mod tests {
         assert!(impact.relationship_types.contains(s));
         assert!(!impact.relationship_types.contains(t));
         assert!(impact.changed_labels.values.is_empty());
+        assert!(impact.structural_changes);
+        assert!(impact.property_keys.contains(p));
         drop(impact);
         assert_eq!(resources.used(), retained);
+        drop(snapshot);
+        assert_eq!(resources.used(), 0);
+    }
+
+    #[test]
+    fn property_key_tracking_is_bounded_interruptible_and_releases_reservations() {
+        use std::cell::Cell;
+
+        let connection = super::super::tests::fixture("CREATE (:N {p:1})");
+        let resources = QueryResources::default();
+        let control = ExecutionControl::new(&resources, &|| false);
+        let commit = storage::branch_head(&connection, "main").unwrap();
+        let snapshot =
+            crate::query::graph::resolve_snapshot_with_control(&connection, commit, &control)
+                .unwrap();
+        let label = storage::find_label(&connection, "N").unwrap().unwrap();
+        let node = snapshot.scan_label_after(label, 0, 1).unwrap().items[0];
+        let mut layer = LayerBuilder::default();
+        for index in 0..300 {
+            let key = storage::intern_property_key(&connection, &format!("p{index}")).unwrap();
+            layer
+                .set_property(OwnerKind::Node, node, key, PropertyValue::Integer(index))
+                .unwrap();
+        }
+        let impact = LayerImpact::resolve(&snapshot, &layer, &control).unwrap();
+        assert!(!impact.structural_changes);
+        assert_eq!(impact.property_keys.values.len(), 300);
+        drop(impact);
+
+        let limited = QueryResources::new(Some(2 * map_entry_bytes::<i64>().unwrap()));
+        let error = LayerImpact::resolve(
+            &snapshot,
+            &layer,
+            &ExecutionControl::new(&limited, &|| false),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.kind, QueryErrorKind::Resource);
+        assert_eq!(limited.used(), 0);
+
+        let cancelled = QueryResources::default();
+        let checks = Cell::new(0);
+        let interrupt = || {
+            checks.set(checks.get() + 1);
+            checks.get() > 6
+        };
+        let error = LayerImpact::resolve(
+            &snapshot,
+            &layer,
+            &ExecutionControl::new(&cancelled, &interrupt),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.kind, QueryErrorKind::Interrupted);
+        assert_eq!(cancelled.used(), 0);
         drop(snapshot);
         assert_eq!(resources.used(), 0);
     }

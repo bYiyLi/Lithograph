@@ -164,11 +164,17 @@ Planner 可以把 filter、projection、typed comparison 与部分 index seek �
 ### Join 与图专用优化的适用顺序
 
 1. **统计、Identity 与谓词**：先完善有界的 versioned Label/Type、组合选择性、NDistinct/MCV、degree skew、Index cardinality；只针对已观察到的访问路径使用相应统计，不预建任意属性组合的全域直方图。增加 Relationship Element ID Seek，按 `r:<positive-int>` 解码，使用同一 historical/staged Snapshot 的 RelationshipId 入口和端点可见性检查，保留跨类型、NULL、错误及 residual 的正确顺序。拓展谓词只在可证明确定性、可提前求值、类型与权限安全时移动。
-2. **Join Order / Index Nested Loop**：安全内连接组件用小规模 DPhyp、大组件 Greedy；先比较 existing Node/Relationship/Property/Adjacency Seek 的参数化 Nested Loop 是否比独立 Scan 更优。重复 outer row 和 parallel relationships 不得被错误去重；连接键的 NULL/类型异常、OPTIONAL 边界及 read-write clause 顺序必须保持。
+2. **Join Order / Index Nested Loop**：安全内连接组件用小规模 DPhyp、大组件 Greedy；先比较 existing Node/Relationship/Property/Adjacency Seek 的参数化 Nested Loop 是否比独立 Scan 更优。连通 hypergraph 的 CSG/CMP 拓扑枚举与物理成本空间分开：当前物理搜索只为既有 cursor 能执行的左深计划计价，不能先按 bushy 子树成本选择再展平成不同的执行顺序，也不声称取得未搜索空间的最优解。先在同一内部预算内完成可执行的 Greedy，再以剩余额度搜索；耗尽后沿用已完成计划，不重新申请预算补建 fallback。重复 outer row 和 parallel relationships 不得被错误去重；连接键的 NULL/类型异常、OPTIONAL 边界及 read-write clause 顺序必须保持。
 3. **有界 Hash Join**：对于已证明与 Cypher equality 等价的 inner equijoin，选择较合适一侧建立 Hash 表；倾斜/超预算时采用 partitioned Grace Hash Join 与有限 TEMP 工作状态。键必须有 type compatibility 证明并保留 residual；碰撞、重复键、NULL、真实 equality TYPE_ERROR、Graph View、staged revision、错误/取消和 spill cleanup 都由既有执行合同验收。无足够条件或预算时安全回退，不要求每个 Join 都 Hash。
 4. **Semi-mask / SIP / Dynamic Filter**：在 Join/邻接已产生有限候选时，把 Node/RelationshipId、typed min/max 或 TopK cutoff 作为**query-scoped advisory** 传给有能力跳过 SQLite 实际读取的上游 Scan/Seek。过滤器绑定 pinned Commit、staged revision、Graph View selector 与访问权限；从不取代最终 residual 或造成 false negative。对已提交与 staged 数据都需要正确覆盖或安全回退，不借用 LadybugDB 专有存储布局；没有实际物理 skip 能力就不开启。TopK 必须保留 ORDER BY/NULL/ties/score 和范围内 Search 排名，仅在上下界能证明不会改变结果时提前剪枝。
 5. **Factorized Execution / ASP-Join**：对于多对多连接、重复共享前缀或 Star/Path 中间值，将可证明独立的分支保留为带 multiplicity 的内部 factorized group，并让相邻过滤、Join、适用聚合按组执行；只在必须输出、排序、含相关表达式、写 barrier 或要求扁平行的边界延迟展开。公开 `lithograph_rows()` 保持严格的一行一结果、重复行及 deterministic order/tie 契约；所需 buffer、乘积计数溢出、取消与 TEMP 均受预算控制。不整体重写已经可用的 flat row executor。
 6. **WCOJ / 多路交集**：对具有可用 typed/directed 邻接访问的三角形、环形和更一般的多边循环模式，在计划中选择多路有序候选交集（Generic Join / Leapfrog 风格），只在满足适用性和成本证明时替代可能爆炸的连续二元 Join；其它 Pattern 使用已经验证的二元 Join/Expand。节点重复、parallel Relationship identity、Path 与 per-MATCH relationship uniqueness、0/1/多结果、方向与类型、Graph View、历史/staged state 必须与普通 Cypher 完全一致。不声称任意 Cypher 查询都达到理论 worst-case optimal 上界。
+
+Hash 的当前执行空间沿用上述左深计划：一次 build 只扫描与已完成 prefix 无关的单个 Pattern Part，probe 消费 prefix；交换两侧通过真实的 Part 顺序和方向表达，不为不可执行的 prefix build 计价。build 在首个可匹配 probe 到达后才开始，按 clause 与当前 Snapshot revision 持有，并在该 clause 的重复 incoming row、输出 batch 和写 barrier 的输入 batch 之间复用；零 outer 输入不初始化 build。不能借未来 Part 的类型或关联约束证明独立 build 的键安全。
+
+Hash 即使未设置 `memoryLimitBytes` 也采用内部有界的 resident 软目标；设置限额时再取共享预算实际剩余额度的较小值。软目标触发 spill，不构成新的单值长度限制或公开调参项。Grace 将完整 typed BindingRow 与键 digest 分区到同一 query-private TEMP store，分批处理两侧；有限 repartition 后的 hot key 使用有界 build chunk，保留重复键与 multiplicity。重载后必须重新提取真实 typed key 并核对已存 digest，异常不能静默变为空 bucket；digest 只筛候选，完整 equality 与原 residual 继续决定结果。table、输入/输出 lease、分区目录与临时编码同时计账，退出、错误和取消必须释放该 owner。Hash 的实际工作计数和内存/RSS 口径由 [PROFILE](interfaces.md#lithograph-json) 拥有。
+
+Hash 必需的私有 TEMP 空间因宿主拒写或无法打开而不可用时，按无法安全 spill 返回 `RESOURCE_ERROR`；该转换只属于 query-private Grace store，不改变 canonical database 的 I/O 错误分类。真实 I/O 故障、损坏、取消和锁冲突仍保留各自既有错误，不将其统称为资源不足或转为空结果。失败继续遵守原 invocation / explicit transaction / durable inner batch 的清理与回滚边界。
 
 **分阶段门槛**：可用的访问路径、统一执行预算和稳定估算先成立，才能启用 DPhyp/Index Nested Loop；它们通过真实 Physical Plan、成本与语义验证后才能启用 Hash Join；Hash Join 有 bounded spill 与反例测试之后，才实现 SIP/Dynamic Filter → Factorized/ASP-Join → WCOJ。每一阶段都同时保留旧计划作为正确性 Oracle 和遇到不可安全优化条件时的 fallback，不以某次微基准成功自动扩大适用范围。
 
@@ -358,6 +364,8 @@ Write / candidate state 不复用过期的 read membership：
 - Merge candidate 绑定 `(session, revision, candidate identity)`；一次 inspection 在同一 read view 验证 revision 并执行，不能跨 revision 复用。`IN TRANSACTIONS` 仍按[Cypher Transaction Subqueries](storage.md#transaction-subqueries)每个 inner transaction 独立 pin，不跨 batch transaction 复用旧 state。
 
 Storage page 与输出 batch 分离：改变调用方的 `max_rows` 不应导致重复解析或重新执行已消费的查询。复用 prepared storage statements、按需读取 properties，并用 bounded ordered merge 代替每页不必要的 map/set 重建；不以增大 batch 隐藏每 batch 重复工作，也不把整图预装内存。
+
+Core cursor 的 `max_rows` 是本次返回行数上限，不要求填满。显式 execution 内存预算下，直接读取路径可以在一行完整投影完成后，根据当前输出 batch 的实际预留和共享预算剩余量提前返回非空、非终态 batch，为仍存活的 producer 留出继续推进的空间。该边界保留原 continuation，不重放表达式、不丢弃已消费的绑定；调用方继续请求原上限并完整消费。必要的单行或算子工作状态本身无法容纳时仍返回原资源错误，不以 partial batch 掩盖失败。
 
 Graph View 优化仅消除有证据的重复检查：对同一合法 Snapshot access path 已证明存在且可见的起点复用 proof；终点按需/分批检查。空 selector 可以省略 Label predicate，但不能把任意外部 Node/Relationship reference 直接认作有效，也不能关闭 canonical integrity 或触及损坏记录时的 fail-closed 检查。可见性缓存限于 query，key 至少包含 state identity/revision、规范化 selector 与 NodeId，采用固定预算、可逐出；revision 改变必须失效，不能随遍历过的所有 Node 无界增长。
 
