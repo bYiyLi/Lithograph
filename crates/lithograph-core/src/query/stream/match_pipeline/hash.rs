@@ -14,7 +14,7 @@ mod key;
 mod probe;
 mod table;
 
-use key::{EvaluatedHashKey, extract_hash_key, hash_keys_equal};
+use key::{EvaluatedHashKey, extract_hash_key, extract_hash_key_admitted, hash_keys_equal};
 pub(super) use probe::HashProbe;
 use table::{HashEntry, HashTable};
 
@@ -135,6 +135,33 @@ pub(super) struct HashBuildState {
 }
 
 impl HashBuildState {
+    fn admit_key_allocation(
+        &mut self,
+        bytes: u64,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<()> {
+        control.check()?;
+        let Some(limit) = control.resources().limit() else {
+            return Ok(());
+        };
+        if bytes <= limit.saturating_sub(control.resources().used()) {
+            return Ok(());
+        }
+        // Optional advice cannot be the reason the mandatory key cannot fit.
+        self.filter = None;
+        let available = limit.saturating_sub(control.resources().used());
+        let BuildStorage::Memory(table) = &self.storage else {
+            return Ok(());
+        };
+        let recovered = available
+            .saturating_add(table.owned_bytes())
+            .saturating_sub(crate::query::spill::grace_resident_bound());
+        if bytes > available && table.len() > 0 && bytes <= recovered {
+            self.spill_build(control)?;
+        }
+        Ok(())
+    }
+
     fn storage_bytes(&self) -> QueryResult<u64> {
         match &self.storage {
             BuildStorage::Empty => Ok(0),

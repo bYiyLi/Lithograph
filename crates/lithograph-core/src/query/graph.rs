@@ -11,7 +11,8 @@ use super::{ExecutionControl, QueryError, QueryErrorKind, QueryResult};
 mod controlled;
 pub(crate) use controlled::{
     borrowed_property as borrowed_property_with_control, materialize_node_with_control,
-    materialize_relationship_with_control, node_property_with_control,
+    materialize_relationship_with_control, node_property_admitted_with_control,
+    node_property_with_control, relationship_property_admitted_with_control,
     relationship_property_with_control, resolve_snapshot_with_control,
     resolve_snapshot_with_layer_and_schema_controlled, snapshot_observer,
 };

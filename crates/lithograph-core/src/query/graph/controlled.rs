@@ -224,13 +224,32 @@ pub(crate) fn node_property_with_control(
     access: &PropertyRules,
     control: &ExecutionControl<'_>,
 ) -> QueryResult<(Value, MemoryReservation)> {
+    node_property_admitted_with_control(snapshot, id, key, access, control, &mut |_| Ok(()))
+}
+
+pub(crate) fn node_property_admitted_with_control(
+    snapshot: &Snapshot<'_>,
+    id: i64,
+    key: &str,
+    access: &PropertyRules,
+    control: &ExecutionControl<'_>,
+    admission: &mut dyn FnMut(u64) -> QueryResult<()>,
+) -> QueryResult<(Value, MemoryReservation)> {
     control.check()?;
     if !snapshot.node_exists(id)? {
         return Err(QueryError::semantic(format!(
             "Node n:{id} is no longer present in the active graph state"
         )));
     }
-    element_property(snapshot, OwnerKind::Node, id, key, access, control)
+    element_property_admitted(
+        snapshot,
+        OwnerKind::Node,
+        id,
+        key,
+        access,
+        control,
+        admission,
+    )
 }
 
 pub(crate) fn relationship_property_with_control(
@@ -240,13 +259,32 @@ pub(crate) fn relationship_property_with_control(
     access: &PropertyRules,
     control: &ExecutionControl<'_>,
 ) -> QueryResult<(Value, MemoryReservation)> {
+    relationship_property_admitted_with_control(snapshot, id, key, access, control, &mut |_| Ok(()))
+}
+
+pub(crate) fn relationship_property_admitted_with_control(
+    snapshot: &Snapshot<'_>,
+    id: i64,
+    key: &str,
+    access: &PropertyRules,
+    control: &ExecutionControl<'_>,
+    admission: &mut dyn FnMut(u64) -> QueryResult<()>,
+) -> QueryResult<(Value, MemoryReservation)> {
     control.check()?;
     if snapshot.relationship(id)?.is_none() {
         return Err(QueryError::semantic(format!(
             "Relationship r:{id} is no longer present in the active graph state"
         )));
     }
-    element_property(snapshot, OwnerKind::Relationship, id, key, access, control)
+    element_property_admitted(
+        snapshot,
+        OwnerKind::Relationship,
+        id,
+        key,
+        access,
+        control,
+        admission,
+    )
 }
 
 fn properties(
@@ -282,13 +320,14 @@ fn properties(
     Ok(values)
 }
 
-fn element_property(
+fn element_property_admitted(
     snapshot: &Snapshot<'_>,
     kind: OwnerKind,
     id: i64,
     key: &str,
     access: &PropertyRules,
     control: &ExecutionControl<'_>,
+    admission: &mut dyn FnMut(u64) -> QueryResult<()>,
 ) -> QueryResult<(Value, MemoryReservation)> {
     if access.denies(key) {
         return Ok((
@@ -297,26 +336,40 @@ fn element_property(
         ));
     }
     let check = || control.check().map_err(storage_error);
-    snapshot.with_named_property_checked(kind, id, key, &check, |value| match value {
-        Some(value) => borrowed_property(value, control),
-        None => Ok((
-            Value::Null,
-            control.reserve(std::mem::size_of::<Value>() as u64)?,
-        )),
-    })
+    snapshot.with_named_property_admitted_checked(
+        kind,
+        id,
+        key,
+        &check,
+        admission,
+        |value, admission| match value {
+            Some(value) => borrowed_property_admitted(value, control, admission),
+            None => Ok((
+                Value::Null,
+                control.reserve(std::mem::size_of::<Value>() as u64)?,
+            )),
+        },
+    )
 }
 
 pub(crate) fn borrowed_property(
     value: &storage::PropertyValue,
     control: &ExecutionControl<'_>,
 ) -> QueryResult<(Value, MemoryReservation)> {
+    borrowed_property_admitted(value, control, &mut |_| Ok(()))
+}
+
+fn borrowed_property_admitted(
+    value: &storage::PropertyValue,
+    control: &ExecutionControl<'_>,
+    admission: &mut dyn FnMut(u64) -> QueryResult<()>,
+) -> QueryResult<(Value, MemoryReservation)> {
     control.work(1)?;
     match value {
         storage::PropertyValue::String(value) => {
-            let memory = control.reserve(checked_add(
-                std::mem::size_of::<Value>() as u64,
-                value.len() as u64,
-            )?)?;
+            let bytes = checked_add(std::mem::size_of::<Value>() as u64, value.len() as u64)?;
+            admission(bytes)?;
+            let memory = control.reserve(bytes)?;
             Ok((Value::String(copy_text(value, control)?), memory))
         }
         storage::PropertyValue::List(values) => {

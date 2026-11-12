@@ -6,6 +6,7 @@ use crate::storage::{
     create_storage_schema, initialize_root, intern_label, intern_property_key,
 };
 
+mod admission;
 mod named;
 
 #[derive(Debug)]

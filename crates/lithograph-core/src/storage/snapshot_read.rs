@@ -98,8 +98,21 @@ pub(super) fn property_from_row(
     observer: Option<&dyn SnapshotReadObserver>,
     check: &dyn Fn() -> StorageResult<()>,
 ) -> StorageResult<ReadProperty> {
+    property_from_row_admitted(row, offset, observer, check, &mut |_| Ok(()))
+}
+
+type PropertyAdmission<'a, E> = dyn FnMut(u64) -> Result<(), E> + 'a;
+
+fn property_from_row_admitted<E: From<StorageError>>(
+    row: &Row<'_>,
+    offset: usize,
+    observer: Option<&dyn SnapshotReadObserver>,
+    check: &dyn Fn() -> StorageResult<()>,
+    admission: &mut PropertyAdmission<'_, E>,
+) -> Result<ReadProperty, E> {
     check()?;
     let (retained, temporary) = property_row_bytes(row, offset, check)?;
+    admission(checked_add(checked_add(retained, 256)?, temporary)?)?;
     let memory = reserve(observer, checked_add(retained, 256)?)?;
     let _temporary = reserve(observer, temporary)?;
     let columns = property_columns(row, offset, check)?;
@@ -346,18 +359,37 @@ impl Snapshot<'_> {
         check: &dyn Fn() -> StorageResult<()>,
         visitor: impl FnOnce(Option<&PropertyValue>) -> Result<T, E>,
     ) -> Result<T, E> {
+        self.with_property_admitted_checked(
+            owner_kind,
+            owner_id,
+            key_id,
+            check,
+            &mut |_| Ok(()),
+            |value, _| visitor(value),
+        )
+    }
+
+    pub(crate) fn with_property_admitted_checked<T, E: From<StorageError>>(
+        &self,
+        owner_kind: OwnerKind,
+        owner_id: i64,
+        key_id: PropertyKeyId,
+        check: &dyn Fn() -> StorageResult<()>,
+        admission: &mut PropertyAdmission<'_, E>,
+        visitor: impl FnOnce(Option<&PropertyValue>, &mut PropertyAdmission<'_, E>) -> Result<T, E>,
+    ) -> Result<T, E> {
         check()?;
         let key = (owner_kind, owner_id, key_id);
         if let Some(delta) = self.state.overlay.properties.get(&key) {
-            return visitor(delta.value.as_ref());
+            return visitor(delta.value.as_ref(), admission);
         }
         let cache = self.state.property_cache.borrow();
         if let Some(value) = cache.get(&key) {
-            return visitor(value.value.as_ref());
+            return visitor(value.value.as_ref(), admission);
         }
         drop(cache);
         let Some(checkpoint) = self.state.checkpoint else {
-            return visitor(None);
+            return visitor(None, admission);
         };
         let mut statement = self
             .connection
@@ -376,19 +408,26 @@ impl Snapshot<'_> {
             ])
             .map_err(StorageError::from)?;
         let Some(row) = rows.next().map_err(StorageError::from)? else {
-            return visitor(None);
+            return visitor(None, admission);
         };
-        let property = property_from_row(row, 0, self.state.read_observer.as_deref(), check)?;
-        visitor(Some(&property.value))
+        let property = property_from_row_admitted(
+            row,
+            0,
+            self.state.read_observer.as_deref(),
+            check,
+            admission,
+        )?;
+        visitor(Some(&property.value), admission)
     }
 
-    pub(crate) fn with_named_property_checked<T, E: From<StorageError>>(
+    pub(crate) fn with_named_property_admitted_checked<T, E: From<StorageError>>(
         &self,
         owner_kind: OwnerKind,
         owner_id: i64,
         name: &str,
         check: &dyn Fn() -> StorageResult<()>,
-        visitor: impl FnOnce(Option<&PropertyValue>) -> Result<T, E>,
+        admission: &mut PropertyAdmission<'_, E>,
+        visitor: impl FnOnce(Option<&PropertyValue>, &mut PropertyAdmission<'_, E>) -> Result<T, E>,
     ) -> Result<T, E> {
         check()?;
         // Overlay/cache values take precedence without decoding a shadowed base
@@ -399,9 +438,11 @@ impl Snapshot<'_> {
                 && self.state.property_cache.borrow().is_empty()
         }) else {
             let Some(key) = super::find_property_key(self.connection, name)? else {
-                return visitor(None);
+                return visitor(None, admission);
             };
-            return self.with_property_checked(owner_kind, owner_id, key, check, visitor);
+            return self.with_property_admitted_checked(
+                owner_kind, owner_id, key, check, admission, visitor,
+            );
         };
         let mut statement = self.connection.prepare_cached(
             "SELECT p.type_tag, p.int_value, p.real_value, p.text_value, p.blob_value, p.aux_value \
@@ -418,10 +459,16 @@ impl Snapshot<'_> {
             ])
             .map_err(StorageError::from)?;
         let Some(row) = rows.next().map_err(StorageError::from)? else {
-            return visitor(None);
+            return visitor(None, admission);
         };
-        let property = property_from_row(row, 0, self.state.read_observer.as_deref(), check)?;
-        visitor(Some(&property.value))
+        let property = property_from_row_admitted(
+            row,
+            0,
+            self.state.read_observer.as_deref(),
+            check,
+            admission,
+        )?;
+        visitor(Some(&property.value), admission)
     }
 
     pub(crate) fn visit_owner_properties<E: From<StorageError>>(

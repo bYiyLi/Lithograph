@@ -621,42 +621,60 @@ fn dynamic_filter_forced_admitted_grace_candidate_preserves_build_multiplicity()
     assert_eq!(counts, [341, 342, 341]);
 }
 
-/// Measure a conservative continuation budget using the same resident Hash
-/// producer with DF disabled. Its complete execution peak includes every real
-/// row/page allocation; the pause matches the late-lease case below.
-fn original_tail_headroom(fixture: &Fixture, limit: u64) -> u64 {
-    let scope = ReadScope::new(&fixture.db);
+fn prepare_limited_resident(db: &Connection, limit: u64) -> PreparedQuery {
     let options = ExecutionOptions {
         memory_limit_bytes: Some(limit),
         ..ExecutionOptions::default()
     };
-    let mut prepared = prepare(
-        &fixture.db,
-        &format!("PROFILE {JOIN}"),
-        BTreeMap::new(),
-        options,
-    )
-    .unwrap();
+    let mut prepared = prepare(db, &format!("PROFILE {JOIN}"), BTreeMap::new(), options).unwrap();
     force_admitted_dynamic_filter(&mut prepared);
-    let plan = std::sync::Arc::get_mut(prepared.matches[0].join.as_mut().unwrap()).unwrap();
-    let StageAccess::Hash { dynamic_filter, .. } = &mut plan.stages[1].access else {
-        panic!("the baseline retains the same resident Hash consumer")
-    };
-    *dynamic_filter = None;
+    prepared
+}
+
+struct PausedResident {
+    columns: Vec<String>,
+    plan: String,
+    resources: crate::query::QueryResources,
+    cursor: QueryCursor,
+    rows: Vec<Vec<Value>>,
+}
+
+fn pause_resident_after_first_owner(db: &Connection, prepared: PreparedQuery) -> PausedResident {
     let columns = prepared.columns.clone();
     let plan = prepared.physical.explain();
     let resources = prepared.resources.clone();
     let mut cursor = QueryCursor::new(prepared);
-    let mut first = cursor.next_batch(&fixture.db, 1).unwrap();
+    let mut first = cursor.next_batch(db, 1).unwrap();
     assert_eq!(first.rows.len(), 1);
     assert!(!first.done);
     assert_eq!(first.rows[0][0], Value::String("n:1".into()));
-    let first_rows = std::mem::take(&mut first.rows);
+    let rows = std::mem::take(&mut first.rows);
     drop(first);
-    let paused = resources.used();
-    let actual = collect_remaining(&fixture.db, &mut cursor, columns, plan, first_rows, 1).unwrap();
+    PausedResident {
+        columns,
+        plan,
+        resources,
+        cursor,
+        rows,
+    }
+}
+
+fn complete_resident_scan(fixture: &Fixture, paused: &mut PausedResident) -> Observed {
+    let actual = collect_remaining(
+        &fixture.db,
+        &mut paused.cursor,
+        std::mem::take(&mut paused.columns),
+        std::mem::take(&mut paused.plan),
+        std::mem::take(&mut paused.rows),
+        1,
+    )
+    .unwrap();
     assert_eq!(bag(&actual.rows), bag(&fixture.expected));
-    let hash = actual
+    actual
+}
+
+fn observed_hash(actual: &Observed) -> &HashJoinRuntimeMetrics {
+    actual
         .profile
         .as_ref()
         .unwrap()
@@ -665,22 +683,39 @@ fn original_tail_headroom(fixture: &Fixture, limit: u64) -> u64 {
         .unwrap()
         .hash
         .as_ref()
-        .unwrap();
+        .unwrap()
+}
+
+/// Measure a conservative continuation budget using the same resident Hash
+/// producer with DF disabled. Its complete execution peak includes every real
+/// row/page allocation; the pause matches the late-lease case below.
+fn original_tail_headroom(fixture: &Fixture, limit: u64) -> u64 {
+    let scope = ReadScope::new(&fixture.db);
+    let mut prepared = prepare_limited_resident(&fixture.db, limit);
+    let plan = std::sync::Arc::get_mut(prepared.matches[0].join.as_mut().unwrap()).unwrap();
+    let StageAccess::Hash { dynamic_filter, .. } = &mut plan.stages[1].access else {
+        panic!("the baseline retains the same resident Hash consumer")
+    };
+    *dynamic_filter = None;
+    let mut paused = pause_resident_after_first_owner(&fixture.db, prepared);
+    let paused_used = paused.resources.used();
+    let actual = complete_resident_scan(fixture, &mut paused);
+    let hash = observed_hash(&actual);
     assert!(hash.dynamic_filter.is_none());
     assert_eq!(hash.build_rows, 64);
     assert_eq!(hash.probe_rows, PROBE_ROWS as u64);
     assert_eq!(hash.spill_partitions, 0);
-    let peak = resources.peak();
-    drop(cursor);
-    assert_eq!(resources.used(), 0);
+    let peak = paused.resources.peak();
+    drop(paused.cursor);
+    assert_eq!(paused.resources.used(), 0);
     assert!(peak <= limit);
     drop(scope);
     // Do not clamp the measured budget to force the window: if it no longer
     // fits below the optional 64 KiB grant, this regression needs a new fixture.
-    let headroom = peak.saturating_sub(paused).saturating_add(16 * 1024);
+    let headroom = peak.saturating_sub(paused_used).saturating_add(16 * 1024);
     assert!(
         headroom < 64 * 1024,
-        "original continuation requires {headroom} bytes; paused={paused}, peak={peak}"
+        "original continuation requires {headroom} bytes; paused={paused_used}, peak={peak}"
     );
     headroom
 }
@@ -694,47 +729,17 @@ fn dynamic_filter_late_caller_lease_abandons_the_tail_and_completes_the_original
     let head = storage::branch_head(&fixture.db, "main").unwrap();
     let headroom = original_tail_headroom(&fixture, LIMIT);
     let scope = ReadScope::new(&fixture.db);
-    let options = ExecutionOptions {
-        memory_limit_bytes: Some(LIMIT),
-        ..ExecutionOptions::default()
-    };
-    let mut prepared = prepare(
-        &fixture.db,
-        &format!("PROFILE {JOIN}"),
-        BTreeMap::new(),
-        options,
-    )
-    .unwrap();
-    force_admitted_dynamic_filter(&mut prepared);
-    let columns = prepared.columns.clone();
-    let plan = prepared.physical.explain();
-    let resources = prepared.resources.clone();
-    let mut cursor = QueryCursor::new(prepared);
-    let mut first = cursor.next_batch(&fixture.db, 1).unwrap();
-    assert_eq!(first.rows.len(), 1);
-    assert!(!first.done);
-    assert_eq!(first.rows[0][0], Value::String("n:1".into()));
-    let first_rows = std::mem::take(&mut first.rows);
-    drop(first);
-    let available = LIMIT.checked_sub(resources.used()).unwrap();
+    let prepared = prepare_limited_resident(&fixture.db, LIMIT);
+    let mut paused = pause_resident_after_first_owner(&fixture.db, prepared);
+    let available = LIMIT.checked_sub(paused.resources.used()).unwrap();
     assert!(available > headroom);
-    let held = resources.reserve(available - headroom).unwrap();
-    assert_eq!(resources.limit(), Some(LIMIT));
-    assert_eq!(LIMIT - resources.used(), headroom);
+    let held = paused.resources.reserve(available - headroom).unwrap();
+    assert_eq!(paused.resources.limit(), Some(LIMIT));
+    assert_eq!(LIMIT - paused.resources.used(), headroom);
     // The caller keeps this claim throughout all remaining pulls. Success is
     // required; Resource is not an acceptable advisory-fallback outcome.
-    let actual = collect_remaining(&fixture.db, &mut cursor, columns, plan, first_rows, 1).unwrap();
-    assert_eq!(bag(&actual.rows), bag(&fixture.expected));
-    let hash = actual
-        .profile
-        .as_ref()
-        .unwrap()
-        .iter()
-        .find(|operator| operator.operator == "HashJoin")
-        .unwrap()
-        .hash
-        .as_ref()
-        .unwrap();
+    let actual = complete_resident_scan(&fixture, &mut paused);
+    let hash = observed_hash(&actual);
     let filter = hash
         .dynamic_filter
         .as_ref()
@@ -750,12 +755,12 @@ fn dynamic_filter_late_caller_lease_abandons_the_tail_and_completes_the_original
     assert_eq!(hash.build_rows, 64);
     assert_eq!(hash.probe_rows, PROBE_ROWS as u64);
     assert_eq!(hash.spill_partitions, 0);
-    assert!(resources.peak() <= LIMIT);
-    drop(cursor);
-    assert_eq!(resources.used(), held.bytes());
+    assert!(paused.resources.peak() <= LIMIT);
+    drop(paused.cursor);
+    assert_eq!(paused.resources.used(), held.bytes());
     drop(held);
-    assert_eq!(resources.used(), 0);
-    assert_eq!(resources.limit(), Some(LIMIT));
+    assert_eq!(paused.resources.used(), 0);
+    assert_eq!(paused.resources.limit(), Some(LIMIT));
     drop(scope);
     assert!(fixture.db.is_autocommit());
     assert_eq!(storage::branch_head(&fixture.db, "main").unwrap(), head);

@@ -94,9 +94,12 @@ fn check(big_first: bool) {
         joined.peak <= LIMIT,
         "complete join working set exceeded quota"
     );
-    let (rows, hashes) = joined
-        .result
-        .unwrap_or_else(|error| panic!("single-key fit; fixed-order join failed: {error:?}"));
+    let (rows, hashes) = joined.result.unwrap_or_else(|error| {
+        panic!(
+            "single-key fit; fixed-order join failed: {error:?}; plan={}; peak={}",
+            joined.plan, joined.peak,
+        )
+    });
     assert!(
         rows.is_empty(),
         "the two complete String domains are disjoint"

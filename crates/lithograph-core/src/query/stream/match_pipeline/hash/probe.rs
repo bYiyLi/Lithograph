@@ -227,14 +227,14 @@ impl HashBuildState {
         };
         self.stats.probe_rows = self.stats.probe_rows.saturating_add(1);
         let previous = metrics.activate_profile_slot(hash_slot(metrics, plan, depth));
-        let result = extract_hash_key(
+        let result = extract_hash_key_admitted(
             plan.hashes[equality].keys(inner_side).1,
             plan.hashes[equality].family,
             row,
-            scope.0,
-            scope.1,
+            scope,
             control,
             metrics,
+            &mut |bytes| self.admit_key_allocation(bytes, control),
         );
         metrics.restore_access_operator(previous);
         result

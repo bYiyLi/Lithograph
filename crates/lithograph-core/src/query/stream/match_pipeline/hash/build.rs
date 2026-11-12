@@ -73,14 +73,14 @@ impl HashBuildState {
     ) -> QueryResult<()> {
         self.stats.build_rows = self.stats.build_rows.saturating_add(1);
         let previous = metrics.activate_profile_slot(slot);
-        let extracted = extract_hash_key(
+        let extracted = extract_hash_key_admitted(
             descriptor.0,
             descriptor.1,
             &input.0,
-            scope.0,
-            scope.1,
+            scope,
             control,
             metrics,
+            &mut |bytes| self.admit_key_allocation(bytes, control),
         );
         metrics.restore_access_operator(previous);
         if let Some(key) = extracted? {
@@ -187,7 +187,7 @@ impl HashBuildState {
         }
     }
 
-    fn spill_build(&mut self, control: &ExecutionControl<'_>) -> QueryResult<()> {
+    pub(super) fn spill_build(&mut self, control: &ExecutionControl<'_>) -> QueryResult<()> {
         let BuildStorage::Memory(table) = std::mem::replace(&mut self.storage, BuildStorage::Empty)
         else {
             return Err(QueryError::internal(

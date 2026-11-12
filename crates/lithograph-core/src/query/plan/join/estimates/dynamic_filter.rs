@@ -23,12 +23,12 @@ pub(super) fn collect(
     step: &MatchStep,
     analysis: &JoinAnalysis,
     context: &JoinPlanningContext<'_, '_, '_>,
-    estimates: &JoinEstimates,
+    rows: &[Option<CardinalityEstimate>; 2],
     distributions: &BTreeMap<&str, Option<IndexDistribution>>,
     budget: &mut PlanningBudget,
-    placement: (usize, &JoinClauseScope<'_>),
+    placement: (usize, usize, &JoinClauseScope<'_>),
 ) -> QueryResult<Vec<DynamicInput>> {
-    let (headroom, scope) = placement;
+    let (headroom, rows_work, scope) = placement;
     if !shape(step, analysis, context.view, scope) {
         return Ok(Vec::new());
     }
@@ -36,7 +36,7 @@ pub(super) fn collect(
         .templates
         .len()
         .saturating_mul(distributions.len().saturating_add(4));
-    let (headroom, candidates, storage) = search_reserve(analysis, estimates, scope, headroom);
+    let (headroom, candidates, storage) = search_reserve(analysis, rows_work, scope, headroom);
     if work.saturating_add(headroom)
         > crate::query::plan::budget::MAX_STATES.saturating_sub(budget.states)
         || candidates > crate::query::plan::budget::MAX_CANDIDATES.saturating_sub(budget.candidates)
@@ -54,7 +54,7 @@ pub(super) fn collect(
             step,
             analysis,
             context,
-            estimates,
+            rows,
             distributions,
             (budget, headroom),
         )? {
@@ -87,7 +87,7 @@ fn shape(
 
 fn search_reserve(
     analysis: &JoinAnalysis,
-    estimates: &JoinEstimates,
+    rows_work: usize,
     scope: &JoinClauseScope<'_>,
     headroom: usize,
 ) -> (usize, usize, usize) {
@@ -98,7 +98,7 @@ fn search_reserve(
     let candidates = 2usize.saturating_mul(4 + analysis.templates.len() + hashes);
     let original = 2usize.saturating_mul(hashes).saturating_mul(
         18usize
-            .saturating_add(estimates.rows_work())
+            .saturating_add(rows_work)
             .saturating_add(analysis.predicates.len()),
     );
     let dynamic = 2 * hashes * 2 + 2 * 2 * 24;
@@ -115,7 +115,7 @@ fn candidate(
     step: &MatchStep,
     analysis: &JoinAnalysis,
     context: &JoinPlanningContext<'_, '_, '_>,
-    estimates: &JoinEstimates,
+    rows: &[Option<CardinalityEstimate>; 2],
     distributions: &BTreeMap<&str, Option<IndexDistribution>>,
     budget: (&mut PlanningBudget, usize),
 ) -> QueryResult<Option<DynamicInput>> {
@@ -153,10 +153,10 @@ fn candidate(
         if let Some(distinct) =
             build_distinct(step, build_key, context, distributions, budget.0, budget.1)?
         {
-            let Some(build_rows) = estimates.parts[build].output else {
+            let Some(build_rows) = rows[build] else {
                 continue;
             };
-            let Some(probe_rows) = estimates.parts[template.part].output else {
+            let Some(probe_rows) = rows[template.part] else {
                 continue;
             };
             if probe_rows.lower == probe_rows.upper

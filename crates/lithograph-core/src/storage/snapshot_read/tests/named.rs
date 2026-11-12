@@ -13,17 +13,24 @@ fn named_lookup_borrows_prefetched_value_without_another_checkpoint_decode() {
         .unwrap();
     let retained = budget.used.get();
     snapshot
-        .with_named_property_checked(OwnerKind::Node, node, "payload", &|| Ok(()), |value| {
-            assert!(
-                matches!(value, Some(PropertyValue::String(value)) if value.len() == 128 * 1024)
-            );
-            assert_eq!(
-                budget.used.get(),
-                retained,
-                "reuse the accounted cache value"
-            );
-            Ok::<_, StorageError>(())
-        })
+        .with_named_property_admitted_checked(
+            OwnerKind::Node,
+            node,
+            "payload",
+            &|| Ok(()),
+            &mut |_| Ok(()),
+            |value, _| {
+                assert!(
+                    matches!(value, Some(PropertyValue::String(value)) if value.len() == 128 * 1024)
+                );
+                assert_eq!(
+                    budget.used.get(),
+                    retained,
+                    "reuse the accounted cache value"
+                );
+                Ok::<_, StorageError>(())
+            },
+        )
         .unwrap();
     assert_eq!(budget.used.get(), retained);
     drop(snapshot);

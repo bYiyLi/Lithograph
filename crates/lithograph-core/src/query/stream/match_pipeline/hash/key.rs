@@ -44,6 +44,27 @@ pub(in crate::query::stream::match_pipeline) fn extract_hash_key(
     control: &ExecutionControl<'_>,
     metrics: &mut QueryMetrics,
 ) -> QueryResult<Option<EvaluatedHashKey>> {
+    extract_hash_key_admitted(
+        key,
+        family,
+        row,
+        (snapshot, view),
+        control,
+        metrics,
+        &mut |_| Ok(()),
+    )
+}
+
+pub(in crate::query::stream::match_pipeline) fn extract_hash_key_admitted(
+    key: &HashInputKey,
+    family: HashFamily,
+    row: &BindingRow,
+    scope: (&Snapshot<'_>, &ResolvedGraphView),
+    control: &ExecutionControl<'_>,
+    metrics: &mut QueryMetrics,
+    admission: &mut dyn FnMut(u64) -> QueryResult<()>,
+) -> QueryResult<Option<EvaluatedHashKey>> {
+    let (snapshot, view) = scope;
     control.check()?;
     let binding = row
         .values
@@ -60,7 +81,8 @@ pub(in crate::query::stream::match_pipeline) fn extract_hash_key(
             if view.query_access.denies(property) {
                 return Ok(None);
             }
-            let (value, memory) = read_property(binding, property, snapshot, view, control)?;
+            let (value, memory) =
+                read_property(binding, property, snapshot, view, control, admission)?;
             metrics.record_db_hits(1);
             (HashKeyValue::Scalar(value), memory)
         }
@@ -89,17 +111,24 @@ fn read_property(
     snapshot: &Snapshot<'_>,
     view: &ResolvedGraphView,
     control: &ExecutionControl<'_>,
+    admission: &mut dyn FnMut(u64) -> QueryResult<()>,
 ) -> QueryResult<(Value, MemoryReservation)> {
     match binding {
-        BindingValue::Node(id) => {
-            graph::node_property_with_control(snapshot, *id, property, &view.query_access, control)
-        }
-        BindingValue::Relationship(record) => graph::relationship_property_with_control(
+        BindingValue::Node(id) => graph::node_property_admitted_with_control(
+            snapshot,
+            *id,
+            property,
+            &view.query_access,
+            control,
+            admission,
+        ),
+        BindingValue::Relationship(record) => graph::relationship_property_admitted_with_control(
             snapshot,
             record.id,
             property,
             &view.query_access,
             control,
+            admission,
         ),
         _ => Err(QueryError::internal(
             "Hash property key has no proven entity binding",

@@ -257,11 +257,6 @@ impl ReadExecutor<'_, '_> {
         let baseline = self.expression_reservation.bytes();
         let matched =
             self.execute_match_row(clause, false, columns, step.predicate.as_ref(), row)?;
-        let produced = self.expression_reservation.bytes() - baseline;
-        let mut matched_memory = self.expression_reservation.split(produced)?;
-        matched_memory.resize(matched_binding_bytes(&matched, self.control)?)?;
-        memory.merge(matched_memory)?;
-        rows.extend(matched);
-        Ok(())
+        self.append_matched_rows(baseline, matched, rows, memory)
     }
 }

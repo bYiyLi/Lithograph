@@ -83,15 +83,17 @@ impl HashInputs {
         result.collect_parts(step, analysis, context, estimates)?;
         result.keys = collect_keys(step, analysis, context, distributions);
         result.output_upper = pair_upper(step, estimates, &result.keys);
-        result.dynamic = super::dynamic_filter::collect(
-            step,
-            analysis,
-            context,
-            estimates,
-            distributions,
-            budget,
-            placement,
-        )?;
+        if let [left, right] = estimates.parts.as_slice() {
+            result.dynamic = super::dynamic_filter::collect(
+                step,
+                analysis,
+                context,
+                &[left.output, right.output],
+                distributions,
+                budget,
+                (headroom, estimates.rows_work(), scope),
+            )?;
+        }
         for (equality, hash) in analysis.hashes.iter().enumerate() {
             for side in [HashOperandSide::Left, HashOperandSide::Right] {
                 let (build, _) = hash.keys(side);

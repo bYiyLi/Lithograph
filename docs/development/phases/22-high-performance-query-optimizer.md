@@ -1158,3 +1158,20 @@ R5的480/fe5与975/3a是**测试时历史epoch**。本地S6已开始修改源码
 | Codec与Hash估算 | codec layout 2项、Hash工作量模型4项、Hash估算13项通过 | 逻辑编码流量与内存scratch分开，保留原预算headroom；输入清单为`target/phase22-current/s6-active-01/inputs-final-unit-test-only-04.json`，实际结果为`target/phase22-current/s6-final-units-04/`对应远端记录 |
 
 当前原生Release已实际构建exit0；这是构建结果，不是S6性能、资源与全CI的替代。继续完成SIP/DF/TopK四档测量和全部局部acceptance，增量源码通过已授权CI分支验证；Profile分母、原资源预算、完整bag及失败/回滚边界保持。S6与整个Phase仍未完成，合并、发布和部署不属于本次交付。
+
+### 25.4 S6 首次分支 CI、定向修复与四档压力边界
+
+S6已在`codex/phase22-query-optimizer-ci`分支实际提交并推送[`05caab67ad03ba03f0e1cb5584f33a5bae3d7984`](https://github.com/bYiyLi/Lithograph/commit/05caab67ad03ba03f0e1cb5584f33a5bae3d7984)。以下续记第25.1–25.3节之后的结果，原历史及失败raw保持原样；S5旧提交的成功CI不能替代本次结果。
+
+| 范围 | 实际结果与边界 |
+| --- | --- |
+| [CI 43198628829](https://github.com/bYiyLi/Lithograph/actions/runs/43198628829) | `completed/failure`：Windows成功；Linux/macOS canonical均在`phase22_hash_join`的`large_string_key_last_preserves_complete_empty_bag`失败，22/23通过，实际错误为execution memory limit的Resource/code18；quality在原1% duplication门槛失败，1308/129311重复行、1.01%。没有将其归因于已确认的基础设施瞬态 |
+| [Release Matrix 43198629184](https://github.com/bYiyLi/Lithograph/actions/runs/43198629184) | `completed/success`：storage fixture及六个平台build/runtime/load/ABI job成功，`publish-release`按分支条件skipped，没有发行；该结果不覆盖上述canonical和quality失败 |
+| 后续原生定向复验 | full Hash 23/23、SIP 11/11、新增admission 3/3、Dynamic Filter 15/15实际通过；只记录各目标的真实范围，不标记完整Stage通过 |
+| 后续质量复验 | 同一`jscpd-rs 0.1.12`、原扫描范围和1%门槛实际exit0：156 clones、1275/129713重复行、0.98%；全部production严格C15/L100/a10、`cargo fmt --all --check`、all-target/all-feature Clippy `-D warnings`实际exit0，Clippy耗26.79s。修复提交和该提交的新CI仍待执行 |
+
+SIP的旧R5四档Before batch在1M时实际达到1GiB cgroup限制，leaf与metadata worker被OOM kill；unit记录`Result=oom-kill`、signal9及MemoryPeak=1GiB，整batch保留failed。1k/10k/100k已完成的个别raw不计作whole batch通过，也不构造完整Before分布。缺少worker最终metadata的owner记录路径已最小修复，真实workload exit保持未知；原OOM raw保留，不重跑该OOM或提高内存限制。
+
+`05caab6`的1M SIP After已实际完成三次完整消费，rows/scalar的SQLite VM分别2412/3315，与1k相同；wait4 RSS为38596608B。cgroup峰值达到1GiB，其中包括SHA读取产生的page cache，实际OOM事件为0；TEMP目录空、unit/cgroup及已知PID清理通过。该小组完整结果不替代S6四档正常分布、全部资源/失败路径或Stage验收。四档数据已全部ready，完整性能/压力仍待完成。
+
+另一次review发现SIP不适用时legacy eager fallback仍有无界Vec，已交由对应executor实现做窄修，目前尚未闭环；不能由SIP命中路径的资源证据推导fallback也符合预算。S6继续`in_progress`，S7–S8未实施，Profile分母与既定功能/资源合同不变。后续修复提交及CI、全Phase综合与最终门禁均按新源码实际结果另记。

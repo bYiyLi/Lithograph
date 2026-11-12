@@ -672,11 +672,7 @@ impl ReadExecutor<'_, '_> {
                     predicate.as_ref(),
                     input_row,
                 )?;
-                let produced = self.expression_reservation.bytes() - baseline;
-                let mut matched_memory = self.expression_reservation.split(produced)?;
-                matched_memory.resize(matched_binding_bytes(&matched, self.control)?)?;
-                memory.merge(matched_memory)?;
-                rows.extend(matched);
+                self.append_matched_rows(baseline, matched, &mut rows, &mut memory)?;
             }
             Ok(RowSet {
                 columns,
@@ -692,6 +688,21 @@ impl ReadExecutor<'_, '_> {
         }
         self.metrics.restore_active_operator(previous_operator);
         result
+    }
+
+    fn append_matched_rows(
+        &mut self,
+        baseline: u64,
+        matched: Vec<BindingRow>,
+        rows: &mut Vec<BindingRow>,
+        memory: &mut MemoryReservation,
+    ) -> QueryResult<()> {
+        let produced = self.expression_reservation.bytes() - baseline;
+        let mut matched_memory = self.expression_reservation.split(produced)?;
+        matched_memory.resize(matched_binding_bytes(&matched, self.control)?)?;
+        memory.merge(matched_memory)?;
+        rows.extend(matched);
+        Ok(())
     }
 
     fn match_columns(&self, clause: &AstNode, input: &[String]) -> QueryResult<Vec<String>> {
