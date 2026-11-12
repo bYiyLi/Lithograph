@@ -203,11 +203,15 @@ fn node_access<'a>(result: &'a Observed, variable: &str) -> &'a OperatorRuntimeM
 }
 
 fn assert_fixed_three(actual: &Observed, ids: &[Value]) {
+    assert_fixed_three_pattern(actual, ids, 128);
+}
+
+fn assert_fixed_three_pattern(actual: &Observed, ids: &[Value], pattern_rows: u64) {
     assert_eq!(bag(&actual.rows), bag(&expected(ids, &MEMBERS, 0)));
     assert_eq!(actual.summary_rows, 3);
     let access = node_access(actual, "a");
     assert_eq!(
-        access.rows, 128,
+        access.rows, pattern_rows,
         "all fresh pattern matches precede WHERE: {actual:?}"
     );
     assert!(access.db_hits > 0);
@@ -541,5 +545,35 @@ fn mid_work_interruption_releases_fallback_and_the_same_handle_recovers() {
     assert_fixed_three(&recovered, &ids);
     assert!(db.is_autocommit());
     assert_eq!(temp_catalog(&db), temp_before);
+    assert_eq!(state(&db), before);
+}
+
+#[test]
+fn hard_512k_keeps_the_fixed_three_bag_across_small_pattern_domains() {
+    for count in [128, 1000] {
+        // Seeding and checkpoint construction use the fixture's default budget;
+        // only the application-facing fallback execution receives this limit.
+        let (db, ids) = fixture(count);
+        let before = state(&db);
+        let mut options = ExecutionOptions::default();
+        options.memory_limit_bytes = Some(524_288);
+        let actual = read(&db, FALLBACK, options)
+            .unwrap_or_else(|error| panic!("hard512 fallback domain {count}: {error:?}"));
+        assert_fixed_three_pattern(&actual, &ids, count as u64);
+        assert_eq!(state(&db), before);
+    }
+}
+
+#[test]
+fn hard_512k_keeps_two_property_members_in_the_fallback_spool() {
+    let (db, ids) = fixture(128);
+    write(&db, "MATCH(n:Probe) SET n.k=n.seq FINISH");
+    storage::create_checkpoint(&db, storage::branch_head(&db, "main").unwrap()).unwrap();
+    let before = state(&db);
+    let mut options = ExecutionOptions::default();
+    options.memory_limit_bytes = Some(524_288);
+    let actual = read(&db, FALLBACK, options)
+        .unwrap_or_else(|error| panic!("hard512 fallback with two-property members: {error:?}"));
+    assert_fixed_three(&actual, &ids);
     assert_eq!(state(&db), before);
 }

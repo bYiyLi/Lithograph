@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::query::plan::MatchStep;
-use crate::query::resources::{allocation_bytes, checked_add, map_entry_bytes};
+use crate::query::resources::{allocation_bytes, checked_add, checked_mul, map_entry_bytes};
 use crate::query::spill::{BINDING_SPILL_BATCH_ROWS, BindingSpill, open_spill_connection};
 use crate::query::stream::{MatchReadBindings, StepCursor};
 
@@ -21,6 +21,9 @@ pub(super) fn lower_match(
     let Some(mut step) = identity::lower_pattern(connection, clause)? else {
         return Ok(None);
     };
+    if step.predicate.is_none() {
+        return Ok(None);
+    }
     let [part] = step.parts.as_slice() else {
         return Ok(None);
     };
@@ -152,10 +155,11 @@ impl ReadExecutor<'_, '_> {
         pattern.early_predicates.clear();
         let mut after = -1;
         loop {
+            let limit = candidate_batch_limit(&pattern, self.control)?;
             let batch = spools.candidates.read_batch_reserved(
                 &spools.connection,
                 after,
-                BINDING_SPILL_BATCH_ROWS,
+                limit,
                 self.control,
             )?;
             let Some(last) = batch.0.last() else {
@@ -254,7 +258,14 @@ fn candidate_row(
     id: i64,
     control: &ExecutionControl<'_>,
 ) -> QueryResult<(BindingRow, MemoryReservation)> {
-    let bytes = checked_add(
+    let memory = control.reserve(candidate_row_bytes(variable)?)?;
+    let mut row = BindingRow::default();
+    row.insert(variable.to_owned(), BindingValue::Node(id));
+    Ok((row, memory))
+}
+
+fn candidate_row_bytes(variable: &str) -> QueryResult<u64> {
+    checked_add(
         checked_add(
             allocation_bytes::<BindingRow>(1)?,
             map_entry_bytes::<BindingValue>()?,
@@ -263,11 +274,38 @@ fn candidate_row(
             allocation_bytes::<String>(4)?,
             (variable.len() as u64).saturating_mul(2),
         )?,
+    )
+}
+
+fn candidate_batch_limit(
+    pattern: &MatchStep,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<usize> {
+    let Some(limit) = control.resources().limit() else {
+        return Ok(BINDING_SPILL_BATCH_ROWS);
+    };
+    let variable = pattern.parts[0].start.variable.as_deref().ok_or_else(|| {
+        QueryError::internal("single-node spill requires its fresh Node variable")
+    })?;
+    let encoded =
+        crate::query::spill::identity_binding_encoded_upper([Some(variable), None, None], 0)?;
+    // This Node-only record has 16 JSON tokens, independently of name escaping
+    // and ID digits. Reuse the reader's DOM allowance and the codec's byte bound.
+    let encoded = usize::try_from(encoded).map_err(|_| {
+        crate::query::resources::memory_error("candidate spill encoding exceeds addressable memory")
+    })?;
+    let workspace = crate::query::spill::decoding_capacity_bytes(16, encoded)?;
+    let slot = allocation_bytes::<(i64, BindingRow)>(1)?;
+    // The reader starts at four slots and grows by doubling. IDs coexist with
+    // the decoded page until the full page has been converted and dropped.
+    let overhead = checked_add(workspace, checked_mul(slot, 4)?)?;
+    let per_row = checked_add(
+        candidate_row_bytes(variable)?,
+        checked_add(checked_mul(slot, 2)?, allocation_bytes::<i64>(1)?)?,
     )?;
-    let memory = control.reserve(bytes)?;
-    let mut row = BindingRow::default();
-    row.insert(variable.to_owned(), BindingValue::Node(id));
-    Ok((row, memory))
+    let available = limit.saturating_sub(control.resources().used());
+    let rows = available.saturating_sub(overhead) / per_row;
+    Ok(rows.clamp(1, BINDING_SPILL_BATCH_ROWS as u64) as usize)
 }
 
 fn candidate_ids(

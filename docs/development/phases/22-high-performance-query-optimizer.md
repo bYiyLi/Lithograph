@@ -2,7 +2,7 @@
 
 **状态：`in_progress`（S22.1–S22.5 已完成局部验收；S22.6 实施中；S22.7–S22.8 未实施）。** 本项目只有**一个 Phase 22、八个内部 Stage**。所有 Stage 和全部算法均为必交付；只完成部分 Stage、已有若干基础、计划通过 Review，都不能标记 Phase `done`。当前实现与实测证据续记于第 21–25 节，S22.5 最终记录见[第 24.9 节](#stage-s22-5-acceptance)，S22.6在途结果见[第25节](#stage-s22-6-implementation)；第 15–20 节保留先前规划审核、实施和修复的历史记录。
 
-**仓库复核（2026-11-10）**：本地 `main` HEAD 为 `3f1f31e`，本地 `v0.3.5` Tag 指向该 Commit；Phase 21 实现已进入此源码基线。复核开始时工作区干净，随后本次文档校正产生三份未提交文档修改。旧的 `e245555` + 未提交 Phase 21 是合并计划时的历史状态，不再代表当前源码。Tag 存在不等于远端 Release 制品已经完成验证；实施时仍须重新核对 HEAD/dirty tree、依赖、源码/SQLite runtime 和 Tag/资产状态。**主工作区保留在途修改；独立`codex/phase22-query-optimizer-ci`分支已提交并推送S5基线`2854fcc9`、S6首轮`05caab6`及修复`7e15ffb`。精确`7e15ffb273feedc99f0b03974ed4ef5da7e6da31`的CI与六平台Matrix已通过；后续fallback/错误传播增量尚未提交或完成运行验收。未合并或发布。第21–25节区分已验收S5基线和S6在途结果，旧审核章节仅为历史证据。**
+**仓库复核（2026-11-10）**：本地 `main` HEAD 为 `3f1f31e`，本地 `v0.3.5` Tag 指向该 Commit；Phase 21 实现已进入此源码基线。复核开始时工作区干净，随后本次文档校正产生三份未提交文档修改。旧的 `e245555` + 未提交 Phase 21 是合并计划时的历史状态，不再代表当前源码。Tag 存在不等于远端 Release 制品已经完成验证；实施时仍须重新核对 HEAD/dirty tree、依赖、源码/SQLite runtime 和 Tag/资产状态。**主工作区保留在途修改；独立`codex/phase22-query-optimizer-ci`分支已提交并推送S5基线`2854fcc9`、S6首轮`05caab6`及修复`7e15ffb`、`2df1ee7`。精确`7e15ffb273feedc99f0b03974ed4ef5da7e6da31`的CI与六平台Matrix已通过；后续`2df1ee7`在完整CI及hard512回退压力中发现新问题，正在修复，尚未通过S6验收。未合并或发布。第21–25节区分已验收S5基线和S6在途结果，旧审核章节仅为历史证据。**
 
 ## 1. 最终目标、权威设计和边界
 
@@ -1185,3 +1185,11 @@ SIP的旧R5四档Before batch在1M时实际达到1GiB cgroup限制，leaf与meta
 新的plain单Node回退已用query-private TEMP分阶段保存候选及pattern结果，保持原pattern-before-WHERE求值顺序；旧输入上的CF8与SIP11定向测试通过。随后发现的真实dictionary错误被当作优化拒绝的问题，正通过共享lowering分类及实际入口one-shot AUTH回归修复。该新增量的源码、运行验证、百万节点回退压力和新提交CI仍在途；上述`7e15ffb`CI不覆盖它。S6继续`in_progress`，S7/S8尚未启用。
 
 后续修复源码已在原生Linux完成139项定向测试：completeness 29、实际builder 1，以及access 19、DF 9、INL 19、Join semantics 16、Relationship 12、single-node fallback 9、SIP 11、TopK 14，均无失败。它们包含三个helper、实际builder及实际program planning共5个首次dictionary AUTH回归、SIP预算/分配后取消、回退中途取消和同连接恢复。首次编译因辅助函数提取后的`unused_mut`失败，已删除该无用mut并保留原失败；修正后全组通过。相同源码Clippy all-target/all-feature `-D warnings`、format、严格Lizard及原1% duplication gate均通过（后者显示1306/130138重复行、1.00%、exit0），输入前后不变。新Release构建、百万节点非SIP回退资源测试与新提交完整CI仍在途，不能把本组结果称为S6已验收。
+
+新增量已提交并推送为[`2df1ee715b9d8e6d440558455d0c9facc8e35807`](https://github.com/bYiyLi/Lithograph/commit/2df1ee715b9d8e6d440558455d0c9facc8e35807)，触发[CI 43213444853](https://github.com/bYiyLi/Lithograph/actions/runs/43213444853)及[Matrix 43213444939](https://github.com/bYiyLi/Lithograph/actions/runs/43213444939)。Linux/macOS canonical在既有`phase22_predicates::incoming_pattern_bindings_keep_errors_before_index_and_early_where_filtering`真实失败：末段无WHERE的Fan LabelIndexScan新增候选落盘/逐ID验证，dbHits由期待16变为实际32，15/16通过；不修改断言或隐藏真实额外读取。Windows canonical已通过，其他job按终态另记，不能称本提交CI通过。
+
+相同源码的原生Release已构建成功，随后plain单Node非SIP的1M/512KiB测试真实返回Resource/code18（CPU约8.34s、wait4 RSS41250816B），未发生OOM，fixture/manifest/artifact/sidecars保护及unit/cgroup/PID/TEMP清理均通过；该结果仍为失败。1k相同查询也复现；新增永久hard512回归证明128候选完整成功、1000候选失败。固定256个候选的BindingRow保留开销本身已超过524288B，正在按实际剩余预算、候选行及解码workspace改为有界页；同时收窄无WHERE场景的回退准入，避免无收益的额外扫描。首次压力launcher曾因错误DB路径在打开DB前退出，按已有成功invocation修正后才运行上述真实查询；原失败均保留。S6仍在修复验收，未进入S7/S8生产实现。
+
+预算分页与无WHERE准入修正已完成原生定向复验：CF10、完整predicates16（保原dbHits16）、SIP11、codec2全通过，另一个两property成员的hard512小例独立通过；Clippy `-D warnings`、严格复杂度及原dup门槛保持通过。该候选原生Release的1M hard512重测仍实际Resource18（CPU约8.64s、RSS41893888B），同候选的原frozen1k也复现；全部输入保护与清理通过而查询失败，不能由自建小例绿灯关闭S6。当前继续用小frozen fixture定位实际失败阶段，不提高预算或重跑未改动的百万用例。
+
+`2df1ee7` CI终态为failure：Linux/macOS及Quality coverage均因相同predicates回归失败，Windows canonical成功。其Matrix另有Windows x64的独立Provider并发publish失败：`concurrent Provider publish failed: result=cache database operation failed`；已证明两worker都通过HTTP barrier，失败范围在HTTP后的cache发布，具体SQLite根因未知。新增固定publish begin/body/commit/rollback阶段及SQLite primary/extended code诊断，保持原Provider分类、500ms/10ms重试、两个worker、HTTP barrier和3-entry/24-byte断言；测试记录两侧安全结果，不回显config/SQL/path/secret。原生Provider25项unit、support编译与Clippy通过，其中新增构造错误单测仅证明诊断分类与去敏，不冒称真实Windows复现或故障修复。新提交CI与剩余回退问题继续按实际结果验收。

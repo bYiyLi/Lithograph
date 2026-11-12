@@ -744,7 +744,7 @@ fn decoding_bytes(encoded: &str, control: &ExecutionControl<'_>) -> QueryResult<
     decoding_capacity_bytes(tokens, encoded.len())
 }
 
-fn decoding_capacity_bytes(tokens: u64, bytes: usize) -> QueryResult<u64> {
+pub(in crate::query) fn decoding_capacity_bytes(tokens: u64, bytes: usize) -> QueryResult<u64> {
     // Per-token allowance covers both Value representations, copied map keys,
     // BTree nodes and growth slack; four times raw bytes covers text copies.
     checked_add(
