@@ -9,6 +9,7 @@ use crate::query::plan::ProfileRole;
 use cursor::MatchFrame;
 #[cfg(test)]
 pub(crate) use hash::hash_resident_target;
+pub(super) use hash::{HashBuildState, HashProbe};
 pub(crate) use hash::{HashLayoutFacts, hash_layout, hash_table_peak_bytes};
 pub(crate) use join::MatchReadBindings;
 
@@ -129,6 +130,51 @@ impl MatchPipeline {
             self.stack.pop();
         }
     }
+
+    pub(super) fn next_packet(
+        &mut self,
+        snapshot: &Snapshot<'_>,
+        graph_view: &ResolvedGraphView,
+        params: &std::collections::BTreeMap<String, Value>,
+        metrics: &mut QueryMetrics,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<Option<super::factor::BindingPacket>> {
+        if self.steps.len() != 1
+            || !self.steps[0]
+                .join
+                .as_ref()
+                .is_some_and(|plan| plan.factorized.is_some())
+        {
+            return self
+                .next_row(snapshot, graph_view, params, metrics, control)
+                .map(|row| row.map(super::factor::BindingPacket::Flat));
+        }
+        if !self.initialized {
+            self.stack.push(StepCursor::new(
+                &self.steps[0],
+                BindingRow::default(),
+                control,
+            )?);
+            self.initialized = true;
+        }
+        if self.stack.is_empty() {
+            return Ok(None);
+        }
+        self.reserve_bindings(1, control)?;
+        let next = self.stack[0].next_packet(
+            snapshot,
+            graph_view,
+            params,
+            metrics,
+            &mut self.read_bindings[0],
+            control,
+        )?;
+        if next.is_none() {
+            self.stack.clear();
+            self.finish_bindings(metrics)?;
+        }
+        Ok(next)
+    }
 }
 
 #[derive(Debug)]
@@ -145,6 +191,9 @@ pub(crate) struct StepCursor {
     node_ids: Option<(Vec<i64>, MemoryReservation)>,
     finite_advisory: bool,
     ordered_numeric: Option<crate::query::schema::OrderedNumericIndexRead>,
+    factor: Option<Box<super::factor::producer::FactorProducer>>,
+    flatten: Option<super::factor::FlattenContinuation>,
+    profile_parts: Vec<usize>,
 }
 
 impl StepCursor {
@@ -158,10 +207,28 @@ impl StepCursor {
         // earlier MATCH while still inheriting its variable bindings.
         base.used_relationships.clear();
         let seek_memory = crate::query::plan::reserve_match_seeks(step, control)?;
+        let factorized = step
+            .join
+            .as_ref()
+            .is_some_and(|plan| plan.factorized.is_some());
+        let base_bytes = if factorized {
+            0
+        } else {
+            expression::binding_row_bytes_controlled(&base, Some(control))?
+        };
         let memory = control.reserve(crate::query::resources::checked_add(
-            expression::binding_row_bytes_controlled(&base, Some(control))?,
+            base_bytes,
             crate::query::resources::allocation_bytes::<MatchFrame>(step.parts.len())?,
         )?)?;
+        let factor = if factorized {
+            Some(Box::new(super::factor::producer::FactorProducer::new(
+                step,
+                std::mem::take(&mut base),
+                control,
+            )?))
+        } else {
+            None
+        };
         Ok(Self {
             step: step.clone(),
             base,
@@ -175,7 +242,49 @@ impl StepCursor {
             node_ids: None,
             finite_advisory: false,
             ordered_numeric: None,
+            factor,
+            flatten: None,
+            profile_parts: Vec::new(),
         })
+    }
+
+    pub(crate) fn set_profile_parts(
+        &mut self,
+        parts: &[usize],
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<()> {
+        self._memory
+            .grow(crate::query::resources::allocation_bytes::<usize>(
+                parts.len(),
+            )?)?;
+        control.check()?;
+        let mut copied = Vec::new();
+        copied.try_reserve_exact(parts.len()).map_err(|_| {
+            crate::query::resources::memory_error("unable to allocate MATCH profile ordinals")
+        })?;
+        copied.extend_from_slice(parts);
+        self.profile_parts = copied;
+        Ok(())
+    }
+
+    pub(crate) fn take_output_memory(
+        &mut self,
+        row: &BindingRow,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<MemoryReservation> {
+        if let Some(flatten) = self.flatten.as_mut() {
+            return flatten.split_output_memory(row, control);
+        }
+        if let Some(memory) = self.output_memory.as_mut() {
+            return memory.split(expression::binding_row_bytes_controlled(
+                row,
+                Some(control),
+            )?);
+        }
+        self.stack
+            .last_mut()
+            .ok_or_else(|| QueryError::internal("MATCH output lost its producer"))?
+            .split_output_memory(row, control)
     }
 
     pub(crate) fn with_node_ids(
@@ -239,6 +348,62 @@ impl StepCursor {
     }
 
     pub(crate) fn next_row(
+        &mut self,
+        snapshot: &Snapshot<'_>,
+        graph_view: &ResolvedGraphView,
+        params: &std::collections::BTreeMap<String, Value>,
+        metrics: &mut QueryMetrics,
+        bindings: &mut MatchReadBindings,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<Option<BindingRow>> {
+        if self.factor.is_none() {
+            return self.next_flat_row(snapshot, graph_view, params, metrics, bindings, control);
+        }
+        loop {
+            if let Some(flatten) = self.flatten.as_mut()
+                && let Some(mut row) = flatten.next_row(control)?
+            {
+                if let Some((clause, delta)) = flatten.take_storage_metrics()? {
+                    metrics.record_factorized_storage(clause, "Flatten", delta);
+                }
+                metrics.record_factorized_flatten(self.step.clause_start, 1);
+                self.restore_declared_order(&mut row);
+                return Ok(Some(row));
+            }
+            let Some(packet) =
+                self.next_packet(snapshot, graph_view, params, metrics, bindings, control)?
+            else {
+                return Ok(None);
+            };
+            if self.flatten.is_none() {
+                self.flatten = Some(super::factor::FlattenContinuation::new(control)?);
+            }
+            self.flatten
+                .as_mut()
+                .expect("installed factor continuation")
+                .install(packet, control)?;
+        }
+    }
+
+    pub(crate) fn next_packet(
+        &mut self,
+        snapshot: &Snapshot<'_>,
+        graph_view: &ResolvedGraphView,
+        params: &std::collections::BTreeMap<String, Value>,
+        metrics: &mut QueryMetrics,
+        bindings: &mut MatchReadBindings,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<Option<super::factor::BindingPacket>> {
+        if let Some(factor) = self.factor.as_mut() {
+            return factor
+                .next_packet((snapshot, graph_view), params, metrics, control)
+                .map(|packet| packet.map(super::factor::BindingPacket::Group));
+        }
+        self.next_flat_row(snapshot, graph_view, params, metrics, bindings, control)
+            .map(|row| row.map(super::factor::BindingPacket::Flat))
+    }
+
+    fn next_flat_row(
         &mut self,
         snapshot: &Snapshot<'_>,
         graph_view: &ResolvedGraphView,

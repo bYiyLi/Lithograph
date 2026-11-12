@@ -24,6 +24,32 @@ pub struct OperatorRuntimeMetrics {
     pub db_hits: u64,
     pub hash: Option<HashJoinRuntimeMetrics>,
     pub semi_mask: Option<SemiMaskRuntimeMetrics>,
+    pub factorized: Option<FactorizedRuntimeMetrics>,
+}
+
+/// Actual work reported by the factor table, ASP phases and final Flatten.
+/// Values are cumulative events or live-owned peaks, never planner estimates.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct FactorizedRuntimeMetrics {
+    pub prefixes: u64,
+    pub accumulate_rows: u64,
+    pub build_rows: u64,
+    pub hash_entries: u64,
+    pub probe_rows: u64,
+    pub group_members: u64,
+    pub flattened_rows: u64,
+    pub semijoin_keys: u64,
+    pub semijoin_seeks: u64,
+    pub memory_peak_bytes: u64,
+    pub spill_encoded_bytes: u64,
+    pub spill_batches: u64,
+    pub spill_vm_steps: u64,
+    pub temp_allocated_bytes: u64,
+    pub accumulate_micros: u64,
+    pub build_micros: u64,
+    pub probe_micros: u64,
+    pub predicate_evaluations: u64,
+    pub expression_evaluations: u64,
 }
 
 /// Actual finite-ID advisory work at the existing storage access boundary.
@@ -81,6 +107,11 @@ impl QueryMetrics {
                 db_hits: 0,
                 hash: (operator.profile_name() == "HashJoin").then(HashJoinRuntimeMetrics::default),
                 semi_mask: None,
+                factorized: matches!(
+                    operator.profile_name(),
+                    "FactorizedAccumulate" | "ASPJoin" | "Flatten"
+                )
+                .then(FactorizedRuntimeMetrics::default),
             });
             if operator.is_storage_access() {
                 access_operators.push(id);
@@ -152,7 +183,11 @@ impl QueryMetrics {
             .as_ref()?
             .sites
             .iter()
-            .find(|binding| binding.site.clause_start == clause && binding.site.part.is_none())
+            .find(|binding| {
+                binding.site.clause_start == clause
+                    && binding.site.part.is_none()
+                    && binding.site.role == ProfileRole::EarlyFilter
+            })
             .map(|binding| binding.physical_slot)
     }
 
@@ -181,6 +216,114 @@ impl QueryMetrics {
             .and_then(|profile| slot.and_then(|slot| profile.operators.get_mut(slot)))
         {
             operator.rows = operator.rows.saturating_add(count);
+        }
+    }
+
+    pub(crate) fn factorized_slot(&self, clause: usize, name: &str) -> Option<usize> {
+        let role = match name {
+            "FactorizedAccumulate" => ProfileRole::FactorizedAccumulate,
+            "ASPJoin" => ProfileRole::ASPJoin,
+            "Flatten" => ProfileRole::Flatten,
+            _ => return None,
+        };
+        self.profile
+            .as_ref()?
+            .sites
+            .iter()
+            .find(|binding| {
+                binding.site.clause_start == clause
+                    && binding.site.part.is_none()
+                    && binding.site.role == role
+            })
+            .map(|binding| binding.physical_slot)
+    }
+
+    pub(crate) fn set_factorized_profile(
+        &mut self,
+        slot: Option<usize>,
+        mut stats: FactorizedRuntimeMetrics,
+    ) {
+        if let Some(operator) = self
+            .profile
+            .as_mut()
+            .and_then(|profile| slot.and_then(|slot| profile.operators.get_mut(slot)))
+            && matches!(
+                operator.operator.as_str(),
+                "FactorizedAccumulate" | "ASPJoin" | "Flatten"
+            )
+        {
+            if let Some(previous) = operator.factorized {
+                stats.predicate_evaluations = previous.predicate_evaluations;
+                stats.expression_evaluations = previous.expression_evaluations;
+            }
+            operator.factorized = Some(stats);
+        }
+    }
+
+    pub(crate) fn record_factorized_flatten(&mut self, clause: usize, rows: u64) {
+        let slot = self.factorized_slot(clause, "Flatten");
+        self.record_profile_rows(slot, rows);
+        if let Some(operator) = self
+            .profile
+            .as_mut()
+            .and_then(|profile| slot.and_then(|slot| profile.operators.get_mut(slot)))
+        {
+            let stats = operator
+                .factorized
+                .get_or_insert_with(FactorizedRuntimeMetrics::default);
+            stats.flattened_rows = stats.flattened_rows.saturating_add(rows);
+        }
+    }
+
+    pub(crate) fn record_factorized_storage(
+        &mut self,
+        clause: usize,
+        name: &str,
+        delta: FactorizedRuntimeMetrics,
+    ) {
+        let slot = self.factorized_slot(clause, name);
+        if let Some(operator) = self
+            .profile
+            .as_mut()
+            .and_then(|profile| slot.and_then(|slot| profile.operators.get_mut(slot)))
+        {
+            let stats = operator
+                .factorized
+                .get_or_insert_with(FactorizedRuntimeMetrics::default);
+            stats.spill_encoded_bytes = stats
+                .spill_encoded_bytes
+                .saturating_add(delta.spill_encoded_bytes);
+            stats.spill_batches = stats.spill_batches.saturating_add(delta.spill_batches);
+            stats.spill_vm_steps = stats.spill_vm_steps.saturating_add(delta.spill_vm_steps);
+            stats.memory_peak_bytes = stats.memory_peak_bytes.max(delta.memory_peak_bytes);
+            stats.temp_allocated_bytes = stats.temp_allocated_bytes.max(delta.temp_allocated_bytes);
+        }
+    }
+
+    pub(crate) fn record_factorized_evaluations(
+        &mut self,
+        slot: Option<usize>,
+        predicates: u64,
+        expressions: u64,
+    ) {
+        if let Some(stats) = self
+            .profile
+            .as_mut()
+            .and_then(|profile| slot.and_then(|slot| profile.operators.get_mut(slot)))
+            .filter(|operator| {
+                matches!(
+                    operator.operator.as_str(),
+                    "FactorizedAccumulate" | "ASPJoin" | "Flatten"
+                )
+            })
+            .map(|operator| {
+                operator
+                    .factorized
+                    .get_or_insert_with(FactorizedRuntimeMetrics::default)
+            })
+        {
+            stats.predicate_evaluations = stats.predicate_evaluations.saturating_add(predicates);
+            stats.expression_evaluations = stats.expression_evaluations.saturating_add(expressions);
         }
     }
 
@@ -429,7 +572,7 @@ impl QueryMetrics {
             && profile
                 .operators
                 .iter()
-                .any(|operator| operator.hash.is_some())
+                .any(|operator| operator.hash.is_some() || operator.factorized.is_some())
         {
             profile.execution_memory_peak_bytes = Some(self.resources.peak());
         }
@@ -526,6 +669,7 @@ fn clone_profile(profile: &QueryProfileState) -> QueryProfileState {
             db_hits: operator.db_hits,
             hash: operator.hash,
             semi_mask: operator.semi_mask,
+            factorized: operator.factorized,
         });
     }
     let mut access_operators = Vec::with_capacity(profile.access_operators.len());
@@ -544,7 +688,7 @@ fn clone_profile(profile: &QueryProfileState) -> QueryProfileState {
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct MatchProfileSlots {
-    slots: [Option<usize>; 4],
+    slots: [Option<usize>; 7],
 }
 
 impl MatchProfileSlots {

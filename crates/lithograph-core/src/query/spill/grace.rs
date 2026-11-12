@@ -442,7 +442,7 @@ impl GracePartitions {
     }
 }
 
-fn private_temp_error(error: QueryError) -> QueryError {
+pub(in crate::query) fn private_temp_error(error: QueryError) -> QueryError {
     let code = error.sqlite_code;
     if matches!(
         code,

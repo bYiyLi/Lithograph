@@ -369,6 +369,7 @@ fn force_admitted_dynamic_filter(prepared: &mut PreparedQuery) {
         templates: original.templates.clone(),
         hashes: original.hashes.clone(),
         stages: dynamic_filter_stages(probe, build, equality, inner_side, template),
+        factorized: None,
     };
     step.join = Some(std::sync::Arc::new(forced));
     refresh_selected_candidate(prepared);

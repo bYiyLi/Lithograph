@@ -16,14 +16,14 @@ pub(super) enum ProbeMode {
 }
 
 #[derive(Debug)]
-pub(in crate::query::stream::match_pipeline) struct HashProbe {
+pub(in crate::query::stream) struct HashProbe {
     pub(super) mode: ProbeMode,
     output_memory: Option<MemoryReservation>,
     mode_memory: Option<MemoryReservation>,
 }
 
 impl HashProbe {
-    pub(in crate::query::stream::match_pipeline) fn empty() -> Self {
+    pub(in crate::query::stream) fn empty() -> Self {
         Self {
             mode: ProbeMode::Empty,
             output_memory: None,
@@ -31,9 +31,7 @@ impl HashProbe {
         }
     }
 
-    pub(in crate::query::stream::match_pipeline) fn grace(
-        control: &ExecutionControl<'_>,
-    ) -> QueryResult<Self> {
+    pub(in crate::query::stream) fn grace(control: &ExecutionControl<'_>) -> QueryResult<Self> {
         let memory = control.reserve(std::mem::size_of::<grace::GraceProbe>() as u64)?;
         Ok(Self {
             mode: ProbeMode::Grace(Box::new(grace::GraceProbe::new())),
@@ -42,7 +40,7 @@ impl HashProbe {
         })
     }
 
-    pub(in crate::query::stream::match_pipeline) fn metadata_bytes(&self) -> u64 {
+    pub(in crate::query::stream) fn metadata_bytes(&self) -> u64 {
         self.mode_memory
             .as_ref()
             .map_or(0, MemoryReservation::bytes)
@@ -73,7 +71,7 @@ impl HashProbe {
         })
     }
 
-    pub(in crate::query::stream::match_pipeline) fn next_row(
+    pub(in crate::query::stream) fn next_row(
         &mut self,
         state: &mut HashBuildState,
         step: &MatchStep,
@@ -123,7 +121,7 @@ impl HashProbe {
         }
     }
 
-    pub(in crate::query::stream::match_pipeline) fn split_output_memory(
+    pub(in crate::query::stream) fn split_output_memory(
         &mut self,
         row: &BindingRow,
         control: &ExecutionControl<'_>,
@@ -204,6 +202,42 @@ fn merge_rows(
 }
 
 impl HashBuildState {
+    pub(in crate::query::stream) fn memory_probe(
+        &mut self,
+        input: (BindingRow, MemoryReservation),
+        step: &MatchStep,
+        depth: usize,
+        scope: (&Snapshot<'_>, &ResolvedGraphView),
+        metrics: &mut QueryMetrics,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<HashProbe> {
+        let probe = match self.probe_key(step, depth, &input.0, scope, metrics, control)? {
+            Some(key) => HashProbe::memory(input, key, self, control)?,
+            None => HashProbe::empty(),
+        };
+        self.record_probe_metadata(&probe);
+        Ok(probe)
+    }
+
+    pub(in crate::query::stream) fn append_spill_probe(
+        &mut self,
+        input: (BindingRow, MemoryReservation),
+        step: &MatchStep,
+        depth: usize,
+        scope: (&Snapshot<'_>, &ResolvedGraphView),
+        metrics: &mut QueryMetrics,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<()> {
+        if let Some(key) = self.probe_key(step, depth, &input.0, scope, metrics, control)? {
+            self.spill_probe(input, key, control)?;
+        }
+        let plan = step
+            .join
+            .as_ref()
+            .ok_or_else(|| QueryError::internal("Hash probe lacks a plan"))?;
+        self.publish(metrics, hash_slot(metrics, plan, depth))
+    }
+
     pub(in crate::query::stream::match_pipeline) fn probe_key(
         &mut self,
         step: &MatchStep,

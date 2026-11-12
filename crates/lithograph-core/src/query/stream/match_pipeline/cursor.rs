@@ -69,7 +69,7 @@ impl MatchFrame {
         }
     }
 
-    fn split_output_memory(
+    pub(super) fn split_output_memory(
         &mut self,
         row: &BindingRow,
         control: &ExecutionControl<'_>,

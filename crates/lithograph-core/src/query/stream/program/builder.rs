@@ -4,7 +4,7 @@ pub(crate) fn build_program_stream(
     connection: &Connection,
     program: &PreparedProgram,
     snapshot: &Snapshot<'_>,
-    _mode: ExecutionMode,
+    graph_view: &ResolvedGraphView,
     params: &std::collections::BTreeMap<String, Value>,
     control: &ExecutionControl<'_>,
 ) -> QueryResult<Option<ProgramStream>> {
@@ -18,6 +18,7 @@ pub(crate) fn build_program_stream(
             connection,
             program,
             _snapshot: snapshot,
+            graph_view: Some(graph_view),
             params,
             control,
         },
@@ -160,6 +161,7 @@ fn build_composed_union_stream(
         source,
         columns,
         output_memory: None,
+        factor_flatten: None,
     }))
 }
 
@@ -176,6 +178,7 @@ pub(crate) fn build_program_prefix_stream(
             connection,
             program,
             _snapshot: snapshot,
+            graph_view: None,
             params,
             control,
         },
@@ -207,6 +210,7 @@ pub(crate) fn build_program_suffix_stream(
             connection,
             program,
             _snapshot: snapshot,
+            graph_view: None,
             params,
             control,
         },
@@ -239,6 +243,7 @@ pub(crate) fn build_program_spilled_suffix_stream(
             connection,
             program,
             _snapshot: snapshot,
+            graph_view: None,
             params,
             control,
         },
@@ -280,6 +285,7 @@ fn build_clause_stream(
         source,
         columns,
         output_memory: None,
+        factor_flatten: None,
     }))
 }
 
@@ -287,6 +293,7 @@ struct ClauseStreamBuilder<'a, 'snapshot> {
     connection: &'a Connection,
     program: &'a PreparedProgram,
     _snapshot: &'a Snapshot<'snapshot>,
+    graph_view: Option<&'a ResolvedGraphView>,
     params: &'a std::collections::BTreeMap<String, Value>,
     control: &'a ExecutionControl<'a>,
 }
@@ -413,6 +420,8 @@ impl ClauseStreamBuilder<'_, '_> {
         Ok(Some(Box::new(FilterSource {
             upstream: source,
             predicate: first_expression(clause, "FILTER is missing its predicate")?,
+            factor_flatten: None,
+            factor_output: None,
         })))
     }
 
@@ -452,6 +461,41 @@ impl ClauseStreamBuilder<'_, '_> {
         clause: &AstNode,
         kind: ClauseKind,
     ) -> QueryResult<Option<Box<dyn BindingSource>>> {
+        if factor_aggregate_shape(self.program) && factor_consumer::supports_aggregate(clause) {
+            let Some(factor) = self
+                .program
+                .match_plans
+                .values()
+                .find_map(|step| step.join.as_ref()?.factorized.as_deref())
+            else {
+                return Ok(None);
+            };
+            let Some(view) = self.graph_view else {
+                return Ok(None);
+            };
+            let Some(plan) = factor_consumer::compile_aggregate(
+                clause,
+                &self.program.source,
+                self.params,
+                self.control,
+            )?
+            else {
+                return Ok(None);
+            };
+            if !factor_consumer::admit_aggregate(
+                &plan,
+                factor,
+                self._snapshot,
+                self.params,
+                view,
+                self.control,
+            )? {
+                return Ok(None);
+            }
+            return Ok(Some(Box::new(factor_consumer::FactorAggregateSource::new(
+                source, plan,
+            ))));
+        }
         if projection_requires_global_executor(clause) {
             return Ok(None);
         }
@@ -489,6 +533,8 @@ impl ClauseStreamBuilder<'_, '_> {
             source = Box::new(FilterSource {
                 upstream: source,
                 predicate: first_expression(where_node, "WITH WHERE is missing its predicate")?,
+                factor_flatten: None,
+                factor_output: None,
             });
         }
         Ok(Some(source))
@@ -515,6 +561,8 @@ impl ClauseStreamBuilder<'_, '_> {
                 limit,
                 seen: 0,
                 emitted: 0,
+                factor_flatten: None,
+                factor_output: None,
             });
         }
         Box::new(BarrierProjectionSource {
@@ -540,12 +588,40 @@ impl ClauseStreamBuilder<'_, '_> {
     }
 }
 
+fn factor_aggregate_shape(program: &PreparedProgram) -> bool {
+    let mut queries = program
+        .root
+        .descendants()
+        .filter(|node| node.kind == AstKind::SingleQuery);
+    let Some(query) = queries.next() else {
+        return false;
+    };
+    if queries.next().is_some() {
+        return false;
+    }
+    let mut clauses = query
+        .children
+        .iter()
+        .filter(|node| matches!(node.kind, AstKind::Clause(_)));
+    matches!(
+        clauses.next().map(|node| &node.kind),
+        Some(AstKind::Clause(ClauseKind::Match))
+    ) && clauses.next().is_some_and(|node| {
+        node.kind == AstKind::Clause(ClauseKind::Return)
+            && crate::query::completeness::execute::identity::identity_clause_size(node).is_some()
+            && factor_consumer::supports_aggregate(node)
+    }) && clauses.next().is_none()
+}
+
 fn has_nonstreamable_operator(program: &PreparedProgram) -> bool {
+    let aggregate = factor_aggregate_shape(program);
     program.logical.operators.iter().any(|operator| {
+        if matches!(operator, LogicalOperator::Aggregate) {
+            return !aggregate;
+        }
         matches!(
             operator,
-            LogicalOperator::Aggregate
-                | LogicalOperator::When
+            LogicalOperator::When
                 | LogicalOperator::Eager
                 | LogicalOperator::Mutation { .. }
                 | LogicalOperator::Schema { .. }

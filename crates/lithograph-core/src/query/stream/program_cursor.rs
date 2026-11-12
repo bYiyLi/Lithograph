@@ -37,7 +37,7 @@ impl QueryCursor {
             connection,
             program,
             &snapshot,
-            self.prepared.mode,
+            &self.prepared.graph_view,
             &self.prepared.params,
             control,
         )?;

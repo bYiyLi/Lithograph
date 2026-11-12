@@ -176,6 +176,7 @@ fn plan_step_access(
         let estimates =
             join::collect_join_estimates(step, &analysis, context, &statistics, budget, scope)?;
         step.join = join::choose_join_order(step, scope, analysis, &estimates, control, budget)?;
+        super::factor::install(step, scope, context, &statistics, &estimates, budget)?;
     }
     Ok((statistics, memory))
 }

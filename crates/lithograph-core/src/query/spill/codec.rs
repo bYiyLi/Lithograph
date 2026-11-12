@@ -42,7 +42,14 @@ fn decode_value(value: &JsonValue, control: &ExecutionControl<'_>) -> QueryResul
     })
 }
 
-fn stringify(mut value: JsonValue, control: Option<&ExecutionControl<'_>>) -> QueryResult<String> {
+fn stringify(value: JsonValue, control: Option<&ExecutionControl<'_>>) -> QueryResult<String> {
+    stringify_measured(value, control).map(|(text, _)| text)
+}
+
+fn stringify_measured(
+    mut value: JsonValue,
+    control: Option<&ExecutionControl<'_>>,
+) -> QueryResult<(String, u64)> {
     check(control)?;
     let scratch = finite::encoding_bytes(&value, control)?;
     let scratch_memory = control
@@ -54,7 +61,7 @@ fn stringify(mut value: JsonValue, control: Option<&ExecutionControl<'_>>) -> Qu
             QueryError::internal(format!("failed to encode spill row: {error}"))
         })?;
         check(control)?;
-        Ok(result)
+        Ok((result, scratch))
     })();
     drop(value);
     drop(scratch_memory);
@@ -90,6 +97,13 @@ pub(super) fn encode_binding_row(
     row: &BindingRow,
     control: &ExecutionControl<'_>,
 ) -> QueryResult<String> {
+    encode_binding_row_measured(row, control).map(|(text, _)| text)
+}
+
+pub(super) fn encode_binding_row_measured(
+    row: &BindingRow,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<(String, u64)> {
     let _dom = control.reserve(dom_supplement(
         binding_scalar_json_bytes(row, control)?,
         super::super::expression::binding_row_bytes_controlled(row, Some(control))?,
@@ -120,7 +134,8 @@ pub(super) fn encode_binding_row(
         "loadCsvContext".to_owned(),
         encode_context(row.load_csv_context.as_ref(), control)?,
     );
-    stringify(JsonValue::Object(object), Some(control))
+    let (text, finite_scratch) = stringify_measured(JsonValue::Object(object), Some(control))?;
+    Ok((text, checked_add(_dom.bytes(), finite_scratch)?))
 }
 
 fn binding_scalar_json_bytes(row: &BindingRow, control: &ExecutionControl<'_>) -> QueryResult<u64> {

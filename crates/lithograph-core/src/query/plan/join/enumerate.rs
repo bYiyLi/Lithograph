@@ -154,6 +154,7 @@ fn complete(
         templates: analysis.templates,
         hashes: analysis.hashes,
         stages,
+        factorized: None,
     })))
 }
 

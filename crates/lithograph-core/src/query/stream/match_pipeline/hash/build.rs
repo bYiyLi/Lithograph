@@ -16,26 +16,13 @@ impl HashBuildState {
         if self.built {
             return Ok(());
         }
-        let plan = step
-            .join
-            .as_ref()
-            .ok_or_else(|| QueryError::internal("Hash lacks its Join plan"))?;
-        let crate::query::plan::join::StageAccess::Hash {
-            equality,
-            inner_side,
-            dynamic_filter,
-        } = plan.stages[depth].access
-        else {
-            return Err(QueryError::internal(
-                "Hash build requested for another access",
-            ));
-        };
+        let (plan, equality, inner_side, dynamic_filter) = hash_build_stage(step, depth)?;
         let (ordinal, part) = crate::query::plan::join::execution_part(step, depth);
         let mut source = PartCursor::new(&part, &BindingRow::default(), control)?;
         source.profile = metrics.match_profile_slots(plan.clause_start, ordinal);
         let bindings = MatchReadBindings::default();
         self.storage = BuildStorage::Memory(HashTable::new(control)?);
-        if dynamic_filter.is_some() {
+        if dynamic_filter {
             self.filter = dynamic_filter::KeyCollector::new(control)?;
         }
         // Keep row before its claim in one tuple through NULL/error exits.
@@ -60,6 +47,91 @@ impl HashBuildState {
         }
         self.built = true;
         self.publish(metrics, hash_slot(metrics, plan, depth))
+    }
+
+    /// The complete ASP ID filter is produced before this call. Every page is
+    /// consumed by the real finite Node reader; only the final source EOF can
+    /// make the Hash build available for probing.
+    pub(in crate::query::stream) fn ensure_build_from_id_pages(
+        &mut self,
+        step: &MatchStep,
+        depth: usize,
+        next_page: &mut dyn FnMut() -> QueryResult<Option<(Vec<i64>, MemoryReservation)>>,
+        scope: (&Snapshot<'_>, &ResolvedGraphView),
+        metrics: &mut QueryMetrics,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<()> {
+        if self.built {
+            return Ok(());
+        }
+        let (plan, equality, _, dynamic_filter) = hash_build_stage(step, depth)?;
+        if plan.hashes[equality].family != HashFamily::NodeIdentity || dynamic_filter {
+            return Err(QueryError::internal(
+                "finite Hash build requires a plain Node identity stage",
+            ));
+        }
+        self.storage = BuildStorage::Memory(HashTable::new(control)?);
+        self.filter = None;
+        loop {
+            control.work(1)?;
+            control.check()?;
+            let Some(ids) = next_page()? else { break };
+            self.consume_id_page(step, depth, ids, scope, metrics, control)?;
+        }
+        if let BuildStorage::Spill(store) = &mut self.storage {
+            store.temp_logical_bytes(control)?;
+        }
+        self.built = true;
+        self.publish(metrics, hash_slot(metrics, plan, depth))
+    }
+
+    fn consume_id_page(
+        &mut self,
+        step: &MatchStep,
+        depth: usize,
+        ids: (Vec<i64>, MemoryReservation),
+        scope: (&Snapshot<'_>, &ResolvedGraphView),
+        metrics: &mut QueryMetrics,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<()> {
+        let (plan, equality, inner_side, _) = hash_build_stage(step, depth)?;
+        let (ordinal, part) = crate::query::plan::join::execution_part(step, depth);
+        let source_step = MatchStep {
+            clause_start: plan.clause_start,
+            optional: false,
+            parts: vec![part],
+            predicate: None,
+            early_predicates: Vec::new(),
+            join: None,
+        };
+        let mut source =
+            StepCursor::with_pattern_node_ids(&source_step, BindingRow::default(), ids, control)?;
+        source.set_profile_parts(&[ordinal], control)?;
+        let mut bindings = MatchReadBindings::default();
+        let params = std::collections::BTreeMap::new();
+        let node_slot = metrics
+            .match_profile_slots(plan.clause_start, ordinal)
+            .and_then(|slots| slots.slot(ProfileRole::NodeAccess));
+        loop {
+            let previous = metrics.activate_profile_slot(node_slot);
+            let result =
+                source.next_row(scope.0, scope.1, &params, metrics, &mut bindings, control);
+            metrics.restore_access_operator(previous);
+            let Some(row) = result? else { break };
+            let memory = source.take_output_memory(&row, control)?;
+            self.consume_build_input(
+                (row, memory),
+                (
+                    plan.hashes[equality].keys(inner_side).0,
+                    plan.hashes[equality].family,
+                ),
+                scope,
+                hash_slot(metrics, plan, depth),
+                metrics,
+                control,
+            )?;
+        }
+        Ok(())
     }
 
     fn consume_build_input(
@@ -221,6 +293,27 @@ impl HashBuildState {
         self.storage = BuildStorage::Spill(Box::new(store));
         Ok(())
     }
+}
+
+fn hash_build_stage(
+    step: &MatchStep,
+    depth: usize,
+) -> QueryResult<(&JoinPlan, usize, HashOperandSide, bool)> {
+    let plan = step
+        .join
+        .as_ref()
+        .ok_or_else(|| QueryError::internal("Hash lacks its Join plan"))?;
+    let crate::query::plan::join::StageAccess::Hash {
+        equality,
+        inner_side,
+        dynamic_filter,
+    } = plan.stages[depth].access
+    else {
+        return Err(QueryError::internal(
+            "Hash build requested for another access",
+        ));
+    };
+    Ok((plan, equality, inner_side, dynamic_filter.is_some()))
 }
 
 fn pull_build_row(

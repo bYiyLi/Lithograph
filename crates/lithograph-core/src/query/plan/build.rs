@@ -43,6 +43,10 @@ pub(crate) fn append_pattern_operators_with_sites(
     operators: &mut Vec<LogicalOperator>,
     sites: &mut Vec<ProfileBinding>,
 ) {
+    if let Some(plan) = step.join.as_ref().and_then(|plan| plan.factorized.as_ref()) {
+        append_factorized_pattern(step, plan, bound, operators, sites);
+        return;
+    }
     for depth in 0..step.parts.len() {
         let (ordinal, part) = if step.join.is_some() {
             let (ordinal, part) = join::execution_part(step, depth);
@@ -102,6 +106,105 @@ pub(crate) fn append_pattern_operators_with_sites(
     }
 }
 
+fn append_factorized_pattern(
+    step: &MatchStep,
+    plan: &FactorizedPlan,
+    bound: &mut BTreeSet<String>,
+    operators: &mut Vec<LogicalOperator>,
+    sites: &mut Vec<ProfileBinding>,
+) {
+    append_factor_arm(step, &plan.accumulate, bound, operators, sites);
+    append_factor_site(
+        step,
+        LogicalOperator::FactorizedAccumulate,
+        ProfileRole::FactorizedAccumulate,
+        operators,
+        sites,
+    );
+    append_factor_arm(step, &plan.build, bound, operators, sites);
+    if let Some(asp) = &plan.asp {
+        sites.push(ProfileBinding {
+            site: OperatorSite {
+                clause_start: step.clause_start,
+                part: Some(asp.part),
+                role: ProfileRole::NodeAccess,
+            },
+            physical_slot: operators.len(),
+        });
+        operators.push(LogicalOperator::NodeIdSeek {
+            variable: asp.build_variable.clone(),
+        });
+        append_factor_site(
+            step,
+            LogicalOperator::ASPJoin,
+            ProfileRole::ASPJoin,
+            operators,
+            sites,
+        );
+    }
+}
+
+fn append_factor_arm(
+    step: &MatchStep,
+    arm: &FactorArm,
+    bound: &mut BTreeSet<String>,
+    operators: &mut Vec<LogicalOperator>,
+    sites: &mut Vec<ProfileBinding>,
+) {
+    for hop in &arm.hops {
+        let mut part = step.parts[hop.part].clone();
+        if hop.orientation == join::PartOrientation::Reversed {
+            if let Some(end) = part.end.as_mut() {
+                std::mem::swap(&mut part.start, end);
+            }
+            if let Some(rel) = part.relationship.as_mut() {
+                rel.direction = match rel.direction {
+                    Direction::Outgoing => Direction::Incoming,
+                    Direction::Incoming => Direction::Outgoing,
+                    Direction::Undirected => Direction::Undirected,
+                };
+            }
+        }
+        let start = operators.len();
+        append_pattern_operator(&part, bound, operators);
+        for (offset, operator) in operators[start..].iter().enumerate() {
+            sites.push(ProfileBinding {
+                site: OperatorSite {
+                    clause_start: step.clause_start,
+                    part: Some(hop.part),
+                    role: if matches!(
+                        operator,
+                        LogicalOperator::ExpandAll { .. } | LogicalOperator::ExpandInto { .. }
+                    ) {
+                        ProfileRole::RelationshipAccess
+                    } else {
+                        ProfileRole::NodeAccess
+                    },
+                },
+                physical_slot: start + offset,
+            });
+        }
+    }
+}
+
+fn append_factor_site(
+    step: &MatchStep,
+    operator: LogicalOperator,
+    role: ProfileRole,
+    operators: &mut Vec<LogicalOperator>,
+    sites: &mut Vec<ProfileBinding>,
+) {
+    sites.push(ProfileBinding {
+        site: OperatorSite {
+            clause_start: step.clause_start,
+            part: None,
+            role,
+        },
+        physical_slot: operators.len(),
+    });
+    operators.push(operator);
+}
+
 fn append_join_link(
     step: &MatchStep,
     depth: usize,
@@ -155,6 +258,19 @@ pub(crate) fn append_match_residual(
         });
     }
     operators.push(LogicalOperator::Filter);
+    if step
+        .join
+        .as_ref()
+        .is_some_and(|plan| plan.factorized.is_some())
+    {
+        append_factor_site(
+            step,
+            LogicalOperator::Flatten,
+            ProfileRole::Flatten,
+            operators,
+            sites,
+        );
+    }
 }
 
 fn append_pattern_operator(
@@ -326,20 +442,7 @@ pub(crate) fn build_physical(
                 variable,
                 index,
                 kind,
-            } => {
-                if *kind == StandardIndexKind::Vector {
-                    operators.push(PhysicalOperator::VectorSearch {
-                        variable: variable.clone(),
-                        index: index.clone(),
-                    });
-                } else {
-                    operators.push(PhysicalOperator::IndexSeek {
-                        variable: variable.clone(),
-                        index: index.clone(),
-                        kind: *kind,
-                    });
-                }
-            }
+            } => operators.push(physical_index(variable, index, *kind)),
             LogicalOperator::ExpandAll { from, .. } | LogicalOperator::ExpandInto { from, .. } => {
                 let (name, direction) = relationships.next().unwrap_or((None, Direction::Outgoing));
                 operators.push(PhysicalOperator::AdjacencySeek {
@@ -365,6 +468,11 @@ pub(crate) fn build_physical(
             LogicalOperator::NestedLoop => operators.push(PhysicalOperator::NestedLoop),
             LogicalOperator::IndexNestedLoop => operators.push(PhysicalOperator::IndexNestedLoop),
             LogicalOperator::HashJoin => operators.push(PhysicalOperator::HashJoin),
+            LogicalOperator::FactorizedAccumulate => {
+                operators.push(PhysicalOperator::FactorizedAccumulate)
+            }
+            LogicalOperator::ASPJoin => operators.push(PhysicalOperator::ASPJoin),
+            LogicalOperator::Flatten => operators.push(PhysicalOperator::Flatten),
             LogicalOperator::Let => operators.push(PhysicalOperator::Let),
             LogicalOperator::Unwind => operators.push(PhysicalOperator::Unwind),
             LogicalOperator::Union { distinct } => operators.push(PhysicalOperator::Union {
@@ -392,6 +500,21 @@ pub(crate) fn build_physical(
     }
     ensure_sort(&mut operators, sorted);
     PhysicalPlan { operators }
+}
+
+fn physical_index(variable: &str, index: &str, kind: StandardIndexKind) -> PhysicalOperator {
+    if kind == StandardIndexKind::Vector {
+        PhysicalOperator::VectorSearch {
+            variable: variable.to_owned(),
+            index: index.to_owned(),
+        }
+    } else {
+        PhysicalOperator::IndexSeek {
+            variable: variable.to_owned(),
+            index: index.to_owned(),
+            kind,
+        }
+    }
 }
 
 fn ensure_sort(operators: &mut Vec<PhysicalOperator>, sorted: bool) {

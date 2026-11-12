@@ -486,9 +486,9 @@ indexesRemoved
 
 collector 由 Hash build owner 持有期间，其同时存活 claims 包含在 `hash.memoryPeakBytes`；转交 Probe continuation 后的 tail buffer、Index binding 和读取工作区继续使用共同 `QueryResources`，包含在整个 execution 的峰值中。`keysetPeakBytes` 是组件计量，不能与其它不同时刻的峰值相加来构造 Hash 或 execution 总峰值。
 
-有实际选中的 Hash operator 时，`summary.profile` 另有 `executionMemoryPeakBytes` 和 `processPeakRssBytes`。前者在 Core terminal-ready 时只冻结一次，是整个 execution 共同 `QueryResources` 的实际同时存活 reservation 峰值，包含 codec/decode/输出等工作区；不能通过相加各组件在不同时刻出现的历史峰值构造，也不包含 SQLite pager 或未被 Engine ledger 计账的宿主内存。Hash 的输入 graph/index access 仍归原 producer boundary；Hash CPU、collision、TEMP read/write 与 VM 计量不重复计入 `dbHits`，不改变其求和合同。
+有实际选中的 Hash 或 Factorized operator 时，`summary.profile` 另有 `executionMemoryPeakBytes` 和 `processPeakRssBytes`。前者在 Core terminal-ready 时只冻结一次，是整个 execution 共同 `QueryResources` 的实际同时存活 reservation 峰值，包含 codec/decode/输出等工作区；不能通过相加各组件在不同时刻出现的历史峰值构造，也不包含 SQLite pager 或未被 Engine ledger 计账的宿主内存。输入 graph/index access 仍归原 producer boundary；Hash/Factorized CPU、collision、TEMP read/write 与 VM 计量不重复计入 `dbHits`，不改变其求和合同。
 
-`processPeakRssBytes` 只在 SQL scalar/rows 共用的 summary JSON 编码边界读取一次 `getrusage(RUSAGE_SELF)`，统一换算为 bytes；它是宿主**整个进程生命周期**的 RSS 高水位，可能包含更早 execution、其它连接/线程、SQLite 和宿主分配，不是本 Hash 独占值、当前 RSS 或本 execution 的增量。macOS/Linux 使用其真实平台单位；不支持的平台、系统调用失败或单位换算溢出返回 JSON `null`，不改变 query 成败。Standalone Core 的 summary 不携带 process RSS，不能将缺失值伪造为 `0`。没有 Hash 的 PROFILE 省略这两个额外字段。`lithograph()` 的 envelope 与 `lithograph_rows()` 的 summary event 始终使用同一编码；[Runtime 压测](runtime.md#optimizer-join-stress) 仍独立测量 cgroup/process RSS、TEMP/disk 和 cleanup，不能以 Engine ledger 或单个进程高水位字段替代。
+`processPeakRssBytes` 只在 SQL scalar/rows 共用的 summary JSON 编码边界读取一次 `getrusage(RUSAGE_SELF)`，统一换算为 bytes；它是宿主**整个进程生命周期**的 RSS 高水位，可能包含更早 execution、其它连接/线程、SQLite 和宿主分配，不是某个 Hash/Factorized 算子独占值、当前 RSS 或本 execution 的增量。macOS/Linux 使用其真实平台单位；不支持的平台、系统调用失败或单位换算溢出返回 JSON `null`，不改变 query 成败。Standalone Core 的 summary 不携带 process RSS，不能将缺失值伪造为 `0`。没有 Hash/Factorized 的 PROFILE 省略这两个额外字段。`lithograph()` 的 envelope 与 `lithograph_rows()` 的 summary event 始终使用同一编码；[Runtime 压测](runtime.md#optimizer-join-stress) 仍独立测量 cgroup/process RSS、TEMP/disk 和 cleanup，不能以 Engine ledger 或单个进程高水位字段替代。
 
 Lithograph JSON v1 的 value encoding：
 

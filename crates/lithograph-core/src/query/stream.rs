@@ -16,6 +16,7 @@ use super::spill::{
 };
 use super::{ExecutionControl, MemoryReservation, QueryError, QueryResult, check_interrupted};
 
+pub(crate) mod factor;
 mod hash_metrics;
 mod match_pipeline;
 mod node_match;
@@ -35,7 +36,9 @@ pub(crate) use match_pipeline::hash_resident_target;
 pub(crate) use match_pipeline::{HashLayoutFacts, hash_layout, hash_table_peak_bytes};
 pub(crate) use match_pipeline::{MatchReadBindings, StepCursor, spill_match_step};
 use node_match::{node_matches, node_matches_scanned};
-pub use profile::{OperatorRuntimeMetrics, QueryMetrics, SemiMaskRuntimeMetrics};
+pub use profile::{
+    FactorizedRuntimeMetrics, OperatorRuntimeMetrics, QueryMetrics, SemiMaskRuntimeMetrics,
+};
 use project::{order_values, project_row};
 
 const PIPELINE_BATCH: usize = 256;
@@ -148,6 +151,7 @@ impl PartialEq for QueryBatch {
 #[derive(Debug)]
 pub struct QueryCursor {
     pipeline: MatchPipeline,
+    factor_flatten: Option<factor::FlattenContinuation>,
     metrics: QueryMetrics,
     started: Instant,
     statement_time: DateTime<Utc>,
@@ -262,6 +266,7 @@ impl QueryCursor {
         }
         Self {
             pipeline,
+            factor_flatten: None,
             prepared,
             metrics,
             started: Instant::now(),
@@ -372,6 +377,7 @@ impl QueryCursor {
 
     fn release_working_memory(&mut self) {
         self.pipeline.clear();
+        self.factor_flatten = None;
         self.prepared.params.clear();
         self.prepared.params_memory = None;
         self.prepared.resolved_state = None;
@@ -473,24 +479,10 @@ impl QueryCursor {
                 self.batch_memory = Some(memory);
                 return self.finish(rows);
             }
-            let next = self.pipeline.next_row(
-                snapshot,
-                &self.prepared.graph_view,
-                &self.prepared.params,
-                &mut self.metrics,
-                &control,
-            )?;
-            let Some(binding) = next else {
+            let Some(projected) = self.next_direct_projected(snapshot, &control)? else {
                 self.batch_memory = Some(memory);
                 return self.finish(rows);
             };
-            self.metrics.record_pipeline_rows(1);
-            self.metrics.record_profile_rows(self.ordered_topk_slot, 1);
-            if self.skipped < self.prepared.skip {
-                self.skipped += 1;
-                continue;
-            }
-            let projected = project_row(&self.prepared, snapshot, &binding, &control)?;
             memory.merge(projected.memory)?;
             rows.push(projected.values);
             self.emitted += 1;
@@ -511,6 +503,66 @@ impl QueryCursor {
             done: false,
             summary: None,
         })
+    }
+
+    fn next_direct_projected(
+        &mut self,
+        snapshot: &Snapshot<'_>,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<Option<project::ProjectedRow>> {
+        loop {
+            if let Some(flatten) = self.factor_flatten.as_mut() {
+                let prepared = &self.prepared;
+                let metrics = &mut self.metrics;
+                let skipped = &mut self.skipped;
+                let slot = self.ordered_topk_slot;
+                let clause = flatten.clause_start();
+                let next = flatten.with_next_row(control, |row, _| {
+                    if let Some(clause) = clause {
+                        metrics.record_factorized_flatten(clause, 1);
+                    }
+                    direct_projected(prepared, snapshot, row, metrics, skipped, slot, control)
+                })?;
+                if let Some((clause, delta)) = flatten.take_storage_metrics()? {
+                    metrics.record_factorized_storage(clause, "Flatten", delta);
+                }
+                match next {
+                    Some(Some(row)) => return Ok(Some(row)),
+                    Some(None) => continue,
+                    None => self.factor_flatten = None,
+                }
+            }
+            let Some(packet) = self.pipeline.next_packet(
+                snapshot,
+                &self.prepared.graph_view,
+                &self.prepared.params,
+                &mut self.metrics,
+                control,
+            )?
+            else {
+                return Ok(None);
+            };
+            match packet {
+                factor::BindingPacket::Flat(row) => {
+                    if let Some(projected) = direct_projected(
+                        &self.prepared,
+                        snapshot,
+                        &row,
+                        &mut self.metrics,
+                        &mut self.skipped,
+                        self.ordered_topk_slot,
+                        control,
+                    )? {
+                        return Ok(Some(projected));
+                    }
+                }
+                packet @ factor::BindingPacket::Group(_) => {
+                    let mut flatten = factor::FlattenContinuation::new(control)?;
+                    flatten.install(packet, control)?;
+                    self.factor_flatten = Some(flatten);
+                }
+            }
+        }
     }
 
     fn build_barrier(
@@ -744,6 +796,7 @@ impl QueryCursor {
 
     fn finish(&mut self, rows: Vec<Vec<Value>>) -> QueryResult<QueryBatch> {
         self.pipeline.clear();
+        self.factor_flatten = None;
         self.prepared.params.clear();
         self.prepared.params_memory = None;
         self.prepared.resolved_state = None;
@@ -807,6 +860,24 @@ impl QueryCursor {
             metrics,
         })
     }
+}
+
+fn direct_projected(
+    prepared: &PreparedQuery,
+    snapshot: &Snapshot<'_>,
+    binding: &BindingRow,
+    metrics: &mut QueryMetrics,
+    skipped: &mut usize,
+    slot: Option<usize>,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<Option<project::ProjectedRow>> {
+    metrics.record_pipeline_rows(1);
+    metrics.record_profile_rows(slot, 1);
+    if *skipped < prepared.skip {
+        *skipped += 1;
+        return Ok(None);
+    }
+    project_row(prepared, snapshot, binding, control).map(Some)
 }
 
 fn spill_at_end(sequence: i64, total: usize) -> bool {

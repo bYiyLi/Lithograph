@@ -8,6 +8,9 @@ pub(crate) fn expansion_metadata(
     step: &MatchStep,
     depth: usize,
 ) -> Option<(Option<&str>, Direction)> {
+    if let Some(factor) = step.join.as_ref().and_then(|plan| plan.factorized.as_ref()) {
+        return factor_expansion(step, factor, depth);
+    }
     let stage = step.join.as_ref().and_then(|plan| plan.stages.get(depth));
     let ordinal = stage.map_or(depth, |stage| stage.part);
     let rel = step.parts.get(ordinal)?.relationship.as_ref()?;
@@ -31,6 +34,26 @@ pub(crate) fn expansion_metadata(
         rel.direction
     };
     Some((rel.type_name.as_deref(), direction))
+}
+
+fn factor_expansion<'a>(
+    step: &'a MatchStep,
+    factor: &super::super::FactorizedPlan,
+    depth: usize,
+) -> Option<(Option<&'a str>, Direction)> {
+    let hop = factor
+        .accumulate
+        .hops
+        .iter()
+        .chain(&factor.build.hops)
+        .nth(depth)?;
+    let relationship = step.parts.get(hop.part)?.relationship.as_ref()?;
+    let direction = if hop.orientation == PartOrientation::Reversed {
+        reverse_direction(relationship.direction)
+    } else {
+        relationship.direction
+    };
+    Some((relationship.type_name.as_deref(), direction))
 }
 
 fn reverse_direction(direction: Direction) -> Direction {

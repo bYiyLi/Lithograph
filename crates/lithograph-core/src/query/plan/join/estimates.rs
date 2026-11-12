@@ -7,6 +7,7 @@ use crate::query::stats::{CardinalityEstimate, PlannerStatistics};
 use crate::query::{QueryErrorKind, QueryResult};
 
 mod collect;
+mod factor;
 use collect::{distribution, existing_index};
 mod degree;
 use degree::{DegreeSamples, collect_degree_samples};

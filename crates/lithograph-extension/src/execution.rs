@@ -486,8 +486,11 @@ pub(super) fn adapter_metadata_bytes(
             let bytes = operators.iter().try_fold(0_u64, |bytes, operator| {
                 query::resources::checked_add(bytes, operator_profile_metadata_bytes(operator)?)
             })?;
-            if operators.iter().any(|operator| operator.hash.is_some()) {
-                query::resources::checked_add(bytes, hash_memory_metadata_bytes()?)
+            if operators
+                .iter()
+                .any(|operator| operator.hash.is_some() || operator.factorized.is_some())
+            {
+                query::resources::checked_add(bytes, profile_memory_metadata_bytes()?)
             } else {
                 Ok(bytes)
             }
@@ -516,10 +519,17 @@ fn operator_profile_metadata_bytes(
             query::resources::checked_mul(query::resources::map_entry_bytes::<Value>()?, 3)?;
         bytes = query::resources::checked_add(bytes, query::resources::checked_add(entries, 96)?)?;
     }
+    if operator.factorized.is_some() {
+        // Nineteen fixed counters plus their containing factorized map key.
+        let entries =
+            query::resources::checked_mul(query::resources::map_entry_bytes::<Value>()?, 20)?;
+        bytes =
+            query::resources::checked_add(bytes, query::resources::checked_add(entries, 1024)?)?;
+    }
     Ok(bytes)
 }
 
-fn hash_memory_metadata_bytes() -> query::QueryResult<u64> {
+fn profile_memory_metadata_bytes() -> query::QueryResult<u64> {
     let entries = query::resources::checked_mul(query::resources::map_entry_bytes::<Value>()?, 2)?;
     query::resources::checked_add(entries, 64)
 }
@@ -573,7 +583,10 @@ pub(super) fn summary_json(summary: &query::QuerySummary) -> Value {
         value["profile"] = json!({
             "operators": operators.iter().map(operator_profile_json).collect::<Vec<_>>(),
         });
-        if operators.iter().any(|operator| operator.hash.is_some()) {
+        if operators
+            .iter()
+            .any(|operator| operator.hash.is_some() || operator.factorized.is_some())
+        {
             value["profile"]["executionMemoryPeakBytes"] =
                 json!(summary.metrics.execution_memory_peak_bytes());
             value["profile"]["processPeakRssBytes"] = json!(rss::process_peak_rss_bytes());
@@ -595,7 +608,34 @@ fn operator_profile_json(operator: &query::OperatorRuntimeMetrics) -> Value {
     if let Some(mask) = operator.semi_mask {
         value["semiMask"] = json!({"keys": mask.keys, "seeks": mask.seeks});
     }
+    if let Some(factorized) = operator.factorized {
+        value["factorized"] = factorized_profile_json(factorized);
+    }
     value
+}
+
+fn factorized_profile_json(factorized: query::FactorizedRuntimeMetrics) -> Value {
+    json!({
+        "prefixes": factorized.prefixes,
+        "accumulateRows": factorized.accumulate_rows,
+        "buildRows": factorized.build_rows,
+        "hashEntries": factorized.hash_entries,
+        "probeRows": factorized.probe_rows,
+        "groupMembers": factorized.group_members,
+        "flattenedRows": factorized.flattened_rows,
+        "semijoinKeys": factorized.semijoin_keys,
+        "semijoinSeeks": factorized.semijoin_seeks,
+        "memoryPeakBytes": factorized.memory_peak_bytes,
+        "spillEncodedBytes": factorized.spill_encoded_bytes,
+        "spillBatches": factorized.spill_batches,
+        "spillVmSteps": factorized.spill_vm_steps,
+        "tempAllocatedBytes": factorized.temp_allocated_bytes,
+        "accumulateMicros": factorized.accumulate_micros,
+        "buildMicros": factorized.build_micros,
+        "probeMicros": factorized.probe_micros,
+        "predicateEvaluations": factorized.predicate_evaluations,
+        "expressionEvaluations": factorized.expression_evaluations,
+    })
 }
 
 fn hash_profile_json(hash: query::HashJoinRuntimeMetrics) -> Value {

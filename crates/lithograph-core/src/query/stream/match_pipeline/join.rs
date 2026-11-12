@@ -156,7 +156,10 @@ impl StepCursor {
             return Ok(cursor);
         }
         let mut cursor = PartCursor::new(&self.step.parts[depth], row, control)?;
-        cursor.profile = metrics.match_profile_slots(self.step.clause_start, depth);
+        cursor.profile = metrics.match_profile_slots(
+            self.step.clause_start,
+            self.profile_parts.get(depth).copied().unwrap_or(depth),
+        );
         Ok(cursor)
     }
 
@@ -410,11 +413,11 @@ impl PartCursor {
             return None;
         }
         if self.profile.is_some() {
-            let relationship = self
-                .part
-                .relationship
-                .as_ref()
-                .is_some_and(|rel| rel.id_seek.is_some() || rel.index_seek.is_some());
+            let relationship = self.part.relationship.as_ref().is_some_and(|rel| {
+                rel.id_seek.is_some()
+                    || rel.index_seek.is_some()
+                    || self.bound_start_uses_relationship_profile()
+            });
             return self.activate_role(
                 metrics,
                 if relationship {
@@ -445,6 +448,18 @@ impl PartCursor {
                 .then(|| metrics.activate_profile_slot(None))
                 .flatten()
         })
+    }
+
+    fn bound_start_uses_relationship_profile(&self) -> bool {
+        let Some(slots) = self.profile else {
+            return false;
+        };
+        slots.slot(ProfileRole::NodeAccess).is_none()
+            && slots.slot(ProfileRole::Join).is_none()
+            && slots.slot(ProfileRole::RelationshipAccess).is_some()
+            && self.part.start.variable.as_ref().is_some_and(|variable| {
+                matches!(self.base.values.get(variable), Some(BindingValue::Node(_)))
+            })
     }
 }
 

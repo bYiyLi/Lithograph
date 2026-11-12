@@ -1151,9 +1151,11 @@ fn evaluate_bound_metadata(
                 },
             )?
         }
-        ("elementid", Some(BindingValue::Node(id))) => metadata_element_id("n", *id, context)?,
+        ("elementid", Some(BindingValue::Node(id))) => {
+            metadata_element_id("n", *id, context.control()?)?
+        }
         ("elementid", Some(BindingValue::Relationship(record))) => {
-            metadata_element_id("r", record.id, context)?
+            metadata_element_id("r", record.id, context.control()?)?
         }
         ("elementid", Some(BindingValue::Path { .. })) => {
             return Err(QueryError::new(
@@ -1178,14 +1180,12 @@ fn metadata_string(text: &str, context: EvalContext<'_, '_>) -> QueryResult<Eval
     })
 }
 
-fn metadata_element_id(
+pub(crate) fn metadata_element_id(
     prefix: &str,
     id: i64,
-    context: EvalContext<'_, '_>,
+    control: &ExecutionControl<'_>,
 ) -> QueryResult<EvaluatedValue> {
-    let reservation = context
-        .control()?
-        .reserve(checked_add(std::mem::size_of::<Value>() as u64, 32)?)?;
+    let reservation = control.reserve(checked_add(std::mem::size_of::<Value>() as u64, 32)?)?;
     Ok(EvaluatedValue {
         value: Value::String(format!("{prefix}:{id}")),
         reservation,

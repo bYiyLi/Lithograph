@@ -1,3 +1,4 @@
+use super::factor::{BindingPacket, FlattenContinuation, GroupProjection};
 use super::*;
 use crate::cypher::{AstKind, AstNode, ClauseKind, ExpressionKind, QueryConnector, SubqueryKind};
 use crate::query::LogicalOperator;
@@ -14,6 +15,7 @@ pub(crate) struct ProgramStream {
     source: Box<dyn BindingSource>,
     columns: Vec<String>,
     output_memory: Option<MemoryReservation>,
+    factor_flatten: Option<FlattenContinuation>,
 }
 
 struct ProgramRuntime<'a, 'connection> {
@@ -59,6 +61,13 @@ impl ProgramRuntime<'_, '_> {
 
 trait BindingSource: std::fmt::Debug {
     fn next(&mut self, runtime: &mut ProgramRuntime<'_, '_>) -> QueryResult<Option<BindingRow>>;
+
+    fn next_packet(
+        &mut self,
+        runtime: &mut ProgramRuntime<'_, '_>,
+    ) -> QueryResult<Option<BindingPacket>> {
+        self.next(runtime).map(|row| row.map(BindingPacket::Flat))
+    }
 }
 
 #[derive(Debug)]
@@ -293,6 +302,33 @@ struct MatchSource {
 }
 
 impl BindingSource for MatchSource {
+    fn next_packet(
+        &mut self,
+        runtime: &mut ProgramRuntime<'_, '_>,
+    ) -> QueryResult<Option<BindingPacket>> {
+        loop {
+            runtime.control.check()?;
+            if let Some(cursor) = self.current.as_mut() {
+                if let Some(packet) = cursor.next_packet(
+                    runtime.snapshot,
+                    runtime.graph_view,
+                    runtime.params,
+                    runtime.metrics,
+                    &mut self.read_bindings,
+                    runtime.control,
+                )? {
+                    return Ok(Some(packet));
+                }
+                self.current = None;
+            }
+            let Some(input) = self.upstream.next(runtime)? else {
+                self.read_bindings.finish(&self.step, runtime.metrics)?;
+                return Ok(None);
+            };
+            self.current = Some(StepCursor::new(&self.step, input, runtime.control)?);
+        }
+    }
+
     fn next(&mut self, runtime: &mut ProgramRuntime<'_, '_>) -> QueryResult<Option<BindingRow>> {
         loop {
             check_interrupted(runtime.is_interrupted)?;
@@ -322,23 +358,20 @@ impl BindingSource for MatchSource {
 struct FilterSource {
     upstream: Box<dyn BindingSource>,
     predicate: Expr,
+    factor_flatten: Option<FlattenContinuation>,
+    factor_output: Option<FlattenContinuation>,
 }
 
 impl BindingSource for FilterSource {
     fn next(&mut self, runtime: &mut ProgramRuntime<'_, '_>) -> QueryResult<Option<BindingRow>> {
-        loop {
-            let baseline = runtime.expression_memory.bytes();
-            check_interrupted(runtime.is_interrupted)?;
-            let Some(row) = self.upstream.next(runtime)? else {
-                return Ok(None);
-            };
-            let value = runtime.evaluate(&self.predicate, &row)?;
-            if expression::predicate(value)? {
-                return Ok(Some(row));
-            }
-            drop(row);
-            runtime.expression_memory.resize(baseline)?;
-        }
+        factor_consumer::filter(self, runtime)
+    }
+
+    fn next_packet(
+        &mut self,
+        runtime: &mut ProgramRuntime<'_, '_>,
+    ) -> QueryResult<Option<BindingPacket>> {
+        factor_consumer::filter_packet(self, runtime)
     }
 }
 
@@ -505,43 +538,20 @@ struct ProjectionSource {
     limit: Option<usize>,
     seen: usize,
     emitted: usize,
+    factor_flatten: Option<FlattenContinuation>,
+    factor_output: Option<FlattenContinuation>,
 }
 
 impl BindingSource for ProjectionSource {
     fn next(&mut self, runtime: &mut ProgramRuntime<'_, '_>) -> QueryResult<Option<BindingRow>> {
-        if self.limit.is_some_and(|limit| self.emitted >= limit) {
-            return Ok(None);
-        }
-        loop {
-            let baseline = runtime.expression_memory.bytes();
-            check_interrupted(runtime.is_interrupted)?;
-            let Some(input) = self.upstream.next(runtime)? else {
-                return Ok(None);
-            };
-            let mut output = BindingRow::default();
-            output.load_csv_context.clone_from(&input.load_csv_context);
-            for projection in &self.projections {
-                let value = runtime.evaluate(&projection.expression, &input)?;
-                output.insert(
-                    projection.column.clone(),
-                    expression::binding_from_value_controlled(
-                        runtime.snapshot,
-                        value,
-                        runtime.control,
-                    )?,
-                );
-            }
-            if self.seen < self.skip {
-                self.seen = self.seen.saturating_add(1);
-                drop(input);
-                drop(output);
-                runtime.expression_memory.resize(baseline)?;
-                continue;
-            }
-            self.seen = self.seen.saturating_add(1);
-            self.emitted = self.emitted.saturating_add(1);
-            return Ok(Some(output));
-        }
+        factor_consumer::projection(self, runtime)
+    }
+
+    fn next_packet(
+        &mut self,
+        runtime: &mut ProgramRuntime<'_, '_>,
+    ) -> QueryResult<Option<BindingPacket>> {
+        factor_consumer::projection_packet(self, runtime)
     }
 }
 
@@ -818,7 +828,7 @@ impl ProgramStream {
         &self.columns
     }
 
-    pub(crate) fn next_binding(
+    pub(crate) fn next_packet(
         &mut self,
         connection: &Connection,
         snapshot: &Snapshot<'_>,
@@ -826,7 +836,7 @@ impl ProgramStream {
         params: &std::collections::BTreeMap<String, Value>,
         metrics: &mut QueryMetrics,
         control: &ExecutionControl<'_>,
-    ) -> QueryResult<Option<BindingRow>> {
+    ) -> QueryResult<Option<BindingPacket>> {
         let is_interrupted = || control.check().is_err();
         let mut runtime = ProgramRuntime {
             connection,
@@ -838,16 +848,39 @@ impl ProgramStream {
             control,
             expression_memory: control.reserve(0)?,
         };
-        let row = self.source.next(&mut runtime)?;
-        let mut memory = runtime.expression_memory;
-        memory.resize(
-            row.as_ref()
-                .map(|row| expression::binding_row_bytes_controlled(row, Some(control)))
-                .transpose()?
-                .unwrap_or(0),
-        )?;
-        self.output_memory = Some(memory);
-        Ok(row)
+        let packet = self.source.next_packet(&mut runtime)?;
+        let bytes = match &packet {
+            Some(BindingPacket::Flat(row)) => {
+                expression::binding_row_bytes_controlled(row, Some(control))?
+            }
+            _ => 0,
+        };
+        runtime.expression_memory.resize(bytes)?;
+        self.output_memory = Some(runtime.expression_memory);
+        Ok(packet)
+    }
+
+    pub(crate) fn next_binding(
+        &mut self,
+        connection: &Connection,
+        snapshot: &Snapshot<'_>,
+        graph_view: &ResolvedGraphView,
+        params: &std::collections::BTreeMap<String, Value>,
+        metrics: &mut QueryMetrics,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<Option<BindingRow>> {
+        self.next_packet_output(
+            PacketOutputKind::Binding,
+            (connection, snapshot, graph_view),
+            params,
+            metrics,
+            control,
+        )?
+        .map(|output| match output {
+            PacketOutput::Binding(row) => Ok(row),
+            PacketOutput::Values(_) => Err(QueryError::internal("binding adapter produced Values")),
+        })
+        .transpose()
     }
 
     pub(crate) fn next(
@@ -859,26 +892,153 @@ impl ProgramStream {
         metrics: &mut QueryMetrics,
         control: &ExecutionControl<'_>,
     ) -> QueryResult<Option<Vec<Value>>> {
-        let Some(row) =
-            self.next_binding(connection, snapshot, graph_view, params, metrics, control)?
-        else {
-            return Ok(None);
-        };
-        let (values, memory) = materialized_binding_values(
-            snapshot,
-            &row,
-            &self.columns,
-            &graph_view.query_access,
+        self.next_packet_output(
+            PacketOutputKind::Values,
+            (connection, snapshot, graph_view),
+            params,
+            metrics,
             control,
-        )?;
-        self.output_memory = Some(memory);
-        Ok(Some(values))
+        )?
+        .map(|output| match output {
+            PacketOutput::Values(row) => Ok(row),
+            PacketOutput::Binding(_) => {
+                Err(QueryError::internal("Value adapter produced a binding"))
+            }
+        })
+        .transpose()
+    }
+
+    fn next_packet_output(
+        &mut self,
+        kind: PacketOutputKind,
+        scope: (&Connection, &Snapshot<'_>, &ResolvedGraphView),
+        params: &std::collections::BTreeMap<String, Value>,
+        metrics: &mut QueryMetrics,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<Option<PacketOutput>> {
+        loop {
+            if let Some(flatten) = self.factor_flatten.as_mut() {
+                let columns = &self.columns;
+                let clause = flatten.clause_start();
+                let next = flatten.with_next_row(control, |row, projection| {
+                    if let Some(clause) = clause {
+                        metrics.record_factorized_flatten(clause, 1);
+                    }
+                    packet_output(
+                        kind,
+                        row,
+                        projection,
+                        columns,
+                        (scope.1, scope.2, params),
+                        control,
+                    )
+                })?;
+                if let Some((clause, delta)) = flatten.take_storage_metrics()? {
+                    metrics.record_factorized_storage(clause, "Flatten", delta);
+                }
+                if let Some((output, memory)) = next {
+                    self.output_memory = Some(memory);
+                    return Ok(Some(output));
+                }
+                self.factor_flatten = None;
+            }
+            let Some(packet) =
+                self.next_packet(scope.0, scope.1, scope.2, params, metrics, control)?
+            else {
+                return Ok(None);
+            };
+            match packet {
+                BindingPacket::Flat(row) => {
+                    if matches!(kind, PacketOutputKind::Binding) {
+                        return Ok(Some(PacketOutput::Binding(row)));
+                    }
+                    let (output, memory) = packet_output(
+                        kind,
+                        &row,
+                        None,
+                        &self.columns,
+                        (scope.1, scope.2, params),
+                        control,
+                    )?;
+                    self.output_memory = Some(memory);
+                    return Ok(Some(output));
+                }
+                packet @ BindingPacket::Group(_) => {
+                    let mut flatten = FlattenContinuation::new(control)?;
+                    flatten.install(packet, control)?;
+                    self.factor_flatten = Some(flatten);
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PacketOutputKind {
+    Binding,
+    Values,
+}
+
+enum PacketOutput {
+    Binding(BindingRow),
+    Values(Vec<Value>),
+}
+
+fn packet_output(
+    kind: PacketOutputKind,
+    row: &BindingRow,
+    projections: Option<&[GroupProjection]>,
+    columns: &[String],
+    scope: (
+        &Snapshot<'_>,
+        &ResolvedGraphView,
+        &std::collections::BTreeMap<String, Value>,
+    ),
+    control: &ExecutionControl<'_>,
+) -> QueryResult<(PacketOutput, MemoryReservation)> {
+    if let Some(projections) = projections {
+        return match kind {
+            PacketOutputKind::Binding => super::factor::consume::project_binding(
+                projections,
+                row,
+                scope.0,
+                scope.2,
+                &scope.1.query_access,
+                control,
+            )
+            .map(|(row, memory)| (PacketOutput::Binding(row), memory)),
+            PacketOutputKind::Values => super::factor::consume::project_values(
+                projections,
+                row,
+                scope.0,
+                scope.2,
+                &scope.1.query_access,
+                control,
+            )
+            .map(|(row, memory)| (PacketOutput::Values(row), memory)),
+        };
+    }
+    match kind {
+        PacketOutputKind::Binding => {
+            let memory = control.reserve(expression::binding_row_bytes_controlled(
+                row,
+                Some(control),
+            )?)?;
+            let row = expression::clone_binding_row_unreserved_controlled(row, Some(control))?;
+            Ok((PacketOutput::Binding(row), memory))
+        }
+        PacketOutputKind::Values => {
+            materialized_binding_values(scope.0, row, columns, &scope.1.query_access, control)
+                .map(|(row, memory)| (PacketOutput::Values(row), memory))
+        }
     }
 }
 
 mod builder;
+mod factor_consumer;
 pub(super) use builder::build_program_stream;
 pub(crate) use builder::supports_read_stream;
 pub(crate) use builder::{
     build_program_prefix_stream, build_program_spilled_suffix_stream, build_program_suffix_stream,
 };
+pub(crate) use factor_consumer::group_counts;

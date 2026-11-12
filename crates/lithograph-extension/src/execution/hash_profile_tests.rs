@@ -7,6 +7,7 @@ fn hash_operator() -> query::OperatorRuntimeMetrics {
         rows: 17,
         db_hits: 0,
         semi_mask: None,
+        factorized: None,
         hash: Some(query::HashJoinRuntimeMetrics {
             build_rows: 1,
             probe_rows: 2,

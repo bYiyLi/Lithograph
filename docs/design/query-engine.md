@@ -170,6 +170,8 @@ Planner 可以把 filter、projection、typed comparison 与部分 index seek �
 5. **Factorized Execution / ASP-Join**：对于多对多连接、重复共享前缀或 Star/Path 中间值，将可证明独立的分支保留为带 multiplicity 的内部 factorized group，并让相邻过滤、Join、适用聚合按组执行；只在必须输出、排序、含相关表达式、写 barrier 或要求扁平行的边界延迟展开。公开 `lithograph_rows()` 保持严格的一行一结果、重复行及 deterministic order/tie 契约；所需 buffer、乘积计数溢出、取消与 TEMP 均受预算控制。不整体重写已经可用的 flat row executor。
 6. **WCOJ / 多路交集**：对具有可用 typed/directed 邻接访问的三角形、环形和更一般的多边循环模式，在计划中选择多路有序候选交集（Generic Join / Leapfrog 风格），只在满足适用性和成本证明时替代可能爆炸的连续二元 Join；其它 Pattern 使用已经验证的二元 Join/Expand。节点重复、parallel Relationship identity、Path 与 per-MATCH relationship uniqueness、0/1/多结果、方向与类型、Graph View、历史/staged state 必须与普通 Cypher 完全一致。不声称任意 Cypher 查询都达到理论 worst-case optimal 上界。
 
+Factorized 计划中的 `Flatten` 表示可按实际输入执行的转换边界。相邻的安全分组过滤、投影或聚合可以直接消费 group；没有收到需要展开的 group 时，该边界没有产出，PROFILE 的实际 `rows` 与 `flattenedRows` 为 `0`。只有真正枚举并交付的 tuple 才计入展开数，不按预计乘积或未执行的分支填充计数；不能为了显示计划而提前展开或再建立一套聚合准入规则。
+
 Hash 的当前执行空间沿用上述左深计划：一次 build 只扫描与已完成 prefix 无关的单个 Pattern Part，probe 消费 prefix；交换两侧通过真实的 Part 顺序和方向表达，不为不可执行的 prefix build 计价。build 在首个可匹配 probe 到达后才开始，按 clause 与当前 Snapshot revision 持有，并在该 clause 的重复 incoming row、输出 batch 和写 barrier 的输入 batch 之间复用；零 outer 输入不初始化 build。不能借未来 Part 的类型或关联约束证明独立 build 的键安全。
 
 Hash 即使未设置 `memoryLimitBytes` 也采用内部有界的 resident 软目标；设置限额时再取共享预算实际剩余额度的较小值。软目标触发 spill，不构成新的单值长度限制或公开调参项。Grace 将完整 typed BindingRow 与键 digest 分区到同一 query-private TEMP store，分批处理两侧；有限 repartition 后的 hot key 使用有界 build chunk，保留重复键与 multiplicity。重载后必须重新提取真实 typed key 并核对已存 digest，异常不能静默变为空 bucket；digest 只筛候选，完整 equality 与原 residual 继续决定结果。table、输入/输出 lease、分区目录与临时编码同时计账，退出、错误和取消必须释放该 owner。Hash 的实际工作计数和内存/RSS 口径由 [PROFILE](interfaces.md#lithograph-json) 拥有。

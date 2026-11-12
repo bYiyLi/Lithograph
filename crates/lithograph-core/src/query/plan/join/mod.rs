@@ -14,7 +14,7 @@ mod cost;
 #[cfg(test)]
 mod df_consumer_tests;
 mod enumerate;
-mod estimates;
+pub(crate) mod estimates;
 mod parts;
 pub(crate) use analysis::analyze_join;
 pub(crate) use enumerate::choose_join_order;
@@ -175,4 +175,5 @@ pub(crate) struct JoinPlan {
     pub(crate) templates: Vec<ParameterTemplate>,
     pub(crate) hashes: Vec<HashEquality>,
     pub(crate) stages: Vec<JoinStage>,
+    pub(crate) factorized: Option<std::sync::Arc<super::FactorizedPlan>>,
 }

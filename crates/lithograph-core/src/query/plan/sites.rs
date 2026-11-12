@@ -6,6 +6,9 @@ pub(crate) enum ProfileRole {
     RelationshipAccess,
     Join,
     EarlyFilter,
+    FactorizedAccumulate,
+    ASPJoin,
+    Flatten,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

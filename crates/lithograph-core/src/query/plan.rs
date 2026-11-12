@@ -18,6 +18,10 @@ use super::{AccessPolicy, ExecutionOptions, QueryError, QueryResult};
 mod access;
 mod budget;
 mod build;
+pub(crate) mod factor;
+pub(crate) use factor::{
+    FactorArm, FactorAsp, FactorBindingKind, FactorGroup, FactorHop, FactorizedPlan,
+};
 pub(crate) mod join;
 mod predicate;
 mod read;
@@ -82,6 +86,9 @@ pub enum LogicalOperator {
     NestedLoop,
     IndexNestedLoop,
     HashJoin,
+    FactorizedAccumulate,
+    ASPJoin,
+    Flatten,
     Let,
     Unwind,
     Union {
@@ -150,6 +157,9 @@ pub enum PhysicalOperator {
     NestedLoop,
     IndexNestedLoop,
     HashJoin,
+    FactorizedAccumulate,
+    ASPJoin,
+    Flatten,
     Let,
     Unwind,
     Union {
@@ -192,6 +202,9 @@ impl PhysicalOperator {
             Self::NestedLoop => "NestedLoop",
             Self::IndexNestedLoop => "IndexNestedLoop",
             Self::HashJoin => "HashJoin",
+            Self::FactorizedAccumulate => "FactorizedAccumulate",
+            Self::ASPJoin => "ASPJoin",
+            Self::Flatten => "Flatten",
             Self::Let => "Let",
             Self::Unwind => "Unwind",
             Self::Union { .. } => "Union",

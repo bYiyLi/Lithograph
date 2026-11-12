@@ -1,8 +1,8 @@
 # Phase 22：高性能查询优化器与可预算执行引擎
 
-**状态：`in_progress`（S22.1–S22.5 已完成局部验收；S22.6 实施中；S22.7–S22.8 未实施）。** 本项目只有**一个 Phase 22、八个内部 Stage**。所有 Stage 和全部算法均为必交付；只完成部分 Stage、已有若干基础、计划通过 Review，都不能标记 Phase `done`。当前实现与实测证据续记于第 21–25 节，S22.5 最终记录见[第 24.9 节](#stage-s22-5-acceptance)，S22.6在途结果见[第25节](#stage-s22-6-implementation)；第 15–20 节保留先前规划审核、实施和修复的历史记录。
+**状态：`in_progress`（S22.1–S22.6 已完成局部验收；S22.7 实施中；S22.8 未实施）。** 本项目只有**一个 Phase 22、八个内部 Stage**。所有 Stage 和全部算法均为必交付；只完成部分 Stage、已有若干基础、计划通过 Review，都不能标记 Phase `done`。当前实现与实测证据续记于第 21–25 节，S22.5 最终记录见[第 24.9 节](#stage-s22-5-acceptance)，S22.6最终记录见[第25.7节](#stage-s22-6-acceptance)；第 15–20 节保留先前规划审核、实施和修复的历史记录。
 
-**仓库复核（2026-11-10）**：本地 `main` HEAD 为 `3f1f31e`，本地 `v0.3.5` Tag 指向该 Commit；Phase 21 实现已进入此源码基线。复核开始时工作区干净，随后本次文档校正产生三份未提交文档修改。旧的 `e245555` + 未提交 Phase 21 是合并计划时的历史状态，不再代表当前源码。Tag 存在不等于远端 Release 制品已经完成验证；实施时仍须重新核对 HEAD/dirty tree、依赖、源码/SQLite runtime 和 Tag/资产状态。**主工作区保留在途修改；独立`codex/phase22-query-optimizer-ci`分支已提交并推送S5基线`2854fcc9`、S6首轮`05caab6`及修复`7e15ffb`、`2df1ee7`。精确`7e15ffb273feedc99f0b03974ed4ef5da7e6da31`的CI与六平台Matrix已通过；后续`2df1ee7`在完整CI及hard512回退压力中发现新问题，正在修复，尚未通过S6验收。未合并或发布。第21–25节区分已验收S5基线和S6在途结果，旧审核章节仅为历史证据。**
+**仓库复核（2026-11-10）**：本地 `main` HEAD 为 `3f1f31e`，本地 `v0.3.5` Tag 指向该 Commit；Phase 21 实现已进入此源码基线。复核开始时工作区干净，随后本次文档校正产生三份未提交文档修改。旧的 `e245555` + 未提交 Phase 21 是合并计划时的历史状态，不再代表当前源码。Tag 存在不等于远端 Release 制品已经完成验证；实施时仍须重新核对 HEAD/dirty tree、依赖、源码/SQLite runtime 和 Tag/资产状态。**主工作区保留任务修改；独立`codex/phase22-query-optimizer-ci`分支已实际提交并推送至`6d122ca5f98fda15afd3b2fba9d8fea5ebdb9316`。该精确提交的CI四项与六平台Matrix全部通过，S6定向、四档性能、百万节点回退资源及独立Review已闭环；原`05caab6`、`2df1ee7`的失败继续保留。S7现已启动实现，S8未实施；未合并、发布或部署。第21–25节记录各自源码epoch及验收，旧审核章节仅为历史证据。**
 
 ## 1. 最终目标、权威设计和边界
 
@@ -40,8 +40,8 @@
 | **S22.3** | Versioned Statistics + Relationship ID Seek + Predicate/Scan | S22.1–2 | 局部验收通过（第 22.7 节）；新冻结、独立 Review、资源与性能复核闭环 |
 | **S22.4** | DPhyp/Greedy Join Order + Index Nested Loop Join | S22.3 | 本地局部验收通过；R2 同源门禁、四档压力与 Review 已闭环（第 23.9–23.12 节） |
 | **S22.5** | Typed Grace Hash Join + TEMP Spill | S22.4 | 局部验收通过；R5 同源完整门禁、性能/非回退、远端原生资源/恢复及独立 Review 闭环（第 24.9 节） |
-| **S22.6** | Semi-mask/SIP + Join Dynamic Filter + TopK Pushdown | S22.5 | 实施中；SIP、Dynamic Filter、TopK 按依赖开发并定向验证，尚未完成局部验收 |
-| **S22.7** | Factorized Execution + ASP-Join + 精确 Flatten | S22.6 | 未开发 |
+| **S22.6** | Semi-mask/SIP + Join Dynamic Filter + TopK Pushdown | S22.5 | 局部验收通过；三算法四档、真实物理收益、语义/预算/错误回退、1M hard512资源及6d完整CI/Matrix与Review闭环（第25.7节） |
+| **S22.7** | Factorized Execution + ASP-Join + 精确 Flatten | S22.6 | 实施中；真实Flat/Group、FT、group-aware消费者及ASP三阶段按依赖开发，尚未局部验收 |
 | **S22.8** | WCOJ / Multiway Intersection + 全算法集成 | S22.7 | 未开发 |
 
 各 Stage 可独立完成**局部测试**后推进，但只有最终所有 Stage 的 Acceptance 加上统一全局门禁同时通过，Phase 22 才能标为 `done`；不会再创建 Phase 23–29 的实现状态。
@@ -1207,3 +1207,41 @@ SIP的旧R5四档Before batch在1M时实际达到1GiB cgroup限制，leaf与meta
 | SQL scalar，原frozen1k，同Release/同query/Engine524288B/同外层限制 | 完整三行与PROFILE/summary/访问行数检查通过，真实controller/leaf成功及清理通过；该smoke不替代rows百万资源或四档普通时延 |
 
 上述结果关闭本次已复现的回退资源问题，不改写旧Resource/OOM/timeout。`b380324`的新Windows x64 Matrix gate已实际成功，新增Provider诊断unit25项及support/check/Clippy通过；旧`2df1ee7`的并发publish一次失败仍保持根因未知，不将这次绿灯写成已证明修复。Node-only修复的精确新提交完整CI/Matrix与S6最后证据收口仍需完成，S6继续`in_progress`，不以资源子集通过进入S7/S8生产实现或将Phase标done。
+
+<a id="stage-s22-6-acceptance"></a>
+
+### 25.7 S22.6 最终局部验收与 S22.7 启动
+
+`6d122ca5f98fda15afd3b2fba9d8fea5ebdb9316`的[CI 43221810009](https://github.com/bYiyLi/Lithograph/actions/runs/43221810009)已实际`completed/success`，Windows、Quality、macOS、Linux canonical四项全部通过，最后Linux于2026-11-12 13:26:27 UTC完成；[Release Matrix 43221809736](https://github.com/bYiyLi/Lithograph/actions/runs/43221809736)亦实际`completed/success`，storage fixture＋六平台共7项成功，`publish-release`为skipped，无发行。原`b380324`两条运行也独立成功，未拿它们替代6d。
+
+| Acceptance | 结论与证据边界 |
+| --- | --- |
+| A22-S6-01 | PASS：SIP11、Node/elementId/null/重复/权限/history/staged反例、真实3 keys/3 seeks及两SQLsurface四档固定结果/VM；未命中路径不假报mask |
+| A22-S6-02 | PASS：公开DF9＋private15与mixed-plan反例；完整typed bag/异常/状态/权限保持，完整Build EOF后keyset真实约束未读尾部；1024/hard512正常CBO仍可选INL，不强迫DF |
+| A22-S6-03 | PASS：TopK14、private/storage/codec边界与四档完整20行；只在既定Range排序/可见域/类型/唯一性证明下读取skip+limit=277，其余保原Sort/Search合同 |
+| A22-S6-04 | PASS：query-local预算、分配后取消、旧pin/staged更新与真实AUTH错误传播；原frozen1k、1M rows hard512/1GiB/no-swap及scalar1k通过；独立资源review核实实际TEMP/FD、RSS、wait/reap及unit/CG/PID清理，无OOM |
+| A22-S6-05 | PASS：SIP/DF/TopK四档完整普通采样及10×物理工作检查；源7e15性能epoch明确保留，后续相邻变更由6d受影响target/资源/全集回归承接。Before OOM/受控timeout及DF首行增加/fullscan+3均保留，不伪造分布或全指标改善 |
+| A22-S6-06 | PASS：6d精确完整quality、canonical/TCK/SQL/Provider及六平台load/runtime/ABI；源码与资源独审、最终diff和文档状态收口。旧Provider一次未知失败保历史限制，未宣称诊断提交为因果修复，也不新增连续N次CI门槛 |
+
+当前compiled输入504/`3a6eeb9106e5c093a6b0bc5c92adf9f32b12615a0b920296983ab41ed5022ce4`，提交输入1002/`81d4a49af46b15aae6f8762ea9453f7b7403769b8e1def3f4600fce336e273db`；百万资源测试时1002/608 epoch与此仅Phase记录不同，编译代码相同。独立收口映射为`target/phase22-current/s6-final-acceptance-map.md`，资源review为`target/phase22-current/s6-identity-spool-final-01/resource-review.md`，精确提交输入为`inputs-commit-6d122ca.json`。当前Stage没有剩余已确认blocking finding。
+
+S22.6局部通过后进入S22.7实际开发：在原pipeline引入可预算的Flat/Group、共享FT及延迟Flatten，完成group-aware消费和真实Accumulate→Semijoin-filtered Build→Probe；当前尚未实现验收。已有旧S6引擎的独立小Star Before完整32768行、原查询/pin、真实CBO、VM及资源记录，不把它称为S7实现或P95。三域Search仅完成Native数据/CP/definitions/完整Oracle与integrity准备，查询/物理build/recall/性能仍待全局Gate。S8、全算法综合、10M/100M、90分钟并发、最终Search tiers与A22-G01–06均未关闭，Phase22继续`in_progress`。
+
+<a id="stage-s22-7-checkpoint"></a>
+
+### 25.8 S22.7 开发检查点：真实 Group 与待通过的候选
+
+S7 已在原 pull pipeline 接入 Flat/Group、紧凑 FactorTable、分组过滤/投影/COUNT/MIN/MAX、延迟 Flatten 与复用原 Hash/Grace 的 ASP pipeline。字段名与顺序在 arm 内共享，typed 成员可预算驻留，溢出继续使用原 private Binding codec；没有新增公开 hint、预算配置或第二执行器。此处记录开发中的真实状态，S7 与 Phase22 仍为 `in_progress`。
+
+原生源码11为1039个输入、`caa8c497bf1dd864ac4278dfba5b2120ee8e17eedbe2ec126def5ea79dcddd2b`，其中编译输入541个、`ae007dcc4199351aa80b5d5fabfe99eeb38ea0668f5e2c9ad0472d69f5b19aac`。Core/lib与集成目标真实编译通过；Mac仅编辑和静态检查，运行使用原生Linux。该源码在1GiB/no-swap中的实际结果：
+
+- `phase22_factorized`：21/22通过，覆盖完整32768五ID/三跳七ID bag、并行关系、别名与丢列重数、nullable聚合、逐行非确定性、错误/权限、历史pin和写barrier/rollback。四跳正例仍因CBO未选Group而失败，完整bag与实际算子断言保留。
+- `phase22_asp`：1/2通过，NULL边界通过；256行正例尚未选择ASP。执行器与真实有限Build/Hash桥存在，不以旧INL结果或三段名称代替尚未通过的优化验收。
+- private Factor tests20、Planner tests23、conditional-prefix回归1及真实64-entry Build首输出前取消1全部通过。取消仍检查`built=false`、probe0、真实profile token恢复、Σ与资源归零。
+- worker最大RSS235552768B，OOM0，TEMP空，源码前后guard通过。source09的Hash23、SIP11、谓词16、Dynamic Filter9、TopK14共73项受影响回归通过；后续普通Group/PROFILE修复由source10的17项集成及21项private测试承接，未拿旧源码绿灯冒充source11完整CI。
+
+真实Star已选择`FactorizedAccumulate`：A128/B256共384个FT成员，观察到owner峰值145014B、spill0，实际Flatten32768。全局分组聚合真实产出一行，未进入Flatten时展开计数为0。Σ少1已按bound-start Node验证的真实Adjacency边界修复，未补造dbHit。
+
+新1k pressure fixture的公开CREATE Oracle、checkpoint、完整integrity及Before scalar/rows各普通1次与PROFILE/VM1次均通过，四次完整消费32768行。新库另含路径辅助域，不继承旧fixture时延、VM或pin；这些少量功能样本不构成P95或quiet性能验收。四档、巨大输出、小预算与取消的原生测量工具已具备，After release候选和剩余选择问题继续验证。
+
+本增量用于独立`codex/phase22-query-optimizer-ci`分支的开发CI；`6d122ca`仍是上节S6验收的精确提交。新commit/push和CI以实际Git/Actions记录为准，不由本检查点预先声明成功。S7尚需关闭四跳/ASP实际选择与净收益、完整资源/两SQLsurface/quality/CI；S8、全算法综合、10M/100M、Search tiers、90分钟reader/writer及A22-G01–06仍未验收。

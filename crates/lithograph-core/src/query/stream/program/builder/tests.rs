@@ -48,6 +48,7 @@ fn match_source_preserves_one_shot_dictionary_access_denial() {
         connection: &connection,
         program: &program,
         _snapshot: &snapshot,
+        graph_view: None,
         params: &params,
         control: &control,
     };

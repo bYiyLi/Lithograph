@@ -1375,7 +1375,9 @@ pub(crate) use controlled::{
     clone_value_unreserved_controlled,
 };
 pub(crate) use evaluate::{EvaluatedValue, binding_value_with_memory};
-pub(crate) use evaluate::{binding_from_value_controlled, is_count, predicate, value_to_string};
+pub(crate) use evaluate::{
+    binding_from_value_controlled, is_count, metadata_element_id, predicate, value_to_string,
+};
 pub(crate) use evaluate::{
     count_contributes_with_access_control, evaluate_with_access_control,
     evaluate_with_aliases_and_access_control,

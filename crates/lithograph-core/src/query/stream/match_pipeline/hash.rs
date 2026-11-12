@@ -15,7 +15,7 @@ mod probe;
 mod table;
 
 use key::{EvaluatedHashKey, extract_hash_key, extract_hash_key_admitted, hash_keys_equal};
-pub(super) use probe::HashProbe;
+pub(in crate::query::stream) use probe::HashProbe;
 use table::{HashEntry, HashTable};
 
 /// An implementation spill target, never a public single-value restriction.
@@ -126,7 +126,7 @@ pub(super) enum BuildStorage {
 }
 
 #[derive(Debug)]
-pub(super) struct HashBuildState {
+pub(in crate::query::stream) struct HashBuildState {
     pub(super) storage: BuildStorage,
     built: bool,
     stats: HashJoinRuntimeMetrics,
@@ -170,7 +170,7 @@ impl HashBuildState {
         }
     }
 
-    pub(super) fn new() -> Self {
+    pub(in crate::query::stream) fn new() -> Self {
         Self {
             storage: BuildStorage::Empty,
             built: false,
@@ -180,7 +180,19 @@ impl HashBuildState {
         }
     }
 
-    pub(super) fn finish(
+    pub(in crate::query::stream) fn is_spilled(&self) -> bool {
+        matches!(self.storage, BuildStorage::Spill(_))
+    }
+
+    pub(in crate::query::stream) fn runtime_stats(&self) -> HashJoinRuntimeMetrics {
+        self.stats
+    }
+
+    pub(in crate::query::stream) fn record_probe_metadata(&mut self, probe: &HashProbe) {
+        self.probe_metadata = self.probe_metadata.max(probe.metadata_bytes());
+    }
+
+    pub(in crate::query::stream) fn finish(
         &mut self,
         metrics: &mut QueryMetrics,
         slot: Option<usize>,
@@ -240,9 +252,19 @@ impl HashBuildState {
 }
 
 pub(super) fn hash_slot(metrics: &QueryMetrics, plan: &JoinPlan, depth: usize) -> Option<usize> {
-    metrics
-        .match_profile_slots(plan.clause_start, plan.stages[depth].part)?
-        .slot(ProfileRole::Join)
+    let part = plan.stages[depth].part;
+    if let Some(slot) = metrics
+        .match_profile_slots(plan.clause_start, part)
+        .and_then(|slots| slots.slot(ProfileRole::Join))
+    {
+        return Some(slot);
+    }
+    let asp = plan.factorized.as_ref()?.asp.as_ref()?;
+    if asp.part == part {
+        metrics.factorized_slot(plan.clause_start, "ASPJoin")
+    } else {
+        None
+    }
 }
 
 fn row_headroom(bytes: u64) -> QueryResult<u64> {

@@ -19,16 +19,27 @@ mod codec;
 mod grace;
 pub(super) use codec::distinct_row_key;
 pub(in crate::query) use codec::identity_binding_encoded_upper;
-use codec::{decode_binding_row, decode_row, encode_binding_row, encode_row};
+use codec::{
+    decode_binding_row, decode_row, encode_binding_row, encode_binding_row_measured, encode_row,
+};
 pub(super) use grace::{
     FANOUT as GRACE_PARTITION_FANOUT, GraceCounters, GracePartitions, HashSide,
     MAX_DEPTH as GRACE_MAX_REPARTITION_DEPTH, PartitionId,
     RECORD_FIXED_VALUE_BYTES as GRACE_RECORD_FIXED_VALUE_BYTES, RepartitionOutcome,
-    ReservedSpillBatch, SpillReadLimit, SpilledBinding, resident_bound as grace_resident_bound,
+    ReservedSpillBatch, SpillReadLimit, SpilledBinding, private_temp_error,
+    resident_bound as grace_resident_bound,
 };
 
 const SORT_RUN_ROWS: usize = 1_024;
 static NEXT_SPILL_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct BindingSpillIo {
+    pub(super) encoded_bytes: u64,
+    pub(super) sqlite_vm_steps: u64,
+    /// Exact peak of the simultaneously held encoding/decoding reservations.
+    pub(super) memory_peak_bytes: u64,
+}
 
 pub(super) fn open_spill_connection() -> QueryResult<Connection> {
     let connection = Connection::open_in_memory()?;
@@ -187,15 +198,28 @@ impl BindingSpill {
         connection: &Connection,
         resources: QueryResources,
     ) -> QueryResult<Self> {
+        Self::create_measured(connection, resources).map(|(spill, _)| spill)
+    }
+
+    pub(super) fn create_measured(
+        connection: &Connection,
+        resources: QueryResources,
+    ) -> QueryResult<(Self, u64)> {
         let table = spill_table("bindings");
-        connection.execute_batch(&format!(
+        let sql = format!(
             "CREATE TEMP TABLE temp.{table}(seq INTEGER PRIMARY KEY,row_json TEXT NOT NULL)"
-        ))?;
-        Ok(Self {
-            resources,
-            table,
-            sequence: 0,
-        })
+        );
+        let mut statement = connection.prepare(&sql)?;
+        statement.execute([])?;
+        let vm_steps = statement_vm_steps(&statement)?;
+        Ok((
+            Self {
+                resources,
+                table,
+                sequence: 0,
+            },
+            vm_steps,
+        ))
     }
 
     pub(super) fn push(
@@ -204,6 +228,15 @@ impl BindingSpill {
         row: &BindingRow,
         control: &ExecutionControl<'_>,
     ) -> QueryResult<()> {
+        self.push_measured(connection, row, control).map(|_| ())
+    }
+
+    pub(super) fn push_measured(
+        &mut self,
+        connection: &Connection,
+        row: &BindingRow,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<BindingSpillIo> {
         control.check()?;
         let sql = format!(
             "INSERT INTO temp.{}(seq,row_json) VALUES(?1,?2)",
@@ -212,13 +245,17 @@ impl BindingSpill {
         let _encoding = self.resources.reserve(serialization_bytes(
             super::expression::binding_row_bytes_controlled(row, Some(control))?,
         )?)?;
-        connection.execute(
-            &sql,
-            params![self.sequence, encode_binding_row(row, control)?],
-        )?;
+        let (encoded, extra_memory) = encode_binding_row_measured(row, control)?;
+        let mut statement = connection.prepare(&sql)?;
+        statement.execute(params![self.sequence, &encoded])?;
+        let sqlite_vm_steps = statement_vm_steps(&statement)?;
         control.check()?;
         self.sequence = self.sequence.saturating_add(1);
-        Ok(())
+        Ok(BindingSpillIo {
+            encoded_bytes: encoded.len() as u64,
+            sqlite_vm_steps,
+            memory_peak_bytes: checked_add(_encoding.bytes(), extra_memory)?,
+        })
     }
 
     pub(super) fn from_rows_with_resources(
@@ -278,6 +315,17 @@ impl BindingSpill {
         limit: usize,
         control: &ExecutionControl<'_>,
     ) -> QueryResult<(Vec<(i64, BindingRow)>, MemoryReservation)> {
+        self.read_batch_reserved_measured(connection, after, limit, control)
+            .map(|(rows, memory, _)| (rows, memory))
+    }
+
+    pub(super) fn read_batch_reserved_measured(
+        &self,
+        connection: &Connection,
+        after: i64,
+        limit: usize,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<(Vec<(i64, BindingRow)>, MemoryReservation, BindingSpillIo)> {
         let limit = i64::try_from(limit)
             .map_err(|_| QueryError::internal("binding spill batch size exceeds INTEGER64"))?;
         let sql = format!(
@@ -288,16 +336,24 @@ impl BindingSpill {
         let mut rows = statement.query(params![after, limit])?;
         let mut memory = self.resources.reserve(0)?;
         let mut output = Vec::new();
+        let mut io = BindingSpillIo::default();
         while let Some(row) = rows.next()? {
             control.work(1)?;
             let seq = row.get::<_, i64>(0)?;
-            let (decoded, decoded_memory) =
-                decode_binding_record(row, 1, &self.resources, control)?;
+            io.encoded_bytes = checked_add(io.encoded_bytes, sqlite_text(row, 1)?.len() as u64)?;
+            let (decoded, decoded_memory, decoding_peak) =
+                decode_binding_record_measured(row, 1, &self.resources, control)?;
+            io.memory_peak_bytes = io
+                .memory_peak_bytes
+                .max(checked_add(memory.bytes(), decoding_peak)?);
             reserve_vec_slot(&mut output, &mut memory)?;
             memory.merge(decoded_memory)?;
+            io.memory_peak_bytes = io.memory_peak_bytes.max(memory.bytes());
             output.push((seq, decoded));
         }
-        Ok((output, memory))
+        drop(rows);
+        io.sqlite_vm_steps = statement_vm_steps(&statement)?;
+        Ok((output, memory, io))
     }
 
     pub(super) fn collect_reserved(
@@ -769,11 +825,28 @@ fn decode_binding_record(
     resources: &QueryResources,
     control: &ExecutionControl<'_>,
 ) -> QueryResult<(BindingRow, MemoryReservation)> {
+    decode_binding_record_measured(row, index, resources, control)
+        .map(|(row, memory, _)| (row, memory))
+}
+
+fn decode_binding_record_measured(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+    resources: &QueryResources,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<(BindingRow, MemoryReservation, u64)> {
     let encoded = sqlite_text(row, index)?;
     let mut memory = resources.reserve(decoding_bytes(encoded, control)?)?;
+    let reserved = memory.bytes();
     let decoded = decode_binding_row(encoded, control)?;
     memory.resize(binding_row_bytes(&decoded, control)?)?;
-    Ok((decoded, memory))
+    let peak = reserved.max(memory.bytes());
+    Ok((decoded, memory, peak))
+}
+
+fn statement_vm_steps(statement: &rusqlite::Statement<'_>) -> QueryResult<u64> {
+    u64::try_from(statement.reset_status(rusqlite::StatementStatus::VmStep))
+        .map_err(|_| super::resources::memory_error("spill SQLite VM counter overflow"))
 }
 
 fn reserve_vec_slot<T>(values: &mut Vec<T>, memory: &mut MemoryReservation) -> QueryResult<()> {
