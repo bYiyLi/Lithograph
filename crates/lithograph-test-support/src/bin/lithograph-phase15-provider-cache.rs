@@ -358,12 +358,12 @@ fn check_concurrent_publish(provider_load: &str, probe_load: &str) -> Result<(),
     let second_path = second_fixture.path().to_path_buf();
     let first_script = format!(
         "{provider_load}\n{probe_load}\n\
-         SELECT 'result=' || provider_cache_probe_error({config}, 'concurrent-a', 2);",
+         SELECT provider_cache_probe_vector({config}, 'concurrent-a', 2);",
         config = sql_literal(&config),
     );
     let second_script = format!(
         "{provider_load}\n{probe_load}\n\
-         SELECT 'result=' || provider_cache_probe_error({config}, 'concurrent-b', 2);",
+         SELECT provider_cache_probe_vector({config}, 'concurrent-b', 2);",
         config = sql_literal(&config),
     );
     let first = thread::spawn(move || {
@@ -382,10 +382,14 @@ fn check_concurrent_publish(provider_load: &str, probe_load: &str) -> Result<(),
         .map_err(|_| "second concurrent provider process panicked")?
         .map_err(|error| format!("second concurrent provider process failed: {error}"))?;
     require_server_requests(server, 2)?;
-    for output in [&first_output, &second_output] {
+    eprintln!("concurrent Provider publish worker=A: {first_output:?}");
+    eprintln!("concurrent Provider publish worker=B: {second_output:?}");
+    for (worker, output) in [("A", &first_output), ("B", &second_output)] {
         require(
-            output.lines().any(|line| line.trim() == "result=OK"),
-            &format!("concurrent Provider publish failed: {output:?}"),
+            output
+                .lines()
+                .any(|line| line.trim() == "status=0;dimensions=2;count=2;values=1,2;error="),
+            &format!("concurrent Provider publish failed worker={worker}: {output:?}"),
         )?;
     }
     require_cache_state(&cache, 3, 24)

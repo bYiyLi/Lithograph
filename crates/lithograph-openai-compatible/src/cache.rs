@@ -252,7 +252,7 @@ impl Cache {
     }
 
     fn initialize(&self, is_cancelled: &mut impl FnMut() -> bool) -> Result<(), Failure> {
-        with_immediate_transaction(&self.connection, is_cancelled, |is_cancelled| {
+        with_immediate_transaction(&self.connection, is_cancelled, false, |is_cancelled| {
             let objects = self.schema_objects()?;
             if !objects.is_empty() {
                 return self.validate(objects, is_cancelled);
@@ -357,7 +357,7 @@ impl Cache {
         payload: u64,
         is_cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), Failure> {
-        with_immediate_transaction(&self.connection, is_cancelled, |_is_cancelled| {
+        with_immediate_transaction(&self.connection, is_cancelled, false, |_is_cancelled| {
             let (used, check) = read_used_counter(&self.connection)?;
             if used < 0 || check != !used {
                 return Err(SqliteError::InvalidQuery);
@@ -389,12 +389,16 @@ impl Cache {
         generated: &[(String, Vec<f32>)],
         is_cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), Failure> {
-        with_immediate_transaction(&self.connection, is_cancelled, |is_cancelled| {
-            let mut used = read_valid_used_counter(&self.connection)?;
-            used = self.publish_entries(space_hash, dimensions, generated, used, is_cancelled)?;
-            used = evict_to_budget(&self.connection, used, self.max_bytes)?;
-            write_used_counter(&self.connection, used)?;
-            Ok::<(), SqliteError>(())
+        with_immediate_transaction(&self.connection, is_cancelled, true, |is_cancelled| {
+            let result = (|| {
+                let mut used = read_valid_used_counter(&self.connection)?;
+                used =
+                    self.publish_entries(space_hash, dimensions, generated, used, is_cancelled)?;
+                used = evict_to_budget(&self.connection, used, self.max_bytes)?;
+                write_used_counter(&self.connection, used)?;
+                Ok::<(), SqliteError>(())
+            })();
+            result.map_err(|error| publish_sqlite_error("publish.body", error))
         })
     }
 
@@ -460,7 +464,7 @@ impl Cache {
         if used <= self.max_bytes {
             return Ok(());
         }
-        with_immediate_transaction(&self.connection, is_cancelled, |_is_cancelled| {
+        with_immediate_transaction(&self.connection, is_cancelled, false, |_is_cancelled| {
             let (used, check) = read_used_counter(&self.connection)?;
             if used < 0 || check != !used {
                 return Err(SqliteError::InvalidQuery);
@@ -643,27 +647,57 @@ fn evict_to_budget(
 fn with_immediate_transaction<E: Into<Failure>>(
     connection: &Connection,
     is_cancelled: &mut impl FnMut() -> bool,
+    publish_diagnostics: bool,
     operation: impl FnOnce(&mut dyn FnMut() -> bool) -> Result<(), E>,
 ) -> Result<(), Failure> {
-    retry_sqlite(is_cancelled, || connection.execute_batch("BEGIN IMMEDIATE"))?;
+    retry_sqlite_at_stage(
+        is_cancelled,
+        publish_diagnostics.then_some("publish.begin"),
+        || connection.execute_batch("BEGIN IMMEDIATE"),
+    )?;
     let result = operation(is_cancelled);
     match result {
         Ok(()) => {
-            if let Err(error) = retry_sqlite(is_cancelled, || connection.execute_batch("COMMIT")) {
-                let _ = connection.execute_batch("ROLLBACK");
+            if let Err(mut error) = retry_sqlite_at_stage(
+                is_cancelled,
+                publish_diagnostics.then_some("publish.commit"),
+                || connection.execute_batch("COMMIT"),
+            ) {
+                rollback_after_failure(connection, publish_diagnostics, &mut error);
                 return Err(error);
             }
             Ok(())
         }
         Err(error) => {
-            let _ = connection.execute_batch("ROLLBACK");
-            Err(error.into())
+            let mut error = error.into();
+            rollback_after_failure(connection, publish_diagnostics, &mut error);
+            Err(error)
         }
+    }
+}
+
+fn rollback_after_failure(connection: &Connection, publish: bool, failure: &mut Failure) {
+    let result = connection.execute_batch("ROLLBACK");
+    if publish {
+        let code = match &result {
+            Ok(()) => Some(rusqlite::ffi::SQLITE_OK),
+            Err(SqliteError::SqliteFailure(code, _)) => Some(code.extended_code),
+            Err(_) => None,
+        };
+        append_publish_stage(failure, "publish.rollback", code);
     }
 }
 
 fn retry_sqlite<T>(
     is_cancelled: &mut (impl FnMut() -> bool + ?Sized),
+    operation: impl FnMut() -> rusqlite::Result<T>,
+) -> Result<T, Failure> {
+    retry_sqlite_at_stage(is_cancelled, None, operation)
+}
+
+fn retry_sqlite_at_stage<T>(
+    is_cancelled: &mut (impl FnMut() -> bool + ?Sized),
+    stage: Option<&'static str>,
     mut operation: impl FnMut() -> rusqlite::Result<T>,
 ) -> Result<T, Failure> {
     let started = Instant::now();
@@ -674,7 +708,12 @@ fn retry_sqlite<T>(
             Err(error) if is_busy(&error) && started.elapsed() < BUSY_RETRY_BUDGET => {
                 thread::sleep(BUSY_RETRY_STEP);
             }
-            Err(error) => return Err(map_sqlite_error(error)),
+            Err(error) => {
+                return Err(match stage {
+                    Some(stage) => publish_sqlite_error(stage, error),
+                    None => map_sqlite_error(error),
+                });
+            }
         }
     }
 }
@@ -711,6 +750,27 @@ fn map_sqlite_error(error: SqliteError) -> Failure {
         };
     }
     Failure::io("cache database operation failed")
+}
+
+fn publish_sqlite_error(stage: &'static str, error: SqliteError) -> Failure {
+    let code = match &error {
+        SqliteError::SqliteFailure(code, _) => Some(code.extended_code),
+        _ => None,
+    };
+    let mut failure = map_sqlite_error(error);
+    append_publish_stage(&mut failure, stage, code);
+    failure
+}
+
+fn append_publish_stage(failure: &mut Failure, stage: &'static str, code: Option<i32>) {
+    let detail = match code {
+        Some(code) => format!(
+            "; stage={stage}; sqlite_base={}; sqlite_extended={code}",
+            code & 0xff
+        ),
+        None => format!("; stage={stage}; sqlite_error=non_sqlite"),
+    };
+    failure.message.push_str(&detail);
 }
 
 impl From<SqliteError> for Failure {
@@ -763,6 +823,49 @@ pub(crate) fn main_database_path(connection: &Connection) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publish_sqlite_diagnostics_keep_status_and_omit_sql_values_and_paths() {
+        let private = "SELECT private_text FROM '/private/cache-secret.sqlite'; api_key=secret";
+        for code in [
+            rusqlite::ffi::SQLITE_BUSY,
+            rusqlite::ffi::SQLITE_IOERR_LOCK,
+            rusqlite::ffi::SQLITE_INTERRUPT,
+            rusqlite::ffi::SQLITE_NOMEM,
+        ] {
+            let original = map_sqlite_error(SqliteError::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                Some(private.to_owned()),
+            ));
+            let diagnostic = publish_sqlite_error(
+                "publish.body",
+                SqliteError::SqliteFailure(
+                    rusqlite::ffi::Error::new(code),
+                    Some(private.to_owned()),
+                ),
+            );
+            assert_eq!(diagnostic.kind, original.kind);
+            assert_eq!(
+                crate::status_for_failure(diagnostic.kind).code(),
+                crate::status_for_failure(original.kind).code()
+            );
+            assert!(diagnostic.message.starts_with(&original.message));
+            assert!(diagnostic.message.contains("stage=publish.body"));
+            assert!(
+                diagnostic
+                    .message
+                    .contains(&format!("sqlite_base={}", code & 0xff))
+            );
+            assert!(
+                diagnostic
+                    .message
+                    .contains(&format!("sqlite_extended={code}"))
+            );
+            for secret in ["SELECT", "private_text", "/private/", "api_key", "secret"] {
+                assert!(!diagnostic.message.contains(secret));
+            }
+        }
+    }
 
     #[test]
     fn cache_space_excludes_operational_cache_and_http_policy() {
