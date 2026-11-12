@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
 impl HashBuildState {
     pub(in crate::query::stream::match_pipeline) fn ensure_build(
         &mut self,
@@ -20,6 +23,7 @@ impl HashBuildState {
         let crate::query::plan::join::StageAccess::Hash {
             equality,
             inner_side,
+            dynamic_filter,
         } = plan.stages[depth].access
         else {
             return Err(QueryError::internal(
@@ -31,33 +35,80 @@ impl HashBuildState {
         source.profile = metrics.match_profile_slots(plan.clause_start, ordinal);
         let bindings = MatchReadBindings::default();
         self.storage = BuildStorage::Memory(HashTable::new(control)?);
+        if dynamic_filter.is_some() {
+            self.filter = dynamic_filter::KeyCollector::new(control)?;
+        }
         // Keep row before its claim in one tuple through NULL/error exits.
         while let Some(input) =
             pull_build_row(&mut source, snapshot, view, metrics, &bindings, control)?
         {
-            self.stats.build_rows = self.stats.build_rows.saturating_add(1);
             let slot = hash_slot(metrics, plan, depth);
-            let previous = metrics.activate_profile_slot(slot);
-            let extracted = extract_hash_key(
-                plan.hashes[equality].keys(inner_side).0,
-                plan.hashes[equality].family,
-                &input.0,
-                snapshot,
-                view,
-                control,
+            self.consume_build_input(
+                input,
+                (
+                    plan.hashes[equality].keys(inner_side).0,
+                    plan.hashes[equality].family,
+                ),
+                (snapshot, view),
+                slot,
                 metrics,
-            );
-            metrics.restore_access_operator(previous);
-            if let Some(key) = extracted? {
-                self.keep_build_row(input, key, control)?;
-            }
-            self.publish(metrics, slot)?;
+                control,
+            )?;
         }
         if let BuildStorage::Spill(store) = &mut self.storage {
             store.temp_logical_bytes(control)?;
         }
         self.built = true;
         self.publish(metrics, hash_slot(metrics, plan, depth))
+    }
+
+    fn consume_build_input(
+        &mut self,
+        input: (BindingRow, MemoryReservation),
+        descriptor: (&crate::query::plan::join::HashInputKey, HashFamily),
+        scope: (&Snapshot<'_>, &ResolvedGraphView),
+        slot: Option<usize>,
+        metrics: &mut QueryMetrics,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<()> {
+        self.stats.build_rows = self.stats.build_rows.saturating_add(1);
+        let previous = metrics.activate_profile_slot(slot);
+        let extracted = extract_hash_key(
+            descriptor.0,
+            descriptor.1,
+            &input.0,
+            scope.0,
+            scope.1,
+            control,
+            metrics,
+        );
+        metrics.restore_access_operator(previous);
+        if let Some(key) = extracted? {
+            self.collect_filter_key(&key, control)?;
+            self.keep_build_row(input, key, control)?;
+        }
+        self.publish(metrics, slot)
+    }
+
+    fn collect_filter_key(
+        &mut self,
+        key: &EvaluatedHashKey,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<()> {
+        let Some(filter) = &mut self.filter else {
+            return Ok(());
+        };
+        let complete = filter.observe(key, control)?;
+        let peak = filter.last_peak_bytes();
+        self.stats.memory_peak_bytes = self
+            .stats
+            .memory_peak_bytes
+            .max(checked_add(self.storage_bytes()?, peak)?);
+        if !complete {
+            // An incomplete advisory set can never exclude a Probe.
+            self.filter = None;
+        }
+        Ok(())
     }
 
     fn keep_build_row(
@@ -68,20 +119,27 @@ impl HashBuildState {
     ) -> QueryResult<()> {
         let incoming = checked_add(input.1.bytes(), key.memory.bytes())?;
         if let BuildStorage::Memory(table) = &self.storage {
-            let target = hash_resident_target(
-                control.resources(),
-                table.owned_bytes(),
-                incoming,
-                row_headroom(input.1.bytes())?,
-            );
-            if table.projected_bytes(input.1.bytes(), key.memory.bytes())? > target {
+            let headroom = row_headroom(input.1.bytes())?;
+            let projected = table.projected_bytes(input.1.bytes(), key.memory.bytes())?;
+            let target =
+                hash_resident_target(control.resources(), table.owned_bytes(), incoming, headroom);
+            if projected > target
+                && !self.discard_filter_to_keep_memory(projected, incoming, headroom, control)?
+            {
                 self.spill_build(control)?;
             }
         }
         match &mut self.storage {
             BuildStorage::Memory(table) => {
                 table.insert_reserved(input.0, input.1, key, control)?;
-                self.stats.memory_peak_bytes = self.stats.memory_peak_bytes.max(table.peak_bytes());
+                let keys = self
+                    .filter
+                    .as_ref()
+                    .map_or(0, |filter| filter.owned_bytes());
+                self.stats.memory_peak_bytes = self
+                    .stats
+                    .memory_peak_bytes
+                    .max(checked_add(table.peak_bytes(), keys)?);
                 Ok(())
             }
             BuildStorage::Spill(store) => {
@@ -102,6 +160,33 @@ impl HashBuildState {
         }
     }
 
+    fn discard_filter_to_keep_memory(
+        &mut self,
+        projected: u64,
+        incoming: u64,
+        headroom: u64,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<bool> {
+        let (BuildStorage::Memory(table), Some(filter)) = (&self.storage, &self.filter) else {
+            return Ok(false);
+        };
+        // The optional allocation may not be the sole reason a formerly
+        // resident Hash requires TEMP. Subtract precisely this existing claim
+        // from outside memory, then drop it before using the recovered grant.
+        let without_filter = hash_resident_target(
+            control.resources(),
+            checked_add(table.owned_bytes(), filter.owned_bytes())?,
+            incoming,
+            headroom,
+        );
+        if projected <= without_filter {
+            self.filter = None;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     fn spill_build(&mut self, control: &ExecutionControl<'_>) -> QueryResult<()> {
         let BuildStorage::Memory(table) = std::mem::replace(&mut self.storage, BuildStorage::Empty)
         else {
@@ -110,10 +195,12 @@ impl HashBuildState {
             ));
         };
         let mut store = GracePartitions::create(control.resources().clone(), control)?;
-        self.stats.memory_peak_bytes = self
-            .stats
-            .memory_peak_bytes
-            .max(checked_add(table.owned_bytes(), store.resident_bytes()?)?);
+        self.stats.memory_peak_bytes = self.stats.memory_peak_bytes.max(checked_add(
+            checked_add(table.owned_bytes(), store.resident_bytes()?)?,
+            self.filter
+                .as_ref()
+                .map_or(0, |filter| filter.owned_bytes()),
+        )?);
         for mut entry in table.flush() {
             control.work(1)?;
             let digest = entry.key.digest;

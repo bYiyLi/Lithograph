@@ -22,4 +22,18 @@ pub struct HashJoinRuntimeMetrics {
     pub memory_peak_bytes: u64,
     /// Peak allocated bytes of the operator's TEMP store, including page overhead.
     pub temp_allocated_bytes: u64,
+    /// A complete, actually installed query-local keyset and its keyed tail.
+    pub dynamic_filter: Option<JoinDynamicFilterRuntimeMetrics>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct JoinDynamicFilterRuntimeMetrics {
+    pub applied: bool,
+    pub build_rows: u64,
+    pub distinct_keys: u64,
+    pub keyset_peak_bytes: u64,
+    pub collector_probes: u64,
+    pub prefix_rows_read: u64,
+    pub equality_seeks: u64,
+    pub tail_owners: u64,
 }

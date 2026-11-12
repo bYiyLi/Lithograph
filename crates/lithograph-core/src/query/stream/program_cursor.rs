@@ -119,7 +119,6 @@ impl QueryCursor {
                 control,
             )?;
         self.read_summary_commit = summary_commit;
-        self.metrics.rows = rows.len().try_into().unwrap_or(u64::MAX);
         let spill_connection = open_spill_connection()?;
         let mut spill =
             RowSpill::create_with_resources(&spill_connection, control.resources().clone())?;

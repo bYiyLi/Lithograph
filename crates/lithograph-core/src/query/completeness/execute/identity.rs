@@ -113,7 +113,7 @@ impl ReadExecutor<'_, '_> {
     }
 }
 
-fn push_identity_match_row(
+pub(super) fn push_identity_match_row(
     rows: &mut Vec<BindingRow>,
     memory: &mut MemoryReservation,
     row: BindingRow,

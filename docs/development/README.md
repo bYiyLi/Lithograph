@@ -89,6 +89,8 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 
 后续性能优化统一为 **[Phase 22：高性能查询优化器与可预算执行引擎](phases/22-high-performance-query-optimizer.md)**，状态 `in_progress`（S22.1–S22.5 已完成局部验收，S22.6 实施中，S22.7–S22.8 未实施）。S22.5 的 R5 同源完整 quality/CI、Hash/Grace 性能与非回退、stock SQLite、hard512KiB 和事务回滚证据已闭合；远端原生 Linux 的 10k 准入及 6 完整输出＋6 故障代表矩阵全部通过，详见[最终局部验收记录](phases/22-high-performance-query-optimizer.md#stage-s22-5-acceptance)。其内部八个 Stage **S22.1–S22.8 均为必实现内容**：先形成真实可用的 Planner / Executor（S22.1），再实现 Tiered Checkpoint / Snapshot、Versioned Statistics、Relationship ID Seek 与 Predicate/Scan（S22.2–3）；待访问/成本/预算路径正确后引入 DPhyp/Greedy Join Order、Index Nested Loop、Grace Hash/Spill（S22.4–5）；随后开发 Semi-mask/SIP、Join Dynamic Filter/TopK、Factorized/ASP-Join、WCOJ/Multiway Intersection（S22.6–8）。八个 Stage 不拥有单独的 Phase 状态，任何一个算法不得因合并计划而取消；Phase 22 只有全部局部与统一验收通过才可 `done`。全算法综合性能、最终 90 分钟并发、Search tier 与跨平台 CI 等全局门禁仍待后续完成。正式行为见 [Query Engine](../design/query-engine.md#optimizer-and-budgeted-executor)、[Storage](../design/storage.md#tiered-checkpoint-policy)，参考证据见 [Optimizer Research](../research/query-optimizer-roadmap-evidence.md)，整体压力见 [Runtime](../design/runtime.md#optimizer-join-stress)。当前 `v0.3.5` 源码 Tag 已存在，远端 Release/资产验收属于单独记录。
 
+S5 的独立 CI 分支快照已提交并推送为 [`2854fcc`](https://github.com/bYiyLi/Lithograph/commit/2854fcc901cd0b895c681d53c56a5221cbbf3f2e)，该精确提交的 [CI](https://github.com/bYiyLi/Lithograph/actions/runs/43185249151) 与 [Release Matrix](https://github.com/bYiyLi/Lithograph/actions/runs/43185249033) 均通过，未合并或发布。主工作区的 S6 开发修改尚未提交；SIP 11/11、TopK 14/14 及双 SQL 入口 smoke 已通过，DF 和补充测试仍在收口，原生 Release 构建成功尚不等于四档性能/压力或完整 CI 通过。最新结果与未闭环项见 [S22.6 实施记录](phases/22-high-performance-query-optimizer.md#stage-s22-6-implementation)，S6 仍为实施中。
+
 ## 4. 路线总览
 
 | Phase | 状态 | 交付结果 | 主要依赖 |

@@ -10,10 +10,12 @@ mod collect;
 use collect::{distribution, existing_index};
 mod degree;
 use degree::{DegreeSamples, collect_degree_samples};
+mod dynamic_filter;
 mod hash;
 mod hash_cohort;
 mod hash_keys;
 mod hash_work;
+mod key_facts;
 use hash::HashInputs;
 
 #[derive(Debug)]
@@ -173,6 +175,11 @@ impl JoinEstimates {
         }
         let mut rows = rows?;
         rows = self.join_selectivity(mask, rows)?;
+        if let Some(upper) = self.hashes.output_upper(mask) {
+            rows.upper = rows.upper.min(upper);
+            rows.expected = rows.expected.min(rows.upper);
+            rows.lower = rows.lower.min(rows.upper);
+        }
         for filter in &self.filters {
             if mask & filter.providers != 0 {
                 if filter.empty {
@@ -605,23 +612,14 @@ fn collect_probes(
                 index_name,
                 definition_hash,
                 ..
-            } => {
-                if !distributions.contains_key(index_name.as_str()) {
-                    let sample =
-                        distribution(index_name, *definition_hash, context, budget, headroom)?;
-                    distributions.insert(index_name.as_str(), sample);
-                }
-                distributions[index_name.as_str()].map(|sample| {
-                    let average = sample
-                        .indexed_owners
-                        .div_ceil(sample.ndistinct.expected.max(1));
-                    // A sampled heavy key contributes to risk, not a false uniformity promise.
-                    expectation(
-                        average.max(sample.max_frequency.expected / 8),
-                        sample.indexed_owners,
-                    )
-                })
-            }
+            } => index_probe_rows(
+                index_name,
+                *definition_hash,
+                context,
+                budget,
+                headroom,
+                &mut distributions,
+            )?,
         };
         if !matches!(template.access, ProbeAccess::Adjacency { .. })
             && node.is_some()
@@ -639,9 +637,16 @@ fn collect_probes(
         if !remember_bound_source(estimates, part, template, rows, budget) {
             return Ok(());
         }
-        estimates
-            .probes
-            .push(rows.map(|rows| AccessEstimate::stream(Some(rows), 2)));
+        estimates.probes.push(rows.map(|rows| {
+            let mut access = AccessEstimate::stream(Some(rows), 2);
+            if matches!(template.access, ProbeAccess::IndexEquality { .. }) {
+                // Every real outer binding evaluates and copies its property
+                // before the parameterized Index cursor is opened.
+                access.io = access.io.map(|io| io.saturating_add(1));
+                access.cpu = access.cpu.map(|cpu| cpu.saturating_add(3));
+            }
+            access
+        }));
     }
     collect_equalities(step, analysis, &distributions, context.schema, estimates);
     estimates.hashes = HashInputs::collect(
@@ -654,6 +659,38 @@ fn collect_probes(
         (headroom, scope),
     )?;
     Ok(())
+}
+
+fn index_probe_rows<'a>(
+    index_name: &'a str,
+    definition_hash: HashId,
+    context: &JoinPlanningContext<'_, '_, '_>,
+    budget: &mut PlanningBudget,
+    headroom: usize,
+    distributions: &mut BTreeMap<&'a str, Option<crate::query::schema::IndexDistribution>>,
+) -> QueryResult<Option<CardinalityEstimate>> {
+    if !distributions.contains_key(index_name) {
+        let sample = distribution(index_name, definition_hash, context, budget, headroom)?;
+        distributions.insert(index_name, sample);
+    }
+    if context
+        .schema
+        .indexes
+        .get(index_name)
+        .is_some_and(|index| key_facts::unique(index, context.schema))
+    {
+        return Ok(Some(expectation(1, 1)));
+    }
+    Ok(distributions[index_name].map(|sample| {
+        let average = sample
+            .indexed_owners
+            .div_ceil(sample.ndistinct.expected.max(1));
+        // A sampled heavy key contributes to risk, not a false uniformity promise.
+        expectation(
+            average.max(sample.max_frequency.expected / 8),
+            sample.indexed_owners,
+        )
+    }))
 }
 
 fn bound_target_providers(

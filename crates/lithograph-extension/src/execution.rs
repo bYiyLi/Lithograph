@@ -502,13 +502,21 @@ fn operator_profile_metadata_bytes(
     operator: &query::OperatorRuntimeMetrics,
 ) -> query::QueryResult<u64> {
     let base = query::resources::checked_add(operator.operator.len() as u64, 8192)?;
-    if operator.hash.is_none() {
-        return Ok(base);
+    let mut bytes = base;
+    if let Some(hash) = operator.hash {
+        // Nine fixed counter keys and their containing `hash` key, each at
+        // most 32 key bytes. Prepay map nodes before constructing any JSON.
+        let entries =
+            query::resources::checked_mul(query::resources::map_entry_bytes::<Value>()?, 10)?;
+        bytes = query::resources::checked_add(bytes, query::resources::checked_add(entries, 512)?)?;
+        bytes = query::resources::checked_add(bytes, dynamic_filter_metadata_bytes(&hash)?)?;
     }
-    // Nine fixed counter keys and their containing `hash` key, each at most
-    // 32 key bytes. Prepay their map nodes before constructing any JSON.
-    let entries = query::resources::checked_mul(query::resources::map_entry_bytes::<Value>()?, 10)?;
-    query::resources::checked_add(base, query::resources::checked_add(entries, 512)?)
+    if operator.semi_mask.is_some() {
+        let entries =
+            query::resources::checked_mul(query::resources::map_entry_bytes::<Value>()?, 3)?;
+        bytes = query::resources::checked_add(bytes, query::resources::checked_add(entries, 96)?)?;
+    }
+    Ok(bytes)
 }
 
 fn hash_memory_metadata_bytes() -> query::QueryResult<u64> {
@@ -584,11 +592,14 @@ fn operator_profile_json(operator: &query::OperatorRuntimeMetrics) -> Value {
     if let Some(hash) = operator.hash {
         value["hash"] = hash_profile_json(hash);
     }
+    if let Some(mask) = operator.semi_mask {
+        value["semiMask"] = json!({"keys": mask.keys, "seeks": mask.seeks});
+    }
     value
 }
 
 fn hash_profile_json(hash: query::HashJoinRuntimeMetrics) -> Value {
-    json!({
+    let mut value = json!({
         "buildRows": hash.build_rows,
         "probeRows": hash.probe_rows,
         "hashCollisions": hash.hash_collisions,
@@ -598,7 +609,29 @@ fn hash_profile_json(hash: query::HashJoinRuntimeMetrics) -> Value {
         "spillEncodedBytes": hash.spill_encoded_bytes,
         "memoryPeakBytes": hash.memory_peak_bytes,
         "tempAllocatedBytes": hash.temp_allocated_bytes,
-    })
+    });
+    if let Some(filter) = hash.dynamic_filter {
+        value["dynamicFilter"] = json!({
+            "applied": filter.applied,
+            "buildRows": filter.build_rows,
+            "distinctKeys": filter.distinct_keys,
+            "keysetPeakBytes": filter.keyset_peak_bytes,
+            "collectorProbes": filter.collector_probes,
+            "prefixRowsRead": filter.prefix_rows_read,
+            "equalitySeeks": filter.equality_seeks,
+            "tailOwners": filter.tail_owners,
+        });
+    }
+    value
+}
+
+fn dynamic_filter_metadata_bytes(hash: &query::HashJoinRuntimeMetrics) -> query::QueryResult<u64> {
+    if hash.dynamic_filter.is_none() {
+        return Ok(0);
+    }
+    // Eight fixed fields plus their containing dynamicFilter map key.
+    let entries = query::resources::checked_mul(query::resources::map_entry_bytes::<Value>()?, 9)?;
+    query::resources::checked_add(entries, 256)
 }
 
 fn metrics_json(metrics: &query::QueryMetrics) -> Value {

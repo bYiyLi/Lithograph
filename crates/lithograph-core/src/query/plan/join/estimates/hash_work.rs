@@ -28,6 +28,7 @@ pub(super) struct HashProbe {
 
 pub(super) fn hash_work(build: HashBuild, probe: HashProbe) -> Option<HashEstimate> {
     let rows = build.access.rows?.expected;
+    let encoded = build.layout.encoded_row_bytes?;
     let resident = if rows == 0 {
         Some(0)
     } else {
@@ -57,15 +58,21 @@ pub(super) fn hash_work(build: HashBuild, probe: HashProbe) -> Option<HashEstima
         estimate.resident = estimate
             .resident
             .saturating_add(crate::query::spill::grace_resident_bound());
-        grace_work(&mut estimate, rows, build, probe);
+        grace_work(&mut estimate, rows, build, probe, encoded);
     }
     Some(estimate)
 }
 
-fn grace_work(cost: &mut HashEstimate, rows: u64, build: HashBuild, probe: HashProbe) {
+fn grace_work(
+    cost: &mut HashEstimate,
+    rows: u64,
+    build: HashBuild,
+    probe: HashProbe,
+    encoded: u64,
+) {
     let passes = probe.partition_passes.max(1);
     let hot = probe.hot_passes.max(1);
-    let build_bytes = logical_record_bytes(build.layout.encoded_row_bytes);
+    let build_bytes = logical_record_bytes(encoded);
     let probe_bytes = logical_record_bytes(probe.encoded_bytes);
     let build_io = temp_records(rows, build_bytes);
     let probe_io = temp_records(1, probe_bytes);
@@ -137,7 +144,8 @@ mod tests {
                     bucket_bytes: 8,
                     binding_bytes: 256,
                     key_heap_bytes: Some(0),
-                    encoded_row_bytes: 2048,
+                    encoded_row_bytes: Some(2048),
+                    encoding_scratch_bytes: 2048,
                     headroom_bytes: 8192,
                     soft_cap: 1024 * 1024,
                 },
@@ -206,5 +214,11 @@ mod tests {
         let (build, _) = input(10);
         probe.resident_target = 0;
         assert!(hash_work(build, probe).is_none());
+        let (mut build, probe) = input(10);
+        build.layout.encoded_row_bytes = None;
+        assert!(
+            hash_work(build, probe).is_none(),
+            "unknown payload keeps the existing plan"
+        );
     }
 }

@@ -1,5 +1,8 @@
 mod bound;
-pub(crate) use bound::{BoundStandardIndexRead, bind_standard_index_read, scan_bound_index_page};
+pub(crate) use bound::{
+    BoundStandardIndexRead, bind_standard_index_read, scan_bound_index_page,
+    try_bind_dynamic_filter_index,
+};
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
@@ -25,10 +28,12 @@ mod safety;
 
 pub(crate) use cache::{
     StandardIndexCursor, StandardIndexPage, scan_node_index_page, scan_relationship_index_page,
+    scan_topk_numeric_page,
 };
 pub(crate) use persistent::{
-    IndexDistribution, build_persistent_generation, ensure_standard_indexes_for_commit_controlled,
-    estimate_index_access, estimate_index_distribution,
+    IndexDistribution, OrderedNumericIndexRead, build_persistent_generation,
+    ensure_standard_indexes_for_commit_controlled, estimate_index_access,
+    estimate_index_distribution, try_bind_topk_numeric_index,
 };
 
 #[derive(Debug, Clone, PartialEq)]

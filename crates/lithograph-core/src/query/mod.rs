@@ -37,8 +37,8 @@ pub use plan::{
 pub use resources::{ExecutionControl, MemoryReservation, QueryResources};
 pub use stats::PlannerStatistics;
 pub use stream::{
-    HashJoinRuntimeMetrics, OperatorRuntimeMetrics, QueryBatch, QueryCounters, QueryCursor,
-    QueryMetrics, QuerySummary, QueryType,
+    HashJoinRuntimeMetrics, JoinDynamicFilterRuntimeMetrics, OperatorRuntimeMetrics, QueryBatch,
+    QueryCounters, QueryCursor, QueryMetrics, QuerySummary, QueryType, SemiMaskRuntimeMetrics,
 };
 
 #[doc(hidden)]

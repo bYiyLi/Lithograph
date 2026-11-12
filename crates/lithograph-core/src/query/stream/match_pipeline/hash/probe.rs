@@ -220,6 +220,7 @@ impl HashBuildState {
         let crate::query::plan::join::StageAccess::Hash {
             equality,
             inner_side,
+            ..
         } = plan.stages[depth].access
         else {
             return Err(QueryError::internal("Hash probe received another stage"));

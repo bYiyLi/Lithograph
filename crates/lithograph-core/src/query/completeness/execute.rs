@@ -638,6 +638,9 @@ impl ReadExecutor<'_, '_> {
         {
             return self.execute_identity_match(clause, &step, input);
         }
+        if let Some(step) = sip::lower_match(self.connection, clause, &input.columns) {
+            return self.execute_sip_match(clause, &step, input);
+        }
         let columns = self.match_columns(clause, &input.columns)?;
         let predicate = match_predicate(clause)?;
         let access_operator_count = usize::from(
@@ -1110,6 +1113,7 @@ pub(crate) mod identity;
 mod load_csv;
 mod registry;
 mod search;
+mod sip;
 
 pub(crate) use helpers::{distinct_bindings, merge_union_rows};
 

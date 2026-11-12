@@ -1,7 +1,11 @@
 pub(crate) use index::{
     BoundStandardIndexRead, StandardIndexPage, bind_standard_index_read, scan_bound_index_page,
+    try_bind_dynamic_filter_index,
 };
 pub(crate) use index::{IndexDistribution, estimate_index_distribution};
+pub(crate) use index::{
+    OrderedNumericIndexRead, scan_topk_numeric_page, try_bind_topk_numeric_index,
+};
 mod access;
 mod command;
 mod equality;

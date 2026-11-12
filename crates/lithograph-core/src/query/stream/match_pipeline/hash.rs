@@ -8,6 +8,7 @@ use crate::query::resources::{QueryResources, allocation_bytes, checked_add, che
 use crate::query::spill::{GracePartitions, HashSide, SpillReadLimit};
 
 mod build;
+pub(super) mod dynamic_filter;
 mod grace;
 mod key;
 mod probe;
@@ -26,7 +27,10 @@ pub(crate) struct HashLayoutFacts {
     pub(crate) bucket_bytes: u64,
     pub(crate) binding_bytes: u64,
     pub(crate) key_heap_bytes: Option<u64>,
-    pub(crate) encoded_row_bytes: u64,
+    /// Codec payload, excluding DOM/String construction scratch. Unknown
+    /// binding families cannot be assigned a fictitious transport width.
+    pub(crate) encoded_row_bytes: Option<u64>,
+    pub(crate) encoding_scratch_bytes: u64,
     pub(crate) headroom_bytes: u64,
     pub(crate) soft_cap: u64,
 }
@@ -37,14 +41,29 @@ pub(crate) fn hash_layout(
     _inner: HashOperandSide,
 ) -> QueryResult<HashLayoutFacts> {
     let bytes = pattern_binding_bytes(part)?;
-    let encoded = crate::query::spill::serialization_bytes(bytes)?;
+    let scratch = crate::query::spill::serialization_bytes(bytes)?;
+    let encoded = if part.path_variable.is_some() {
+        None
+    } else {
+        Some(crate::query::spill::identity_binding_encoded_upper(
+            [
+                part.start.variable.as_deref(),
+                part.relationship
+                    .as_ref()
+                    .and_then(|rel| rel.variable.as_deref()),
+                part.end.as_ref().and_then(|node| node.variable.as_deref()),
+            ],
+            usize::from(part.relationship.is_some()),
+        )?)
+    };
     Ok(HashLayoutFacts {
         entry_inline_bytes: std::mem::size_of::<HashEntry>() as u64,
         bucket_bytes: std::mem::size_of::<Option<usize>>() as u64,
         binding_bytes: bytes.saturating_sub(std::mem::size_of::<BindingRow>() as u64),
         key_heap_bytes: (equality.family != HashFamily::String).then_some(0),
         encoded_row_bytes: encoded,
-        headroom_bytes: checked_add(checked_mul(encoded, 2)?, 4096)?,
+        encoding_scratch_bytes: scratch,
+        headroom_bytes: checked_add(checked_mul(scratch, 2)?, 4096)?,
         soft_cap: HASH_RESIDENT_BYTES,
     })
 }
@@ -112,15 +131,25 @@ pub(super) struct HashBuildState {
     built: bool,
     stats: HashJoinRuntimeMetrics,
     pub(super) probe_metadata: u64,
+    filter: Option<dynamic_filter::KeyCollector>,
 }
 
 impl HashBuildState {
+    fn storage_bytes(&self) -> QueryResult<u64> {
+        match &self.storage {
+            BuildStorage::Empty => Ok(0),
+            BuildStorage::Memory(table) => Ok(table.owned_bytes()),
+            BuildStorage::Spill(store) => store.resident_bytes(),
+        }
+    }
+
     pub(super) fn new() -> Self {
         Self {
             storage: BuildStorage::Empty,
             built: false,
             stats: HashJoinRuntimeMetrics::default(),
             probe_metadata: 0,
+            filter: None,
         }
     }
 
@@ -157,6 +186,12 @@ impl HashBuildState {
         metrics: &mut QueryMetrics,
         slot: Option<usize>,
     ) -> QueryResult<()> {
+        self.stats.memory_peak_bytes = self.stats.memory_peak_bytes.max(checked_add(
+            self.storage_bytes()?,
+            self.filter
+                .as_ref()
+                .map_or(0, |filter| filter.owned_bytes()),
+        )?);
         if let BuildStorage::Spill(store) = &self.storage {
             let counts = store.counters();
             let resident = store.resident_bytes()?;

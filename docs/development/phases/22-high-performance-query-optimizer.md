@@ -1,8 +1,8 @@
 # Phase 22：高性能查询优化器与可预算执行引擎
 
-**状态：`in_progress`（S22.1–S22.5 已完成局部验收；S22.6 实施中；S22.7–S22.8 未实施）。** 本项目只有**一个 Phase 22、八个内部 Stage**。所有 Stage 和全部算法均为必交付；只完成部分 Stage、已有若干基础、计划通过 Review，都不能标记 Phase `done`。当前实现与实测证据续记于第 21–24 节，S22.5 最终记录见[第 24.9 节](#stage-s22-5-acceptance)；第 15–20 节保留先前规划审核、实施和修复的历史记录。
+**状态：`in_progress`（S22.1–S22.5 已完成局部验收；S22.6 实施中；S22.7–S22.8 未实施）。** 本项目只有**一个 Phase 22、八个内部 Stage**。所有 Stage 和全部算法均为必交付；只完成部分 Stage、已有若干基础、计划通过 Review，都不能标记 Phase `done`。当前实现与实测证据续记于第 21–25 节，S22.5 最终记录见[第 24.9 节](#stage-s22-5-acceptance)，S22.6在途结果见[第25节](#stage-s22-6-implementation)；第 15–20 节保留先前规划审核、实施和修复的历史记录。
 
-**仓库复核（2026-11-10）**：本地 `main` HEAD 为 `3f1f31e`，本地 `v0.3.5` Tag 指向该 Commit；Phase 21 实现已进入此源码基线。复核开始时工作区干净，随后本次文档校正产生三份未提交文档修改。旧的 `e245555` + 未提交 Phase 21 是合并计划时的历史状态，不再代表当前源码。Tag 存在不等于远端 Release 制品已经完成验证；实施时仍须重新核对 HEAD/dirty tree、依赖、源码/SQLite runtime 和 Tag/资产状态。**当前 S22.1–S22.5 已在未提交工作区取得局部门禁通过；第 21–24 节记录最终证据，旧审核章节仅为历史证据。**
+**仓库复核（2026-11-10）**：本地 `main` HEAD 为 `3f1f31e`，本地 `v0.3.5` Tag 指向该 Commit；Phase 21 实现已进入此源码基线。复核开始时工作区干净，随后本次文档校正产生三份未提交文档修改。旧的 `e245555` + 未提交 Phase 21 是合并计划时的历史状态，不再代表当前源码。Tag 存在不等于远端 Release 制品已经完成验证；实施时仍须重新核对 HEAD/dirty tree、依赖、源码/SQLite runtime 和 Tag/资产状态。**当前主工作区的S6修改尚未提交；S5 R5独立快照已在`codex/phase22-query-optimizer-ci`分支提交为`2854fcc901cd0b895c681d53c56a5221cbbf3f2e`并推送，精确提交的CI与六平台Matrix已通过，尚未合并或发布。第21–25节区分已验收S5基线和S6在途结果，旧审核章节仅为历史证据。**
 
 ## 1. 最终目标、权威设计和边界
 
@@ -1117,3 +1117,44 @@ R4 冻结 479 个编译输入（`ac772bb32a1ac0f664f1ad1d9ac05f90ba531dbb32fc0ab
 R5的480/fe5与975/3a是**测试时历史epoch**。本地S6已开始修改源码，当前工作区不再冒称同一冻结输入；本次三个development文档同步也改变仓库inputs。新的实际membership/count/digest由收口记录另采；R5测试制品与独立CI快照保持其原source lineage，不能用在途S6代码冒充S5已测源码。远端仍使用旧epoch的独立fixture任务不由本次本地文档更新同步或改写。
 
 **全Phase未完成**：S6实施中，S7–S8未实施；全算法混合与九组corpus、最终同机Before/After和10M/100M综合G03、1/4/8readers＋writer各30分钟共90分钟、独立Search tiers、最终跨平台CI及A22-G01–G06仍需后续完成。这里通过的Stage NR/规模子集不能替代全局验收。冻结Cypher Profile分母不变；提交、推送、分支CI、合并和发布按实际执行另记，不从本节局部PASS推导。
+
+<a id="stage-s22-6-implementation"></a>
+
+## 25. S22.6 实施记录（局部验收未完成）
+
+### 25.1 已提交的S5基线与在途S6分离
+
+2026-11-12，独立`codex/phase22-query-optimizer-ci`分支已提交并推送[`2854fcc901cd0b895c681d53c56a5221cbbf3f2e`](https://github.com/bYiyLi/Lithograph/commit/2854fcc901cd0b895c681d53c56a5221cbbf3f2e)。它来自已验收R5源码快照及三份development文档，不包含主工作区在途S6实现；编译源码仍为480/`fe5e02dc…`。原975/`3a324cbd…`仅是先前测试epoch，不能称包含后续文档或S6变更的当前inputs。
+
+- [CI 43185249151](https://github.com/bYiyLi/Lithograph/actions/runs/43185249151)实际`completed/success`，Windows、macOS/Linux canonical、quality四个job全部成功；最后Linux canonical于2026-11-12 09:14:20 UTC完成。
+- [Release Matrix 43185249033](https://github.com/bYiyLi/Lithograph/actions/runs/43185249033)实际`completed/success`：storage fixture及macOS/Linux/Windows各x64/arm64六个平台job成功，最后macOS x64于09:02:56 UTC完成。`publish-release`按分支条件skipped，没有发行；构建及运行验收结果不扩张为S6通过。
+
+主工作区S6继续边开发边定向验证，未提交、未合入上述快照；远端保留的独立R5 fixture任务继续使用原epoch，不因本地S6修改被同步覆盖。S7/S8仅可继续只读准备，尚未启用实现。
+
+### 25.2 首轮定向结果与未闭环项
+
+以下是S6实施中的一次受控验证快照，不是Stage完成，也不覆盖S6完整质量、SQL/资源、四档压力及跨算法验收。测试目标为`phase22_sip`、`phase22_topk`、`phase22_dynamic_filter`；在途输入清单保存于`target/phase22-current/s6-active-01/`，不拿该清单本身替代测试结果。
+
+| 路径 | 本轮实际状态 | 尚未证明或需继续处理 |
+| --- | --- | --- |
+| SIP | 定向10/10通过 | 只对应当前定向范围，尚未完成S6整体资源/性能与跨路径Gate |
+| TopK | 定向14/14通过 | 不外推所有排序、Search或分页场景，也不代替真实四档工作量验收 |
+| Dynamic Filter公开集成 | 9项中5通过、4失败；4项实际CBO仍选择INL | 保留原红；未取得这些case的目标DF生产路径，不把结果正确或INL名称当DF命中，也不为强选DF放宽成本/Oracle |
+| 私有DF consumer | resident路径用例通过 | Grace路径尚无终态；late-quota的资源断言未闭环，均保持待验证，不能据resident成功标记整个consumer完成 |
+
+后续继续按实际失败完成最小修复与受影响验证，保留廉价INL和安全fallback；不修改冻结Cypher Profile分母、不清除原红或减少资源/功能合同。S22.6保持实施中，S22.7–S22.8未实施，Phase22及最终G01–G06仍未完成；不因S5分支CI成功提前跳过后续Stage。
+
+### 25.3 当前定向闭环与增量 CI 准备
+
+本节续记第25.2节后的实际进展，首轮及中间失败raw继续保留，不改写为首次即通过。S6仍为`in_progress`，以下结果不覆盖尚未完成的四档性能/压力、完整quality/CI或最终全Phase验收。
+
+| 路径 | 已取得的实际结果 | 当前边界 |
+| --- | --- | --- |
+| SIP | 11/11通过，包含rows计数由6修正为3的单行修复 | 不把旧计数错误或首轮10/10报告覆盖；只记录该次真实复验 |
+| TopK | 14/14集成、3项private、5项storage、4项encoder通过 | 各组范围分别记载，不合并成所有排序/Search均已通过 |
+| 真实SQL入口 | scalar与rows smoke均通过 | smoke不是完整分布采样、四档压力或S6 Stage Gate |
+| Dynamic Filter公开集成 | 8个未改用例通过，正常CBO的64-row resident场景真实执行DF，first-page计数为1；修正后的低预算用例也已独立复验通过 | 1024-row/hard512KiB实际选择INL，完整1024行bag与341/342/341重数保持；原“必须DF”的错误成本期待及失败raw保留，尚未将分轮结果写成一次完整9/9运行 |
+| DF相关units | `dynamic_filter`过滤的15项通过，包含长定义预算、derived missing、collector、late quota和严格Memory/Grace consumer | 内部强制512KiB Grace仍要求真实DF/spill与完整bag；它与正常CBO选择分开，不要求所有合法查询均选DF |
+| Codec与Hash估算 | codec layout 2项、Hash工作量模型4项、Hash估算13项通过 | 逻辑编码流量与内存scratch分开，保留原预算headroom；输入清单为`target/phase22-current/s6-active-01/inputs-final-unit-test-only-04.json`，实际结果为`target/phase22-current/s6-final-units-04/`对应远端记录 |
+
+当前原生Release已实际构建exit0；这是构建结果，不是S6性能、资源与全CI的替代。继续完成SIP/DF/TopK四档测量和全部局部acceptance，增量源码通过已授权CI分支验证；Profile分母、原资源预算、完整bag及失败/回滚边界保持。S6与整个Phase仍未完成，合并、发布和部署不属于本次交付。

@@ -456,7 +456,9 @@ indexesRemoved
 
 `profile.operators` 与该 execution 的 Physical Plan 使用相同 operator 顺序和 zero-based `id`；`operator` 是 Lithograph Physical Operator 的稳定类别名，`rows` 是该 operator runtime boundary 实际产出的 row 数，`dbHits` 是归属于该 boundary 的底层 graph/index access 数。Planner-only annotation 不伪造 runtime count；如果一个 plan operator 被 executor 融合且没有独立可观察的 storage access，则其 `dbHits` 可以为 `0`，不能通过平均分摊或估算制造计数。所有 operator `dbHits` 之和必须等于 `summary.metrics.dbHits`。普通 execution 和 `EXPLAIN` 省略 `summary.profile`；`EXPLAIN` 不执行 graph/storage operator，因此除计划输出自身的 row accounting 外不得伪造 storage hits。
 
-实际选择 `HashJoin` 的 PROFILE operator 额外包含 `hash` object；没有进入 Hash 计划的其它 operator 和 fallback 省略该字段。选中 Hash 但 outer 为零行时仍有 `hash` object，其所有未发生计数为 `0`。该 object 只有以下固定计量，不包含 Join key、属性值、参数或原始 query：
+实际应用已完成有限 NodeId 集合的访问 boundary 可额外包含 `semiMask:{keys,seeks}`。`keys` 是该 execution 在此 boundary 每个成功发布的完整集合去重后候选数之和；`seeks` 是实际发起的逐 ID 点验次数，包含最终被 Snapshot、Label 或 Graph View 拒绝的候选。空完整集合可以为 `0/0`；只走原 matcher 的 fallback 省略 `semiMask`。原 `operator` 类别保留，因为同一 boundary 的不同 incoming row 可以分别应用 advice 或 fallback；不能仅据类别名断言全部读取为 seek。此注记不包含 ID 或属性值，不替代原 `rows`、`dbHits` 及其求和合同，也不作为跳过页数的估计。普通 execution 和 `EXPLAIN` 仍省略 `summary.profile`。
+
+实际选择 `HashJoin` 的 PROFILE operator 额外包含 `hash` object；没有进入 Hash 计划的其它 operator 和 fallback 省略该字段。选中 Hash 但 outer 为零行时仍有 `hash` object，其所有未发生计数为 `0`。该 object 的基础计量如下，不包含 Join key、属性值、参数或原始 query：
 
 | 字段 | 含义 |
 | --- | --- |
@@ -468,6 +470,21 @@ indexesRemoved
 | `spillEncodedBytes` | 写入 spill 的 typed payload 编码字节累计量，不包含 SQLite page/B-tree 开销，不作为设备累计写入量 |
 | `memoryPeakBytes` | Hash 自身 retained state 的实际 reservation 高水位：table、buckets、typed keys、retained rows、probe 与分区目录；table 重分配期间 old/new 同时存活的 claims 都计入。不包含私有 SQLite pager，不等同于进程 RSS |
 | `tempAllocatedBytes` | 该 Hash 所拥有 TEMP store 的已分配页字节峰值，包含 SQLite page 开销；不是累计设备写入量 |
+
+完整 typed KeySet 已实际构造并发布给 Probe continuation 时，`hash` 可另含 `dynamicFilter` object；未完成、发布前已放弃的 collector 或从未安装过滤器的路径省略它。字段只记录实际工作，不包含键或属性值，也不提供估计的 skip 行数或页数：
+
+| 字段 | 含义 |
+| --- | --- |
+| `applied` | 只有 keyed tail 已完整取得并接管未读 Probe 输入时为 `true`；尚未接管或 late budget fallback 继续原扫描时为 `false`，已发布的计数仍保留 |
+| `buildRows` | 发布该完整 KeySet 前实际消费的 Build 输入行数；NULL 不进入集合，仍包含在输入计数中 |
+| `distinctKeys` | 实际完整 KeySet 的不同非 NULL 键数，不是统计 NDV 或 Build 行数 |
+| `collectorProbes` | 构造 KeySet 实际进行的 bucket 探测次数，包含重复键检查与扩容重排，不是图访问次数 |
+| `keysetPeakBytes` | collector 的 key/bucket heap reservation 高水位，包含扩容时 old/new 同时存活的 claims；不是整个 Hash、execution 或进程 RSS 峰值 |
+| `prefixRowsRead` | 接管前已物理读入原 Probe 页的 owner 数，不是 Join 输出行数 |
+| `equalitySeeks` | 已完成的 keyed equality page 读取次数，包含零命中以及键仅命中已读 prefix 的情况 |
+| `tailOwners` | keyed union 去重后交给原 Node 校验的未读 owner 数；最终 residual 和 Build multiplicity 仍决定结果行数 |
+
+collector 由 Hash build owner 持有期间，其同时存活 claims 包含在 `hash.memoryPeakBytes`；转交 Probe continuation 后的 tail buffer、Index binding 和读取工作区继续使用共同 `QueryResources`，包含在整个 execution 的峰值中。`keysetPeakBytes` 是组件计量，不能与其它不同时刻的峰值相加来构造 Hash 或 execution 总峰值。
 
 有实际选中的 Hash operator 时，`summary.profile` 另有 `executionMemoryPeakBytes` 和 `processPeakRssBytes`。前者在 Core terminal-ready 时只冻结一次，是整个 execution 共同 `QueryResources` 的实际同时存活 reservation 峰值，包含 codec/decode/输出等工作区；不能通过相加各组件在不同时刻出现的历史峰值构造，也不包含 SQLite pager 或未被 Engine ledger 计账的宿主内存。Hash 的输入 graph/index access 仍归原 producer boundary；Hash CPU、collision、TEMP read/write 与 VM 计量不重复计入 `dbHits`，不改变其求和合同。
 

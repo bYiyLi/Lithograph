@@ -53,6 +53,7 @@ fn hash_profile_replaces_cumulative_snapshots_at_only_the_selected_slot() {
         spill_encoded_bytes: 11,
         memory_peak_bytes: 13,
         temp_allocated_bytes: 17,
+        dynamic_filter: None,
     };
     metrics.set_hash_profile(Some(1), first);
     let next = HashJoinRuntimeMetrics {

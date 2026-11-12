@@ -17,6 +17,7 @@ use crate::query::plan::PlanningBudget;
 mod controlled;
 mod distribution;
 mod statistics;
+mod topk;
 use crate::query::resources::{
     ExecutionControl, MemoryReservation, checked_add, checked_mul, map_entry_bytes,
 };
@@ -26,6 +27,8 @@ pub(crate) use controlled::{
 pub(super) use controlled::{definition_workspace, equality_key};
 pub(crate) use distribution::{IndexDistribution, estimate_index_distribution};
 pub(crate) use statistics::estimate_index_access;
+pub(crate) use topk::{OrderedNumericIndexRead, try_bind_topk_numeric_index};
+pub(super) use topk::{numeric_topk_seek, validate_topk_numeric_binding};
 
 #[cfg(not(test))]
 const GENERATION_COPY_PAGE_SIZE: i64 = 4_096;
@@ -907,6 +910,12 @@ const CACHE_TABLES_SQL: &str = "CREATE TEMP TABLE IF NOT EXISTS _lithograph_stan
              snapshot_hash BLOB NOT NULL, index_name TEXT NOT NULL, owner_kind INTEGER NOT NULL, owner_id INTEGER NOT NULL,\
              PRIMARY KEY(snapshot_hash, index_name, owner_kind, owner_id)) WITHOUT ROWID;";
 
+const CACHE_RANGE_INDEXES_SQL: &str = "CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_equality ON _lithograph_standard_index_cache_local(snapshot_hash, index_name, owner_kind, property_ordinal, equality_blob, owner_id);\
+     CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_range_number ON _lithograph_standard_index_cache_local(snapshot_hash, index_name, owner_kind, property_ordinal, sort_family, sort_number, owner_id);\
+     CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_range_text ON _lithograph_standard_index_cache_local(snapshot_hash, index_name, owner_kind, property_ordinal, sort_family, sort_text, owner_id);\
+     CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_range_tuple \
+     ON _lithograph_standard_index_cache_local(snapshot_hash, index_name, owner_kind, property_ordinal, sort_family, sort_a, sort_b, sort_c, sort_text, owner_id);";
+
 /// Compile the actual optional TEMP DDL without stepping it. A host authorizer
 /// can deny TEMP writes even when query_only is off. Only AUTH from these fixed
 /// initialization statements means unavailable advice; all other errors remain
@@ -1009,13 +1018,7 @@ fn ensure_cache_indexes(connection: &Connection, kind: StandardIndexKind) -> Que
             "CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_token \
              ON _lithograph_standard_index_cache_local(snapshot_hash, index_name, owner_kind, token_id, owner_id);"
         }
-        StandardIndexKind::Range => {
-            "CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_equality ON _lithograph_standard_index_cache_local(snapshot_hash, index_name, owner_kind, property_ordinal, equality_blob, owner_id);\
-             CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_range_number ON _lithograph_standard_index_cache_local(snapshot_hash, index_name, owner_kind, property_ordinal, sort_family, sort_number, owner_id);\
-             CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_range_text ON _lithograph_standard_index_cache_local(snapshot_hash, index_name, owner_kind, property_ordinal, sort_family, sort_text, owner_id);\
-             CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_range_tuple \
-             ON _lithograph_standard_index_cache_local(snapshot_hash, index_name, owner_kind, property_ordinal, sort_family, sort_a, sort_b, sort_c, sort_text, owner_id);"
-        }
+        StandardIndexKind::Range => CACHE_RANGE_INDEXES_SQL,
         StandardIndexKind::Text => {
             "CREATE INDEX IF NOT EXISTS temp._lithograph_standard_index_cache_equality \
              ON _lithograph_standard_index_cache_local(snapshot_hash, index_name, owner_kind, property_ordinal, equality_blob, owner_id);\

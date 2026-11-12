@@ -23,6 +23,15 @@ pub struct OperatorRuntimeMetrics {
     pub rows: u64,
     pub db_hits: u64,
     pub hash: Option<HashJoinRuntimeMetrics>,
+    pub semi_mask: Option<SemiMaskRuntimeMetrics>,
+}
+
+/// Actual finite-ID advisory work at the existing storage access boundary.
+/// The static access name remains valid when another input row falls back.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SemiMaskRuntimeMetrics {
+    pub keys: u64,
+    pub seeks: u64,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -71,6 +80,7 @@ impl QueryMetrics {
                 rows: 0,
                 db_hits: 0,
                 hash: (operator.profile_name() == "HashJoin").then(HashJoinRuntimeMetrics::default),
+                semi_mask: None,
             });
             if operator.is_storage_access() {
                 access_operators.push(id);
@@ -200,16 +210,52 @@ impl QueryMetrics {
             .map(|profile| profile.operators.as_slice())
     }
 
+    pub(crate) fn record_semi_mask(&mut self, keys: u64, seeks: u64) {
+        if let Some(operator) = self.profile.as_mut().and_then(|profile| {
+            profile
+                .active_operator
+                .and_then(|slot| profile.operators.get_mut(slot))
+        }) {
+            let stats = operator
+                .semi_mask
+                .get_or_insert_with(SemiMaskRuntimeMetrics::default);
+            stats.keys = stats.keys.saturating_add(keys);
+            stats.seeks = stats.seeks.saturating_add(seeks);
+        }
+    }
+
     /// Replace the cumulative snapshot at the exact selected Hash Join site.
     /// A missing or non-Hash site remains unchanged, including fallback plans.
-    pub(crate) fn set_hash_profile(&mut self, slot: Option<usize>, stats: HashJoinRuntimeMetrics) {
+    pub(crate) fn set_hash_profile(
+        &mut self,
+        slot: Option<usize>,
+        mut stats: HashJoinRuntimeMetrics,
+    ) {
         if let Some(operator) = self
             .profile
             .as_mut()
             .and_then(|profile| slot.and_then(|slot| profile.operators.get_mut(slot)))
             .filter(|operator| operator.hash.is_some())
         {
+            if stats.dynamic_filter.is_none() {
+                stats.dynamic_filter = operator.hash.and_then(|previous| previous.dynamic_filter);
+            }
             operator.hash = Some(stats);
+        }
+    }
+
+    pub(crate) fn set_dynamic_filter_profile(
+        &mut self,
+        slot: Option<usize>,
+        stats: super::hash_metrics::JoinDynamicFilterRuntimeMetrics,
+    ) {
+        if let Some(hash) = self
+            .profile
+            .as_mut()
+            .and_then(|profile| slot.and_then(|slot| profile.operators.get_mut(slot)))
+            .and_then(|operator| operator.hash.as_mut())
+        {
+            hash.dynamic_filter = Some(stats);
         }
     }
 
@@ -479,6 +525,7 @@ fn clone_profile(profile: &QueryProfileState) -> QueryProfileState {
             rows: operator.rows,
             db_hits: operator.db_hits,
             hash: operator.hash,
+            semi_mask: operator.semi_mask,
         });
     }
     let mut access_operators = Vec::with_capacity(profile.access_operators.len());

@@ -18,6 +18,7 @@ use super::{QueryError, QueryErrorKind, QueryResult};
 mod codec;
 mod grace;
 pub(super) use codec::distinct_row_key;
+pub(in crate::query) use codec::identity_binding_encoded_upper;
 use codec::{decode_binding_row, decode_row, encode_binding_row, encode_row};
 pub(super) use grace::{
     FANOUT as GRACE_PARTITION_FANOUT, GraceCounters, GracePartitions, HashSide,

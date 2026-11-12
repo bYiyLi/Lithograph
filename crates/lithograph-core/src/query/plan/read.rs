@@ -69,7 +69,7 @@ pub(super) fn prepare_read_query(
         aggregate,
     );
     let physical = build_physical(&logical, &matches, !order.is_empty());
-    Ok(PreparedQuery {
+    let mut prepared = PreparedQuery {
         resources: crate::query::QueryResources::default(),
         metrics: crate::query::stream::QueryMetrics::default(),
         params_memory: Some(index_memory),
@@ -82,6 +82,7 @@ pub(super) fn prepare_read_query(
         profile_sites,
         projections,
         order,
+        ordered_topk: None,
         skip,
         limit,
         distinct,
@@ -95,5 +96,7 @@ pub(super) fn prepare_read_query(
         physical,
         statistics,
         columns,
-    })
+    };
+    crate::query::stream::topk::install(&mut prepared, &snapshot, single, &mut budget, control)?;
+    Ok(prepared)
 }

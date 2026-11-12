@@ -7,7 +7,9 @@ mod output;
 use super::profile::MatchProfileSlots;
 use crate::query::plan::ProfileRole;
 use cursor::MatchFrame;
-pub(crate) use hash::{HashLayoutFacts, hash_layout, hash_resident_target, hash_table_peak_bytes};
+#[cfg(test)]
+pub(crate) use hash::hash_resident_target;
+pub(crate) use hash::{HashLayoutFacts, hash_layout, hash_table_peak_bytes};
 pub(crate) use join::MatchReadBindings;
 
 #[derive(Debug)]
@@ -19,6 +21,7 @@ pub(super) struct MatchPipeline {
     read_bindings: Vec<MatchReadBindings>,
     read_memory: Option<MemoryReservation>,
     fallback_read_bindings: MatchReadBindings,
+    ordered_numeric: Option<crate::query::schema::OrderedNumericIndexRead>,
 }
 
 impl MatchPipeline {
@@ -62,7 +65,15 @@ impl MatchPipeline {
             read_bindings: Vec::new(),
             read_memory: None,
             fallback_read_bindings: MatchReadBindings::default(),
+            ordered_numeric: None,
         }
+    }
+
+    pub(super) fn require_ordered_numeric(
+        &mut self,
+        proof: crate::query::schema::OrderedNumericIndexRead,
+    ) {
+        self.ordered_numeric = Some(proof);
     }
 
     pub(super) fn next_row(
@@ -81,11 +92,9 @@ impl MatchPipeline {
             return Ok(Some(BindingRow::default()));
         }
         if !self.initialized {
-            self.stack.push(StepCursor::new(
-                &self.steps[0],
-                BindingRow::default(),
-                control,
-            )?);
+            let mut cursor = StepCursor::new(&self.steps[0], BindingRow::default(), control)?;
+            cursor.ordered_numeric = self.ordered_numeric;
+            self.stack.push(cursor);
             self.initialized = true;
         }
         loop {
@@ -133,6 +142,8 @@ pub(crate) struct StepCursor {
     _memory: MemoryReservation,
     output_memory: Option<MemoryReservation>,
     _seek_memory: MemoryReservation,
+    node_ids: Option<(Vec<i64>, MemoryReservation)>,
+    ordered_numeric: Option<crate::query::schema::OrderedNumericIndexRead>,
 }
 
 impl StepCursor {
@@ -160,7 +171,31 @@ impl StepCursor {
             _memory: memory,
             output_memory: None,
             _seek_memory: seek_memory,
+            node_ids: None,
+            ordered_numeric: None,
         })
+    }
+
+    pub(crate) fn with_node_ids(
+        step: &MatchStep,
+        base: BindingRow,
+        candidates: (Vec<i64>, MemoryReservation),
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<Self> {
+        if step.optional
+            || step.join.is_some()
+            || step.parts.len() != 1
+            || step.parts[0].relationship.is_some()
+            || step.parts[0].end.is_some()
+            || step.parts[0].path_variable.is_some()
+        {
+            return Err(QueryError::internal(
+                "finite node access requires one plain MATCH part",
+            ));
+        }
+        let mut cursor = Self::new(step, base, control)?;
+        cursor.node_ids = Some(candidates);
+        Ok(cursor)
     }
 
     fn initialize(
@@ -173,8 +208,15 @@ impl StepCursor {
     ) -> QueryResult<()> {
         if !self.initialized {
             if !self.step.parts.is_empty() {
-                let frame =
+                let mut frame =
                     self.frame(0, &self.base, (snapshot, view), metrics, bindings, control)?;
+                frame.ordered_numeric = self.ordered_numeric;
+                if let Some((ids, memory)) = self.node_ids.take() {
+                    frame.start_buffer = ids;
+                    frame.start_done = true;
+                    frame.finite_starts = true;
+                    frame._finite_memory = Some(memory);
+                }
                 self.stack.push(MatchFrame::part(frame)?);
             }
             self.initialized = true;
@@ -306,11 +348,16 @@ struct PartCursor {
     part: PatternPart,
     base: BindingRow,
     start_after: i64,
+    initial_page_limit: usize,
     start_index_cursor: Option<crate::query::schema::StandardIndexCursor>,
     start_buffer: Vec<i64>,
     start_known_label: Option<LabelId>,
     start_index: usize,
     start_done: bool,
+    finite_starts: bool,
+    _finite_memory: Option<MemoryReservation>,
+    dynamic_filter: Option<hash::dynamic_filter::ProbeFilter>,
+    ordered_numeric: Option<crate::query::schema::OrderedNumericIndexRead>,
     current_start: Option<i64>,
     relationships: Vec<RelationshipRecord>,
     relationship_index: usize,
@@ -350,11 +397,16 @@ impl PartCursor {
             part: part.clone(),
             base: base.clone(),
             start_after: 0,
+            initial_page_limit: PIPELINE_BATCH,
             start_index_cursor: None,
             start_buffer: Vec::new(),
             start_known_label: None,
             start_index: 0,
             start_done: false,
+            finite_starts: false,
+            _finite_memory: None,
+            dynamic_filter: None,
+            ordered_numeric: None,
             current_start: None,
             relationships: Vec::new(),
             relationship_index: 0,
@@ -793,6 +845,9 @@ impl PartCursor {
         bindings: &MatchReadBindings,
         control: &ExecutionControl<'_>,
     ) -> QueryResult<Option<i64>> {
+        if self.finite_starts {
+            return self.next_finite_start(snapshot, graph_view, metrics, control);
+        }
         if self.part.start.id_seek.is_some() {
             return self.next_id_start(snapshot, graph_view, metrics, control);
         }
@@ -829,6 +884,21 @@ impl PartCursor {
         bindings: &MatchReadBindings,
         control: &ExecutionControl<'_>,
     ) -> QueryResult<()> {
+        if self.load_dynamic_filter_page(snapshot, metrics, control)? {
+            return Ok(());
+        }
+        if self.ordered_numeric.is_some()
+            && !self
+                .part
+                .start
+                .index_seek
+                .as_ref()
+                .is_some_and(|seek| seek.kind == crate::storage::StandardIndexKind::Range)
+        {
+            return Err(QueryError::internal(
+                "ordered numeric access lost its Range seek",
+            ));
+        }
         if let Some(seek) = &self.part.start.index_seek
             && seek.kind != crate::storage::StandardIndexKind::Lookup
         {
@@ -837,20 +907,31 @@ impl PartCursor {
             } else {
                 self.part.start.scan_label
             };
-            let page = match self.scan_bound_page(
-                snapshot,
-                bindings,
-                self.start_index_cursor.as_ref(),
-                control,
-            )? {
-                Some(page) => page,
-                None => crate::query::schema::scan_node_index_page(
+            let page = if let Some(proof) = &self.ordered_numeric {
+                crate::query::schema::scan_topk_numeric_page(
                     snapshot,
+                    proof,
                     seek,
                     self.start_index_cursor.as_ref(),
                     PIPELINE_BATCH,
                     control,
-                )?,
+                )?
+            } else {
+                match self.scan_bound_page(
+                    snapshot,
+                    bindings,
+                    self.start_index_cursor.as_ref(),
+                    control,
+                )? {
+                    Some(page) => page,
+                    None => crate::query::schema::scan_node_index_page(
+                        snapshot,
+                        seek,
+                        self.start_index_cursor.as_ref(),
+                        PIPELINE_BATCH,
+                        control,
+                    )?,
+                }
             };
             metrics.record_db_hits(page.items.len() as u64);
             self.start_buffer = page.items;
@@ -858,11 +939,12 @@ impl PartCursor {
             self.start_index_cursor = page.next_cursor;
             self.start_done = self.start_index_cursor.is_none();
         } else {
+            let page_limit = std::mem::replace(&mut self.initial_page_limit, PIPELINE_BATCH);
             let (page, known_label) = graph_view.scan_nodes_after(
                 snapshot,
                 self.part.start.scan_label,
                 self.start_after,
-                PIPELINE_BATCH,
+                page_limit,
                 control,
             )?;
             self.start_known_label = known_label;
@@ -876,6 +958,25 @@ impl PartCursor {
             }
         }
         Ok(())
+    }
+
+    fn next_finite_start(
+        &mut self,
+        snapshot: &Snapshot<'_>,
+        graph_view: &ResolvedGraphView,
+        metrics: &mut QueryMetrics,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<Option<i64>> {
+        while let Some(&id) = self.start_buffer.get(self.start_index) {
+            control.work(1)?;
+            self.start_index += 1;
+            metrics.record_db_hits(1);
+            metrics.record_semi_mask(0, 1);
+            if node_matches(snapshot, graph_view, &self.part.start, id, metrics, control)? {
+                return Ok(Some(id));
+            }
+        }
+        Ok(None)
     }
 
     fn next_id_start(

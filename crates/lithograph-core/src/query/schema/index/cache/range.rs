@@ -111,20 +111,51 @@ pub(super) fn scan_persistent_numeric_range_page(
         limit,
         bounds,
     };
+    read_numeric_range_page(snapshot, &spec).map(Some)
+}
 
+pub(super) fn scan_required_persistent_numeric_range_page(
+    snapshot: &Snapshot<'_>,
+    index_name: &str,
+    generation_id: i64,
+    cursor: Option<&StandardIndexCursor>,
+    limit: usize,
+    bounds: &NumericRangeBounds,
+) -> QueryResult<StandardIndexPage> {
+    if bound_generation_id(snapshot, index_name)? != Some(generation_id) {
+        return Err(QueryError::internal(
+            "required numeric Range generation binding was lost",
+        ));
+    }
+    let spec = NumericRangePageSpec {
+        index_name,
+        generation_id,
+        owner_kind: super::NODE_OWNER_KIND,
+        ordinal: 0,
+        cursor: numeric_range_cursor(cursor, generation_id)?,
+        limit,
+        bounds,
+    };
+    read_numeric_range_page(snapshot, &spec)
+}
+
+fn read_numeric_range_page(
+    snapshot: &Snapshot<'_>,
+    spec: &NumericRangePageSpec<'_>,
+) -> QueryResult<StandardIndexPage> {
     #[cfg(feature = "test-support")]
     let started = std::time::Instant::now();
-    let (sql, parameters) = numeric_range_page_query(snapshot, &spec);
+    let (sql, parameters) = numeric_range_page_query(snapshot, spec);
     let mut statement = snapshot.connection_for_query().prepare(&sql)?;
     let rows = statement.query_map(rusqlite::params_from_iter(parameters), |row| {
         Ok((row.get::<_, SqlValue>(0)?, row.get::<_, i64>(1)?))
     })?;
     let keyed = rows.collect::<Result<Vec<_>, _>>()?;
-    let next_cursor = numeric_range_next_cursor(generation_id, &keyed, limit);
+    let next_cursor = numeric_range_next_cursor(spec.generation_id, &keyed, spec.limit);
     let items = keyed.into_iter().map(|(_, owner_id)| owner_id).collect();
     #[cfg(feature = "test-support")]
     crate::performance::record_standard_index_scan(started.elapsed().as_micros());
-    Ok(Some(StandardIndexPage { items, next_cursor }))
+    Ok(StandardIndexPage { items, next_cursor })
 }
 
 struct NumericRangePageSpec<'a> {

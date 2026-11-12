@@ -6,6 +6,7 @@ fn hash_operator() -> query::OperatorRuntimeMetrics {
         operator: "HashJoin".to_owned(),
         rows: 17,
         db_hits: 0,
+        semi_mask: None,
         hash: Some(query::HashJoinRuntimeMetrics {
             build_rows: 1,
             probe_rows: 2,
@@ -16,8 +17,28 @@ fn hash_operator() -> query::OperatorRuntimeMetrics {
             spill_encoded_bytes: 7,
             memory_peak_bytes: 8,
             temp_allocated_bytes: 9,
+            dynamic_filter: None,
         }),
     }
+}
+
+#[test]
+fn finite_id_advice_is_an_actual_optional_annotation_on_the_shared_encoder() {
+    let mut operator = hash_operator();
+    operator.hash = None;
+    operator.operator = "LabelIndexScan".to_owned();
+    let fallback_bytes = operator_profile_metadata_bytes(&operator).unwrap();
+    assert!(operator_profile_json(&operator).get("semiMask").is_none());
+    operator.semi_mask = Some(query::SemiMaskRuntimeMetrics { keys: 3, seeks: 2 });
+    assert_eq!(
+        operator_profile_json(&operator),
+        json!({"id": 3, "operator": "LabelIndexScan", "rows": 17, "dbHits": 0,
+               "semiMask": {"keys": 3, "seeks": 2}})
+    );
+    let entries = query::resources::map_entry_bytes::<Value>().unwrap() * 3;
+    assert!(operator_profile_metadata_bytes(&operator).unwrap() >= fallback_bytes + entries);
+    operator.semi_mask = None;
+    assert!(operator_profile_json(&operator).get("semiMask").is_none());
 }
 
 #[test]
@@ -48,6 +69,35 @@ fn one_operator_encoder_exposes_exact_fixed_hash_keys_and_omits_fallback() {
 }
 
 #[test]
+fn dynamic_filter_metadata_contains_only_actual_fixed_work_counters() {
+    let mut operator = hash_operator();
+    let hash = operator.hash.as_mut().unwrap();
+    hash.dynamic_filter = Some(Default::default());
+    let filter = hash.dynamic_filter.as_mut().unwrap();
+    filter.applied = true;
+    filter.build_rows = 1024;
+    filter.distinct_keys = 3;
+    filter.collector_probes = 1030;
+    filter.keyset_peak_bytes = 512;
+    filter.prefix_rows_read = 256;
+    filter.equality_seeks = 3;
+    filter.tail_owners = 2;
+    let value = operator_profile_json(&operator);
+    assert_eq!(
+        value["hash"]["dynamicFilter"],
+        json!({
+            "applied": true, "buildRows": 1024, "distinctKeys": 3,
+            "collectorProbes": 1030, "keysetPeakBytes": 512,
+            "prefixRowsRead": 256, "equalitySeeks": 3, "tailOwners": 2,
+        })
+    );
+    assert!(
+        operator_profile_metadata_bytes(&operator).unwrap()
+            >= query::resources::json_bytes(&value).unwrap()
+    );
+}
+
+#[test]
 fn hash_json_metadata_is_reserved_before_building_many_operator_objects() {
     let operators = (0..128)
         .map(|id| {
@@ -63,6 +113,7 @@ fn hash_json_metadata_is_reserved_before_building_many_operator_objects() {
                 spill_encoded_bytes: u64::MAX,
                 memory_peak_bytes: u64::MAX,
                 temp_allocated_bytes: u64::MAX,
+                dynamic_filter: None,
             });
             operator
         })

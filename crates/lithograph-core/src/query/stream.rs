@@ -25,16 +25,17 @@ mod program_cursor;
 mod project;
 #[cfg(test)]
 mod resources_tests;
+pub(crate) mod topk;
 mod transaction;
 mod write;
-pub use hash_metrics::HashJoinRuntimeMetrics;
+pub use hash_metrics::{HashJoinRuntimeMetrics, JoinDynamicFilterRuntimeMetrics};
 use match_pipeline::MatchPipeline;
-pub(crate) use match_pipeline::{
-    HashLayoutFacts, hash_layout, hash_resident_target, hash_table_peak_bytes,
-};
+#[cfg(test)]
+pub(crate) use match_pipeline::hash_resident_target;
+pub(crate) use match_pipeline::{HashLayoutFacts, hash_layout, hash_table_peak_bytes};
 pub(crate) use match_pipeline::{MatchReadBindings, StepCursor, spill_match_step};
 use node_match::{node_matches, node_matches_scanned};
-pub use profile::{OperatorRuntimeMetrics, QueryMetrics};
+pub use profile::{OperatorRuntimeMetrics, QueryMetrics, SemiMaskRuntimeMetrics};
 use project::{order_values, project_row};
 
 const PIPELINE_BATCH: usize = 256;
@@ -154,6 +155,7 @@ pub struct QueryCursor {
     suppress_summary_commit: bool,
     skipped: usize,
     emitted: usize,
+    ordered_topk_slot: Option<usize>,
     explain_emitted: bool,
     aggregate_state: Option<Vec<u64>>,
     batch_memory: Option<MemoryReservation>,
@@ -226,7 +228,15 @@ fn prepared_snapshot<'connection>(
 impl QueryCursor {
     pub fn new(mut prepared: PreparedQuery) -> Self {
         let transaction_boundary = prepared.requires_transaction_boundary();
-        let barrier = if prepared.order.is_empty() && !prepared.distinct {
+        let ordered_topk = prepared.ordered_topk.take();
+        let ordered_topk_slot =
+            ordered_topk.as_ref().and_then(|_| {
+                prepared.physical.operators.iter().position(|operator| {
+                    matches!(operator, super::plan::PhysicalOperator::OrderedTopK)
+                })
+            });
+        let barrier = if ordered_topk.is_some() || (prepared.order.is_empty() && !prepared.distinct)
+        {
             BarrierState::Direct
         } else {
             BarrierState::Pending
@@ -246,8 +256,12 @@ impl QueryCursor {
         };
         let statement_time = Utc::now();
         let metrics = std::mem::take(&mut prepared.metrics);
+        let mut pipeline = MatchPipeline::new(std::mem::take(&mut prepared.matches));
+        if let Some(proof) = ordered_topk {
+            pipeline.require_ordered_numeric(proof);
+        }
         Self {
-            pipeline: MatchPipeline::new(std::mem::take(&mut prepared.matches)),
+            pipeline,
             prepared,
             metrics,
             started: Instant::now(),
@@ -256,6 +270,7 @@ impl QueryCursor {
             suppress_summary_commit: false,
             skipped: 0,
             emitted: 0,
+            ordered_topk_slot,
             explain_emitted: false,
             aggregate_state: None,
             batch_memory: None,
@@ -470,6 +485,7 @@ impl QueryCursor {
                 return self.finish(rows);
             };
             self.metrics.record_pipeline_rows(1);
+            self.metrics.record_profile_rows(self.ordered_topk_slot, 1);
             if self.skipped < self.prepared.skip {
                 self.skipped += 1;
                 continue;

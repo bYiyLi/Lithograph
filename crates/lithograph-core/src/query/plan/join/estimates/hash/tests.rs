@@ -10,7 +10,8 @@ fn inputs(rows: u64, string: bool) -> HashInputs {
         bucket_bytes: 8,
         binding_bytes: 256,
         key_heap_bytes: (!string).then_some(0),
-        encoded_row_bytes: 2048,
+        encoded_row_bytes: Some(2048),
+        encoding_scratch_bytes: 2048,
         headroom_bytes: 8192,
         soft_cap: 1024 * 1024,
     };
@@ -27,18 +28,20 @@ fn inputs(rows: u64, string: bool) -> HashInputs {
                 peak: (!string).then_some(rows.saturating_mul(600)),
                 key_property: true,
             },
-            target: layout.soft_cap,
-            quota: false,
+            available: None,
             probe_property: true,
         }],
         ids: vec![Vec::new(), vec![0]],
         dependencies: vec![1, 2],
-        encoded: vec![2048, 2048],
+        encoded: vec![Some(2048), Some(2048)],
+        encoding_scratch: vec![2048, 2048],
         keys: vec![KeyScopes {
             left: vec![None; 2],
             right: vec![None; 2],
         }],
         incoming_unknown: false,
+        output_upper: None,
+        dynamic: Vec::new(),
     }
 }
 
@@ -131,8 +134,68 @@ fn default_soft_target_is_per_owner_but_quota_has_shared_headroom() {
         inputs.estimate(0, 1, outer).is_some(),
         "NoLimit is not a second quota"
     );
-    inputs.candidates[0].quota = true;
+    inputs.candidates[0].available = Some(1024 * 1024);
     assert!(inputs.estimate(0, 1, outer).is_none());
+}
+
+#[test]
+fn ample_hard_grant_keeps_the_soft_target_after_prefix_and_df_claims() {
+    let mut inputs = inputs(1500, false);
+    let candidate = &mut inputs.candidates[0];
+    let limit = 512 * 1024 * 1024;
+    candidate.available = Some(limit - candidate.build.layout.headroom_bytes);
+    let resources = crate::query::QueryResources::new(Some(limit));
+    let _prefix = resources.reserve(2048).unwrap();
+    let _filter = resources.reserve(163 * 1024).unwrap();
+    let runtime = crate::query::stream::hash_resident_target(
+        &resources,
+        0,
+        0,
+        candidate.build.layout.headroom_bytes,
+    );
+    assert_eq!(runtime, candidate.build.layout.soft_cap);
+    assert_eq!(candidate.resident_target(resources.used(), false), runtime);
+    let mut prefix = prefix(1000);
+    prefix.memory = 2048;
+    let original = inputs.estimate(0, 1, prefix).unwrap();
+    let filtered = inputs
+        .estimate_with_memory(0, 1, prefix, 163 * 1024)
+        .unwrap();
+    assert_eq!(original.temp.owner, 0);
+    assert_eq!(
+        filtered.temp.owner, 0,
+        "DF must not subtract from an already clamped soft cap"
+    );
+    assert_eq!(filtered.resident, original.resident);
+}
+
+#[test]
+fn tight_hard_grant_subtracts_the_same_real_claims_before_the_soft_cap() {
+    let mut inputs = inputs(1500, false);
+    let candidate = &mut inputs.candidates[0];
+    let limit = 512 * 1024;
+    candidate.available = Some(limit - candidate.build.layout.headroom_bytes);
+    let resources = crate::query::QueryResources::new(Some(limit));
+    let _prefix = resources.reserve(2048).unwrap();
+    let before = candidate.resident_target(resources.used(), false);
+    let _filter = resources.reserve(163 * 1024).unwrap();
+    let runtime = crate::query::stream::hash_resident_target(
+        &resources,
+        0,
+        0,
+        candidate.build.layout.headroom_bytes,
+    );
+    assert_eq!(candidate.resident_target(resources.used(), false), runtime);
+    assert_eq!(before - runtime, 163 * 1024);
+    let mut prefix = prefix(1000);
+    prefix.memory = 2048;
+    let original = inputs.estimate(0, 1, prefix).unwrap();
+    let filtered = inputs
+        .estimate_with_memory(0, 1, prefix, 163 * 1024)
+        .unwrap();
+    assert!(original.temp.owner > 0 && filtered.temp.owner > 0);
+    assert!(filtered.resident < original.resident);
+    assert!(original.resident <= limit && filtered.resident <= limit);
 }
 
 #[test]
@@ -144,6 +207,7 @@ fn observed_skew_and_real_routing_depth_are_retained() {
         ndistinct: expectation(900_001, 1_000_000),
         max_frequency: expectation(100_000, 1_000_000),
         max_observed_frequency: 32,
+        unique: false,
     };
     inputs.keys[0].right[1] = Some(advice);
     let (passes, hot) = routing(&inputs.candidates[0], Some(&advice), 1024 * 1024);
@@ -157,11 +221,34 @@ fn observed_skew_and_real_routing_depth_are_retained() {
 #[test]
 fn prefix_payload_uses_all_real_part_widths() {
     let mut inputs = inputs(10, true);
-    inputs.encoded.push(8192);
-    assert_eq!(inputs.prefix_bytes(0b101), 10_240);
-    assert_eq!(inputs.prefix_bytes(0b010), 2048);
+    inputs.encoded.push(Some(8192));
+    inputs.encoding_scratch.push(8192);
+    assert_eq!(inputs.prefix_bytes(0b101), Some(10_240));
+    assert_eq!(inputs.prefix_bytes(0b010), Some(2048));
+    assert_eq!(inputs.prefix_scratch(0b101), 10_240);
     let hash = inputs.estimate(0, 0b101, prefix(100)).unwrap();
     assert!(hash.temp.per_probe >= 20_480);
+}
+
+#[test]
+fn logical_traffic_and_serialization_scratch_are_independent_cost_facts() {
+    let mut inputs = inputs(10_000, false);
+    let wide = inputs.estimate(0, 1, prefix(1000)).unwrap();
+    inputs.encoded = vec![Some(64), Some(64)];
+    inputs.candidates[0].build.layout.encoded_row_bytes = Some(64);
+    let compact = inputs.estimate(0, 1, prefix(1000)).unwrap();
+    assert_eq!(inputs.prefix_scratch(1), 2048);
+    assert_eq!(
+        compact.resident, wide.resident,
+        "compact JSON does not release Rust scratch"
+    );
+    assert!(compact.temp.owner < wide.temp.owner);
+    assert!(compact.temp.per_probe < wide.temp.per_probe);
+    inputs.encoded[0] = None;
+    assert!(
+        inputs.estimate(0, 1, prefix(1000)).is_none(),
+        "unknown prefix payload rejects only Hash advice"
+    );
 }
 
 fn metadata() -> (MatchStep, JoinAnalysis, JoinEstimates) {

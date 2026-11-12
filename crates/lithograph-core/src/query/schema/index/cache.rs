@@ -183,6 +183,45 @@ pub(crate) fn scan_node_index_page(
     scan_property_index_page(snapshot, seek, NODE_OWNER_KIND, cursor, limit)
 }
 
+/// The TopK consumer has removed Sort only with this exact ordering proof.
+/// Never initialize/rebuild an Index or switch to an owner-ordered producer.
+pub(crate) fn scan_topk_numeric_page(
+    snapshot: &Snapshot<'_>,
+    proof: &super::persistent::OrderedNumericIndexRead,
+    seek: &StandardIndexSeek,
+    cursor: Option<&StandardIndexCursor>,
+    limit: usize,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<StandardIndexPage> {
+    let scan = IndexScan::new(snapshot, seek, control)?;
+    if !super::persistent::numeric_topk_seek(seek) || limit == 0 {
+        return Err(QueryError::internal("invalid required TopK numeric page"));
+    }
+    let index = snapshot
+        .query_schema_state()
+        .and_then(|s| s.indexes.get(&seek.index_name))
+        .ok_or_else(|| QueryError::internal("ordered TopK Index definition is absent"))?;
+    super::persistent::validate_topk_numeric_binding(snapshot, proof, index, control)?;
+    let StandardIndexPredicate::Bounds { lower, upper } = &seek.predicates[0].1 else {
+        return Err(QueryError::internal(
+            "required TopK numeric bounds are absent",
+        ));
+    };
+    let bounds = numeric_range_bounds(lower, upper)
+        .ok_or_else(|| QueryError::internal("required TopK numeric bounds changed"))?;
+    let page = range::scan_required_persistent_numeric_range_page(
+        snapshot,
+        &seek.index_name,
+        proof.generation_id(),
+        cursor,
+        limit,
+        &bounds,
+    )?;
+    prefetch_index_properties(&scan, index, NODE_OWNER_KIND, &page.items)?;
+    control.check()?;
+    Ok(page)
+}
+
 pub(crate) fn scan_relationship_index_page(
     snapshot: &Snapshot<'_>,
     seek: &StandardIndexSeek,

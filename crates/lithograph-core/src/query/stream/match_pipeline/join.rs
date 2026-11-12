@@ -135,6 +135,21 @@ impl StepCursor {
             let (ordinal, part) = crate::query::plan::join::execution_part(&self.step, depth);
             let mut cursor = PartCursor::new(&part, row, control)?;
             cursor.profile = metrics.match_profile_slots(plan.clause_start, ordinal);
+            if depth == 0
+                && plan.stages.get(1).is_some_and(|stage| {
+                    matches!(
+                        stage.access,
+                        StageAccess::Hash {
+                            dynamic_filter: Some(_),
+                            ..
+                        }
+                    )
+                })
+            {
+                // Only the first real outer binding is needed to start the
+                // lazy build. Advice refusal restores normal page sizes.
+                cursor.initial_page_limit = crate::query::plan::join::DYNAMIC_FILTER_INITIAL_PAGE;
+            }
             if let StageAccess::Probe(template) = plan.stages[depth].access {
                 cursor.bind_probe(plan, template, snapshot, view, bindings, control)?;
             }
@@ -391,6 +406,9 @@ impl PartCursor {
     }
 
     pub(super) fn activate_frame(&self, metrics: &mut QueryMetrics) -> Option<Option<usize>> {
+        if self.finite_starts {
+            return None;
+        }
         if self.profile.is_some() {
             let relationship = self
                 .part

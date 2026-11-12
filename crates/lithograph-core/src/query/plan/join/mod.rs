@@ -11,6 +11,8 @@ use crate::storage::{HashId, SchemaState, Snapshot};
 
 mod analysis;
 mod cost;
+#[cfg(test)]
+mod df_consumer_tests;
 mod enumerate;
 mod estimates;
 mod parts;
@@ -21,6 +23,8 @@ pub(crate) use parts::{execution_part, expansion_metadata};
 
 pub(crate) type PartId = usize;
 pub(crate) type TemplateId = usize;
+pub(crate) const DYNAMIC_FILTER_MAX_KEYS: usize = 4096;
+pub(crate) const DYNAMIC_FILTER_INITIAL_PAGE: usize = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PartSet(pub(crate) u128);
@@ -147,6 +151,9 @@ pub(crate) enum StageAccess {
     Hash {
         equality: usize,
         inner_side: HashOperandSide,
+        /// A Range template targeting the already-started singleton Probe.
+        /// Its complete typed KeySet is published only after Build EOF.
+        dynamic_filter: Option<TemplateId>,
     },
 }
 

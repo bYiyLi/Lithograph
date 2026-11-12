@@ -19,6 +19,8 @@ pub(super) struct HashKeyAdvice {
     pub(super) ndistinct: CardinalityEstimate,
     pub(super) max_frequency: CardinalityEstimate,
     pub(super) max_observed_frequency: u64,
+    /// A same-Schema single-column Constraint, rather than sampled uniqueness.
+    pub(super) unique: bool,
 }
 
 /// The definition and sample must come from the same already-validated query
@@ -48,6 +50,7 @@ pub(super) fn key_advice(
         ndistinct: sample.ndistinct,
         max_frequency: sample.max_frequency,
         max_observed_frequency: sample.max_observed_frequency,
+        unique: false,
     })
 }
 
@@ -137,12 +140,20 @@ pub(super) fn key_matches(
         }
         _ => 1,
     };
+    let mut upper = outer.upper.saturating_mul(inner.upper);
+    if outer_key.is_some_and(|key| key.unique) {
+        upper = upper.min(inner.upper);
+    }
+    if inner_key.is_some_and(|key| key.unique) {
+        upper = upper.min(outer.upper);
+    }
     Some(CardinalityEstimate {
-        expected: product
+        expected: (product
             .div_ceil(u128::from(divisor))
-            .min(u128::from(u64::MAX)) as u64,
+            .min(u128::from(u64::MAX)) as u64)
+            .min(upper),
         lower: 0,
-        upper: outer.upper.saturating_mul(inner.upper),
+        upper,
     })
 }
 
@@ -479,5 +490,19 @@ mod tests {
         let mut broken = sample(10, 10, 1);
         broken.ndistinct.lower = 11;
         assert!(key_advice(&step, &key, &index, broken).is_none());
+    }
+
+    #[test]
+    fn schema_unique_bounds_k_for_both_hash_directions_without_proving_overlap() {
+        let mut unique = advice(1000, 1000, 1);
+        unique.unique = true;
+        let repeated = advice(1024, 96, 342);
+        let a = Some(CardinalityEstimate::exact(1000));
+        let b = Some(CardinalityEstimate::exact(1024));
+        let forward = key_matches(a, b, Some(&unique), Some(&repeated)).unwrap();
+        let reverse = key_matches(b, a, Some(&repeated), Some(&unique)).unwrap();
+        assert_eq!(forward, reverse);
+        assert_eq!(forward.upper, 1024);
+        assert_eq!(forward.lower, 0);
     }
 }

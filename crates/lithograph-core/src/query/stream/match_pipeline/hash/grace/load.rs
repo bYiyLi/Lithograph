@@ -169,6 +169,7 @@ pub(super) fn stored_key(
     let crate::query::plan::join::StageAccess::Hash {
         equality,
         inner_side,
+        ..
     } = plan.stages[depth].access
     else {
         return Err(QueryError::internal("Grace leaf has another access kind"));

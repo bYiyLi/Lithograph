@@ -65,6 +65,142 @@ fn active_snapshot(connection: &Connection) -> Snapshot<'_> {
     Snapshot::resolve(connection, branch_head(connection, "main").expect("head")).expect("snapshot")
 }
 
+fn pinned_schema_snapshot(connection: &Connection) -> Snapshot<'_> {
+    let base = active_snapshot(connection);
+    let schema = base.schema_state().unwrap();
+    Snapshot::resolve_with_layer_and_schema(
+        connection,
+        base.commit(),
+        &LayerBuilder::default(),
+        schema,
+    )
+    .unwrap()
+}
+
+#[test]
+fn dynamic_filter_binding_rejects_long_scope_before_any_optional_allocation_or_sql() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    let connection = current_storage();
+    let label = "L".repeat(4096);
+    execute(&connection, &format!("CREATE (n:{label} {{k:7}}) FINISH"));
+    execute(
+        &connection,
+        &format!("CREATE RANGE INDEX short FOR(n:{label}) ON(n.k)"),
+    );
+    let snapshot = pinned_schema_snapshot(&connection);
+    let index = &snapshot.query_schema_state().unwrap().indexes["short"];
+    let (_, hash) = index_definition_identity(index).unwrap();
+    let ready: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM main._lithograph_index_generations \
+         WHERE definition_hash=?1 AND anchor_commit=?2 AND complete=1",
+            params![
+                hash.as_bytes().as_slice(),
+                snapshot.commit().as_bytes().as_slice()
+            ],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(ready > 0, "the real current generation exists");
+    let resources = QueryResources::new(Some(90 * 1024));
+    let control = ExecutionControl::new(&resources, &|| false);
+    assert!(64 * 1024 + index.name.len() as u64 * 64 < 90 * 1024);
+    assert!(definition_workspace(index, &control).unwrap() > 90 * 1024);
+    connection
+        .authorizer(Some(|context: AuthContext<'_>| {
+            if matches!(
+                context.action,
+                AuthAction::Read {
+                    table_name: "_lithograph_index_generations",
+                    ..
+                }
+            ) {
+                Authorization::Deny
+            } else {
+                Authorization::Allow
+            }
+        }))
+        .unwrap();
+    assert!(
+        try_bind_dynamic_filter_index(&snapshot, "short", hash, &control)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(resources.used(), 0);
+    assert_eq!(
+        resources.peak(),
+        0,
+        "preflight rejects before cloning or reserving the definition"
+    );
+    connection
+        .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+        .unwrap();
+}
+
+#[test]
+fn dynamic_filter_binding_missing_ready_source_is_fallback_but_main_auth_remains_error() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    let connection = node_fixture("[7,8,9]");
+    let snapshot = pinned_schema_snapshot(&connection);
+    let index = &snapshot.query_schema_state().unwrap().indexes["metric_value"];
+    let (_, hash) = index_definition_identity(index).unwrap();
+    let resources = QueryResources::default();
+    let control = ExecutionControl::new(&resources, &|| false);
+    let bound = try_bind_dynamic_filter_index(&snapshot, "metric_value", hash, &control)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        owners(&snapshot, &bound, &Value::Integer(7), &control).len(),
+        1
+    );
+    drop(bound);
+    assert_eq!(resources.used(), 0);
+    connection
+        .authorizer(Some(|context: AuthContext<'_>| {
+            if matches!(
+                context.action,
+                AuthAction::Read {
+                    table_name: "_lithograph_index_generations",
+                    ..
+                }
+            ) {
+                Authorization::Deny
+            } else {
+                Authorization::Allow
+            }
+        }))
+        .unwrap();
+    let error =
+        try_bind_dynamic_filter_index(&snapshot, "metric_value", hash, &control).unwrap_err();
+    assert_eq!(error.sqlite_code, Some(rusqlite::ffi::SQLITE_AUTH));
+    connection
+        .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+        .unwrap();
+    // Derived-state eviction is synthetic and disposable. The optional path
+    // must not use generic binding to rebuild the complete Probe domain.
+    connection
+        .execute_batch(
+            "DELETE FROM main._lithograph_index_entries; \
+        DELETE FROM main._lithograph_index_generations; \
+        DELETE FROM temp._lithograph_standard_index_cache_meta",
+        )
+        .unwrap();
+    assert!(
+        try_bind_dynamic_filter_index(&snapshot, "metric_value", hash, &control)
+            .unwrap()
+            .is_none()
+    );
+    let count: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM main._lithograph_index_generations",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0, "no hidden generic rebuild");
+    assert_eq!(resources.used(), 0);
+}
+
 fn bind(
     snapshot: &Snapshot<'_>,
     name: &str,

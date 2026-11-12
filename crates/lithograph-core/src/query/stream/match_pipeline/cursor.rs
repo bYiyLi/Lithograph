@@ -168,6 +168,7 @@ impl StepCursor {
         let key = state.probe_key(&self.step, depth, &input.0, scope, metrics, control)?;
         let probe = if let Some(key) = key {
             state.ensure_build(&self.step, depth, scope.0, scope.1, metrics, control)?;
+            self.install_dynamic_filter(depth, &mut state, scope, metrics, control)?;
             match &state.storage {
                 BuildStorage::Memory(_) => HashProbe::memory(input, key, &state, control)?,
                 BuildStorage::Spill(_) => {
@@ -180,9 +181,21 @@ impl StepCursor {
         } else {
             HashProbe::empty()
         };
+        self.finish_hash_frame(frame_memory, state, probe, (depth, slot), metrics, bindings)
+    }
+
+    fn finish_hash_frame(
+        &mut self,
+        frame_memory: MemoryReservation,
+        mut state: hash::HashBuildState,
+        probe: HashProbe,
+        position: (usize, Option<usize>),
+        metrics: &mut QueryMetrics,
+        bindings: &mut MatchReadBindings,
+    ) -> QueryResult<()> {
         state.probe_metadata = state.probe_metadata.max(probe.metadata_bytes());
-        state.publish(metrics, slot)?;
-        bindings.hashes[depth] = Some(state);
+        state.publish(metrics, position.1)?;
+        bindings.hashes[position.0] = Some(state);
         self.stack.push(MatchFrame::Hash(Box::new(HashFrame {
             probe,
             _memory: frame_memory,

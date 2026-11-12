@@ -14,7 +14,7 @@ use crate::query::expression::clone_value_unreserved_controlled;
 use crate::query::mutation::property_from_value_controlled;
 use crate::query::resources::{
     ExecutionControl, MemoryReservation, allocation_bytes, checked_add, checked_mul,
-    value_bytes_controlled,
+    map_entry_bytes, value_bytes_controlled,
 };
 use crate::query::{QueryError, QueryResult};
 use crate::storage::{
@@ -74,6 +74,117 @@ pub(crate) fn bind_standard_index_read(
         QueryError::internal("bound Index definition is absent from the active Schema")
     })?;
     bind_index_definition(snapshot, index, expected_definition_hash, memory, control)
+}
+
+/// Optional DF binding must preflight the exact controlled workspace of the
+/// existing binding path. SQL errors are never converted into advisory failure.
+pub(crate) fn try_bind_dynamic_filter_index(
+    snapshot: &Snapshot<'_>,
+    index_name: &str,
+    definition_hash: HashId,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<Option<BoundStandardIndexRead>> {
+    let Some(index) = snapshot
+        .query_schema_state()
+        .and_then(|schema| schema.indexes.get(index_name))
+    else {
+        return Ok(None);
+    };
+    let definition = definition_workspace(index, control)?;
+    let handle = checked_add(
+        size_of::<BoundStandardIndexRead>() as u64,
+        index.name.len() as u64,
+    )?;
+    // bind_index_definition and ensure_index_cache retain separate, nested
+    // definition claims. The ready-generation path needs no graph rebuild.
+    let fixed = checked_add(checked_add(handle, checked_mul(definition, 2)?)?, 64 * 1024)?;
+    if !binding_grant_fits(fixed, control) {
+        return Ok(None);
+    }
+    let workspace = match control.reserve(definition) {
+        Ok(memory) => memory,
+        Err(error) if error.kind == crate::query::QueryErrorKind::Resource => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let (expected, actual_hash) = index_definition_identity(index)?;
+    if actual_hash != definition_hash {
+        return Ok(None);
+    }
+    let candidates = generation_binding_workspace(snapshot, definition_hash, &expected, control)?;
+    drop(expected);
+    drop(workspace);
+    let Some(candidates) = candidates else {
+        return Ok(None);
+    };
+    if !binding_grant_fits(checked_add(fixed, candidates)?, control) {
+        return Ok(None);
+    }
+    bind_standard_index_read(snapshot, index_name, definition_hash, control).map(Some)
+}
+
+fn binding_grant_fits(bytes: u64, control: &ExecutionControl<'_>) -> bool {
+    control
+        .resources()
+        .limit()
+        .is_none_or(|limit| bytes <= limit.saturating_sub(control.resources().used()))
+}
+
+fn generation_binding_workspace(
+    snapshot: &Snapshot<'_>,
+    definition_hash: HashId,
+    definition: &[u8],
+    control: &ExecutionControl<'_>,
+) -> QueryResult<Option<u64>> {
+    let mut statement = snapshot.connection_for_query().prepare(
+        "SELECT length(definition_blob), anchor_commit, \
+         CASE WHEN length(definition_blob) = ?4 THEN definition_blob = ?3 ELSE 0 END, generation_id \
+         FROM main._lithograph_index_generations \
+         WHERE definition_hash = ?1 AND encoding_version = ?2 AND complete = 1 \
+         AND typeof(definition_hash) = 'blob' AND typeof(encoding_version) = 'integer' \
+         AND typeof(complete) = 'integer' LIMIT 3",
+    )?;
+    let mut rows = statement.query(params![
+        definition_hash.as_bytes().as_slice(),
+        storage::STANDARD_INDEX_ENCODING_VERSION,
+        definition,
+        definition.len() as i64,
+    ])?;
+    let mut bytes = 0;
+    let mut count = 0;
+    let mut ready = false;
+    while let Some(row) = rows.next()? {
+        control.work(1)?;
+        count += 1;
+        // Normal generation retention keeps at most two candidates per
+        // definition. Extra/corrupt derived metadata only disables this DF.
+        if count > 2 {
+            return Ok(None);
+        }
+        let Some((current, candidate_bytes)) =
+            generation_candidate_workspace(row, snapshot.commit())?
+        else {
+            continue;
+        };
+        ready |= current;
+        bytes = checked_add(bytes, candidate_bytes)?;
+    }
+    control.check()?;
+    Ok(ready.then_some(bytes))
+}
+
+fn generation_candidate_workspace(
+    row: &rusqlite::Row<'_>,
+    commit: HashId,
+) -> QueryResult<Option<(bool, u64)>> {
+    let length: Option<i64> = row.get(0)?;
+    let Some(length) = length.filter(|length| *length >= 0) else {
+        return Ok(None);
+    };
+    let ready = matches!(row.get_ref(3)?, ValueRef::Integer(id) if id > 0)
+        && matches!(row.get_ref(1)?, ValueRef::Blob(anchor) if anchor == commit.as_bytes())
+        && row.get::<_, Option<bool>>(2)?.unwrap_or(false);
+    let bytes = checked_add(map_entry_bytes::<(i64, Vec<u8>)>()?, length as u64)?;
+    Ok(Some((ready, bytes)))
 }
 
 fn bind_index_definition(

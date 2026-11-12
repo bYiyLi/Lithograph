@@ -2,6 +2,8 @@ use super::*;
 use serde_json::{Map, Value as JsonValue, json};
 
 mod finite;
+mod layout;
+pub(in crate::query) use layout::identity_binding_encoded_upper;
 #[cfg(test)]
 mod tests;
 
