@@ -143,6 +143,7 @@ pub(crate) struct StepCursor {
     output_memory: Option<MemoryReservation>,
     _seek_memory: MemoryReservation,
     node_ids: Option<(Vec<i64>, MemoryReservation)>,
+    finite_advisory: bool,
     ordered_numeric: Option<crate::query::schema::OrderedNumericIndexRead>,
 }
 
@@ -172,11 +173,23 @@ impl StepCursor {
             output_memory: None,
             _seek_memory: seek_memory,
             node_ids: None,
+            finite_advisory: false,
             ordered_numeric: None,
         })
     }
 
     pub(crate) fn with_node_ids(
+        step: &MatchStep,
+        base: BindingRow,
+        candidates: (Vec<i64>, MemoryReservation),
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<Self> {
+        let mut cursor = Self::with_pattern_node_ids(step, base, candidates, control)?;
+        cursor.finite_advisory = true;
+        Ok(cursor)
+    }
+
+    pub(crate) fn with_pattern_node_ids(
         step: &MatchStep,
         base: BindingRow,
         candidates: (Vec<i64>, MemoryReservation),
@@ -215,6 +228,7 @@ impl StepCursor {
                     frame.start_buffer = ids;
                     frame.start_done = true;
                     frame.finite_starts = true;
+                    frame.finite_advisory = self.finite_advisory;
                     frame._finite_memory = Some(memory);
                 }
                 self.stack.push(MatchFrame::part(frame)?);
@@ -243,7 +257,12 @@ impl StepCursor {
             control,
         )? {
             if self.full_match_passes(&row, snapshot, graph_view, params, control)? {
-                metrics.record_profile_rows(metrics.match_residual_slot(self.step.clause_start), 1);
+                if self.step.predicate.is_some() {
+                    metrics.record_profile_rows(
+                        metrics.match_residual_slot(self.step.clause_start),
+                        1,
+                    );
+                }
                 self.matched = true;
                 self.restore_declared_order(&mut row);
                 return Ok(Some(row));
@@ -355,6 +374,7 @@ struct PartCursor {
     start_index: usize,
     start_done: bool,
     finite_starts: bool,
+    finite_advisory: bool,
     _finite_memory: Option<MemoryReservation>,
     dynamic_filter: Option<hash::dynamic_filter::ProbeFilter>,
     ordered_numeric: Option<crate::query::schema::OrderedNumericIndexRead>,
@@ -404,6 +424,7 @@ impl PartCursor {
             start_index: 0,
             start_done: false,
             finite_starts: false,
+            finite_advisory: false,
             _finite_memory: None,
             dynamic_filter: None,
             ordered_numeric: None,
@@ -971,7 +992,9 @@ impl PartCursor {
             control.work(1)?;
             self.start_index += 1;
             metrics.record_db_hits(1);
-            metrics.record_semi_mask(0, 1);
+            if self.finite_advisory {
+                metrics.record_semi_mask(0, 1);
+            }
             if node_matches(snapshot, graph_view, &self.part.start, id, metrics, control)? {
                 return Ok(Some(id));
             }

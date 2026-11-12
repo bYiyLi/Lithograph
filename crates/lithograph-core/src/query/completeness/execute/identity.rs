@@ -18,9 +18,9 @@ pub(crate) fn lower_identity_match(
     clause: &AstNode,
     params: &BTreeMap<String, Value>,
     incoming: &[String],
-) -> Option<MatchStep> {
-    identity_clause_size(clause)?;
-    if super::super::has_graph_expression(clause, false)
+) -> QueryResult<Option<MatchStep>> {
+    if identity_clause_size(clause).is_none()
+        || super::super::has_graph_expression(clause, false)
         || clause.descendants().any(|node| {
             matches!(
                 node.kind,
@@ -32,34 +32,61 @@ pub(crate) fn lower_identity_match(
             )
         })
     {
-        return None;
+        return Ok(None);
     }
-    let mut step = crate::query::plan::lower_match(
-        connection,
-        clause,
-        clause.kind == AstKind::Clause(ClauseKind::OptionalMatch),
-    )
-    .ok()?;
+    let Some(mut step) = lower_pattern(connection, clause)? else {
+        return Ok(None);
+    };
     // A single fixed-hop part keeps this boundary on the established scalar
     // cursor. General graph expressions and multi-part programs retain their
     // existing matcher, including its evaluation and relationship-bag order.
     if step.parts.len() != 1 {
-        return None;
+        return Ok(None);
     }
     if !crate::query::plan::constrain_match_scope(&mut step, incoming) {
-        return None;
+        return Ok(None);
     }
     crate::query::plan::select_node_id_seeks(&mut step, params);
     crate::query::plan::select_relationship_id_seeks(&mut step, params);
-    (step.parts[0].start.id_seek.is_some()
+    Ok((step.parts[0].start.id_seek.is_some()
         || step.parts[0]
             .relationship
             .as_ref()
             .is_some_and(|rel| rel.id_seek.is_some()))
-    .then_some(step)
+    .then_some(step))
+}
+
+pub(crate) fn lower_pattern(
+    connection: &Connection,
+    clause: &AstNode,
+) -> QueryResult<Option<MatchStep>> {
+    match crate::query::plan::lower_match(
+        connection,
+        clause,
+        clause.kind == AstKind::Clause(ClauseKind::OptionalMatch),
+    ) {
+        Ok(step) => Ok(Some(step)),
+        // The fixed-pattern lowerer rejects shapes the legacy matcher supports.
+        // A dictionary read failure is not an optimization refusal or retry.
+        Err(error) if error.kind == QueryErrorKind::Semantic && error.sqlite_code.is_none() => {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 impl ReadExecutor<'_, '_> {
+    pub(super) fn permitted_identity_match(
+        &self,
+        clause: &AstNode,
+        incoming: &[String],
+    ) -> QueryResult<Option<MatchStep>> {
+        if !self.identity_match_spans.contains(&clause.span.start) {
+            return Ok(None);
+        }
+        lower_identity_match(self.connection, clause, self.params, incoming)
+    }
+
     pub(super) fn execute_identity_match(
         &mut self,
         clause: &AstNode,

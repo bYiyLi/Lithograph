@@ -203,7 +203,7 @@ impl PreparedProgram {
                     params,
                     &incoming,
                     &mut budget,
-                );
+                )?;
                 continue;
             }
             memory.merge(Self::plan_fixed_match(
@@ -285,11 +285,9 @@ impl PreparedProgram {
         clause_scope: (&AstNode, &[String], &[String]),
     ) -> QueryResult<MemoryReservation> {
         let (clause, incoming, declared) = clause_scope;
-        let Ok(mut step) = super::super::plan::lower_match(
-            snapshot.connection_for_query(),
-            clause,
-            clause.kind == AstKind::Clause(ClauseKind::OptionalMatch),
-        ) else {
+        let Some(mut step) =
+            execute::identity::lower_pattern(snapshot.connection_for_query(), clause)?
+        else {
             return control.reserve(0);
         };
         if !super::super::plan::constrain_match_scope(&mut step, incoming) {
@@ -395,23 +393,24 @@ fn plan_identity_display(
     params: &BTreeMap<String, Value>,
     incoming: &[String],
     budget: &mut super::super::plan::PlanningBudget,
-) {
+) -> QueryResult<()> {
     let Some((states, bytes)) = execute::identity::identity_clause_size(clause) else {
-        return;
+        return Ok(());
     };
     // Reserve the structural description and display copy in the planner's
     // existing ledger before lowering. This is not a Schema/type proof.
     if !budget.work(states, bytes.saturating_mul(2)) {
-        return;
+        return Ok(());
     }
     if let Some(step) = execute::identity::lower_identity_match(
         snapshot.connection_for_query(),
         clause,
         params,
         incoming,
-    ) {
+    )? {
         display.insert(clause.span.start, step);
     }
+    Ok(())
 }
 
 fn is_write(node: &AstNode) -> bool {
@@ -629,3 +628,6 @@ mod fallback_display_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod lower_errors_tests;

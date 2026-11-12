@@ -314,7 +314,7 @@ impl ClauseStreamBuilder<'_, '_> {
         }
         match kind {
             ClauseKind::Match | ClauseKind::OptionalMatch => {
-                self.match_source(source, columns, next_columns, clause, kind)
+                self.match_source(source, columns, next_columns, clause)
             }
             ClauseKind::Filter => self.filter_source(source, clause),
             ClauseKind::Let => self.let_source(source, clause),
@@ -348,7 +348,6 @@ impl ClauseStreamBuilder<'_, '_> {
         columns: &[String],
         next_columns: &[String],
         clause: &AstNode,
-        kind: ClauseKind,
     ) -> QueryResult<Option<Box<dyn BindingSource>>> {
         if match_requires_complex_executor(clause) {
             return Ok(Some(Box::new(BatchClauseSource {
@@ -367,11 +366,9 @@ impl ClauseStreamBuilder<'_, '_> {
                 input_batch_rows: 1,
             })));
         }
-        let Ok(mut fallback) = crate::query::plan::lower_match(
-            self.connection,
-            clause,
-            kind == ClauseKind::OptionalMatch,
-        ) else {
+        let Some(mut fallback) =
+            crate::query::completeness::execute::identity::lower_pattern(self.connection, clause)?
+        else {
             return Ok(None);
         };
         // No costed plan survives a preceding write/batch boundary. A stable
@@ -387,7 +384,7 @@ impl ClauseStreamBuilder<'_, '_> {
                     clause,
                     self.params,
                     columns,
-                )
+                )?
         {
             fallback = identity;
         }
@@ -683,3 +680,6 @@ fn first_expression(node: &AstNode, message: &str) -> QueryResult<Expr> {
         .ok_or_else(|| QueryError::semantic(message))?;
     expression::compile_expression(expression)
 }
+
+#[cfg(test)]
+mod tests;

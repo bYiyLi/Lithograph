@@ -441,7 +441,8 @@ fn plan_fresh_identity_match(
     }
     let Some(step) = super::completeness::execute::identity::lower_identity_match(
         connection, clause, params, incoming,
-    ) else {
+    )?
+    else {
         return control.reserve(0);
     };
     *fresh_identity = true;

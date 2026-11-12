@@ -1,6 +1,30 @@
 use super::*;
 use crate::query::access::PropertyRules;
 
+pub(super) fn fallback_match_step(
+    context: &MutationContext<'_, '_>,
+    clause: &AstNode,
+    optional: bool,
+    fresh_identity: bool,
+    allow_legacy_node_id: bool,
+) -> QueryResult<MatchStep> {
+    let mut step = lower_match(context.connection, clause, optional)?;
+    if allow_legacy_node_id {
+        crate::query::plan::select_node_id_seeks(&mut step, context.params);
+    }
+    if fresh_identity
+        && let Some(identity) = crate::query::completeness::execute::identity::lower_identity_match(
+            context.connection,
+            clause,
+            context.params,
+            &[],
+        )?
+    {
+        step = identity;
+    }
+    Ok(step)
+}
+
 pub(super) fn match_pattern(
     connection: &Connection,
     snapshot: &Snapshot<'_>,

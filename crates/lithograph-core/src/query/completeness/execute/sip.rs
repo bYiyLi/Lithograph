@@ -13,6 +13,9 @@ enum ListKind {
     ElementId,
 }
 
+#[cfg(test)]
+mod tests;
+
 struct ListSource<'a> {
     variable: &'a str,
     kind: ListKind,
@@ -22,26 +25,31 @@ pub(super) fn lower_match(
     connection: &Connection,
     clause: &AstNode,
     incoming: &[String],
-) -> Option<MatchStep> {
-    identity::identity_clause_size(clause)?;
-    if clause.kind != AstKind::Clause(ClauseKind::Match) {
-        return None;
+) -> QueryResult<Option<MatchStep>> {
+    if identity::identity_clause_size(clause).is_none()
+        || clause.kind != AstKind::Clause(ClauseKind::Match)
+    {
+        return Ok(None);
     }
-    let mut step = crate::query::plan::lower_match(connection, clause, false).ok()?;
+    let Some(mut step) = identity::lower_pattern(connection, clause)? else {
+        return Ok(None);
+    };
     let [part] = step.parts.as_slice() else {
-        return None;
+        return Ok(None);
     };
     if part.relationship.is_some() || part.path_variable.is_some() || part.end.is_some() {
-        return None;
+        return Ok(None);
     }
     if !crate::query::plan::constrain_match_scope(&mut step, incoming) {
-        return None;
+        return Ok(None);
     }
-    let source = list_source(&step)?;
-    incoming
+    let Some(source) = list_source(&step) else {
+        return Ok(None);
+    };
+    Ok(incoming
         .iter()
         .any(|name| name == source.variable)
-        .then_some(step)
+        .then_some(step))
 }
 
 fn list_source(step: &MatchStep) -> Option<ListSource<'_>> {
@@ -193,8 +201,8 @@ impl ReadExecutor<'_, '_> {
             .metrics
             .activate_match_clause_access(clause.span.start, 1);
         let result = (|| {
-            let mut rows = Vec::new();
             let mut memory = self.control.reserve(0)?;
+            let mut rows = Vec::new();
             for row in input.rows {
                 let before = rows.len();
                 if let Some((ids, ids_memory)) = node_ids(step, &row, self.control)? {
@@ -202,11 +210,7 @@ impl ReadExecutor<'_, '_> {
                     self.metrics
                         .record_pipeline_rows((rows.len() - before).try_into().unwrap_or(u64::MAX));
                 } else {
-                    self.append_sip_fallback(clause, step, &columns, row, &mut rows, &mut memory)?;
-                    self.metrics.record_eager_match_rows(
-                        clause.span.start,
-                        (rows.len() - before).try_into().unwrap_or(u64::MAX),
-                    );
+                    self.append_single_node_fallback(step, row, &mut rows, &mut memory)?;
                 }
             }
             Ok(RowSet {
@@ -243,20 +247,5 @@ impl ReadExecutor<'_, '_> {
             identity::push_identity_match_row(rows, memory, row, self.control)?;
         }
         Ok(())
-    }
-
-    fn append_sip_fallback(
-        &mut self,
-        clause: &AstNode,
-        step: &MatchStep,
-        columns: &[String],
-        row: BindingRow,
-        rows: &mut Vec<BindingRow>,
-        memory: &mut MemoryReservation,
-    ) -> QueryResult<()> {
-        let baseline = self.expression_reservation.bytes();
-        let matched =
-            self.execute_match_row(clause, false, columns, step.predicate.as_ref(), row)?;
-        self.append_matched_rows(baseline, matched, rows, memory)
     }
 }

@@ -2,7 +2,7 @@
 
 **状态：`in_progress`（S22.1–S22.5 已完成局部验收；S22.6 实施中；S22.7–S22.8 未实施）。** 本项目只有**一个 Phase 22、八个内部 Stage**。所有 Stage 和全部算法均为必交付；只完成部分 Stage、已有若干基础、计划通过 Review，都不能标记 Phase `done`。当前实现与实测证据续记于第 21–25 节，S22.5 最终记录见[第 24.9 节](#stage-s22-5-acceptance)，S22.6在途结果见[第25节](#stage-s22-6-implementation)；第 15–20 节保留先前规划审核、实施和修复的历史记录。
 
-**仓库复核（2026-11-10）**：本地 `main` HEAD 为 `3f1f31e`，本地 `v0.3.5` Tag 指向该 Commit；Phase 21 实现已进入此源码基线。复核开始时工作区干净，随后本次文档校正产生三份未提交文档修改。旧的 `e245555` + 未提交 Phase 21 是合并计划时的历史状态，不再代表当前源码。Tag 存在不等于远端 Release 制品已经完成验证；实施时仍须重新核对 HEAD/dirty tree、依赖、源码/SQLite runtime 和 Tag/资产状态。**当前主工作区的S6修改尚未提交；S5 R5独立快照已在`codex/phase22-query-optimizer-ci`分支提交为`2854fcc901cd0b895c681d53c56a5221cbbf3f2e`并推送，精确提交的CI与六平台Matrix已通过，尚未合并或发布。第21–25节区分已验收S5基线和S6在途结果，旧审核章节仅为历史证据。**
+**仓库复核（2026-11-10）**：本地 `main` HEAD 为 `3f1f31e`，本地 `v0.3.5` Tag 指向该 Commit；Phase 21 实现已进入此源码基线。复核开始时工作区干净，随后本次文档校正产生三份未提交文档修改。旧的 `e245555` + 未提交 Phase 21 是合并计划时的历史状态，不再代表当前源码。Tag 存在不等于远端 Release 制品已经完成验证；实施时仍须重新核对 HEAD/dirty tree、依赖、源码/SQLite runtime 和 Tag/资产状态。**主工作区保留在途修改；独立`codex/phase22-query-optimizer-ci`分支已提交并推送S5基线`2854fcc9`、S6首轮`05caab6`及修复`7e15ffb`。精确`7e15ffb273feedc99f0b03974ed4ef5da7e6da31`的CI与六平台Matrix已通过；后续fallback/错误传播增量尚未提交或完成运行验收。未合并或发布。第21–25节区分已验收S5基线和S6在途结果，旧审核章节仅为历史证据。**
 
 ## 1. 最终目标、权威设计和边界
 
@@ -1172,6 +1172,16 @@ S6已在`codex/phase22-query-optimizer-ci`分支实际提交并推送[`05caab67a
 
 SIP的旧R5四档Before batch在1M时实际达到1GiB cgroup限制，leaf与metadata worker被OOM kill；unit记录`Result=oom-kill`、signal9及MemoryPeak=1GiB，整batch保留failed。1k/10k/100k已完成的个别raw不计作whole batch通过，也不构造完整Before分布。缺少worker最终metadata的owner记录路径已最小修复，真实workload exit保持未知；原OOM raw保留，不重跑该OOM或提高内存限制。
 
-`05caab6`的1M SIP After已实际完成三次完整消费，rows/scalar的SQLite VM分别2412/3315，与1k相同；wait4 RSS为38596608B。cgroup峰值达到1GiB，其中包括SHA读取产生的page cache，实际OOM事件为0；TEMP目录空、unit/cgroup及已知PID清理通过。该小组完整结果不替代S6四档正常分布、全部资源/失败路径或Stage验收。四档数据已全部ready，完整性能/压力仍待完成。
+`05caab6`的1M SIP After在scalar与rows接口均完整返回同一组三行结果，SQLite VM分别3315/2412，与1k相同；wait4 RSS为38596608B。cgroup峰值达到1GiB，其中包括SHA读取产生的page cache，实际OOM事件为0；TEMP目录空、unit/cgroup及已知PID清理通过。该小组完整结果不替代S6四档正常分布、全部资源/失败路径或Stage验收。四档数据已全部ready，完整性能/压力仍待完成。
 
 另一次review发现SIP不适用时legacy eager fallback仍有无界Vec，已交由对应executor实现做窄修，目前尚未闭环；不能由SIP命中路径的资源证据推导fallback也符合预算。S6继续`in_progress`，S7–S8未实施，Profile分母与既定功能/资源合同不变。后续修复提交及CI、全Phase综合与最终门禁均按新源码实际结果另记。
+
+### 25.5 修复提交的 CI 终态与新回退路径
+
+第25.4节后的修复已实际提交并推送为[`7e15ffb273feedc99f0b03974ed4ef5da7e6da31`](https://github.com/bYiyLi/Lithograph/commit/7e15ffb273feedc99f0b03974ed4ef5da7e6da31)。[CI 43205581489](https://github.com/bYiyLi/Lithograph/actions/runs/43205581489)实际`completed/success`，Linux、macOS、Windows及Quality四项job全部通过；[Release Matrix 43205581628](https://github.com/bYiyLi/Lithograph/actions/runs/43205581628)实际`completed/success`，storage fixture及六平台全部通过，`publish-release`为skipped，未发行。旧`05caab6`的失败保留，不由后续绿灯改写。
+
+同一原生Release候选上的SIP、Join Dynamic Filter、TopK均已完成1k/10k/100k/1M四档After普通时延采样、独立VM及PROFILE诊断，完整固定结果和外层owner检查均通过。SIP/DF的Engine预算为512KiB；TopK沿脚本默认512MiB。所有工作负载受原生Linux amd64的1GiB/no-swap限制，三类结果不合并成同一内存预算。对应普通时延P50/P95、物理工作量和Before对比仍须按各自报告闭环；旧R5 SIP百万节点OOM与TopK百万节点600秒受控超时保留为失败边界，不重复运行或提高限制，不编造成功baseline/P95。
+
+新的plain单Node回退已用query-private TEMP分阶段保存候选及pattern结果，保持原pattern-before-WHERE求值顺序；旧输入上的CF8与SIP11定向测试通过。随后发现的真实dictionary错误被当作优化拒绝的问题，正通过共享lowering分类及实际入口one-shot AUTH回归修复。该新增量的源码、运行验证、百万节点回退压力和新提交CI仍在途；上述`7e15ffb`CI不覆盖它。S6继续`in_progress`，S7/S8尚未启用。
+
+后续修复源码已在原生Linux完成139项定向测试：completeness 29、实际builder 1，以及access 19、DF 9、INL 19、Join semantics 16、Relationship 12、single-node fallback 9、SIP 11、TopK 14，均无失败。它们包含三个helper、实际builder及实际program planning共5个首次dictionary AUTH回归、SIP预算/分配后取消、回退中途取消和同连接恢复。首次编译因辅助函数提取后的`unused_mut`失败，已删除该无用mut并保留原失败；修正后全组通过。相同源码Clippy all-target/all-feature `-D warnings`、format、严格Lizard及原1% duplication gate均通过（后者显示1306/130138重复行、1.00%、exit0），输入前后不变。新Release构建、百万节点非SIP回退资源测试与新提交完整CI仍在途，不能把本组结果称为S6已验收。

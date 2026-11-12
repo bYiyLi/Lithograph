@@ -632,14 +632,14 @@ impl ReadExecutor<'_, '_> {
         optional: bool,
         input: RowSet,
     ) -> QueryResult<RowSet> {
-        if self.identity_match_spans.contains(&clause.span.start)
-            && let Some(step) =
-                identity::lower_identity_match(self.connection, clause, self.params, &input.columns)
-        {
+        if let Some(step) = self.permitted_identity_match(clause, &input.columns)? {
             return self.execute_identity_match(clause, &step, input);
         }
-        if let Some(step) = sip::lower_match(self.connection, clause, &input.columns) {
+        if let Some(step) = sip::lower_match(self.connection, clause, &input.columns)? {
             return self.execute_sip_match(clause, &step, input);
+        }
+        if let Some(step) = single_node::lower_match(self.connection, clause, &input.columns)? {
+            return self.execute_single_node_match(clause, &step, input);
         }
         let columns = self.match_columns(clause, &input.columns)?;
         let predicate = match_predicate(clause)?;
@@ -1124,6 +1124,7 @@ pub(crate) mod identity;
 mod load_csv;
 mod registry;
 mod search;
+mod single_node;
 mod sip;
 
 pub(crate) use helpers::{distinct_bindings, merge_union_rows};

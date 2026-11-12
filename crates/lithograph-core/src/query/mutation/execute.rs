@@ -206,25 +206,17 @@ fn execute_match_clause_spilled(
     check_interrupted(is_interrupted)?;
     let snapshot = context.staged_snapshot()?;
     let graph_view = context.graph_view()?;
-    let mut fallback;
+    let fallback;
     let step = if let Some(planned) = planned {
         planned
     } else {
-        fallback = lower_match(context.connection, clause, optional)?;
-        if allow_legacy_node_id {
-            crate::query::plan::select_node_id_seeks(&mut fallback, context.params);
-        }
-        if fresh_identity
-            && let Some(identity) =
-                crate::query::completeness::execute::identity::lower_identity_match(
-                    context.connection,
-                    clause,
-                    context.params,
-                    &[],
-                )
-        {
-            fallback = identity;
-        }
+        fallback = matcher::fallback_match_step(
+            context,
+            clause,
+            optional,
+            fresh_identity,
+            allow_legacy_node_id,
+        )?;
         &fallback
     };
     let mut output =
