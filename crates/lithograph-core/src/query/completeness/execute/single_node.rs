@@ -92,15 +92,17 @@ impl ReadExecutor<'_, '_> {
     pub(super) fn append_single_node_fallback(
         &mut self,
         step: &MatchStep,
-        base: BindingRow,
+        mut base: BindingRow,
         rows: &mut Vec<BindingRow>,
         memory: &mut MemoryReservation,
     ) -> QueryResult<()> {
+        // Relationship uniqueness belongs to this MATCH, as in StepCursor::new.
+        base.used_relationships.clear();
         let mut spools = PatternSpools::new(self.control)?;
         self.spill_node_candidates(step, &mut spools)?;
-        self.spill_node_pattern(step, &base, &mut spools)?;
+        self.spill_node_pattern(step, &mut spools)?;
         spools.candidates.abort(&spools.connection)?;
-        self.filter_node_pattern(step, &spools, rows, memory)?;
+        self.filter_node_pattern(step, &base, &spools, rows, memory)?;
         spools.matched.abort(&spools.connection)
     }
 
@@ -147,7 +149,6 @@ impl ReadExecutor<'_, '_> {
     fn spill_node_pattern(
         &mut self,
         step: &MatchStep,
-        base: &BindingRow,
         spools: &mut PatternSpools,
     ) -> QueryResult<()> {
         let mut pattern = step.clone();
@@ -168,7 +169,7 @@ impl ReadExecutor<'_, '_> {
             after = last.0;
             let candidates = candidate_ids(&batch.0, &pattern, self.control)?;
             drop(batch);
-            self.spill_node_batch(&pattern, base, candidates, spools)?;
+            self.spill_node_batch(&pattern, candidates, spools)?;
         }
         self.metrics
             .record_pipeline_rows(spools.matched.len().try_into().unwrap_or(u64::MAX));
@@ -178,21 +179,18 @@ impl ReadExecutor<'_, '_> {
     fn spill_node_batch(
         &mut self,
         pattern: &MatchStep,
-        base: &BindingRow,
         candidates: (Vec<i64>, MemoryReservation),
         spools: &mut PatternSpools,
     ) -> QueryResult<()> {
-        let memory = self
-            .control
-            .reserve(expression::binding_row_bytes_controlled(
-                base,
-                Some(self.control),
-            )?)?;
-        let copied = expression::clone_binding_row_unreserved_controlled(base, Some(self.control))?;
-        let input = (copied, memory);
-        let mut cursor =
-            StepCursor::with_pattern_node_ids(pattern, input.0, candidates, self.control)?;
-        drop(input.1);
+        // The selected pattern has one fresh Node, static labels and no inline
+        // predicates or other bindings. Matching needs no outer payload. Keep
+        // that immutable base once, outside this Node-only pattern spool.
+        let mut cursor = StepCursor::with_pattern_node_ids(
+            pattern,
+            BindingRow::default(),
+            candidates,
+            self.control,
+        )?;
         let mut bindings = MatchReadBindings::default();
         while let Some(row) = cursor.next_row(
             &self.snapshot,
@@ -212,6 +210,7 @@ impl ReadExecutor<'_, '_> {
     fn filter_node_pattern(
         &mut self,
         step: &MatchStep,
+        base: &BindingRow,
         spools: &PatternSpools,
         rows: &mut Vec<BindingRow>,
         memory: &mut MemoryReservation,
@@ -228,16 +227,13 @@ impl ReadExecutor<'_, '_> {
                 return Ok(());
             };
             after = *sequence;
-            if self.single_node_predicate(step, row)? {
+            let working = merge_node_pattern(base, row, step, self.control)?;
+            if self.single_node_predicate(step, &working.0)? {
                 self.metrics
                     .record_profile_rows(self.metrics.match_residual_slot(step.clause_start), 1);
-                // Keep the decoded page's lease until the output claim has
-                // been reserved and ownership moves to the final RowSet.
-                let mut batch = batch;
-                let (_, row) = batch.0.pop().ok_or_else(|| {
-                    QueryError::internal("single-node spill lost its decoded row")
-                })?;
-                identity::push_identity_match_row(rows, memory, row, self.control)?;
+                // Both source and combined-row leases remain live until the
+                // final RowSet reserves its own claim and accepts ownership.
+                identity::push_identity_match_row(rows, memory, working.0, self.control)?;
             }
         }
     }
@@ -251,6 +247,35 @@ impl ReadExecutor<'_, '_> {
         let evaluated = self.take_evaluated_value(value, baseline)?;
         expression::predicate(evaluated.value)
     }
+}
+
+fn merge_node_pattern(
+    base: &BindingRow,
+    matched: &BindingRow,
+    step: &MatchStep,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<(BindingRow, MemoryReservation)> {
+    let variable = step.parts[0].start.variable.as_deref().ok_or_else(|| {
+        QueryError::internal("single-node spill requires its fresh Node variable")
+    })?;
+    let Some(BindingValue::Node(id)) = matched.values.get(variable) else {
+        return Err(QueryError::internal(
+            "single-node spill lost a matched NodeId",
+        ));
+    };
+    let bytes = checked_add(
+        expression::binding_row_bytes_controlled(base, Some(control))?,
+        checked_add(
+            candidate_row_bytes(variable)?,
+            allocation_bytes::<String>(base.order.len())?,
+        )?,
+    )?;
+    let memory = control.reserve(bytes)?;
+    let mut row = expression::clone_binding_row_unreserved_controlled(base, Some(control))?;
+    // Preserve every outer column, its declared order and LOAD CSV context.
+    // The per-MATCH used set was already cleared once on this outer base.
+    row.insert(variable.to_owned(), BindingValue::Node(*id));
+    Ok((row, memory))
 }
 
 fn candidate_row(

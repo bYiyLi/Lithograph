@@ -50,9 +50,21 @@ struct Observed {
 }
 
 fn execute(db: &Connection, text: &str, options: ExecutionOptions) -> Result<Observed, QueryError> {
+    execute_with_shared_lease(db, text, options, 0)
+}
+
+fn execute_with_shared_lease(
+    db: &Connection,
+    text: &str,
+    options: ExecutionOptions,
+    held_bytes: u64,
+) -> Result<Observed, QueryError> {
     let prepared = prepare(db, text, BTreeMap::new(), options)?;
     let physical = prepared.physical.clone();
     let resources = prepared.resources.clone();
+    let held = resources
+        .reserve(held_bytes)
+        .expect("reserve test-only shared-ledger pressure after prepare");
     let mut cursor = QueryCursor::new(prepared);
     let result = (|| {
         let mut rows = Vec::new();
@@ -84,6 +96,12 @@ fn execute(db: &Connection, text: &str, options: ExecutionOptions) -> Result<Obs
         }
     })();
     drop(cursor);
+    assert_eq!(
+        resources.used(),
+        held_bytes,
+        "success/error leaves only the held shared lease: {text}"
+    );
+    drop(held);
     assert_eq!(
         resources.used(),
         0,
@@ -575,5 +593,17 @@ fn hard_512k_keeps_two_property_members_in_the_fallback_spool() {
     let actual = read(&db, FALLBACK, options)
         .unwrap_or_else(|error| panic!("hard512 fallback with two-property members: {error:?}"));
     assert_fixed_three(&actual, &ids);
+    assert_eq!(state(&db), before);
+
+    // This models observed live-prefix pressure on the same query ledger. It
+    // does not claim to clone the exact frozen million-node execution state.
+    let mut options = ExecutionOptions::default();
+    options.memory_limit_bytes = Some(524_288);
+    let pressured = {
+        let _scope = ReadScope::new(&db);
+        execute_with_shared_lease(&db, &format!("PROFILE {FALLBACK}"), options, 150_856)
+            .unwrap_or_else(|error| panic!("hard512 fallback with shared pressure: {error:?}"))
+    };
+    assert_fixed_three(&pressured, &ids);
     assert_eq!(state(&db), before);
 }

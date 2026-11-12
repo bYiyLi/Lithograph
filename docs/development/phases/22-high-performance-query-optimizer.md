@@ -1193,3 +1193,17 @@ SIP的旧R5四档Before batch在1M时实际达到1GiB cgroup限制，leaf与meta
 预算分页与无WHERE准入修正已完成原生定向复验：CF10、完整predicates16（保原dbHits16）、SIP11、codec2全通过，另一个两property成员的hard512小例独立通过；Clippy `-D warnings`、严格复杂度及原dup门槛保持通过。该候选原生Release的1M hard512重测仍实际Resource18（CPU约8.64s、RSS41893888B），同候选的原frozen1k也复现；全部输入保护与清理通过而查询失败，不能由自建小例绿灯关闭S6。当前继续用小frozen fixture定位实际失败阶段，不提高预算或重跑未改动的百万用例。
 
 `2df1ee7` CI终态为failure：Linux/macOS及Quality coverage均因相同predicates回归失败，Windows canonical成功。其Matrix另有Windows x64的独立Provider并发publish失败：`concurrent Provider publish failed: result=cache database operation failed`；已证明两worker都通过HTTP barrier，失败范围在HTTP后的cache发布，具体SQLite根因未知。新增固定publish begin/body/commit/rollback阶段及SQLite primary/extended code诊断，保持原Provider分类、500ms/10ms重试、两个worker、HTTP barrier和3-entry/24-byte断言；测试记录两侧安全结果，不回显config/SQL/path/secret。原生Provider25项unit、support编译与Clippy通过，其中新增构造错误单测仅证明诊断分类与去敏，不冒称真实Windows复现或故障修复。新提交CI与剩余回退问题继续按实际结果验收。
+
+### 25.6 Node-only 回退修复与百万节点资源结果
+
+后续将候选及matched TEMP都限制为现有codec的单Node binding；每个outer的原绑定只保留一次，完整pattern结束后才在预算内恢复原绑定、order/CSV context并执行原WHERE。没有引入新的因子化IR、公开配置或codec。原frozen1k的私有只读诊断先精确定位`spill_matched_record`首次写入失败（候选1000已完成、matched0、live150856B），修正后同一fixture/Commit/SQLite和524288B预算实际完整通过。该诊断与验证仅存在ignored disposable源码，正式实现不含tracker、临时日志或新ABI。私有验证脚本最初在仍持有QuerySummary的72B正常lease时提前断言used0；已改为验证完整结果后释放summary再断言归零，原脚本失败记录保留，未改变生产释放行为。
+
+当前正式实现的CF11、SIP11、完整predicates16实际通过，原dbHits16断言不改；shared-pressure永久回归从Resource失败变为完整成功。Clippy all-target/all-feature `-D warnings`、format、严格复杂度及原dup门槛通过（1302/130304重复行、显示1.00%、exit0）。同源原生Release的SHA256为`28de76577f69c114583b04b2cd561788a9de9b021d7eba63a8f8eaae864b0fd7`，测试输入1002/`608132d6995c77b65392d5a3f13f0af088e644c5914d2a1c77272d911fe78778`在前后检查相同。
+
+| 实测范围 | 结果与边界 |
+| --- | --- |
+| SQL rows，原immutable 1M Probe，非SIP的`(a IN bs) OR false`，Engine524288B，Linux amd64 1GiB/no-swap | 完整三行typed bag、summary3、最终Project3、LabelIndexScan消费1000000行、无semiMask、dbHits求和通过。真实leaf/worker/controller均exit0；wait4 RSS41803776B，CPU user98.417142s/sys1.546149s；OOM事件0。此次单次PROFILE是功能/资源证据，不构造P50/P95 |
+| 资源与恢复 | 实际TEMP落盘；cgroup峰1073741824B含文件页，与RSS分列。unit/cgroup路径消失，两已知PID实际ESRCH，TEMP空、连接关闭；fixture/manifest/artifact/sidecars前后不变，Source1002项postguard通过 |
+| SQL scalar，原frozen1k，同Release/同query/Engine524288B/同外层限制 | 完整三行与PROFILE/summary/访问行数检查通过，真实controller/leaf成功及清理通过；该smoke不替代rows百万资源或四档普通时延 |
+
+上述结果关闭本次已复现的回退资源问题，不改写旧Resource/OOM/timeout。`b380324`的新Windows x64 Matrix gate已实际成功，新增Provider诊断unit25项及support/check/Clippy通过；旧`2df1ee7`的并发publish一次失败仍保持根因未知，不将这次绿灯写成已证明修复。Node-only修复的精确新提交完整CI/Matrix与S6最后证据收口仍需完成，S6继续`in_progress`，不以资源子集通过进入S7/S8生产实现或将Phase标done。
