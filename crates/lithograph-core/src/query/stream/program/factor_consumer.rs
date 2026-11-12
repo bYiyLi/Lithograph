@@ -9,13 +9,16 @@ mod filter;
 mod proof;
 mod scratch;
 
-pub(super) use aggregate::{FactorAggregateSource, admit_aggregate, compile_aggregate, supports_aggregate};
+pub(super) use aggregate::{
+    FactorAggregateSource, admit_aggregate, compile_aggregate, supports_aggregate,
+};
 pub(crate) use count::group_counts;
 
 fn evaluation_slot(packet: &GroupPacket, metrics: &QueryMetrics) -> Option<usize> {
-    packet.plan.as_ref().and_then(|plan| {
-        metrics.factorized_slot(plan.clause_start, "FactorizedAccumulate")
-    })
+    packet
+        .plan
+        .as_ref()
+        .and_then(|plan| metrics.factorized_slot(plan.clause_start, "FactorizedAccumulate"))
 }
 
 pub(super) fn filter(
@@ -26,10 +29,14 @@ pub(super) fn filter(
         if let Some(row) = next_flat(&mut source.factor_output, runtime)? {
             return Ok(Some(row));
         }
-        let Some(packet) = filter_packet(source, runtime)? else { return Ok(None); };
+        let Some(packet) = filter_packet(source, runtime)? else {
+            return Ok(None);
+        };
         match packet {
             BindingPacket::Flat(row) => return Ok(Some(row)),
-            packet @ BindingPacket::Group(_) => install(&mut source.factor_output, packet, runtime.control)?,
+            packet @ BindingPacket::Group(_) => {
+                install(&mut source.factor_output, packet, runtime.control)?
+            }
         }
     }
 }
@@ -44,7 +51,9 @@ pub(super) fn filter_packet(
         let packet = if let Some(row) = next_flat(&mut source.factor_flatten, runtime)? {
             BindingPacket::Flat(row)
         } else {
-            let Some(packet) = source.upstream.next_packet(runtime)? else { return Ok(None); };
+            let Some(packet) = source.upstream.next_packet(runtime)? else {
+                return Ok(None);
+            };
             packet
         };
         match packet {
@@ -54,9 +63,16 @@ pub(super) fn filter_packet(
                 }
             }
             BindingPacket::Group(packet) => {
-                if packet.is_empty() { continue; }
-                let Some(group) = proof::predicate_group(&source.predicate, &packet, runtime)? else {
-                    install(&mut source.factor_flatten, BindingPacket::Group(packet), runtime.control)?;
+                if packet.is_empty() {
+                    continue;
+                }
+                let Some(group) = proof::predicate_group(&source.predicate, &packet, runtime)?
+                else {
+                    install(
+                        &mut source.factor_flatten,
+                        BindingPacket::Group(packet),
+                        runtime.control,
+                    )?;
                     continue;
                 };
                 if let Some(packet) = filter::apply(packet, group, &source.predicate, runtime)? {
@@ -76,10 +92,14 @@ pub(super) fn projection(
         if let Some(row) = next_flat(&mut source.factor_output, runtime)? {
             return Ok(Some(row));
         }
-        let Some(packet) = projection_packet(source, runtime)? else { return Ok(None); };
+        let Some(packet) = projection_packet(source, runtime)? else {
+            return Ok(None);
+        };
         match packet {
             BindingPacket::Flat(row) => return Ok(Some(row)),
-            packet @ BindingPacket::Group(_) => install(&mut source.factor_output, packet, runtime.control)?,
+            packet @ BindingPacket::Group(_) => {
+                install(&mut source.factor_output, packet, runtime.control)?
+            }
         }
     }
 }
@@ -88,14 +108,18 @@ pub(super) fn projection_packet(
     source: &mut ProjectionSource,
     runtime: &mut ProgramRuntime<'_, '_>,
 ) -> QueryResult<Option<BindingPacket>> {
-    if source.limit.is_some_and(|limit| source.emitted >= limit) { return Ok(None); }
+    if source.limit.is_some_and(|limit| source.emitted >= limit) {
+        return Ok(None);
+    }
     loop {
         let baseline = runtime.expression_memory.bytes();
         check_interrupted(runtime.is_interrupted)?;
         let packet = if let Some(row) = next_flat(&mut source.factor_flatten, runtime)? {
             BindingPacket::Flat(row)
         } else {
-            let Some(packet) = source.upstream.next_packet(runtime)? else { return Ok(None); };
+            let Some(packet) = source.upstream.next_packet(runtime)? else {
+                return Ok(None);
+            };
             packet
         };
         let input = match packet {
@@ -111,9 +135,14 @@ pub(super) fn projection_packet(
         output.load_csv_context.clone_from(&input.load_csv_context);
         for projection in &source.projections {
             let value = runtime.evaluate(&projection.expression, &input)?;
-            output.insert(projection.column.clone(), expression::binding_from_value_controlled(
-                runtime.snapshot, value, runtime.control,
-            )?);
+            output.insert(
+                projection.column.clone(),
+                expression::binding_from_value_controlled(
+                    runtime.snapshot,
+                    value,
+                    runtime.control,
+                )?,
+            );
         }
         if source.seen < source.skip {
             source.seen = source.seen.saturating_add(1);
@@ -133,16 +162,22 @@ fn project_group(
     mut packet: GroupPacket,
     runtime: &mut ProgramRuntime<'_, '_>,
 ) -> QueryResult<Option<BindingPacket>> {
-    if packet.is_empty() { return Ok(None); }
+    if packet.is_empty() {
+        return Ok(None);
+    }
     if source.skip == 0 && source.limit.is_none() {
-        if let Some((projections, _memory)) = factor::consume::compile_projection(
-            &packet, &source.projections, runtime.control,
-        )? {
+        if let Some((projections, _memory)) =
+            factor::consume::compile_projection(&packet, &source.projections, runtime.control)?
+        {
             packet.set_projections(&projections, runtime.control)?;
             return Ok(Some(BindingPacket::Group(packet)));
         }
     }
-    install(&mut source.factor_flatten, BindingPacket::Group(packet), runtime.control)?;
+    install(
+        &mut source.factor_flatten,
+        BindingPacket::Group(packet),
+        runtime.control,
+    )?;
     Ok(None)
 }
 
@@ -151,8 +186,12 @@ fn install(
     packet: BindingPacket,
     control: &ExecutionControl<'_>,
 ) -> QueryResult<()> {
-    if flatten.is_none() { *flatten = Some(FlattenContinuation::new(control)?); }
-    flatten.as_mut().ok_or_else(|| QueryError::internal("missing factor continuation"))?
+    if flatten.is_none() {
+        *flatten = Some(FlattenContinuation::new(control)?);
+    }
+    flatten
+        .as_mut()
+        .ok_or_else(|| QueryError::internal("missing factor continuation"))?
         .install(packet, control)
 }
 
@@ -160,7 +199,9 @@ fn next_flat(
     flatten: &mut Option<FlattenContinuation>,
     runtime: &mut ProgramRuntime<'_, '_>,
 ) -> QueryResult<Option<BindingRow>> {
-    let Some(flatten) = flatten.as_mut() else { return Ok(None); };
+    let Some(flatten) = flatten.as_mut() else {
+        return Ok(None);
+    };
     let clause = flatten.clause_start();
     let row = flatten.with_next_row(runtime.control, |row, projection| {
         if let Some(clause) = clause {
@@ -168,21 +209,36 @@ fn next_flat(
         }
         let (row, memory) = match projection {
             Some(projections) => factor::consume::project_binding(
-                projections, row, runtime.snapshot, runtime.params,
-                &runtime.graph_view.query_access, runtime.control,
+                projections,
+                row,
+                runtime.snapshot,
+                runtime.params,
+                &runtime.graph_view.query_access,
+                runtime.control,
             )?,
             None => {
-                let memory = runtime.control.reserve(expression::binding_row_bytes_controlled(
-                    row, Some(runtime.control),
-                )?)?;
-                (expression::clone_binding_row_unreserved_controlled(row, Some(runtime.control))?, memory)
+                let memory = runtime
+                    .control
+                    .reserve(expression::binding_row_bytes_controlled(
+                        row,
+                        Some(runtime.control),
+                    )?)?;
+                (
+                    expression::clone_binding_row_unreserved_controlled(
+                        row,
+                        Some(runtime.control),
+                    )?,
+                    memory,
+                )
             }
         };
         runtime.expression_memory.merge(memory)?;
         Ok(row)
     })?;
     if let Some((clause, delta)) = flatten.take_storage_metrics()? {
-        runtime.metrics.record_factorized_storage(clause, "Flatten", delta);
+        runtime
+            .metrics
+            .record_factorized_storage(clause, "Flatten", delta);
     }
     Ok(row)
 }
