@@ -8,8 +8,8 @@ pub(super) fn claim(
     control: &ExecutionControl<'_>,
 ) -> QueryResult<Option<MemoryReservation>> {
     if budget.exhausted()
-        || work > super::super::budget::MAX_STATES.saturating_sub(budget.states)
-        || bytes > super::super::budget::MAX_BYTES.saturating_sub(budget.bytes)
+        || work > budget.remaining_states()
+        || bytes > budget.remaining_advice_bytes()
     {
         return Ok(None);
     }

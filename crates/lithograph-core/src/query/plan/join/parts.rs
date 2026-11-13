@@ -8,6 +8,14 @@ pub(crate) fn expansion_metadata(
     step: &MatchStep,
     depth: usize,
 ) -> Option<(Option<&str>, Direction)> {
+    if step
+        .join
+        .as_ref()
+        .and_then(|plan| plan.multiway.as_ref())
+        .is_some_and(|plan| depth < plan.edges.len())
+    {
+        return None;
+    }
     if let Some(factor) = step.join.as_ref().and_then(|plan| plan.factorized.as_ref()) {
         return factor_expansion(step, factor, depth);
     }

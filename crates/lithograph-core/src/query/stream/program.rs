@@ -298,25 +298,85 @@ struct MatchSource {
     step: MatchStep,
     current: Option<StepCursor>,
     read_bindings: super::MatchReadBindings,
+    finite_profile_slot: Option<usize>,
     _index_memory: MemoryReservation,
 }
 
-impl BindingSource for MatchSource {
-    fn next_packet(
+impl MatchSource {
+    fn start(
+        &self,
+        input: BindingRow,
+        runtime: &mut ProgramRuntime<'_, '_>,
+    ) -> QueryResult<StepCursor> {
+        let Some(candidates) = crate::query::completeness::execute::streaming_sip_node_ids(
+            &self.step,
+            &input,
+            runtime.control,
+        )?
+        else {
+            return StepCursor::new(&self.step, input, runtime.control);
+        };
+        let keys = candidates.0.len().try_into().unwrap_or(u64::MAX);
+        let cursor = StepCursor::with_node_ids(&self.step, input, candidates, runtime.control)?;
+        let previous = runtime
+            .metrics
+            .activate_profile_slot(self.finite_profile_slot);
+        runtime.metrics.record_semi_mask(keys, 0);
+        runtime.metrics.restore_access_operator(previous);
+        Ok(cursor)
+    }
+}
+
+impl MatchSource {
+    fn pull(
         &mut self,
         runtime: &mut ProgramRuntime<'_, '_>,
+        packets: bool,
     ) -> QueryResult<Option<BindingPacket>> {
         loop {
-            runtime.control.check()?;
+            if packets {
+                runtime.control.check()?;
+            } else {
+                check_interrupted(runtime.is_interrupted)?;
+            }
             if let Some(cursor) = self.current.as_mut() {
-                if let Some(packet) = cursor.next_packet(
-                    runtime.snapshot,
-                    runtime.graph_view,
-                    runtime.params,
-                    runtime.metrics,
-                    &mut self.read_bindings,
-                    runtime.control,
-                )? {
+                let previous = if cursor.is_finite_advisory() {
+                    runtime
+                        .metrics
+                        .activate_profile_slot(self.finite_profile_slot)
+                } else {
+                    None
+                };
+                let result = if packets {
+                    cursor.next_packet(
+                        runtime.snapshot,
+                        runtime.graph_view,
+                        runtime.params,
+                        runtime.metrics,
+                        &mut self.read_bindings,
+                        runtime.control,
+                    )
+                } else {
+                    cursor
+                        .next_row(
+                            runtime.snapshot,
+                            runtime.graph_view,
+                            runtime.params,
+                            runtime.metrics,
+                            &mut self.read_bindings,
+                            runtime.control,
+                        )
+                        .map(|row| row.map(BindingPacket::Flat))
+                };
+                if let Some(previous) = previous {
+                    if matches!(&result, Ok(Some(BindingPacket::Flat(_)))) {
+                        // Exact sites already count their producer. Legacy
+                        // fresh finite pulls need this caller-owned row event.
+                        runtime.metrics.record_pipeline_rows(1);
+                    }
+                    runtime.metrics.restore_active_operator(previous);
+                }
+                if let Some(packet) = result? {
                     return Ok(Some(packet));
                 }
                 self.current = None;
@@ -325,31 +385,26 @@ impl BindingSource for MatchSource {
                 self.read_bindings.finish(&self.step, runtime.metrics)?;
                 return Ok(None);
             };
-            self.current = Some(StepCursor::new(&self.step, input, runtime.control)?);
+            self.current = Some(self.start(input, runtime)?);
         }
+    }
+}
+
+impl BindingSource for MatchSource {
+    fn next_packet(
+        &mut self,
+        runtime: &mut ProgramRuntime<'_, '_>,
+    ) -> QueryResult<Option<BindingPacket>> {
+        self.pull(runtime, true)
     }
 
     fn next(&mut self, runtime: &mut ProgramRuntime<'_, '_>) -> QueryResult<Option<BindingRow>> {
-        loop {
-            check_interrupted(runtime.is_interrupted)?;
-            if let Some(cursor) = self.current.as_mut() {
-                if let Some(row) = cursor.next_row(
-                    runtime.snapshot,
-                    runtime.graph_view,
-                    runtime.params,
-                    runtime.metrics,
-                    &mut self.read_bindings,
-                    runtime.control,
-                )? {
-                    return Ok(Some(row));
-                }
-                self.current = None;
+        match self.pull(runtime, false)? {
+            Some(BindingPacket::Flat(row)) => Ok(Some(row)),
+            None => Ok(None),
+            Some(BindingPacket::Group(_)) => {
+                Err(QueryError::internal("MATCH row pull returned a group"))
             }
-            let Some(input) = self.upstream.next(runtime)? else {
-                self.read_bindings.finish(&self.step, runtime.metrics)?;
-                return Ok(None);
-            };
-            self.current = Some(StepCursor::new(&self.step, input, runtime.control)?);
         }
     }
 }

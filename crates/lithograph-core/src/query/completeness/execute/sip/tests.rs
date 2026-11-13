@@ -53,6 +53,61 @@ fn complete_mask_keeps_its_capacity_claim_through_sort_and_dedup() {
 }
 
 #[test]
+fn streaming_mask_uses_the_same_complete_validation_and_budget_claim() {
+    let (step, row) = step_and_row(three_non_null_values());
+    let resources = QueryResources::default();
+    let control = ExecutionControl::new(&resources, &|| false);
+    let mask = streaming_node_ids(&step, &row, &control)
+        .unwrap()
+        .expect("fresh plain streaming Node can reuse the completed mask");
+    assert_eq!(mask.0, vec![1, 3]);
+    assert_eq!(mask.1.bytes(), 24);
+    assert_eq!(resources.used(), 24);
+    drop(mask);
+    assert_eq!(resources.used(), 0);
+
+    let (step, mixed) = step_and_row(vec![Value::Integer(1), Value::String("n:3".into())]);
+    assert!(
+        streaming_node_ids(&step, &mixed, &control)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        resources.used(),
+        0,
+        "mixed families keep original IN evaluation"
+    );
+}
+
+#[test]
+fn streaming_mask_never_narrows_an_existing_binding_optional_or_path_pattern() {
+    let (step, mut row) = step_and_row(three_non_null_values());
+    let resources = QueryResources::default();
+    let control = ExecutionControl::new(&resources, &|| false);
+    row.insert("a".into(), BindingValue::Scalar(Value::Integer(1)));
+    assert!(streaming_node_ids(&step, &row, &control).unwrap().is_none());
+    let (_, row) = step_and_row(three_non_null_values());
+    let mut optional = step.clone();
+    optional.optional = true;
+    assert!(
+        streaming_node_ids(&optional, &row, &control)
+            .unwrap()
+            .is_none()
+    );
+    let mut path = step.clone();
+    path.parts[0].path_variable = Some("p".into());
+    assert!(streaming_node_ids(&path, &row, &control).unwrap().is_none());
+    let mut multiple = step.clone();
+    multiple.parts.push(step.parts[0].clone());
+    assert!(
+        streaming_node_ids(&multiple, &row, &control)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(resources.used(), 0);
+}
+
+#[test]
 fn insufficient_mask_budget_returns_optional_fallback_without_a_live_claim() {
     let (step, row) = step_and_row(three_non_null_values());
     let resources = QueryResources::new(Some(16));

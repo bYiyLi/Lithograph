@@ -19,6 +19,7 @@ use super::{ExecutionControl, MemoryReservation, QueryError, QueryResult, check_
 pub(crate) mod factor;
 mod hash_metrics;
 mod match_pipeline;
+pub(crate) mod multiway;
 mod node_match;
 mod profile;
 pub(crate) mod program;
@@ -33,11 +34,14 @@ pub use hash_metrics::{HashJoinRuntimeMetrics, JoinDynamicFilterRuntimeMetrics};
 use match_pipeline::MatchPipeline;
 #[cfg(test)]
 pub(crate) use match_pipeline::hash_resident_target;
-pub(crate) use match_pipeline::{HashLayoutFacts, hash_layout, hash_table_peak_bytes};
+pub(crate) use match_pipeline::{
+    HashLayoutFacts, hash_layout, hash_table_peak_bytes, identity_binding_row_bytes,
+};
 pub(crate) use match_pipeline::{MatchReadBindings, StepCursor, spill_match_step};
 use node_match::{node_matches, node_matches_scanned};
 pub use profile::{
-    FactorizedRuntimeMetrics, OperatorRuntimeMetrics, QueryMetrics, SemiMaskRuntimeMetrics,
+    FactorizedRuntimeMetrics, MultiwayRuntimeMetrics, OperatorRuntimeMetrics, QueryMetrics,
+    SemiMaskRuntimeMetrics,
 };
 use project::{order_values, project_row};
 

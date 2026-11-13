@@ -39,11 +39,19 @@ pub(crate) fn append_pattern_operators_with_sites(
     operators: &mut Vec<LogicalOperator>,
     sites: &mut Vec<ProfileBinding>,
 ) {
+    let first = step
+        .join
+        .as_ref()
+        .and_then(|plan| plan.multiway.as_ref())
+        .map_or(0, |plan| {
+            append_multiway_pattern(step, plan, bound, operators, sites);
+            plan.edges.len()
+        });
     if let Some(plan) = step.join.as_ref().and_then(|plan| plan.factorized.as_ref()) {
         append_factorized_pattern(step, plan, bound, operators, sites);
         return;
     }
-    for depth in 0..step.parts.len() {
+    for depth in first..step.parts.len() {
         let (ordinal, part) = if step.join.is_some() {
             let (ordinal, part) = join::execution_part(step, depth);
             (ordinal, std::borrow::Cow::Owned(part))
@@ -87,19 +95,58 @@ pub(crate) fn append_pattern_operators_with_sites(
             |plan| !plan.stages[depth].predicates_after.is_empty(),
         );
         if filtered {
-            {
-                sites.push(ProfileBinding {
-                    site: OperatorSite {
-                        clause_start: step.clause_start,
-                        part: Some(ordinal),
-                        role: ProfileRole::EarlyFilter,
-                    },
-                    physical_slot: operators.len(),
-                });
-            }
-            operators.push(LogicalOperator::Filter);
+            append_prefix_filter(step.clause_start, ordinal, operators, sites);
         }
     }
+}
+
+fn append_multiway_pattern(
+    step: &MatchStep,
+    plan: &MultiwayPlan,
+    bound: &mut BTreeSet<String>,
+    operators: &mut Vec<LogicalOperator>,
+    sites: &mut Vec<ProfileBinding>,
+) {
+    append_clause_site(
+        step,
+        LogicalOperator::MultiwayIntersect,
+        ProfileRole::MultiwayIntersect,
+        operators,
+        sites,
+    );
+    bound.extend(plan.nodes.iter().map(|node| node.variable.clone()));
+    bound.extend(plan.edges.iter().filter_map(|edge| {
+        step.parts[edge.part]
+            .relationship
+            .as_ref()
+            .and_then(|rel| rel.variable.clone())
+    }));
+    if plan.edges.len() < step.parts.len()
+        && let Some(join) = &step.join
+    {
+        for stage in join.stages.iter().take(plan.edges.len()) {
+            if !stage.predicates_after.is_empty() {
+                append_prefix_filter(step.clause_start, stage.part, operators, sites);
+            }
+        }
+    }
+}
+
+fn append_prefix_filter(
+    clause_start: usize,
+    ordinal: usize,
+    operators: &mut Vec<LogicalOperator>,
+    sites: &mut Vec<ProfileBinding>,
+) {
+    sites.push(ProfileBinding {
+        site: OperatorSite {
+            clause_start,
+            part: Some(ordinal),
+            role: ProfileRole::EarlyFilter,
+        },
+        physical_slot: operators.len(),
+    });
+    operators.push(LogicalOperator::Filter);
 }
 
 fn append_factorized_pattern(
@@ -110,7 +157,7 @@ fn append_factorized_pattern(
     sites: &mut Vec<ProfileBinding>,
 ) {
     append_factor_arm(step, &plan.accumulate, bound, operators, sites);
-    append_factor_site(
+    append_clause_site(
         step,
         LogicalOperator::FactorizedAccumulate,
         ProfileRole::FactorizedAccumulate,
@@ -130,7 +177,7 @@ fn append_factorized_pattern(
         operators.push(LogicalOperator::NodeIdSeek {
             variable: asp.build_variable.clone(),
         });
-        append_factor_site(
+        append_clause_site(
             step,
             LogicalOperator::ASPJoin,
             ProfileRole::ASPJoin,
@@ -183,7 +230,7 @@ fn append_factor_arm(
     }
 }
 
-fn append_factor_site(
+fn append_clause_site(
     step: &MatchStep,
     operator: LogicalOperator,
     role: ProfileRole,
@@ -259,7 +306,7 @@ pub(crate) fn append_match_residual(
         .as_ref()
         .is_some_and(|plan| plan.factorized.is_some())
     {
-        append_factor_site(
+        append_clause_site(
             step,
             LogicalOperator::Flatten,
             ProfileRole::Flatten,
@@ -464,6 +511,9 @@ pub(crate) fn build_physical(
             LogicalOperator::NestedLoop => operators.push(PhysicalOperator::NestedLoop),
             LogicalOperator::IndexNestedLoop => operators.push(PhysicalOperator::IndexNestedLoop),
             LogicalOperator::HashJoin => operators.push(PhysicalOperator::HashJoin),
+            LogicalOperator::MultiwayIntersect => {
+                operators.push(PhysicalOperator::MultiwayIntersect)
+            }
             LogicalOperator::FactorizedAccumulate => {
                 operators.push(PhysicalOperator::FactorizedAccumulate)
             }

@@ -156,29 +156,61 @@ fn plan_step_access(
         control,
         budget,
     )?;
-    let analysis = match scope {
-        Some(scope)
-            if budget.work(
-                0,
-                step.parts
-                    .len()
-                    .saturating_mul(4)
-                    .saturating_mul(std::mem::size_of::<ProfileBinding>()),
-            ) =>
-        {
-            join::analyze_join(step, scope, context, budget)?
-        }
-        _ => None,
-    };
+    let analysis = analyze_step_join(step, scope, context, budget)?;
+    if let (Some(scope), Some(analysis)) = (scope, analysis.as_ref()) {
+        join::estimates::protect_completion_metadata(step, analysis, scope, context, budget)?;
+    }
     let statistics = step_statistics(snapshot, step, view, budget, control, analysis.is_some())?;
     choose_parts(step, view, snapshot, schema, &statistics, budget, control)?;
     if let (Some(scope), Some(analysis)) = (scope, analysis) {
         let estimates =
             join::collect_join_estimates(step, &analysis, context, &statistics, budget, scope)?;
-        step.join = join::choose_join_order(step, scope, analysis, &estimates, control, budget)?;
-        super::factor::install(step, scope, context, &statistics, &estimates, budget)?;
+        step.join = join::choose_join_order(
+            step,
+            scope,
+            analysis,
+            &estimates,
+            context,
+            &statistics,
+            budget,
+        )?;
+        install_legacy_factor(step, scope, context, &statistics, &estimates, budget)?;
     }
     Ok((statistics, memory))
+}
+
+fn analyze_step_join(
+    step: &MatchStep,
+    scope: Option<&join::JoinClauseScope<'_>>,
+    context: &join::JoinPlanningContext<'_, '_, '_>,
+    budget: &mut PlanningBudget,
+) -> QueryResult<Option<join::JoinAnalysis>> {
+    let Some(scope) = scope else {
+        return Ok(None);
+    };
+    let bytes = step
+        .parts
+        .len()
+        .saturating_mul(4)
+        .saturating_mul(std::mem::size_of::<ProfileBinding>());
+    if !budget.work(0, bytes) {
+        return Ok(None);
+    }
+    join::analyze_join(step, scope, context, budget)
+}
+
+fn install_legacy_factor(
+    step: &mut MatchStep,
+    scope: &join::JoinClauseScope<'_>,
+    context: &join::JoinPlanningContext<'_, '_, '_>,
+    statistics: &PlannerStatistics,
+    estimates: &join::estimates::JoinEstimates,
+    budget: &mut PlanningBudget,
+) -> QueryResult<()> {
+    if budget.clause_scoped() {
+        return Ok(());
+    }
+    super::factor::install(step, scope, context, statistics, estimates, budget)
 }
 
 fn step_statistics(
@@ -201,9 +233,7 @@ fn step_statistics(
         return Ok(PlannerStatistics::default());
     }
     let work = snapshot.bounded_statistics_work(label_slots, step.parts.len(), need_relationships);
-    if work > super::budget::MAX_STATES.saturating_sub(budget.states)
-        || budget.bytes > super::budget::MAX_BYTES.saturating_sub(64 * 1024)
-    {
+    if work > budget.remaining_states() || 64 * 1024 > budget.remaining_bytes() {
         return Ok(PlannerStatistics::default());
     }
     let Some(_probe) = sampling::claim(1, 0, budget, control)? else {
@@ -337,7 +367,9 @@ fn eligible_step(
     if !budget.step(step, schema) {
         // Unsupported expressions also require the established graph/program
         // executor; never cache an unoptimized step in the scalar matcher.
-        budget.stop();
+        if !budget.exhausted() {
+            budget.stop();
+        }
         return Ok(false);
     }
     Ok(step.predicate.is_none()

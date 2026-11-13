@@ -18,10 +18,9 @@ pub(super) fn encoding_bytes(
     work(control)?;
     match value {
         JsonValue::Number(number) if number.is_f64() => Ok(((FLOAT.len() + 16) * 4 + 16) as u64),
-        JsonValue::String(string) if string.starts_with(PREFIX) => checked_add(
-            checked_mul(checked_add(string.len() as u64, TEXT.len() as u64)?, 2)?,
-            32,
-        ),
+        JsonValue::String(string) if string.starts_with(PREFIX) => {
+            escaped_strings_bytes(string.len() as u64, 1)
+        }
         JsonValue::Array(values) => values.iter().try_fold(0, |total, value| {
             checked_add(total, encoding_bytes(value, control)?)
         }),
@@ -30,6 +29,16 @@ pub(super) fn encoding_bytes(
         }),
         _ => Ok(0),
     }
+}
+
+pub(super) fn escaped_strings_bytes(bytes: u64, strings: u64) -> QueryResult<u64> {
+    checked_add(
+        checked_mul(
+            checked_add(bytes, checked_mul(strings, TEXT.len() as u64)?)?,
+            2,
+        )?,
+        checked_mul(strings, 32)?,
+    )
 }
 
 pub(super) fn encode(

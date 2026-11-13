@@ -35,6 +35,8 @@ fn inputs(rows: u64, string: bool) -> HashInputs {
         dependencies: vec![1, 2],
         encoded: vec![Some(2048), Some(2048)],
         encoding_scratch: vec![2048, 2048],
+        prefix_bindings: None,
+        relationship_parts: 0,
         keys: vec![KeyScopes {
             left: vec![None; 2],
             right: vec![None; 2],
@@ -159,7 +161,7 @@ fn ample_hard_grant_keeps_the_soft_target_after_prefix_and_df_claims() {
     prefix.memory = 2048;
     let original = inputs.estimate(0, 1, prefix).unwrap();
     let filtered = inputs
-        .estimate_with_memory(0, 1, prefix, 163 * 1024)
+        .estimate_with_memory(0, 1, prefix, 163 * 1024, None)
         .unwrap();
     assert_eq!(original.temp.owner, 0);
     assert_eq!(
@@ -191,7 +193,7 @@ fn tight_hard_grant_subtracts_the_same_real_claims_before_the_soft_cap() {
     prefix.memory = 2048;
     let original = inputs.estimate(0, 1, prefix).unwrap();
     let filtered = inputs
-        .estimate_with_memory(0, 1, prefix, 163 * 1024)
+        .estimate_with_memory(0, 1, prefix, 163 * 1024, None)
         .unwrap();
     assert!(original.temp.owner > 0 && filtered.temp.owner > 0);
     assert!(filtered.resident < original.resident);
@@ -225,7 +227,7 @@ fn prefix_payload_uses_all_real_part_widths() {
     inputs.encoding_scratch.push(8192);
     assert_eq!(inputs.prefix_bytes(0b101), Some(10_240));
     assert_eq!(inputs.prefix_bytes(0b010), Some(2048));
-    assert_eq!(inputs.prefix_scratch(0b101), 10_240);
+    assert_eq!(inputs.prefix_scratch(0b101), Some(10_240));
     let hash = inputs.estimate(0, 0b101, prefix(100)).unwrap();
     assert!(hash.temp.per_probe >= 20_480);
 }
@@ -237,7 +239,7 @@ fn logical_traffic_and_serialization_scratch_are_independent_cost_facts() {
     inputs.encoded = vec![Some(64), Some(64)];
     inputs.candidates[0].build.layout.encoded_row_bytes = Some(64);
     let compact = inputs.estimate(0, 1, prefix(1000)).unwrap();
-    assert_eq!(inputs.prefix_scratch(1), 2048);
+    assert_eq!(inputs.prefix_scratch(1), Some(2048));
     assert_eq!(
         compact.resident, wide.resident,
         "compact JSON does not release Rust scratch"

@@ -9,10 +9,7 @@ pub(super) fn prepare_read_query(
     context: PrepareContext,
     control: &crate::query::ExecutionControl<'_>,
 ) -> QueryResult<PreparedQuery> {
-    let (mut matches, return_clause) = lower_clauses(connection, single)?;
-    for step in &mut matches {
-        select_node_id_seeks(step, &context.params);
-    }
+    let (mut matches, return_clause) = lower_read_matches(connection, single, &context.params)?;
     let ProjectionPlan {
         projections,
         order,
@@ -35,7 +32,11 @@ pub(super) fn prepare_read_query(
             AstKind::Clause(ClauseKind::Match | ClauseKind::OptionalMatch)
         )
     });
+    let match_count = matches.len();
     for (step, clause) in matches.iter_mut().zip(clauses) {
+        budget.begin_clause(match_count);
+        #[cfg(test)]
+        budget.observe(clause.span.start, "read-clause-enter");
         let declared = crate::query::completeness::infer_clause_columns(clause, &incoming, query)?;
         let scope = join::JoinClauseScope {
             complete_consumer: limit.is_none() || !order.is_empty(),
@@ -58,6 +59,9 @@ pub(super) fn prepare_read_query(
             index_memory.merge(selected_memory)?;
         }
         incoming = declared;
+        budget.end_clause();
+        #[cfg(test)]
+        budget.observe(clause.span.start, "read-clause-leave");
     }
     let columns = output_columns(context.mode, &projections);
     let (logical, profile_sites) = build_logical(
@@ -97,4 +101,16 @@ pub(super) fn prepare_read_query(
     };
     crate::query::stream::topk::install(&mut prepared, &snapshot, single, &mut budget, control)?;
     Ok(prepared)
+}
+
+fn lower_read_matches<'a>(
+    connection: &Connection,
+    single: &'a AstNode,
+    params: &BTreeMap<String, Value>,
+) -> QueryResult<(Vec<MatchStep>, &'a AstNode)> {
+    let (mut matches, return_clause) = lower_clauses(connection, single)?;
+    for step in &mut matches {
+        select_node_id_seeks(step, params);
+    }
+    Ok((matches, return_clause))
 }

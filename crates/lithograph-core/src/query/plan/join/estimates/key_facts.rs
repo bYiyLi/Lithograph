@@ -32,20 +32,14 @@ pub(super) fn collect(
     headroom: usize,
 ) -> QueryResult<Option<KeyFacts>> {
     let work = context.schema.constraints.len().saturating_add(1);
-    if work.saturating_add(headroom)
-        > crate::query::plan::budget::MAX_STATES.saturating_sub(budget.states)
-        || !budget.work(work, 0)
-    {
+    if work.saturating_add(headroom) > budget.remaining_states() || !budget.work(work, 0) {
         return Ok(None);
     }
     let mut facts = KeyFacts::default();
     for constraint in context.schema.constraints.values() {
         context.control.work(1)?;
         let units = comparison_bytes(index, constraint).div_ceil(64);
-        if units.saturating_add(headroom)
-            > crate::query::plan::budget::MAX_STATES.saturating_sub(budget.states)
-            || !budget.work(units, 0)
-        {
+        if units.saturating_add(headroom) > budget.remaining_states() || !budget.work(units, 0) {
             return Ok(None);
         }
         context.control.work(units as u64)?;

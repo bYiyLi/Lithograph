@@ -486,10 +486,7 @@ pub(super) fn adapter_metadata_bytes(
             let bytes = operators.iter().try_fold(0_u64, |bytes, operator| {
                 query::resources::checked_add(bytes, operator_profile_metadata_bytes(operator)?)
             })?;
-            if operators
-                .iter()
-                .any(|operator| operator.hash.is_some() || operator.factorized.is_some())
-            {
+            if operators.iter().any(operator_has_memory_profile) {
                 query::resources::checked_add(bytes, profile_memory_metadata_bytes()?)
             } else {
                 Ok(bytes)
@@ -506,20 +503,30 @@ fn operator_profile_metadata_bytes(
 ) -> query::QueryResult<u64> {
     let base = query::resources::checked_add(operator.operator.len() as u64, 8192)?;
     let mut bytes = base;
+    // Include every fixed counter and its containing object key before JSON
+    // construction. Dynamic Filter has its own optional nested payload.
+    let fixed_objects = [
+        (operator.hash.is_some(), 10, 512),
+        (operator.semi_mask.is_some(), 3, 96),
+        (operator.factorized.is_some(), 20, 1024),
+        (operator.multiway.is_some(), 9, 512),
+    ];
+    for (present, entries, payload) in fixed_objects {
+        if present {
+            bytes = query::resources::checked_add(
+                bytes,
+                profile_counter_metadata_bytes(entries, payload)?,
+            )?;
+        }
+    }
     if let Some(hash) = operator.hash {
-        // Nine fixed counter keys and their containing `hash` key, each at
-        // most 32 key bytes. Prepay map nodes before constructing any JSON.
-        bytes = query::resources::checked_add(bytes, profile_counter_metadata_bytes(10, 512)?)?;
         bytes = query::resources::checked_add(bytes, dynamic_filter_metadata_bytes(&hash)?)?;
     }
-    if operator.semi_mask.is_some() {
-        bytes = query::resources::checked_add(bytes, profile_counter_metadata_bytes(3, 96)?)?;
-    }
-    if operator.factorized.is_some() {
-        // Nineteen fixed counters plus their containing factorized map key.
-        bytes = query::resources::checked_add(bytes, profile_counter_metadata_bytes(20, 1024)?)?;
-    }
     Ok(bytes)
+}
+
+fn operator_has_memory_profile(operator: &query::OperatorRuntimeMetrics) -> bool {
+    operator.hash.is_some() || operator.factorized.is_some() || operator.multiway.is_some()
 }
 
 fn profile_counter_metadata_bytes(entries: u64, payload_bytes: u64) -> query::QueryResult<u64> {
@@ -582,10 +589,7 @@ pub(super) fn summary_json(summary: &query::QuerySummary) -> Value {
         value["profile"] = json!({
             "operators": operators.iter().map(operator_profile_json).collect::<Vec<_>>(),
         });
-        if operators
-            .iter()
-            .any(|operator| operator.hash.is_some() || operator.factorized.is_some())
-        {
+        if operators.iter().any(operator_has_memory_profile) {
             value["profile"]["executionMemoryPeakBytes"] =
                 json!(summary.metrics.execution_memory_peak_bytes());
             value["profile"]["processPeakRssBytes"] = json!(rss::process_peak_rss_bytes());
@@ -609,6 +613,18 @@ fn operator_profile_json(operator: &query::OperatorRuntimeMetrics) -> Value {
     }
     if let Some(factorized) = operator.factorized {
         value["factorized"] = factorized_profile_json(factorized);
+    }
+    if let Some(work) = operator.multiway {
+        value["multiway"] = json!({
+            "inputLists": work.input_lists,
+            "adjacencyRows": work.adjacency_rows,
+            "seekOperations": work.seek_operations,
+            "intersectionSteps": work.intersection_steps,
+            "candidateNodes": work.candidate_nodes,
+            "nodeAssignments": work.node_assignments,
+            "relationshipCandidates": work.relationship_candidates,
+            "memoryPeakBytes": work.memory_peak_bytes,
+        });
     }
     value
 }

@@ -1,6 +1,83 @@
 use super::*;
 
 #[test]
+fn optional_sample_preserves_completion_metadata_without_debiting_it() {
+    let resources = crate::query::QueryResources::default();
+    let control = ExecutionControl::new(&resources, &|| false);
+    let mut budget = PlanningBudget::default();
+    budget.begin_clause(2);
+    let remaining = budget.remaining_bytes();
+    budget.reserve_advice_bytes(4096);
+    assert!(budget.work(3, remaining - 4096));
+    let paid = (budget.states, budget.bytes);
+    assert!(
+        sampling::claim(1, 1, &mut budget, &control)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!((budget.states, budget.bytes), paid);
+    assert!(!budget.exhausted());
+    assert_eq!(resources.used(), 0);
+    assert!(
+        budget.work(1, 4096),
+        "real construction uses the protected bytes"
+    );
+    budget.end_clause();
+    assert_eq!((budget.states, budget.bytes), (paid.0 + 1, remaining));
+    assert_eq!(budget.remaining_advice_bytes(), budget.remaining_bytes());
+}
+
+#[test]
+fn soft_eligible_step_refusal_does_not_stop_later_matches() {
+    let resources = crate::query::QueryResources::default();
+    let control = ExecutionControl::new(&resources, &|| false);
+    let node = NodeSpec {
+        variable: Some("n".into()),
+        labels: Vec::new(),
+        label_names: Vec::new(),
+        scan_label: None,
+        scan_label_name: None,
+        index_seek: None,
+        id_seek: None,
+        impossible: false,
+    };
+    let step = MatchStep {
+        clause_start: 0,
+        optional: false,
+        parts: vec![PatternPart {
+            path_variable: None,
+            start: node,
+            relationship: None,
+            end: None,
+        }],
+        predicate: None,
+        early_predicates: Vec::new(),
+        join: None,
+    };
+    let schema = storage::SchemaState::default();
+    let params = BTreeMap::new();
+    let mut budget = PlanningBudget::default();
+    budget.begin_clause(2);
+    assert!(budget.work(super::super::budget::MAX_STATES / 2, 0));
+    assert!(!eligible_step(&step, &schema, &params, &control, &mut budget).unwrap());
+    assert!(budget.exhausted());
+    assert!(
+        !budget.exhausted,
+        "the real access guard must preserve a local refusal"
+    );
+    let retained = (budget.states, budget.bytes, budget.candidates);
+    budget.end_clause();
+    assert!(!budget.exhausted());
+    assert_eq!(retained, (budget.states, budget.bytes, budget.candidates));
+    budget.begin_clause(2);
+    assert!(eligible_step(&step, &schema, &params, &control, &mut budget).unwrap());
+    budget.end_clause();
+    assert!(!budget.exhausted());
+    assert_eq!(budget.states, retained.0 + 1);
+    assert_eq!(resources.used(), 0);
+}
+
+#[test]
 fn unknown_estimates_do_not_claim_zero_or_override_the_baseline() {
     let unknown = AccessCandidate::scan(AccessPath::Scan, None);
     let empty = AccessCandidate::scan(AccessPath::Label(1), Some(0));

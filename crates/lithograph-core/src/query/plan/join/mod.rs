@@ -179,4 +179,5 @@ pub(crate) struct JoinPlan {
     pub(crate) hashes: Vec<HashEquality>,
     pub(crate) stages: Vec<JoinStage>,
     pub(crate) factorized: Option<std::sync::Arc<super::FactorizedPlan>>,
+    pub(crate) multiway: Option<std::sync::Arc<super::MultiwayPlan>>,
 }

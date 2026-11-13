@@ -172,6 +172,7 @@ impl PreparedProgram {
             return Ok(memory);
         };
         let cost_streamable = self.cost_matches_streamable()?;
+        let match_count = Self::cost_match_count(single, cost_streamable);
         // Do not infer a LIMIT's upstream demand through arbitrary WITH,
         // projections or writes. Only complete-consumer costs are proved here.
         let complete_consumer = !single.descendants().any(|node| node.kind == AstKind::Limit);
@@ -182,6 +183,8 @@ impl PreparedProgram {
         for node in &single.children {
             control.work(1)?;
             changed |= is_write(node);
+            #[cfg(test)]
+            budget.observe(node.span.start, "program-clause-enter");
             if budget.exhausted() {
                 break;
             }
@@ -209,6 +212,7 @@ impl PreparedProgram {
                 )?;
                 continue;
             }
+            budget.begin_clause(match_count);
             memory.merge(Self::plan_fixed_match(
                 &mut self.match_plans,
                 snapshot,
@@ -218,9 +222,29 @@ impl PreparedProgram {
                 &mut budget,
                 (node, &incoming, &columns, complete_consumer),
             )?)?;
+            budget.end_clause();
+            #[cfg(test)]
+            budget.observe(node.span.start, "program-match-leave");
         }
         self.install_identity_permissions(identity_display, control, &mut memory)?;
         Ok(memory)
+    }
+
+    fn cost_match_count(single: &AstNode, streamable: bool) -> usize {
+        if !streamable {
+            return 0;
+        }
+        single
+            .children
+            .iter()
+            .take_while(|node| !is_write(node))
+            .filter(|node| {
+                matches!(
+                    node.kind,
+                    AstKind::Clause(ClauseKind::Match | ClauseKind::OptionalMatch)
+                )
+            })
+            .count()
     }
 
     fn fixed_match_query(root: &AstNode) -> Option<&AstNode> {
@@ -578,6 +602,7 @@ pub(super) fn physical_operator(operator: &LogicalOperator) -> PhysicalOperator 
         LogicalOperator::NestedLoop => PhysicalOperator::NestedLoop,
         LogicalOperator::IndexNestedLoop => PhysicalOperator::IndexNestedLoop,
         LogicalOperator::HashJoin => PhysicalOperator::HashJoin,
+        LogicalOperator::MultiwayIntersect => PhysicalOperator::MultiwayIntersect,
         LogicalOperator::FactorizedAccumulate => PhysicalOperator::FactorizedAccumulate,
         LogicalOperator::ASPJoin => PhysicalOperator::ASPJoin,
         LogicalOperator::Flatten => PhysicalOperator::Flatten,

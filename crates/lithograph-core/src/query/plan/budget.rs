@@ -5,6 +5,11 @@
 use super::*;
 use crate::query::expression::BinaryOp;
 
+mod allowance;
+
+#[cfg(test)]
+pub(super) mod trace;
+
 pub(super) const MAX_STATES: usize = 4_096;
 pub(super) const MAX_CANDIDATES: usize = 1_024;
 pub(super) const MAX_BYTES: usize = 256 * 1_024;
@@ -18,14 +23,20 @@ pub(crate) struct PlanningBudget {
     pub(super) bytes: usize,
     pub(super) depth: usize,
     pub(super) exhausted: bool,
+    clause: Option<allowance::ClauseAllowance>,
     // This budget belongs to one prepare with fixed Graph View / PropertyRules.
     // Never reuse its sampled advice across queries or access-policy scopes.
     join_distributions: BTreeMap<(HashId, HashId), Option<crate::query::schema::IndexDistribution>>,
 }
 
 impl PlanningBudget {
+    #[cfg(test)]
+    pub(crate) fn observe(&self, clause_start: usize, stage: &'static str) {
+        trace::record(self, clause_start, stage);
+    }
+
     pub(crate) fn exhausted(&self) -> bool {
-        self.exhausted
+        self.exhausted || self.clause.as_ref().is_some_and(|clause| clause.stopped)
     }
 
     pub(crate) fn stop(&mut self) {
@@ -57,8 +68,8 @@ impl PlanningBudget {
         .saturating_mul(16)
         .saturating_add(256);
         if self.join_distributions.len() >= MAX_PARTS
-            || self.states >= MAX_STATES
-            || bytes > MAX_BYTES.saturating_sub(self.bytes)
+            || self.remaining_states() == 0
+            || bytes > self.remaining_advice_bytes()
         {
             return false;
         }
@@ -91,9 +102,7 @@ impl PlanningBudget {
         // The input map is borrowed, not cloned as an executor B-tree. Bound
         // its minimum inspection work up front; charge visited names/values
         // below without multiplying an execution allocator allowance again.
-        if params.len().saturating_mul(2).saturating_add(1) > MAX_STATES.saturating_sub(self.states)
-        {
-            self.stop();
+        if !self.accepts_work(params.len().saturating_mul(2).saturating_add(1), 0) {
             return Ok(None);
         }
         if !self.work(1, 0) {
@@ -116,8 +125,11 @@ impl PlanningBudget {
     ) -> QueryResult<bool> {
         control.work(1)?;
         self.depth = self.depth.max(depth);
-        if depth > MAX_DEPTH || !self.work(1, 0) {
+        if depth > MAX_DEPTH {
             self.stop();
+            return Ok(false);
+        }
+        if !self.work(1, 0) {
             return Ok(false);
         }
         let inline = std::mem::size_of::<Value>();
@@ -160,11 +172,7 @@ impl PlanningBudget {
     }
 
     pub(crate) fn work(&mut self, states: usize, bytes: usize) -> bool {
-        if self.exhausted
-            || states > MAX_STATES.saturating_sub(self.states)
-            || bytes > MAX_BYTES.saturating_sub(self.bytes)
-        {
-            self.exhausted = true;
+        if !self.accepts_work(states, bytes) {
             return false;
         }
         self.states += states;
@@ -173,7 +181,7 @@ impl PlanningBudget {
     }
 
     pub(super) fn candidate(&mut self) -> bool {
-        if self.candidates == MAX_CANDIDATES {
+        if self.candidates >= MAX_CANDIDATES {
             self.exhausted = true;
             return false;
         }
@@ -185,11 +193,13 @@ impl PlanningBudget {
     }
 
     pub(super) fn step(&mut self, step: &MatchStep, schema: &storage::SchemaState) -> bool {
-        if step.parts.len() > MAX_PARTS
-            || !self.work(step.parts.len(), step.parts.len().saturating_mul(256))
+        if step.parts.len() > MAX_PARTS {
+            self.stop();
+            return false;
+        }
+        if !self.work(step.parts.len(), step.parts.len().saturating_mul(256))
             || !self.work(schema.indexes.len() + schema.constraints.len(), 0)
         {
-            self.exhausted = true;
             return false;
         }
         for part in &step.parts {
@@ -207,8 +217,11 @@ impl PlanningBudget {
 
     fn expression(&mut self, expression: &Expr, depth: usize) -> bool {
         self.depth = self.depth.max(depth);
-        if depth > MAX_DEPTH || !self.work(1, std::mem::size_of::<Expr>()) {
-            self.exhausted = true;
+        if depth > MAX_DEPTH {
+            self.stop();
+            return false;
+        }
+        if !self.work(1, std::mem::size_of::<Expr>()) {
             return false;
         }
         match expression {

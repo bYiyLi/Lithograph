@@ -1,13 +1,15 @@
 //! Complete a runnable Greedy before spending the remainder on DPhyp topology.
 use super::cost::{Choice, Cost};
-use super::estimates::JoinEstimates;
+use super::estimates::{HashPrefixMemory, JoinEstimates};
 use super::*;
 use crate::query::plan::{MatchStep, budget::PlanningBudget};
 use crate::query::{ExecutionControl, QueryResult};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+mod greedy;
 mod hash;
+mod multiway;
 mod physical;
 mod topology;
 use topology::{Graph, charge};
@@ -17,9 +19,13 @@ pub(crate) fn choose_join_order(
     scope: &JoinClauseScope<'_>,
     analysis: JoinAnalysis,
     estimates: &JoinEstimates,
-    control: &ExecutionControl<'_>,
+    context: &JoinPlanningContext<'_, '_, '_>,
+    statistics: &crate::query::stats::PlannerStatistics,
     budget: &mut PlanningBudget,
 ) -> QueryResult<Option<Arc<JoinPlan>>> {
+    let control = context.control;
+    #[cfg(test)]
+    budget.observe(scope.clause_start, "join-enter");
     control.check()?;
     if !estimates.ready(step.parts.len()) {
         return Ok(None);
@@ -28,18 +34,116 @@ pub(crate) fn choose_join_order(
         return Ok(None);
     };
     let Some((stages, greedy_cost)) = greedy(&graph, &analysis, estimates, control, budget)? else {
+        #[cfg(test)]
+        budget.observe(scope.clause_start, "greedy-refused");
         return Ok(None);
     };
+    #[cfg(test)]
+    budget.observe(scope.clause_start, "greedy-complete");
     let Some(mut completed) = complete(scope, analysis, stages, control, budget)? else {
         return Ok(None);
     };
-    if let Some(stages) = exact(&graph, &completed, greedy_cost, estimates, control, budget)?
-        && let Some(plan) = Arc::get_mut(&mut completed)
-    {
-        plan.stages = stages;
-    }
+    let factor = price_factor(
+        (step, scope),
+        &completed,
+        greedy_cost,
+        context,
+        statistics,
+        estimates,
+        budget,
+    )?;
+    let source = super::super::multiway::CompletedJoin {
+        plan: &completed,
+        work: paid_binary_work(greedy_cost),
+    };
+    let multiway =
+        super::super::multiway::price(step, source, scope, context, statistics, estimates, budget)?;
+    let hybrid = if multiway.is_none() {
+        multiway::price(
+            (step, scope),
+            &graph,
+            &completed,
+            estimates,
+            context,
+            statistics,
+            budget,
+        )?
+    } else {
+        None
+    };
+    #[cfg(test)]
+    budget.observe(scope.clause_start, "specialization-complete");
+    let exact = exact(&graph, &completed, greedy_cost, estimates, control, budget)?;
+    install_specializations(&mut completed, exact, greedy_cost, multiway, hybrid, factor);
+    #[cfg(test)]
+    budget.observe(scope.clause_start, "exact-leave");
     control.check()?;
     Ok(Some(completed))
+}
+
+fn install_specializations(
+    completed: &mut Arc<JoinPlan>,
+    exact: Option<(Vec<JoinStage>, Cost)>,
+    greedy: Cost,
+    whole: Option<super::super::multiway::PricedMultiway>,
+    hybrid: Option<multiway::Candidate>,
+    factor: Option<super::super::factor::PricedFactor>,
+) {
+    let binary = exact.as_ref().map_or(greedy, |(_, cost)| *cost);
+    let best = paid_binary_work(binary).map(|work| {
+        let work = whole.as_ref().map_or(work, |whole| work.min(whole.work()));
+        hybrid
+            .as_ref()
+            .and_then(|hybrid| hybrid.winning_work(binary))
+            .map_or(work, |hybrid| work.min(hybrid))
+    });
+    let Some(plan) = Arc::get_mut(completed) else {
+        return;
+    };
+    if let Some(factor) = factor
+        && factor.beats(best)
+        && factor.install(plan)
+    {
+        return;
+    }
+    if let Some((stages, _)) = exact {
+        plan.stages = stages;
+    }
+    if let Some(whole) = whole {
+        // Both searches already paid for their complete binary Cost.
+        whole.install(plan, paid_binary_work(binary));
+    }
+    if let Some(hybrid) = hybrid {
+        hybrid.install(plan, binary);
+    }
+}
+
+fn price_factor(
+    pattern: (&MatchStep, &JoinClauseScope<'_>),
+    completed: &JoinPlan,
+    cost: Cost,
+    context: &JoinPlanningContext<'_, '_, '_>,
+    statistics: &crate::query::stats::PlannerStatistics,
+    estimates: &JoinEstimates,
+    budget: &mut PlanningBudget,
+) -> QueryResult<Option<super::super::factor::PricedFactor>> {
+    let paid = paid_binary_work(cost).zip(cost.rows.map(|rows| rows.expected));
+    if !budget.clause_scoped() || paid.is_none() {
+        return Ok(None);
+    }
+    super::super::factor::price(
+        pattern.0,
+        (completed, paid),
+        pattern.1,
+        context,
+        statistics,
+        estimates,
+        budget,
+    )
+}
+
+fn paid_binary_work(cost: Cost) -> Option<u64> {
+    cost.io?.checked_add(cost.cpu?)
 }
 
 fn exact(
@@ -49,11 +153,13 @@ fn exact(
     estimates: &JoinEstimates,
     control: &ExecutionControl<'_>,
     budget: &mut PlanningBudget,
-) -> QueryResult<Option<Vec<JoinStage>>> {
+) -> QueryResult<Option<(Vec<JoinStage>, Cost)>> {
     // Scratch scheduling/backtrace storage is paid before starting exact search.
     let Some(mut scratch) =
         stage_storage(graph.parts, completed.predicates.len(), control, budget)?
     else {
+        #[cfg(test)]
+        budget.observe(completed.clause_start, "exact-storage-refused");
         record(0, false, true);
         return Ok(None);
     };
@@ -65,14 +171,20 @@ fn exact(
             .saturating_mul(schedule_work(&completed.predicates)),
         0,
     )? {
+        #[cfg(test)]
+        budget.observe(completed.clause_start, "exact-schedule-refused");
         record(0, false, true);
         return Ok(None);
     }
     let Some(pairs) = topology::enumerate(graph, control, budget)? else {
+        #[cfg(test)]
+        budget.observe(completed.clause_start, "exact-topology-refused");
         record(0, false, true);
         return Ok(None);
     };
     let result = physical::search(graph, completed, estimates, &pairs, control, budget)?;
+    #[cfg(test)]
+    budget.observe(completed.clause_start, "exact-search-leave");
     if let Some((choices, cost)) = result {
         if cost.beats(greedy_cost) {
             for (slot, choice) in scratch.iter_mut().zip(choices) {
@@ -80,7 +192,7 @@ fn exact(
             }
             schedule(&mut scratch, &completed.predicates);
             record(0, true, false);
-            return Ok(Some(scratch));
+            return Ok(Some((scratch, cost)));
         }
         record(0, true, false);
     } else {
@@ -155,6 +267,7 @@ fn complete(
         hashes: analysis.hashes,
         stages,
         factorized: None,
+        multiway: None,
     })))
 }
 
@@ -201,50 +314,17 @@ fn greedy(
         templates: &analysis.templates,
         estimates,
         control,
+        prefix_memory: None,
     };
-    let mut remaining_score = (0..graph.parts).try_fold(0u128, |sum, part| {
-        estimates
-            .leaf_score(part)
-            .map(|score| sum.saturating_add(score))
-    });
-    let mut prefix = 0;
-    let mut cost = Cost::root();
-    for slot in &mut stages {
-        let mut best = None;
-        for part in 0..graph.parts {
-            if prefix & (1_u128 << part) != 0 {
-                continue;
-            }
-            if !charge(budget, control, graph.singleton_work(), 0)? {
-                return Ok(None);
-            }
-            let connected = prefix == 0 || graph.connects_singleton(prefix, part);
-            let Some(candidate) = search.best_access(part, prefix, !connected, cost, budget)?
-            else {
-                return Ok(None);
-            };
-            let replace = best
-                .as_ref()
-                .is_none_or(|old| greedy_better(candidate, *old, remaining_score, estimates));
-            if replace {
-                best = Some(candidate);
-            }
-        }
-        let Some((choice, mut next)) = best else {
-            return Ok(None);
-        };
-        set_choice(slot, choice);
-        remaining_score = remaining_score
-            .zip(estimates.leaf_score(choice.part))
-            .map(|(total, used)| total.saturating_sub(used));
-        prefix |= 1_u128 << choice.part;
-        if !charge(budget, control, estimates.rows_work(), 0)? {
-            return Ok(None);
-        }
-        next.rows = estimates.rows(prefix);
-        cost = next;
-    }
-    Ok(Some((stages, cost)))
+    Ok(greedy::fill(
+        graph,
+        &search,
+        &mut stages,
+        greedy::all_parts(graph.parts),
+        (0, Cost::root()),
+        budget,
+    )?
+    .map(|(_, cost)| (stages, cost)))
 }
 
 fn greedy_better(
@@ -284,6 +364,7 @@ pub(super) struct SearchContext<'a, 'ctl> {
     templates: &'a [ParameterTemplate],
     estimates: &'a JoinEstimates,
     control: &'a ExecutionControl<'ctl>,
+    prefix_memory: Option<HashPrefixMemory>,
 }
 
 impl SearchContext<'_, '_> {

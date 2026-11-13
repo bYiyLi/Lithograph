@@ -13,6 +13,7 @@ pub(super) struct HashFrame {
 pub(super) enum MatchFrame {
     Part(Box<PartCursor>),
     Hash(Box<HashFrame>),
+    Multiway(Box<crate::query::stream::multiway::MultiwayProducer>),
     Consumed,
 }
 
@@ -34,7 +35,7 @@ impl MatchFrame {
             Self::Part(frame) => frame.profile,
             Self::Hash(_) => metrics
                 .match_profile_slots(step.clause_start, step.join.as_ref()?.stages[depth].part),
-            Self::Consumed => None,
+            Self::Multiway(_) | Self::Consumed => None,
         }
     }
 
@@ -49,6 +50,7 @@ impl MatchFrame {
     ) -> QueryResult<Option<BindingRow>> {
         match self {
             Self::Consumed => Ok(None),
+            Self::Multiway(producer) => producer.next_row(scope, metrics, control),
             Self::Hash(frame) => {
                 let state = bindings
                     .hashes
@@ -77,6 +79,7 @@ impl MatchFrame {
         match self {
             Self::Part(frame) => frame.split_output_memory(row, control),
             Self::Hash(frame) => frame.probe.split_output_memory(row, control),
+            Self::Multiway(producer) => producer.split_output_memory(row, control),
             Self::Consumed => Err(QueryError::internal("consumed prefix cannot own a row")),
         }
     }
@@ -172,6 +175,7 @@ impl StepCursor {
             match &state.storage {
                 BuildStorage::Memory(_) => HashProbe::memory(input, key, &state, control)?,
                 BuildStorage::Spill(_) => {
+                    self.park_multiway_workspace(control)?;
                     state.spill_probe(input, key, control)?;
                     self.partition_prefix(scope, params, metrics, bindings, &mut state, control)?;
                     HashProbe::grace(control)?
@@ -223,6 +227,7 @@ impl StepCursor {
             if let Some(key) =
                 state.probe_key(&self.step, depth, &input.0, scope, metrics, control)?
             {
+                self.park_multiway_workspace(control)?;
                 state.spill_probe(input, key, control)?;
             }
         }

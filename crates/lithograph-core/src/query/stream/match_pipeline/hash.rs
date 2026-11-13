@@ -13,6 +13,8 @@ mod grace;
 mod key;
 mod probe;
 mod table;
+#[cfg(test)]
+mod tests;
 
 use key::{EvaluatedHashKey, extract_hash_key, extract_hash_key_admitted, hash_keys_equal};
 pub(in crate::query::stream) use probe::HashProbe;
@@ -70,27 +72,50 @@ pub(crate) fn hash_layout(
 
 fn pattern_binding_bytes(part: &PatternPart) -> QueryResult<u64> {
     let variables = super::output::binding_names(part);
-    let mut bytes = allocation_bytes::<BindingRow>(1)?;
     let mut count = 0;
+    let mut name_bytes = 0;
     for (position, name) in variables.iter().enumerate() {
         let Some(name) = name else { continue };
         if variables[..position].contains(&Some(name)) {
             continue;
         }
         count += 1;
-        bytes = checked_add(
-            bytes,
+        name_bytes = checked_add(name_bytes, name.len() as u64)?;
+    }
+    identity_binding_row_bytes(
+        count,
+        name_bytes,
+        usize::from(part.relationship.is_some()),
+        if count > 0 { count.max(4) } else { 0 },
+    )
+}
+
+/// Retained identity-only BindingRow shape. Callers prove unique named
+/// variables, separately count anonymous Relationships in the used set, and
+/// bound the actual Vec capacity of the row's declaration order. No scalar,
+/// Path or inherited LOAD CSV payload width is inferred by this helper.
+pub(crate) fn identity_binding_row_bytes(
+    variables: usize,
+    name_bytes: u64,
+    relationships: usize,
+    order_capacity: usize,
+) -> QueryResult<u64> {
+    let bytes = checked_add(
+        allocation_bytes::<BindingRow>(1)?,
+        checked_mul(
             crate::query::resources::map_entry_bytes::<BindingValue>()?,
-        )?;
-        bytes = checked_add(bytes, checked_mul(name.len() as u64, 2)?)?;
-    }
-    if count > 0 {
-        bytes = checked_add(bytes, allocation_bytes::<String>(count.max(4))?)?;
-    }
-    if part.relationship.is_some() {
-        bytes = checked_add(bytes, crate::query::resources::map_entry_bytes::<i64>()?)?;
-    }
-    Ok(bytes)
+            variables as u64,
+        )?,
+    )?;
+    let bytes = checked_add(bytes, checked_mul(name_bytes, 2)?)?;
+    let bytes = checked_add(bytes, allocation_bytes::<String>(order_capacity)?)?;
+    checked_add(
+        bytes,
+        checked_mul(
+            crate::query::resources::map_entry_bytes::<i64>()?,
+            relationships as u64,
+        )?,
+    )
 }
 
 /// `owned` and `incoming` already occur in used; remove them only because the

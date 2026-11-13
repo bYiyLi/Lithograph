@@ -22,6 +22,7 @@ pub(super) fn search(
         templates: &plan.templates,
         estimates,
         control,
+        prefix_memory: None,
     };
     if !charge(
         budget,

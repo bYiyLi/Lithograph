@@ -1126,6 +1126,7 @@ mod registry;
 mod search;
 mod single_node;
 mod sip;
+pub(crate) use sip::streaming_node_ids as streaming_sip_node_ids;
 
 pub(crate) use helpers::{distinct_bindings, merge_union_rows};
 

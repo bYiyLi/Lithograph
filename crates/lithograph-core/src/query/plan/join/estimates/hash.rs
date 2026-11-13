@@ -8,6 +8,10 @@ use crate::query::plan::join::cost::{Cost, HashEstimate};
 use crate::query::schema::IndexDistribution;
 use crate::query::stream::{hash_layout, hash_table_peak_bytes};
 
+mod admission;
+use admission::admit;
+pub(super) use admission::{advice_headroom, advice_headroom_work};
+
 #[derive(Debug)]
 pub(in crate::query::plan::join) struct HashCandidate {
     pub(in crate::query::plan::join) part: usize,
@@ -35,6 +39,8 @@ pub(in crate::query::plan::join) struct HashInputs {
     dependencies: Vec<u128>,
     encoded: Vec<Option<u64>>,
     encoding_scratch: Vec<u64>,
+    prefix_bindings: Option<Vec<(u128, u64)>>,
+    relationship_parts: u128,
     keys: Vec<KeyScopes>,
     incoming_unknown: bool,
     output_upper: Option<u64>,
@@ -52,6 +58,14 @@ impl HashInputs {
         placement: (usize, &JoinClauseScope<'_>),
     ) -> QueryResult<Self> {
         let (headroom, scope) = placement;
+        #[cfg(test)]
+        crate::query::plan::budget::trace::event(format_args!(
+            "S8 hash-collect parts={} hashes={} headroom={headroom} remaining_states={} remaining_bytes={}",
+            step.parts.len(),
+            analysis.hashes.len(),
+            budget.remaining_states(),
+            budget.remaining_bytes()
+        ));
         if analysis.hashes.is_empty()
             || !admit(
                 step,
@@ -63,6 +77,8 @@ impl HashInputs {
                 scope,
             )
         {
+            #[cfg(test)]
+            crate::query::plan::budget::trace::event(format_args!("S8 hash-collect declined"));
             return Ok(Self::default());
         }
         let mut result = Self {
@@ -111,6 +127,11 @@ impl HashInputs {
                 }
             }
         }
+        #[cfg(test)]
+        crate::query::plan::budget::trace::event(format_args!(
+            "S8 hash-collected ids={:?}",
+            result.ids
+        ));
         Ok(result)
     }
 
@@ -121,11 +142,15 @@ impl HashInputs {
         context: &JoinPlanningContext<'_, '_, '_>,
         estimates: &JoinEstimates,
     ) -> QueryResult<()> {
+        self.prefix_bindings = prefix_bindings(step, estimates);
         for (id, part) in step.parts.iter().enumerate() {
             context.control.work(1)?;
             let layout = hash_layout(part, &analysis.hashes[0], HashOperandSide::Left)?;
             self.encoded.push(layout.encoded_row_bytes);
             self.encoding_scratch.push(layout.encoding_scratch_bytes);
+            if part.relationship.is_some() {
+                self.relationship_parts |= 1_u128 << id;
+            }
             self.dependencies.push(
                 estimates
                     .variables
@@ -201,9 +226,13 @@ impl HashInputs {
     /// The prefix width walk and bounded routing arithmetic are charged once
     /// for each actually considered Hash alternative in the same search ledger.
     pub(in crate::query::plan::join) fn work(&self) -> usize {
-        self.encoded
-            .len()
-            .saturating_mul(2)
+        let parts = self.encoded.len();
+        parts
+            .saturating_add(
+                self.prefix_bindings
+                    .as_ref()
+                    .map_or(parts, |vars| parts.max(vars.len())),
+            )
             .saturating_add(12)
             .saturating_add(self.dynamic.len())
     }
@@ -218,7 +247,23 @@ impl HashInputs {
         prefix: u128,
         cost: Cost,
     ) -> Option<HashEstimate> {
-        self.estimate_with_memory(id, prefix, cost, 0)
+        self.estimate_with_memory(id, prefix, cost, 0, None)
+    }
+
+    pub(in crate::query::plan::join) fn estimate_prefix(
+        &self,
+        id: usize,
+        prefix: u128,
+        cost: Cost,
+        memory: Option<HashPrefixMemory>,
+    ) -> Option<HashEstimate> {
+        self.estimate_with_memory(
+            id,
+            prefix,
+            cost,
+            0,
+            memory.filter(|memory| memory.mask == prefix),
+        )
     }
 
     fn estimate_with_memory(
@@ -227,6 +272,7 @@ impl HashInputs {
         prefix: u128,
         cost: Cost,
         extra_memory: u64,
+        memory: Option<HashPrefixMemory>,
     ) -> Option<HashEstimate> {
         let candidate = &self.candidates[id];
         let keys = &self.keys[candidate.equality];
@@ -241,8 +287,8 @@ impl HashInputs {
         let inner = build_keys[candidate.part].as_ref();
         let matches = key_matches(cost.rows, candidate.build.access.rows, outer, inner)?;
         let encoded_bytes = self.prefix_bytes(prefix)?;
-        let extra_headroom = self
-            .prefix_scratch(prefix)
+        let prefix_scratch = self.prefix_scratch(prefix)?;
+        let extra_headroom = prefix_scratch
             .saturating_mul(2)
             .saturating_add(4096)
             .saturating_sub(candidate.build.layout.headroom_bytes);
@@ -250,15 +296,27 @@ impl HashInputs {
             .memory
             .saturating_add(extra_memory)
             .saturating_add(extra_headroom);
-        let mut target = candidate.resident_target(outside, false);
-        if self.incoming_unknown && candidate.build.peak.is_none_or(|peak| peak > target) {
-            return None;
-        }
-        if candidate.available.is_some() && candidate.build.peak.is_none_or(|peak| peak > target) {
-            target = candidate.resident_target(outside, true);
-        }
+        let base_target = candidate.resident_target(outside, false);
+        let (target, partition) = spill_target(
+            candidate,
+            (base_target, outside),
+            memory,
+            prefix_scratch,
+            extra_memory,
+            self.incoming_unknown,
+        )?;
+        #[cfg(test)]
+        crate::query::plan::budget::trace::event(format_args!(
+            "S8 hash-target id={id} prefix={prefix:#x} available={:?} peak={:?} layout_headroom={} soft_cap={} prefix_memory={} prefix_scratch={prefix_scratch} extra_headroom={extra_headroom} outside={outside} base_target={base_target} final_target={target} encoded_bytes={encoded_bytes} incoming_unknown={}",
+            candidate.available,
+            candidate.build.peak,
+            candidate.build.layout.headroom_bytes,
+            candidate.build.layout.soft_cap,
+            cost.memory,
+            self.incoming_unknown
+        ));
         let (partition_passes, hot_passes) = routing(candidate, inner, target);
-        hash_work(
+        let mut estimate = hash_work(
             candidate.build,
             HashProbe {
                 matches,
@@ -268,7 +326,11 @@ impl HashInputs {
                 partition_passes,
                 hot_passes,
             },
-        )
+        )?;
+        if let Some(partition) = partition {
+            estimate.resident = estimate.resident.max(partition.saturating_sub(cost.memory));
+        }
+        Some(estimate)
     }
 
     pub(in crate::query::plan::join) fn dynamic_estimate(
@@ -288,7 +350,7 @@ impl HashInputs {
         let workspace = input.workspace()?;
         #[cfg(test)]
         self.log_dynamic_target(id, prefix, cost, workspace, input);
-        let estimate = self.estimate_with_memory(id, prefix, cost, workspace)?;
+        let estimate = self.estimate_with_memory(id, prefix, cost, workspace, None)?;
         // Retain the unfiltered full-domain K estimate. KeySet overlap is not
         // an independent selectivity proof and cannot discount match merging.
         let filtered = input.prefix(cost, workspace)?;
@@ -309,6 +371,7 @@ impl HashInputs {
         let candidate = &self.candidates[id];
         let extra_headroom = self
             .prefix_scratch(prefix)
+            .unwrap_or(u64::MAX)
             .saturating_mul(2)
             .saturating_add(4096)
             .saturating_sub(candidate.build.layout.headroom_bytes);
@@ -345,13 +408,88 @@ impl HashInputs {
             })
     }
 
-    fn prefix_scratch(&self, prefix: u128) -> u64 {
-        self.encoding_scratch
-            .iter()
-            .enumerate()
-            .filter(|(part, _)| prefix & (1_u128 << part) != 0)
-            .fold(0_u64, |bytes, (_, width)| bytes.saturating_add(*width))
+    fn prefix_scratch(&self, prefix: u128) -> Option<u64> {
+        if !self.incoming_unknown
+            && let Some(bindings) = &self.prefix_bindings
+        {
+            let (mut count, mut names) = (0usize, 0u64);
+            for &(providers, bytes) in bindings {
+                if providers & prefix != 0 {
+                    count = count.checked_add(1)?;
+                    names = names.checked_add(bytes)?;
+                }
+            }
+            let capacity = if count == 0 {
+                0
+            } else {
+                count.checked_mul(2)?.max(4)
+            };
+            let bytes = crate::query::stream::identity_binding_row_bytes(
+                count,
+                names,
+                (self.relationship_parts & prefix).count_ones() as usize,
+                capacity,
+            )
+            .ok()?;
+            return crate::query::spill::identity_binding_encoding_scratch(bytes, count, names)
+                .ok();
+        }
+        Some(
+            self.encoding_scratch
+                .iter()
+                .enumerate()
+                .filter(|(part, _)| prefix & (1_u128 << part) != 0)
+                .fold(0_u64, |bytes, (_, width)| bytes.saturating_add(*width)),
+        )
     }
+}
+
+fn prefix_bindings(step: &MatchStep, estimates: &JoinEstimates) -> Option<Vec<(u128, u64)>> {
+    if estimates.bindings.len() != step.parts.len() {
+        return None;
+    }
+    let mut bindings = Vec::with_capacity(step.parts.len().saturating_mul(3));
+    for (part, pattern) in step.parts.iter().enumerate() {
+        let (start, end) = estimates.bindings[part];
+        append_binding(
+            &mut bindings,
+            part,
+            pattern.start.variable.as_deref(),
+            start,
+        )?;
+        let end_name = pattern
+            .end
+            .as_ref()
+            .and_then(|node| node.variable.as_deref());
+        if end_name != pattern.start.variable.as_deref() {
+            append_binding(&mut bindings, part, end_name, end)?;
+        }
+        if let Some(name) = pattern
+            .relationship
+            .as_ref()
+            .and_then(|rel| rel.variable.as_deref())
+        {
+            bindings.push((1_u128 << part, name.len() as u64));
+        }
+    }
+    Some(bindings)
+}
+
+fn append_binding(
+    bindings: &mut Vec<(u128, u64)>,
+    part: usize,
+    name: Option<&str>,
+    providers: u128,
+) -> Option<()> {
+    if let Some(name) = name {
+        if providers == 0 {
+            return None;
+        }
+        if providers.trailing_zeros() as usize == part {
+            bindings.push((providers, name.len() as u64));
+        }
+    }
+    Some(())
 }
 
 impl HashCandidate {
@@ -371,6 +509,62 @@ impl HashCandidate {
     }
 }
 
+fn spill_target(
+    candidate: &HashCandidate,
+    state: (u64, u64),
+    memory: Option<HashPrefixMemory>,
+    scratch: u64,
+    extra: u64,
+    incoming_unknown: bool,
+) -> Option<(u64, Option<u64>)> {
+    let (base, outside) = state;
+    let spilling = candidate.build.peak.is_none_or(|peak| peak > base);
+    if incoming_unknown && spilling {
+        return None;
+    }
+    if candidate.available.is_none() || !spilling {
+        return Some((base, None));
+    }
+    if let Some(memory) = memory {
+        let (target, peak) = grace_prefix_target(candidate, memory, scratch, extra)?;
+        Some((target, Some(peak)))
+    } else {
+        Some((candidate.resident_target(outside, true), None))
+    }
+}
+
+fn grace_prefix_target(
+    candidate: &HashCandidate,
+    memory: HashPrefixMemory,
+    scratch: u64,
+    extra: u64,
+) -> Option<(u64, u64)> {
+    let available = candidate
+        .available?
+        .checked_add(candidate.build.layout.headroom_bytes)?;
+    let partition = memory
+        .yielded
+        .checked_add(scratch)?
+        .checked_add(extra)?
+        .checked_add(crate::query::spill::grace_resident_bound())?;
+    if partition > available {
+        return None;
+    }
+    // Probe encoding has one codec lease after the W producer yields. Leaf
+    // tables load after that producer drains; outer/shared state survives.
+    let headroom = scratch
+        .checked_add(4096)?
+        .saturating_sub(candidate.build.layout.headroom_bytes);
+    let outside = memory.drained.checked_add(extra)?.checked_add(headroom)?;
+    let target = candidate.resident_target(outside, true);
+    #[cfg(test)]
+    crate::query::plan::budget::trace::event(format_args!(
+        "S8 Grace prefix yielded={} drained={} codec={scratch} partition_peak={partition} available={available} leaf_outside={outside} target={target}",
+        memory.yielded, memory.drained
+    ));
+    (target > 0).then_some((target, partition))
+}
+
 fn pair_upper(step: &MatchStep, estimates: &JoinEstimates, keys: &[KeyScopes]) -> Option<u64> {
     if step.parts.len() != 2 || keys.len() != 1 {
         return None;
@@ -388,95 +582,31 @@ fn pair_upper(step: &MatchStep, estimates: &JoinEstimates, keys: &[KeyScopes]) -
     upper
 }
 
-fn admit(
-    step: &MatchStep,
-    analysis: &JoinAnalysis,
-    estimates: &JoinEstimates,
-    distributions: usize,
-    budget: &mut PlanningBudget,
-    headroom: usize,
-    scope: &JoinClauseScope<'_>,
-) -> bool {
-    let parts = step.parts.len();
-    let hashes = analysis.hashes.len();
-    let inspection = parts
-        .saturating_add(hashes)
-        .saturating_add(scope.declared_columns.len());
-    if budget.exhausted()
-        || inspection.saturating_add(headroom)
-            > crate::query::plan::budget::MAX_STATES.saturating_sub(budget.states)
-    {
-        return false;
-    }
-    // Even a later byte/candidate refusal pays for the borrowed masks and
-    // column-name walk performed below; no refused request gets free traversal.
-    if !budget.work(inspection, 0) {
-        return false;
-    }
-    let work = parts
-        .saturating_mul(estimates.variables.len().saturating_add(1))
-        .saturating_add(
-            hashes.saturating_mul(parts).saturating_mul(
-                distributions
-                    .saturating_add(2)
-                    .saturating_mul(analysis.predicates.len().saturating_add(4)),
-            ),
-        );
-    let labels = step.parts.iter().fold(0usize, |count, part| {
+pub(super) fn label_slots(step: &MatchStep) -> usize {
+    step.parts.iter().fold(0usize, |count, part| {
         count
             .saturating_add(part.start.label_names.len())
             .saturating_add(part.end.as_ref().map_or(0, |node| node.label_names.len()))
-    });
-    // Matching an existing distribution walks real Label names, including
-    // unresolved names; those comparisons are not free optional advice.
-    let work = work.saturating_add(
-        hashes
+    })
+}
+
+pub(super) fn greedy_candidates(parts: usize, analysis: &JoinAnalysis) -> usize {
+    parts.saturating_mul(
+        parts
             .saturating_mul(2)
-            .saturating_mul(distributions)
-            .saturating_mul(labels),
-    );
-    let bytes = hashes
-        .saturating_mul(parts)
-        .saturating_mul(
-            4 * std::mem::size_of::<HashCandidate>()
-                + 2 * std::mem::size_of::<Option<HashKeyAdvice>>()
-                + 4 * std::mem::size_of::<usize>(),
-        )
-        .saturating_add(parts.saturating_mul(96))
-        .saturating_add(parts.saturating_mul(std::mem::size_of::<Option<u64>>()))
-        .saturating_add(std::mem::size_of::<Vec<u64>>())
-        .saturating_add(hashes.saturating_mul(std::mem::size_of::<KeyScopes>()));
-    let alternatives = analysis.hashes.iter().fold(0usize, |count, hash| {
+            .saturating_add(analysis.templates.len())
+            .saturating_add(hash_alternatives(analysis)),
+    )
+}
+
+fn hash_alternatives(analysis: &JoinAnalysis) -> usize {
+    analysis.hashes.iter().fold(0usize, |count, hash| {
         count.saturating_add(
             (hash.left.providers.0.count_ones() as usize)
                 .saturating_add(hash.right.providers.0.count_ones() as usize)
                 .saturating_mul(2),
         )
-    });
-    let greedy_candidates = parts.saturating_mul(
-        parts
-            .saturating_mul(2)
-            .saturating_add(analysis.templates.len())
-            .saturating_add(alternatives),
-    );
-    let greedy_work = parts.saturating_mul(alternatives).saturating_mul(
-        parts
-            .saturating_mul(2)
-            .saturating_add(14)
-            .saturating_add(estimates.rows_work())
-            .saturating_add(analysis.predicates.len()),
-    );
-    let greedy_bytes = greedy_storage(parts, analysis, scope, greedy_candidates);
-    if work.saturating_add(headroom).saturating_add(greedy_work)
-        > crate::query::plan::budget::MAX_STATES.saturating_sub(budget.states)
-        || bytes.saturating_add(greedy_bytes)
-            > crate::query::plan::budget::MAX_BYTES.saturating_sub(budget.bytes)
-        || greedy_candidates
-            > crate::query::plan::budget::MAX_CANDIDATES.saturating_sub(budget.candidates)
-    {
-        return false;
-    }
-    budget.work(work, bytes)
+    })
 }
 
 pub(super) fn greedy_storage(

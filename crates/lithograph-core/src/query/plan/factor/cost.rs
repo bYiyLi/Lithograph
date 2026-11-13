@@ -38,6 +38,7 @@ struct BaseWork {
 
 pub(super) fn savings(
     step: &MatchStep,
+    original: &crate::query::plan::join::JoinPlan,
     plan: &FactorizedPlan,
     statistics: &PlannerStatistics,
     flat_work: Option<FactorWork>,
@@ -80,7 +81,7 @@ pub(super) fn savings(
         .limit()
         .map(|limit| limit.saturating_sub(control.resources().used()));
     let result = if plan.asp.is_some() {
-        asp::compare(step, plan, a, b, work, statistics, available)?
+        asp::compare(step, original, plan, a, b, work, statistics, available)?
     } else {
         compare(plan, a, b, work, available)
     };

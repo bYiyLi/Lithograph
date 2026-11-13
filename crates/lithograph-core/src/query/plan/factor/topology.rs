@@ -14,7 +14,11 @@ struct Edge<'a> {
 
 /// Return A (far leaf to shared) and B (shared to far leaf). The caller prepays
 /// identifier comparisons and two vectors of at most two `FactorHop`s each.
-pub(super) fn describe(step: &MatchStep, shared: &str) -> Option<(FactorArm, FactorArm)> {
+pub(super) fn describe(
+    step: &MatchStep,
+    shared: &str,
+    source: Option<&crate::query::plan::join::JoinPlan>,
+) -> Option<(FactorArm, FactorArm)> {
     if step.optional || shared.is_empty() || !(2..=4).contains(&step.parts.len()) {
         return None;
     }
@@ -42,7 +46,7 @@ pub(super) fn describe(step: &MatchStep, shared: &str) -> Option<(FactorArm, Fac
     if !disjoint_types(edges, a_mask, b_mask) {
         return None;
     }
-    let first = first_part(step)?;
+    let first = first_part(step, source)?;
     if a_mask & (1 << first) == 0 {
         std::mem::swap(&mut a, &mut b);
     }
@@ -173,8 +177,11 @@ fn disjoint_types(edges: &[Edge<'_>], a: u8, b: u8) -> bool {
     true
 }
 
-fn first_part(step: &MatchStep) -> Option<usize> {
-    let Some(join) = &step.join else {
+fn first_part(
+    step: &MatchStep,
+    source: Option<&crate::query::plan::join::JoinPlan>,
+) -> Option<usize> {
+    let Some(join) = source else {
         return Some(0);
     };
     if join.stages.len() != step.parts.len() {
@@ -231,6 +238,7 @@ mod tests {
                 })
                 .collect(),
             factorized: None,
+            multiway: None,
         }));
     }
 
@@ -261,10 +269,10 @@ mod tests {
                         pattern.relationship.as_mut().unwrap().direction = direction;
                     }
                     if direction == Direction::Undirected {
-                        assert!(describe(&value, "h").is_none());
+                        assert!(describe(&value, "h", value.join.as_deref()).is_none());
                         continue;
                     }
-                    let (a, b) = describe(&value, "h").unwrap();
+                    let (a, b) = describe(&value, "h", value.join.as_deref()).unwrap();
                     let orientation = |reversed| {
                         if reversed {
                             PartOrientation::Reversed
@@ -286,7 +294,7 @@ mod tests {
             part("m", "s", "h", 1),
             part("h", "t", "b", 2),
         ]);
-        let (a, b) = describe(&value, "h").unwrap();
+        let (a, b) = describe(&value, "h", value.join.as_deref()).unwrap();
         assert_eq!(
             hops(&a),
             vec![(0, PartOrientation::Written), (1, PartOrientation::Written)]
@@ -303,7 +311,8 @@ mod tests {
             part("b", "u", "n", 2),
         ]);
         join_order(&mut value, &[3, 2, 1, 0]);
-        let (a, b) = describe(&value, "h").unwrap();
+        let source = value.join.take().unwrap();
+        let (a, b) = describe(&value, "h", Some(&source)).unwrap();
         assert_eq!(
             hops(&a),
             vec![
@@ -318,7 +327,7 @@ mod tests {
                 (0, PartOrientation::Reversed)
             ]
         );
-        assert!(describe(&value, "m").is_none());
+        assert!(describe(&value, "m", Some(&source)).is_none());
     }
 
     #[test]
@@ -348,7 +357,7 @@ mod tests {
                 part("x", "t", "y", 3),
             ],
         ] {
-            assert!(describe(&step(parts), "h").is_none());
+            assert!(describe(&step(parts), "h", None).is_none());
         }
     }
 
@@ -364,7 +373,7 @@ mod tests {
                 part("h", "t", "b", 1),
             ],
         ] {
-            assert!(describe(&step(parts), "h").is_none());
+            assert!(describe(&step(parts), "h", None).is_none());
         }
     }
 
@@ -384,10 +393,10 @@ mod tests {
                 7 => value.parts[0].relationship.as_mut().unwrap().impossible = true,
                 _ => value.parts[0].relationship.as_mut().unwrap().variable = None,
             }
-            assert!(describe(&value, "h").is_none());
+            assert!(describe(&value, "h", value.join.as_deref()).is_none());
         }
-        assert!(describe(&baseline, "a").is_none());
-        assert!(describe(&baseline, "").is_none());
-        assert!(describe(&step(vec![part("a", "r", "h", 1)]), "h").is_none());
+        assert!(describe(&baseline, "a", baseline.join.as_deref()).is_none());
+        assert!(describe(&baseline, "", baseline.join.as_deref()).is_none());
+        assert!(describe(&step(vec![part("a", "r", "h", 1)]), "h", None).is_none());
     }
 }

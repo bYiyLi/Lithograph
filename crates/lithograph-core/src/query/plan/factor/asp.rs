@@ -20,6 +20,7 @@ pub(super) struct AspShape<'a> {
 
 pub(super) fn inspect<'a>(
     step: &'a MatchStep,
+    plan: &join::JoinPlan,
     scope: &join::JoinClauseScope<'_>,
     context: &join::JoinPlanningContext<'_, '_, '_>,
     budget: &mut PlanningBudget,
@@ -52,9 +53,6 @@ pub(super) fn inspect<'a>(
         return Ok(None);
     };
     let Some(probe_part) = probe_part(step, star_parts, probe_variable, build_variable) else {
-        return Ok(None);
-    };
-    let Some(plan) = step.join.as_ref() else {
         return Ok(None);
     };
     if plan.clause_start != scope.clause_start || plan.snapshot_identity != scope.snapshot_identity
@@ -228,6 +226,7 @@ fn key_matches(key: &join::HashInputKey, name: &str, providers: join::PartSet) -
 
 pub(super) fn extend(
     step: &MatchStep,
+    original: &join::JoinPlan,
     mut base: FactorizedPlan,
     shape: &AspShape<'_>,
     budget: &mut PlanningBudget,
@@ -237,11 +236,7 @@ pub(super) fn extend(
     if base.asp.is_some() || !base.single_shared || base.bindings.len() != 5 {
         return Ok(None);
     }
-    let Some(hash) = step
-        .join
-        .as_ref()
-        .and_then(|plan| plan.hashes.get(shape.equality))
-    else {
+    let Some(hash) = original.hashes.get(shape.equality) else {
         return Ok(None);
     };
     let (build, probe) = hash.keys(shape.inner_side);
@@ -255,11 +250,11 @@ pub(super) fn extend(
         return Ok(None);
     };
     let node = &part.start;
-    let Some(position) = step.join.as_ref().and_then(|plan| {
-        plan.declared_columns
-            .iter()
-            .position(|name| name == shape.build_variable)
-    }) else {
+    let Some(position) = original
+        .declared_columns
+        .iter()
+        .position(|name| name == shape.build_variable)
+    else {
         return Ok(None);
     };
     if position > base.bindings.len() {
@@ -471,6 +466,7 @@ mod tests {
             declared_columns: vec![],
             templates: vec![],
             factorized: None,
+            multiway: None,
             predicates: vec![
                 join::JoinPredicate {
                     expression: Expr::Literal(Value::Boolean(true)),
@@ -673,9 +669,11 @@ mod tests {
         let identity = identity("a", "d");
         for inner_side in [join::HashOperandSide::Left, join::HashOperandSide::Right] {
             let mut step = extension_step(inner_side);
+            let original = step.join.take().unwrap();
             let shape = identity_shape(&shared, &identity, inner_side);
             let extended = extend(
                 &step,
+                &original,
                 base_description(),
                 &shape,
                 &mut PlanningBudget::default(),
@@ -692,6 +690,7 @@ mod tests {
                 FactorGroup::Accumulate
             );
             assert!(matches!(&binding.kind, FactorBindingKind::Node { labels } if labels == &[7]));
+            step.join = Some(original);
             let plan = std::sync::Arc::get_mut(step.join.as_mut().unwrap()).unwrap();
             assert!(install(plan, &extended));
             assert_eq!(
@@ -731,6 +730,7 @@ mod tests {
         }
         let extended = extend(
             &step,
+            step.join.as_deref().unwrap(),
             base,
             &shape,
             &mut PlanningBudget::default(),

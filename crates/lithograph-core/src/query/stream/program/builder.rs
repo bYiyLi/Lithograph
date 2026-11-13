@@ -400,7 +400,13 @@ impl ClauseStreamBuilder<'_, '_> {
             .match_plans
             .get(&clause.span.start)
             .unwrap_or(&fallback);
-        let index_memory = crate::query::plan::reserve_match_seeks(selected, self.control)?;
+        let mut index_memory = crate::query::plan::reserve_match_seeks(selected, self.control)?;
+        // Retain one actual physical site for every incoming owner and pull.
+        // Option<usize>'s complete layout, including its tag, stays budgeted.
+        index_memory.grow(crate::query::resources::allocation_bytes::<Option<usize>>(
+            1,
+        )?)?;
+        let finite_profile_slot = self.node_access_profile_slot(clause.span.start)?;
         let mut step = selected.clone();
         crate::query::plan::constrain_match_scope(&mut step, columns);
         Ok(Some(Box::new(MatchSource {
@@ -409,7 +415,21 @@ impl ClauseStreamBuilder<'_, '_> {
             step,
             current: None,
             read_bindings: super::super::MatchReadBindings::default(),
+            finite_profile_slot,
         })))
+    }
+
+    fn node_access_profile_slot(&self, clause: usize) -> QueryResult<Option<usize>> {
+        for binding in &self.program.profile_sites {
+            self.control.work(1)?;
+            if binding.site.clause_start == clause
+                && binding.site.part == Some(0)
+                && binding.site.role == crate::query::plan::ProfileRole::NodeAccess
+            {
+                return Ok(Some(binding.physical_slot));
+            }
+        }
+        Ok(None)
     }
 
     fn filter_source(

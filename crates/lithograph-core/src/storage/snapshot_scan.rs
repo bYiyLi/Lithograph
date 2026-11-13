@@ -9,6 +9,9 @@ use super::layer::{DeltaOp, RelationshipRecord};
 use super::snapshot::{Snapshot, relationship_from_checkpoint_row};
 use super::{HashId, LabelId, NodeId, RelationshipId, RelationshipTypeId, ScanPage, StorageResult};
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AdjacencyKind {
     Outgoing,
@@ -111,7 +114,14 @@ impl Snapshot<'_> {
         cursor: Option<AdjacencyCursor>,
         limit: usize,
     ) -> StorageResult<AdjacencyScanPage> {
-        self.scan_directed_adjacency_page(AdjacencyKind::Outgoing, node_id, type_id, cursor, limit)
+        self.scan_directed_adjacency_page(
+            AdjacencyKind::Outgoing,
+            node_id,
+            type_id,
+            cursor,
+            limit,
+            None,
+        )
     }
 
     pub(crate) fn scan_incoming_page(
@@ -121,7 +131,55 @@ impl Snapshot<'_> {
         cursor: Option<AdjacencyCursor>,
         limit: usize,
     ) -> StorageResult<AdjacencyScanPage> {
-        self.scan_directed_adjacency_page(AdjacencyKind::Incoming, node_id, type_id, cursor, limit)
+        self.scan_directed_adjacency_page(
+            AdjacencyKind::Incoming,
+            node_id,
+            type_id,
+            cursor,
+            limit,
+            None,
+        )
+    }
+
+    /// Seeks a typed outgoing stream to `minimum_neighbor`, preserving its position.
+    ///
+    /// Both checkpoint and overlay skip earlier neighbors. Parallel Relationships
+    /// remain ordered by identity; a lower target never rewinds an existing cursor.
+    pub(crate) fn scan_outgoing_from_neighbor_page(
+        &self,
+        node_id: NodeId,
+        type_id: RelationshipTypeId,
+        minimum_neighbor: NodeId,
+        cursor: Option<AdjacencyCursor>,
+        limit: usize,
+    ) -> StorageResult<AdjacencyScanPage> {
+        self.scan_directed_adjacency_page(
+            AdjacencyKind::Outgoing,
+            node_id,
+            Some(type_id),
+            cursor,
+            limit,
+            Some(minimum_neighbor),
+        )
+    }
+
+    /// Seeks a typed incoming stream to `minimum_neighbor`, preserving its position.
+    pub(crate) fn scan_incoming_from_neighbor_page(
+        &self,
+        node_id: NodeId,
+        type_id: RelationshipTypeId,
+        minimum_neighbor: NodeId,
+        cursor: Option<AdjacencyCursor>,
+        limit: usize,
+    ) -> StorageResult<AdjacencyScanPage> {
+        self.scan_directed_adjacency_page(
+            AdjacencyKind::Incoming,
+            node_id,
+            Some(type_id),
+            cursor,
+            limit,
+            Some(minimum_neighbor),
+        )
     }
 
     pub(crate) fn scan_incident_page(
@@ -153,6 +211,7 @@ impl Snapshot<'_> {
             type_id,
             directed_cursor,
             limit,
+            None,
         )?;
         if first.next_cursor.is_some() {
             return Ok(AdjacencyScanPage {
@@ -181,6 +240,7 @@ impl Snapshot<'_> {
             type_id,
             None,
             remaining,
+            None,
         )?;
         items.extend(filter_incident_self_loops(
             node_id,
@@ -215,13 +275,15 @@ impl Snapshot<'_> {
         type_id: Option<RelationshipTypeId>,
         cursor: Option<AdjacencyCursor>,
         limit: usize,
+        minimum_neighbor: Option<NodeId>,
     ) -> StorageResult<AdjacencyScanPage> {
         debug_assert!(kind != AdjacencyKind::Incident);
         self.validate_adjacency_cursor(kind, node_id, type_id, cursor)?;
         let limit = normalized_limit(limit);
         let after = cursor.and_then(|value| value.after);
-        let base = self.base_adjacency_keyset_page(kind, node_id, type_id, after, limit)?;
-        let overlay = self.overlay_adjacency_keyset_page(kind, node_id, type_id, after, limit);
+        let lower = adjacency_lower_bound(type_id, after, minimum_neighbor);
+        let base = self.base_adjacency_keyset_page(kind, node_id, type_id, lower, limit)?;
+        let overlay = self.overlay_adjacency_keyset_page(kind, node_id, type_id, lower, limit);
         Ok(self.merge_adjacency_page(
             kind,
             node_id,
@@ -353,7 +415,7 @@ impl Snapshot<'_> {
         kind: AdjacencyKind,
         node_id: NodeId,
         type_id: Option<RelationshipTypeId>,
-        after: Option<AdjacencyKey>,
+        lower: Bound<AdjacencyKey>,
         limit: usize,
     ) -> Vec<(AdjacencyKey, RelationshipRecord, DeltaOp)> {
         let map = match kind {
@@ -361,11 +423,16 @@ impl Snapshot<'_> {
             AdjacencyKind::Incoming => &self.state.overlay.incoming,
             AdjacencyKind::Incident => unreachable!("incident scans use two directed streams"),
         };
-        let lower = match after {
-            Some(key) => {
+        let lower = match lower {
+            Bound::Included(key) => {
+                Bound::Included((node_id, key.type_id, key.neighbor_id, key.relationship_id))
+            }
+            Bound::Excluded(key) => {
                 Bound::Excluded((node_id, key.type_id, key.neighbor_id, key.relationship_id))
             }
-            None => Bound::Included((node_id, type_id.unwrap_or(i64::MIN), i64::MIN, i64::MIN)),
+            Bound::Unbounded => {
+                Bound::Included((node_id, type_id.unwrap_or(i64::MIN), i64::MIN, i64::MIN))
+            }
         };
         let upper = type_id.map_or(
             Bound::Included((node_id, i64::MAX, i64::MAX, i64::MAX)),
@@ -521,7 +588,7 @@ impl Snapshot<'_> {
         kind: AdjacencyKind,
         node_id: NodeId,
         type_id: Option<RelationshipTypeId>,
-        after: Option<AdjacencyKey>,
+        lower: Bound<AdjacencyKey>,
         limit: usize,
     ) -> StorageResult<Vec<RelationshipRecord>> {
         let Some(checkpoint) = self.state.checkpoint else {
@@ -530,7 +597,7 @@ impl Snapshot<'_> {
         #[cfg(feature = "test-support")]
         crate::performance::record_adjacency_page();
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        self.base_directed_adjacency_page(checkpoint, kind, node_id, type_id, after, limit)
+        self.base_directed_adjacency_page(checkpoint, kind, node_id, type_id, lower, limit)
     }
 
     fn base_directed_adjacency_page(
@@ -539,7 +606,7 @@ impl Snapshot<'_> {
         kind: AdjacencyKind,
         node_id: NodeId,
         type_id: Option<RelationshipTypeId>,
-        after: Option<AdjacencyKey>,
+        lower: Bound<AdjacencyKey>,
         limit: i64,
     ) -> StorageResult<Vec<RelationshipRecord>> {
         let (index, endpoint, neighbor) = match kind {
@@ -560,18 +627,7 @@ impl Snapshot<'_> {
             sql.push_str(" AND type_id = ?");
             parameters.push(SqlValue::Integer(type_id));
         }
-        if let Some(after) = after {
-            if type_id.is_some() {
-                sql.push_str(&format!(" AND ({neighbor}, relationship_id) > (?, ?)"));
-            } else {
-                sql.push_str(&format!(
-                    " AND (type_id, {neighbor}, relationship_id) > (?, ?, ?)"
-                ));
-                parameters.push(SqlValue::Integer(after.type_id));
-            }
-            parameters.push(SqlValue::Integer(after.neighbor_id));
-            parameters.push(SqlValue::Integer(after.relationship_id));
-        }
+        append_adjacency_lower_bound(&mut sql, &mut parameters, neighbor, type_id, lower);
         if type_id.is_some() {
             sql.push_str(&format!(" ORDER BY {neighbor}, relationship_id LIMIT ?"));
         } else {
@@ -645,6 +701,51 @@ impl Snapshot<'_> {
                 .map_err(Into::into),
         }
     }
+}
+
+fn adjacency_lower_bound(
+    type_id: Option<RelationshipTypeId>,
+    after: Option<AdjacencyKey>,
+    minimum_neighbor: Option<NodeId>,
+) -> Bound<AdjacencyKey> {
+    let Some((type_id, neighbor_id)) = type_id.zip(minimum_neighbor) else {
+        return after.map_or(Bound::Unbounded, Bound::Excluded);
+    };
+    let minimum = AdjacencyKey {
+        type_id,
+        neighbor_id,
+        relationship_id: i64::MIN,
+    };
+    match after {
+        Some(after) if after >= minimum => Bound::Excluded(after),
+        _ => Bound::Included(minimum),
+    }
+}
+
+fn append_adjacency_lower_bound(
+    sql: &mut String,
+    parameters: &mut Vec<SqlValue>,
+    neighbor: &str,
+    type_id: Option<RelationshipTypeId>,
+    lower: Bound<AdjacencyKey>,
+) {
+    let (key, comparison) = match lower {
+        Bound::Included(key) => (key, ">="),
+        Bound::Excluded(key) => (key, ">"),
+        Bound::Unbounded => return,
+    };
+    if type_id.is_some() {
+        sql.push_str(&format!(
+            " AND ({neighbor}, relationship_id) {comparison} (?, ?)"
+        ));
+    } else {
+        sql.push_str(&format!(
+            " AND (type_id, {neighbor}, relationship_id) {comparison} (?, ?, ?)"
+        ));
+        parameters.push(SqlValue::Integer(key.type_id));
+    }
+    parameters.push(SqlValue::Integer(key.neighbor_id));
+    parameters.push(SqlValue::Integer(key.relationship_id));
 }
 
 fn normalized_limit(limit: usize) -> usize {

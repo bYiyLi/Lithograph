@@ -145,21 +145,7 @@ fn read(db: &Connection, text: &str, options: ExecutionOptions, batch_size: usiz
 }
 
 fn empty_db() -> Connection {
-    let db = Connection::open_in_memory().unwrap();
-    db.execute_batch(
-        "CREATE TABLE main._lithograph_meta(id INTEGER PRIMARY KEY,magic TEXT NOT NULL,\
-         database_id TEXT NOT NULL,storage_format INTEGER NOT NULL)",
-    )
-    .unwrap();
-    db.execute(
-        "INSERT INTO main._lithograph_meta VALUES(1,'lithograph-format-v1',\
-         '00000000-0000-4000-8000-000000000026',?1)",
-        [storage::STORAGE_FORMAT],
-    )
-    .unwrap();
-    storage::create_storage_schema(&db).unwrap();
-    storage::initialize_root(&db).unwrap();
-    db
+    crate::query::plan::test_support::database("00000000-0000-4000-8000-000000000026")
 }
 
 #[derive(Debug)]
@@ -370,6 +356,7 @@ fn force_admitted_dynamic_filter(prepared: &mut PreparedQuery) {
         hashes: original.hashes.clone(),
         stages: dynamic_filter_stages(probe, build, equality, inner_side, template),
         factorized: None,
+        multiway: None,
     };
     step.join = Some(std::sync::Arc::new(forced));
     refresh_selected_candidate(prepared);

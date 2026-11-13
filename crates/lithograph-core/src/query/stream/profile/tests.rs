@@ -2,6 +2,8 @@ use super::*;
 use crate::query::QueryErrorKind;
 use crate::query::plan::PhysicalOperator;
 
+mod multiway;
+
 fn hash_plan() -> PhysicalPlan {
     PhysicalPlan {
         operators: vec![

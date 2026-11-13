@@ -265,9 +265,8 @@ fn source_cohort(
 }
 
 fn admit(budget: &mut PlanningBudget, headroom: usize, work: usize, bytes: usize) -> bool {
-    if work.saturating_add(headroom)
-        > crate::query::plan::budget::MAX_STATES.saturating_sub(budget.states)
-        || bytes > crate::query::plan::budget::MAX_BYTES.saturating_sub(budget.bytes)
+    if work.saturating_add(headroom) > budget.remaining_states()
+        || bytes > budget.remaining_advice_bytes()
     {
         return false;
     }

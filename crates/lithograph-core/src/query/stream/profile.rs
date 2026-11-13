@@ -25,6 +25,49 @@ pub struct OperatorRuntimeMetrics {
     pub hash: Option<HashJoinRuntimeMetrics>,
     pub semi_mask: Option<SemiMaskRuntimeMetrics>,
     pub factorized: Option<FactorizedRuntimeMetrics>,
+    pub multiway: Option<MultiwayRuntimeMetrics>,
+}
+
+/// Actual bounded adjacency intersection and relationship-bag work.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct MultiwayRuntimeMetrics {
+    pub input_lists: u64,
+    pub adjacency_rows: u64,
+    pub seek_operations: u64,
+    pub intersection_steps: u64,
+    pub candidate_nodes: u64,
+    pub node_assignments: u64,
+    pub relationship_candidates: u64,
+    pub memory_peak_bytes: u64,
+}
+
+impl MultiwayRuntimeMetrics {
+    /// A MATCH site can create several incoming-row owners. Publish each
+    /// owner's new events once, and keep its actual live memory peak separate.
+    pub(crate) fn take_delta(self, published: &mut Self) -> Self {
+        let delta = Self {
+            input_lists: self.input_lists.saturating_sub(published.input_lists),
+            adjacency_rows: self.adjacency_rows.saturating_sub(published.adjacency_rows),
+            seek_operations: self
+                .seek_operations
+                .saturating_sub(published.seek_operations),
+            intersection_steps: self
+                .intersection_steps
+                .saturating_sub(published.intersection_steps),
+            candidate_nodes: self
+                .candidate_nodes
+                .saturating_sub(published.candidate_nodes),
+            node_assignments: self
+                .node_assignments
+                .saturating_sub(published.node_assignments),
+            relationship_candidates: self
+                .relationship_candidates
+                .saturating_sub(published.relationship_candidates),
+            memory_peak_bytes: self.memory_peak_bytes,
+        };
+        *published = self;
+        delta
+    }
 }
 
 /// Actual work reported by the factor table, ASP phases and final Flatten.
@@ -107,6 +150,8 @@ impl QueryMetrics {
                 db_hits: 0,
                 hash: (operator.profile_name() == "HashJoin").then(HashJoinRuntimeMetrics::default),
                 semi_mask: None,
+                multiway: (operator.profile_name() == "MultiwayIntersect")
+                    .then(MultiwayRuntimeMetrics::default),
                 factorized: matches!(
                     operator.profile_name(),
                     "FactorizedAccumulate" | "ASPJoin" | "Flatten"
@@ -236,6 +281,50 @@ impl QueryMetrics {
                     && binding.site.role == role
             })
             .map(|binding| binding.physical_slot)
+    }
+
+    pub(crate) fn multiway_slot(&self, clause: usize) -> Option<usize> {
+        self.profile
+            .as_ref()?
+            .sites
+            .iter()
+            .find(|binding| {
+                binding.site.clause_start == clause
+                    && binding.site.part.is_none()
+                    && binding.site.role == ProfileRole::MultiwayIntersect
+            })
+            .map(|binding| binding.physical_slot)
+    }
+
+    pub(crate) fn add_multiway_profile(
+        &mut self,
+        slot: Option<usize>,
+        delta: MultiwayRuntimeMetrics,
+    ) {
+        if let Some(operator) = self
+            .profile
+            .as_mut()
+            .and_then(|profile| slot.and_then(|slot| profile.operators.get_mut(slot)))
+            && operator.operator == "MultiwayIntersect"
+        {
+            let total = operator
+                .multiway
+                .get_or_insert_with(MultiwayRuntimeMetrics::default);
+            total.input_lists = total.input_lists.saturating_add(delta.input_lists);
+            total.adjacency_rows = total.adjacency_rows.saturating_add(delta.adjacency_rows);
+            total.seek_operations = total.seek_operations.saturating_add(delta.seek_operations);
+            total.intersection_steps = total
+                .intersection_steps
+                .saturating_add(delta.intersection_steps);
+            total.candidate_nodes = total.candidate_nodes.saturating_add(delta.candidate_nodes);
+            total.node_assignments = total
+                .node_assignments
+                .saturating_add(delta.node_assignments);
+            total.relationship_candidates = total
+                .relationship_candidates
+                .saturating_add(delta.relationship_candidates);
+            total.memory_peak_bytes = total.memory_peak_bytes.max(delta.memory_peak_bytes);
+        }
     }
 
     pub(crate) fn set_factorized_profile(
@@ -569,10 +658,11 @@ impl QueryMetrics {
             return;
         };
         if profile.execution_memory_peak_bytes.is_none()
-            && profile
-                .operators
-                .iter()
-                .any(|operator| operator.hash.is_some() || operator.factorized.is_some())
+            && profile.operators.iter().any(|operator| {
+                operator.hash.is_some()
+                    || operator.factorized.is_some()
+                    || operator.multiway.is_some()
+            })
         {
             profile.execution_memory_peak_bytes = Some(self.resources.peak());
         }
@@ -670,6 +760,7 @@ fn clone_profile(profile: &QueryProfileState) -> QueryProfileState {
             hash: operator.hash,
             semi_mask: operator.semi_mask,
             factorized: operator.factorized,
+            multiway: operator.multiway,
         });
     }
     let mut access_operators = Vec::with_capacity(profile.access_operators.len());

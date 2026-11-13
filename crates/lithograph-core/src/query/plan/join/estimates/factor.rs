@@ -5,20 +5,28 @@ use crate::query::plan::join::cost::Cost;
 
 impl JoinEstimates {
     pub(crate) fn factor_advice_work(&self, plan: &JoinPlan) -> usize {
-        plan.stages.len().saturating_mul(
-            self.rows_work()
-                .saturating_mul(3)
-                .saturating_add(self.hashes.work())
-                .saturating_add(16),
-        )
+        plan.stages
+            .len()
+            .saturating_mul(self.rows_work().saturating_mul(2).saturating_add(16))
+    }
+
+    pub(crate) fn factor_selected_advice_work(&self, plan: &JoinPlan) -> usize {
+        plan.stages
+            .len()
+            .saturating_mul(self.rows_work().saturating_add(self.hashes.work()))
+    }
+
+    pub(crate) fn factor_selected_work(&self, plan: &JoinPlan) -> Option<(u64, u64)> {
+        let cost = self.selected_cost(plan)?;
+        Some((cost.io?.checked_add(cost.cpu?)?, cost.rows?.expected))
     }
 
     pub(crate) fn factor_candidate_work(
         &self,
         original: &JoinPlan,
         plan: &FactorizedPlan,
+        flat: (u64, u64),
     ) -> Option<FactorWork> {
-        let old = self.selected_factor_cost(original)?;
         let a = self.factor_arm_work(original, &plan.accumulate, 0)?;
         let prefix = plan
             .accumulate
@@ -26,7 +34,7 @@ impl JoinEstimates {
             .iter()
             .fold(0, |mask, hop| mask | (1_u128 << hop.part));
         let b = self.factor_arm_work(original, &plan.build, prefix)?;
-        let output = old.rows?.expected;
+        let output = flat.1;
         let star = prefix
             | plan
                 .build
@@ -42,7 +50,7 @@ impl JoinEstimates {
             output
         };
         Some(FactorWork {
-            old: old.io?.checked_add(old.cpu?)?,
+            old: flat.0,
             output,
             arms: [a, b],
             point_work: self.factor_point_work(original, plan),
@@ -59,7 +67,7 @@ impl JoinEstimates {
         access.io?.checked_add(access.cpu?)
     }
 
-    fn selected_factor_cost(&self, plan: &JoinPlan) -> Option<Cost> {
+    pub(super) fn selected_cost(&self, plan: &JoinPlan) -> Option<Cost> {
         let mut prefix = 0;
         let mut cost = Cost::root();
         for stage in &plan.stages {
@@ -185,6 +193,7 @@ mod tests {
                 })
                 .collect(),
             factorized: None,
+            multiway: None,
         }
     }
 

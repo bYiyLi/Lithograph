@@ -23,10 +23,14 @@ pub(crate) use factor::{
     FactorArm, FactorAsp, FactorBindingKind, FactorGroup, FactorHop, FactorizedPlan,
 };
 pub(crate) mod join;
+mod multiway;
+pub(crate) use multiway::MultiwayPlan;
 mod predicate;
 mod read;
 use read::prepare_read_query;
 mod sites;
+#[cfg(test)]
+mod test_support;
 pub(crate) use sites::{OperatorSite, ProfileBinding, ProfileRole};
 #[cfg(test)]
 #[path = "plan/statistics_tests.rs"]
@@ -86,6 +90,7 @@ pub enum LogicalOperator {
     NestedLoop,
     IndexNestedLoop,
     HashJoin,
+    MultiwayIntersect,
     FactorizedAccumulate,
     ASPJoin,
     Flatten,
@@ -157,6 +162,7 @@ pub enum PhysicalOperator {
     NestedLoop,
     IndexNestedLoop,
     HashJoin,
+    MultiwayIntersect,
     FactorizedAccumulate,
     ASPJoin,
     Flatten,
@@ -202,6 +208,7 @@ impl PhysicalOperator {
             Self::NestedLoop => "NestedLoop",
             Self::IndexNestedLoop => "IndexNestedLoop",
             Self::HashJoin => "HashJoin",
+            Self::MultiwayIntersect => "MultiwayIntersect",
             Self::FactorizedAccumulate => "FactorizedAccumulate",
             Self::ASPJoin => "ASPJoin",
             Self::Flatten => "Flatten",
@@ -229,6 +236,7 @@ impl PhysicalOperator {
                 | Self::VectorSearch { .. }
                 | Self::RelationshipScan { .. }
                 | Self::AdjacencySeek { .. }
+                | Self::MultiwayIntersect
         )
     }
 }

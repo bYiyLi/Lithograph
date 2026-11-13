@@ -11,6 +11,7 @@ use crate::storage::{ConstraintDefinitionKind, LabelId, PropertyType, SchemaTarg
 
 struct Proof<'a, 'q, 'db, 'ctl> {
     context: &'a join::JoinPlanningContext<'q, 'db, 'ctl>,
+    original: &'a join::JoinPlan,
     budget: &'a mut PlanningBudget,
 }
 
@@ -34,8 +35,25 @@ struct Equality<'a> {
     value: i64,
 }
 
+pub(super) fn metadata_bytes(step: &MatchStep, scope: &join::JoinClauseScope<'_>) -> usize {
+    std::mem::size_of::<FactorizedPlan>()
+        .saturating_add(
+            scope
+                .declared_columns
+                .len()
+                .saturating_mul(std::mem::size_of::<FactorBinding>()),
+        )
+        .saturating_add(
+            step.parts
+                .len()
+                .saturating_mul(std::mem::size_of::<FactorHop>()),
+        )
+        .saturating_add(3 * std::mem::size_of::<Expr>())
+}
+
 pub(super) fn describe(
     step: &MatchStep,
+    original: &join::JoinPlan,
     scope: &join::JoinClauseScope<'_>,
     context: &join::JoinPlanningContext<'_, '_, '_>,
     budget: &mut PlanningBudget,
@@ -53,7 +71,12 @@ pub(super) fn describe(
     {
         return Ok(None);
     }
-    Proof { context, budget }.describe(step, scope)
+    Proof {
+        context,
+        original,
+        budget,
+    }
+    .describe(step, scope)
 }
 
 impl Proof<'_, '_, '_, '_> {
@@ -74,7 +97,9 @@ impl Proof<'_, '_, '_, '_> {
             return self.describe_path(step, scope);
         }
         let shape = if step.parts.len() == 3 {
-            let Some(shape) = super::asp::inspect(step, scope, self.context, self.budget)? else {
+            let Some(shape) =
+                super::asp::inspect(step, self.original, scope, self.context, self.budget)?
+            else {
                 return Ok(None);
             };
             Some(shape)
@@ -88,7 +113,7 @@ impl Proof<'_, '_, '_, '_> {
         let Some(shared) = shared_node(&step.parts[indices[0]], &step.parts[indices[1]]) else {
             return Ok(None);
         };
-        let Some((a, b)) = selected_arms(step, scope, indices, shared) else {
+        let Some((a, b)) = selected_arms(step, self.original, scope, indices, shared) else {
             return Ok(None);
         };
         let Some(sources) = binding_sources(shared, &a, &b) else {
@@ -129,9 +154,14 @@ impl Proof<'_, '_, '_, '_> {
             asp: None,
         };
         match shape {
-            Some(shape) => {
-                super::asp::extend(step, result, &shape, self.budget, self.context.control)
-            }
+            Some(shape) => super::asp::extend(
+                step,
+                self.original,
+                result,
+                &shape,
+                self.budget,
+                self.context.control,
+            ),
             None => Ok(Some(result)),
         }
     }
@@ -147,7 +177,9 @@ impl Proof<'_, '_, '_, '_> {
         let Some(key) = self.equality(predicate)? else {
             return Ok(None);
         };
-        let Some((accumulate, build)) = super::topology::describe(step, key.variable) else {
+        let Some((accumulate, build)) =
+            super::topology::describe(step, key.variable, Some(self.original))
+        else {
             return Ok(None);
         };
         let Some([a, b]) = super::path_bindings::shared_nodes(step, key.variable) else {
@@ -181,10 +213,7 @@ impl Proof<'_, '_, '_, '_> {
     }
 
     fn prepay(&mut self, step: &MatchStep, scope: &join::JoinClauseScope<'_>) -> QueryResult<bool> {
-        let bytes = std::mem::size_of::<FactorizedPlan>()
-            .saturating_add(scope.declared_columns.len() * std::mem::size_of::<FactorBinding>())
-            .saturating_add(step.parts.len() * std::mem::size_of::<FactorHop>())
-            .saturating_add(3 * std::mem::size_of::<Expr>());
+        let bytes = metadata_bytes(step, scope);
         // Two three-name parts and five output names need only a fixed number
         // of pairwise identity/order checks; prepay them before comparisons.
         if !self.inspect(step.parts.len().saturating_mul(64), bytes)? {
@@ -261,11 +290,10 @@ impl Proof<'_, '_, '_, '_> {
                 }
             }
         }
-        if let Some(join) = &step.join {
-            for predicate in &join.predicates {
-                if !self.allowed_predicate(&predicate.expression, identity, key)? {
-                    return Ok(false);
-                }
+        let original = self.original;
+        for predicate in &original.predicates {
+            if !self.allowed_predicate(&predicate.expression, identity, key)? {
+                return Ok(false);
             }
         }
         Ok(true)
@@ -443,7 +471,7 @@ impl Proof<'_, '_, '_, '_> {
     }
 }
 
-fn supported_parts(step: &MatchStep) -> bool {
+pub(super) fn supported_parts(step: &MatchStep) -> bool {
     let relationships = step
         .parts
         .iter()
@@ -463,11 +491,12 @@ fn binding_count(step: &MatchStep) -> usize {
 
 fn selected_arms<'a>(
     step: &'a MatchStep,
+    original: &join::JoinPlan,
     scope: &join::JoinClauseScope<'_>,
     indices: [usize; 2],
     shared: &str,
 ) -> Option<(Arm<'a>, Arm<'a>)> {
-    let first = first_part(step, scope, indices)?;
+    let first = first_part(original, scope, indices)?;
     let second = if first == indices[0] {
         indices[1]
     } else {
@@ -526,13 +555,10 @@ fn shared_node<'a>(a: &'a PatternPart, b: &'a PatternPart) -> Option<&'a str> {
 }
 
 fn first_part(
-    step: &MatchStep,
+    join: &join::JoinPlan,
     scope: &join::JoinClauseScope<'_>,
     indices: [usize; 2],
 ) -> Option<usize> {
-    let Some(join) = &step.join else {
-        return Some(indices[0]);
-    };
     if join.clause_start != scope.clause_start || join.snapshot_identity != scope.snapshot_identity
     {
         return None;

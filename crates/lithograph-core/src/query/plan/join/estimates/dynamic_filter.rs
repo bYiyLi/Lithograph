@@ -37,11 +37,10 @@ pub(super) fn collect(
         .len()
         .saturating_mul(distributions.len().saturating_add(4));
     let (headroom, candidates, storage) = search_reserve(analysis, rows_work, scope, headroom);
-    if work.saturating_add(headroom)
-        > crate::query::plan::budget::MAX_STATES.saturating_sub(budget.states)
-        || candidates > crate::query::plan::budget::MAX_CANDIDATES.saturating_sub(budget.candidates)
+    if work.saturating_add(headroom) > budget.remaining_states()
+        || candidates > budget.remaining_candidates()
         || storage.saturating_add(2 * std::mem::size_of::<DynamicInput>())
-            > crate::query::plan::budget::MAX_BYTES.saturating_sub(budget.bytes)
+            > budget.remaining_bytes()
         || !budget.work(work, 2 * std::mem::size_of::<DynamicInput>())
     {
         return Ok(Vec::new());

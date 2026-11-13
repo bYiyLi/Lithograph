@@ -19,21 +19,58 @@ fn output_row_bytes(
     part: &PatternPart,
     control: &ExecutionControl<'_>,
 ) -> QueryResult<u64> {
-    let mut bytes = expression::binding_row_bytes_controlled(base, Some(control))?;
+    let bytes = expression::binding_row_bytes_controlled(base, Some(control))?;
     let (fresh, additions) = fresh_bindings(base, part, control)?;
+    output_growth_bytes(
+        bytes,
+        base.order.len(),
+        fresh,
+        additions,
+        part.relationship.is_some(),
+    )
+}
+
+fn output_growth_bytes(
+    mut bytes: u64,
+    order_len: usize,
+    fresh: u64,
+    additions: usize,
+    relationship: bool,
+) -> QueryResult<u64> {
     bytes = checked_add(bytes, fresh)?;
-    let order = base
-        .order
-        .len()
+    let order = order_len
         .checked_add(additions)
         .and_then(usize::checked_next_power_of_two)
         .ok_or_else(|| crate::query::resources::memory_error("MATCH order capacity overflow"))?;
     bytes = checked_add(bytes, allocation_bytes::<String>(order.max(4))?)?;
-    if part.relationship.is_some() {
+    if relationship {
         bytes = checked_add(bytes, map_entry_bytes::<i64>()?)?;
     }
     // The fixed-hop path vectors and their small allocation headers.
     checked_add(bytes, 256)
+}
+
+/// The root StepCursor has one plain node Part and an empty incoming binding.
+/// Price the same checked output reservation without constructing a fake row.
+pub(super) fn node_output_row_bytes(spec: &crate::query::plan::NodeSpec) -> QueryResult<u64> {
+    let (fresh, additions) = match spec.variable.as_ref() {
+        Some(name) => (fresh_name_bytes(name)?, 1),
+        None => (0, 0),
+    };
+    output_growth_bytes(
+        allocation_bytes::<BindingRow>(1)?,
+        0,
+        fresh,
+        additions,
+        false,
+    )
+}
+
+fn fresh_name_bytes(name: &str) -> QueryResult<u64> {
+    checked_add(
+        map_entry_bytes::<BindingValue>()?,
+        checked_mul(name.len() as u64, 2)?,
+    )
 }
 
 fn fresh_bindings(
@@ -48,8 +85,7 @@ fn fresh_bindings(
         control.work(1)?;
         if !base.values.contains_key(name) {
             additions += 1;
-            bytes = checked_add(bytes, map_entry_bytes::<BindingValue>()?)?;
-            bytes = checked_add(bytes, checked_mul(name.len() as u64, 2)?)?;
+            bytes = checked_add(bytes, fresh_name_bytes(name)?)?;
         }
     }
     Ok((bytes, additions))

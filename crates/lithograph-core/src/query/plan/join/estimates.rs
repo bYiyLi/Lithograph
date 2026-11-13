@@ -16,7 +16,10 @@ mod hash;
 mod hash_cohort;
 mod hash_keys;
 mod hash_work;
+mod headroom;
+pub(crate) use headroom::protect_completion_metadata;
 mod key_facts;
+mod multiway;
 use hash::HashInputs;
 
 #[derive(Debug)]
@@ -61,6 +64,14 @@ struct BoundSources {
     reversed: Option<BoundSource>,
 }
 
+/// Lifetimes proved for the first Hash tail of a fresh cyclic component.
+#[derive(Clone, Copy)]
+pub(crate) struct HashPrefixMemory {
+    pub(crate) mask: u128,
+    pub(crate) yielded: u64,
+    pub(crate) drained: u64,
+}
+
 /// Opaque to the execution layer: only B interprets cardinalities and costs.
 #[derive(Debug, Default)]
 pub(crate) struct JoinEstimates {
@@ -72,6 +83,8 @@ pub(crate) struct JoinEstimates {
     bound_sources: Vec<BoundSources>,
     probe_ids: Vec<Vec<usize>>,
     variables: Vec<VariableDomain>,
+    node_variables: usize,
+    relationship_parts: usize,
     equalities: Vec<EqualityDomain>,
     equality_keys: usize,
     filters: Vec<LocalFilter>,
@@ -168,14 +181,7 @@ impl JoinEstimates {
 
     /// A subset has one estimate regardless of the memo path which reached it.
     pub(super) fn rows(&self, mask: u128) -> Option<CardinalityEstimate> {
-        let mut rows = Some(CardinalityEstimate::exact(1));
-        for (part, estimate) in self.parts.iter().enumerate() {
-            if mask & (1_u128 << part) != 0 {
-                rows = multiply(rows, estimate.output);
-            }
-        }
-        let mut rows = rows?;
-        rows = self.join_selectivity(mask, rows)?;
+        let mut rows = self.join_selectivity(mask, self.raw_part_rows(mask)?)?;
         if let Some(upper) = self.hashes.output_upper(mask) {
             rows.upper = rows.upper.min(upper);
             rows.expected = rows.expected.min(rows.upper);
@@ -197,19 +203,22 @@ impl JoinEstimates {
         };
         Some(rows)
     }
+
+    fn raw_part_rows(&self, mask: u128) -> Option<CardinalityEstimate> {
+        let mut rows = Some(CardinalityEstimate::exact(1));
+        for (part, estimate) in self.parts.iter().enumerate() {
+            if mask & (1_u128 << part) != 0 {
+                rows = multiply(rows, estimate.output);
+            }
+        }
+        rows
+    }
     fn join_selectivity(
         &self,
         mask: u128,
-        mut rows: CardinalityEstimate,
+        rows: CardinalityEstimate,
     ) -> Option<CardinalityEstimate> {
-        for domain in &self.variables {
-            let copies = (mask & domain.providers).count_ones().saturating_sub(1);
-            if copies == 0 {
-                continue;
-            }
-            let count = domain.count?.max(1);
-            rows.expected = rows.expected.div_ceil(count.saturating_pow(copies));
-        }
+        let mut rows = self.identity_selectivity(mask, rows)?;
         let mut parents = [0u8; 128];
         for (key, parent) in parents.iter_mut().enumerate().take(self.equality_keys) {
             *parent = key as u8;
@@ -224,6 +233,22 @@ impl JoinEstimates {
                 parents[left] = right as u8;
                 rows.expected = rows.expected.div_ceil(equality.distinct.max(1));
             }
+        }
+        Some(rows)
+    }
+
+    fn identity_selectivity(
+        &self,
+        mask: u128,
+        mut rows: CardinalityEstimate,
+    ) -> Option<CardinalityEstimate> {
+        for domain in &self.variables {
+            let copies = (mask & domain.providers).count_ones().saturating_sub(1);
+            if copies == 0 {
+                continue;
+            }
+            let count = domain.count?.max(1);
+            rows.expected = rows.expected.div_ceil(count.saturating_pow(copies));
         }
         Some(rows)
     }
@@ -258,9 +283,10 @@ pub(crate) fn collect_join_estimates(
                 ),
         )
         .saturating_add(128);
-    let static_indexes = collect_static(step, context, budget, headroom)?;
+    let advice_headroom = sampling_headroom(step, analysis, scope, headroom, context, budget)?;
+    let static_indexes = collect_static(step, context, budget, advice_headroom)?;
     let degree_samples =
-        collect_degree_samples(step, analysis, context, statistics, budget, headroom)?;
+        collect_degree_samples(step, analysis, context, statistics, budget, advice_headroom)?;
     if !budget.work(
         step.parts
             .len()
@@ -322,11 +348,33 @@ pub(crate) fn collect_join_estimates(
         context,
         statistics,
         budget,
-        (headroom, scope),
+        (headroom, advice_headroom, scope),
         (&degree_samples, &mut estimates),
     )?;
     collect_filters(analysis, &mut estimates);
     Ok(estimates)
+}
+
+fn sampling_headroom(
+    step: &MatchStep,
+    analysis: &JoinAnalysis,
+    scope: &JoinClauseScope<'_>,
+    base: usize,
+    context: &JoinPlanningContext<'_, '_, '_>,
+    budget: &mut PlanningBudget,
+) -> QueryResult<usize> {
+    let work = hash::advice_headroom_work(step, analysis);
+    if work == 0 {
+        return Ok(base);
+    }
+    if work > budget.remaining_states() {
+        return Ok(usize::MAX);
+    }
+    context.control.work(work as u64)?;
+    if !budget.work(work, 0) {
+        return Ok(usize::MAX);
+    }
+    Ok(hash::advice_headroom(step, analysis, scope, base))
 }
 
 fn admit_collection(
@@ -563,7 +611,10 @@ fn collect_variables(
 ) {
     // Borrowed names are used only during this bounded collection, never interned.
     let mut variables: BTreeMap<&str, VariableDomain> = BTreeMap::new();
+    let mut node_variables = 0;
+    let mut relationship_parts = 0;
     for (id, part) in step.parts.iter().enumerate() {
+        relationship_parts += usize::from(part.relationship.is_some());
         for node in std::iter::once(&part.start).chain(part.end.iter()) {
             if let Some(name) = &node.variable {
                 let count = endpoint_domain(
@@ -571,9 +622,12 @@ fn collect_variables(
                     part.relationship.as_ref(),
                     statistics,
                 );
-                let entry = variables.entry(name).or_insert(VariableDomain {
-                    providers: 0,
-                    count,
+                let entry = variables.entry(name).or_insert_with(|| {
+                    node_variables += 1;
+                    VariableDomain {
+                        providers: 0,
+                        count,
+                    }
                 });
                 entry.providers |= 1_u128 << id;
                 entry.count = match (entry.count, count) {
@@ -592,6 +646,8 @@ fn collect_variables(
             entry.providers |= 1_u128 << id;
         }
     }
+    estimates.node_variables = node_variables;
+    estimates.relationship_parts = relationship_parts;
     estimates.bindings = step
         .parts
         .iter()
@@ -617,10 +673,10 @@ fn collect_probes(
     context: &JoinPlanningContext<'_, '_, '_>,
     statistics: &PlannerStatistics,
     budget: &mut PlanningBudget,
-    placement: (usize, &JoinClauseScope<'_>),
+    placement: (usize, usize, &JoinClauseScope<'_>),
     output: (&DegreeSamples, &mut JoinEstimates),
 ) -> QueryResult<()> {
-    let (headroom, scope) = placement;
+    let (headroom, advice_headroom, scope) = placement;
     let (degree_samples, estimates) = output;
     let mut distributions = BTreeMap::new();
     for (id, template) in analysis.templates.iter().enumerate() {
@@ -653,7 +709,7 @@ fn collect_probes(
                 *definition_hash,
                 context,
                 budget,
-                headroom,
+                advice_headroom,
                 &mut distributions,
             )?,
         };

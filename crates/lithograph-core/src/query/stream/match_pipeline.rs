@@ -3,6 +3,7 @@ use super::*;
 mod cursor;
 mod hash;
 mod join;
+mod multiway;
 mod output;
 use super::profile::MatchProfileSlots;
 use crate::query::plan::ProfileRole;
@@ -10,7 +11,9 @@ use cursor::MatchFrame;
 #[cfg(test)]
 pub(crate) use hash::hash_resident_target;
 pub(super) use hash::{HashBuildState, HashProbe};
-pub(crate) use hash::{HashLayoutFacts, hash_layout, hash_table_peak_bytes};
+pub(crate) use hash::{
+    HashLayoutFacts, hash_layout, hash_table_peak_bytes, identity_binding_row_bytes,
+};
 pub(crate) use join::MatchReadBindings;
 
 #[derive(Debug)]
@@ -192,6 +195,7 @@ pub(crate) struct StepCursor {
     finite_advisory: bool,
     ordered_numeric: Option<crate::query::schema::OrderedNumericIndexRead>,
     factor: Option<Box<super::factor::producer::FactorProducer>>,
+    multiway: Option<Box<super::multiway::MultiwayProducer>>,
     flatten: Option<super::factor::FlattenContinuation>,
     profile_parts: Vec<usize>,
 }
@@ -211,7 +215,11 @@ impl StepCursor {
             .join
             .as_ref()
             .is_some_and(|plan| plan.factorized.is_some());
-        let base_bytes = if factorized {
+        let multiway = step
+            .join
+            .as_ref()
+            .is_some_and(|plan| plan.multiway.is_some());
+        let base_bytes = if factorized || multiway {
             0
         } else {
             expression::binding_row_bytes_controlled(&base, Some(control))?
@@ -222,6 +230,15 @@ impl StepCursor {
         )?)?;
         let factor = if factorized {
             Some(Box::new(super::factor::producer::FactorProducer::new(
+                step,
+                std::mem::take(&mut base),
+                control,
+            )?))
+        } else {
+            None
+        };
+        let multiway = if multiway {
+            Some(Box::new(super::multiway::MultiwayProducer::new(
                 step,
                 std::mem::take(&mut base),
                 control,
@@ -243,6 +260,7 @@ impl StepCursor {
             finite_advisory: false,
             ordered_numeric: None,
             factor,
+            multiway,
             flatten: None,
             profile_parts: Vec::new(),
         })
@@ -287,6 +305,10 @@ impl StepCursor {
             .split_output_memory(row, control)
     }
 
+    pub(crate) fn is_finite_advisory(&self) -> bool {
+        self.finite_advisory
+    }
+
     pub(crate) fn with_node_ids(
         step: &MatchStep,
         base: BindingRow,
@@ -329,7 +351,7 @@ impl StepCursor {
         control: &ExecutionControl<'_>,
     ) -> QueryResult<()> {
         if !self.initialized {
-            if !self.step.parts.is_empty() {
+            if !self.initialize_multiway_frame(control)? && !self.step.parts.is_empty() {
                 let mut frame =
                     self.frame(0, &self.base, (snapshot, view), metrics, bindings, control)?;
                 frame.ordered_numeric = self.ordered_numeric;
@@ -422,14 +444,7 @@ impl StepCursor {
             control,
         )? {
             if self.full_match_passes(&row, snapshot, graph_view, params, control)? {
-                if self.step.predicate.is_some() {
-                    metrics.record_profile_rows(
-                        metrics.match_residual_slot(self.step.clause_start),
-                        1,
-                    );
-                }
-                self.matched = true;
-                self.restore_declared_order(&mut row);
+                self.finish_match_row(&mut row, metrics);
                 return Ok(Some(row));
             }
         }
@@ -559,16 +574,20 @@ struct PartCursor {
 }
 
 impl PartCursor {
+    fn page_memory_bytes() -> QueryResult<u64> {
+        crate::query::resources::checked_add(
+            crate::query::resources::allocation_bytes::<RelationshipRecord>(PIPELINE_BATCH)?,
+            crate::query::resources::allocation_bytes::<i64>(PIPELINE_BATCH * 2)?,
+        )
+    }
+
     fn new(
         part: &PatternPart,
         base: &BindingRow,
         control: &ExecutionControl<'_>,
     ) -> QueryResult<Self> {
         let base_bytes = expression::binding_row_bytes_controlled(base, Some(control))?;
-        let page_bytes = crate::query::resources::checked_add(
-            crate::query::resources::allocation_bytes::<RelationshipRecord>(PIPELINE_BATCH)?,
-            crate::query::resources::allocation_bytes::<i64>(PIPELINE_BATCH * 2)?,
-        )?;
+        let page_bytes = Self::page_memory_bytes()?;
         let memory = control.reserve(crate::query::resources::checked_add(
             crate::query::resources::checked_add(base_bytes, page_bytes)?,
             crate::query::plan::part_seek_bytes(part, control)?,

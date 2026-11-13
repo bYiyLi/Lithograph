@@ -10,6 +10,11 @@ pub(super) fn consider(
     budget: &mut PlanningBudget,
 ) -> QueryResult<bool> {
     let hashes = search.estimates.hashes();
+    #[cfg(test)]
+    crate::query::plan::budget::trace::event(format_args!(
+        "S8 hash-select part={part} prefix={prefix:#x} ids={:?} prefix_cost={cost:?} baseline={best:?}",
+        hashes.ids(part)
+    ));
     let mut output = None;
     for &id in hashes.ids(part) {
         if !charge(budget, search.control, 1, 0)? {
@@ -32,11 +37,21 @@ pub(super) fn consider(
         if !charge(budget, search.control, hashes.work(), 0)? || !budget.candidate() {
             return Ok(false);
         }
-        let Some(estimate) = hashes.estimate(id, prefix, cost) else {
+        let Some(estimate) = hashes.estimate_prefix(id, prefix, cost, search.prefix_memory) else {
+            #[cfg(test)]
+            crate::query::plan::budget::trace::event(format_args!(
+                "S8 hash-estimate id={id} prefix={prefix:#x} unknown"
+            ));
             continue;
         };
         let candidate = hashes.candidate(id);
         let next = estimate.append(cost, output.flatten());
+        #[cfg(test)]
+        crate::query::plan::budget::trace::event(format_args!(
+            "S8 hash-estimate id={id} prefix={prefix:#x} estimate={estimate:?} next={next:?} score={:?} baseline_score={:?}",
+            next.score(),
+            best.as_ref().and_then(|(_, cost)| cost.score())
+        ));
         if best.as_ref().is_none_or(|(_, old)| next.beats(*old)) {
             *best = Some((
                 Choice {

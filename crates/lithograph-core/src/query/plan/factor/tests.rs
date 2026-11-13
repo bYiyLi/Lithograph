@@ -2,6 +2,29 @@ use super::*;
 use crate::cypher::Value;
 use join::PartOrientation::{Reversed, Written};
 
+mod mixed_budget;
+
+#[test]
+fn priced_factor_requires_known_strictly_larger_binary_work() {
+    let priced = PricedFactor {
+        description: FactorizedPlan {
+            clause_start: 0,
+            shared: "h".into(),
+            accumulate: FactorArm { hops: vec![] },
+            build: FactorArm { hops: vec![] },
+            bindings: vec![],
+            single_shared: true,
+            shared_predicate: Expr::Literal(Value::Boolean(true)),
+            asp: None,
+        },
+        work: 100,
+    };
+    assert!(!priced.beats(None));
+    assert!(!priced.beats(Some(99)));
+    assert!(!priced.beats(Some(100)));
+    assert!(priced.beats(Some(101)));
+}
+
 #[test]
 fn exchanging_proven_arms_reverses_hops_and_preserves_columns_and_asp_identity() {
     let mut plan = FactorizedPlan {

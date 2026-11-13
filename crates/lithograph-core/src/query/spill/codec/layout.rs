@@ -1,5 +1,5 @@
-//! Logical JSON payload bounds for independent fixed identity bindings.
-//! This describes the existing codec, never Rust DOM/String scratch capacity.
+//! Fixed identity payload and workspace bounds for the existing spill codec.
+//! Wire bytes and serialization reservations remain separate measurements.
 
 use super::*;
 
@@ -9,6 +9,20 @@ const EMPTY_ROW_BYTES: u64 =
 const NODE_BYTES: u64 = br#"{"kind":"node","id":0}"#.len() as u64 + I64_BYTES - 1;
 const RELATIONSHIP_BYTES: u64 =
     br#"{"kind":"relationship","record":[0,0,0,0]}"#.len() as u64 + 4 * (I64_BYTES - 1);
+
+/// One actual Grace append encoding claim plus the existing finite-string
+/// protection. Pure identity values contain no Float or Scalar DOM supplement;
+/// every order name is conservatively allowed to require prefix escaping.
+pub(in crate::query) fn identity_binding_encoding_scratch(
+    raw_bytes: u64,
+    names: usize,
+    name_bytes: u64,
+) -> QueryResult<u64> {
+    checked_add(
+        super::super::serialization_bytes(raw_bytes)?,
+        super::finite::escaped_strings_bytes(name_bytes, names as u64)?,
+    )
+}
 
 /// `names` are the written start Node, Relationship and end Node names. A
 /// repeated Node name is encoded once. The caller proves these are identity
@@ -109,5 +123,40 @@ mod tests {
             bound < 256,
             "a single identity is not a multi-KiB scratch lease"
         );
+    }
+
+    #[test]
+    fn identity_encoding_bound_covers_one_real_append_lease_and_marker_supplement() {
+        let mut row = BindingRow::default();
+        for (name, id) in [("~left\"\n", 1), ("right", 2)] {
+            row.insert(name.to_owned(), BindingValue::Node(id));
+        }
+        row.insert(
+            "~rel".to_owned(),
+            BindingValue::Relationship(RelationshipRecord {
+                id: 3,
+                source: 1,
+                type_id: 4,
+                target: 2,
+            }),
+        );
+        row.used_relationships.insert(3);
+        let raw = super::super::super::super::expression::binding_row_bytes(&row).unwrap();
+        let resources = QueryResources::default();
+        let control = ExecutionControl::new(&resources, &|| false);
+        let row_memory = resources.reserve(raw).unwrap();
+        let encoding = resources
+            .reserve(super::super::super::serialization_bytes(raw).unwrap())
+            .unwrap();
+        let (encoded, extra) = encode_binding_row_measured(&row, &control).unwrap();
+        let names = row.values.keys().map(|name| name.len() as u64).sum();
+        let bound = identity_binding_encoding_scratch(raw, row.values.len(), names).unwrap();
+        assert!(!encoded.is_empty());
+        assert!(extra > 0, "the marker supplement must actually execute");
+        assert!(encoding.bytes() + extra <= bound);
+        assert!(resources.peak() <= raw + bound);
+        drop((row, encoded));
+        drop((row_memory, encoding));
+        assert_eq!(resources.used(), 0);
     }
 }

@@ -8,6 +8,7 @@ fn hash_operator() -> query::OperatorRuntimeMetrics {
         db_hits: 0,
         semi_mask: None,
         factorized: None,
+        multiway: None,
         hash: Some(query::HashJoinRuntimeMetrics {
             build_rows: 1,
             probe_rows: 2,
@@ -21,6 +22,44 @@ fn hash_operator() -> query::OperatorRuntimeMetrics {
             dynamic_filter: None,
         }),
     }
+}
+
+#[test]
+fn multiway_json_reserves_every_counter_and_preserves_fallback_shape() {
+    let mut operator = hash_operator();
+    operator.operator = "MultiwayIntersect".into();
+    operator.hash = None;
+    let baseline = operator_profile_metadata_bytes(&operator).unwrap();
+    assert!(!operator_has_memory_profile(&operator));
+    operator.multiway = Some(query::MultiwayRuntimeMetrics {
+        input_lists: 1,
+        adjacency_rows: 2,
+        seek_operations: 3,
+        intersection_steps: 4,
+        candidate_nodes: 5,
+        node_assignments: 6,
+        relationship_candidates: 7,
+        memory_peak_bytes: u64::MAX,
+    });
+    let value = operator_profile_json(&operator);
+    assert_eq!(
+        value["multiway"],
+        json!({
+            "inputLists": 1, "adjacencyRows": 2, "seekOperations": 3,
+            "intersectionSteps": 4, "candidateNodes": 5, "nodeAssignments": 6,
+            "relationshipCandidates": 7, "memoryPeakBytes": u64::MAX,
+        })
+    );
+    assert!(operator_has_memory_profile(&operator));
+    let reserved = operator_profile_metadata_bytes(&operator).unwrap();
+    assert!(reserved >= baseline + query::resources::map_entry_bytes::<Value>().unwrap() * 9);
+    assert!(reserved >= query::resources::json_bytes(&value).unwrap());
+    operator.multiway = None;
+    assert!(operator_profile_json(&operator).get("multiway").is_none());
+    assert_eq!(
+        operator_profile_metadata_bytes(&operator).unwrap(),
+        baseline
+    );
 }
 
 #[test]

@@ -88,6 +88,36 @@ fn list_id(value: &Value, kind: ListKind) -> Option<Option<i64>> {
     }
 }
 
+/// A cached Program MATCH bypasses the eager clause dispatcher. Reuse its
+/// completed-list proof for a fresh plain-node pull owner, never for an outer
+/// binding whose original pattern/type check must happen before WHERE.
+pub(crate) fn streaming_node_ids(
+    step: &MatchStep,
+    row: &BindingRow,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<Option<(Vec<i64>, MemoryReservation)>> {
+    control.check()?;
+    let [part] = step.parts.as_slice() else {
+        return Ok(None);
+    };
+    if step.optional
+        || step.join.is_some()
+        || part.relationship.is_some()
+        || part.end.is_some()
+        || part.path_variable.is_some()
+        || part.start.id_seek.is_some()
+        || part.start.index_seek.is_some()
+        || part
+            .start
+            .variable
+            .as_ref()
+            .is_none_or(|variable| row.values.contains_key(variable))
+    {
+        return Ok(None);
+    }
+    node_ids(step, row, control)
+}
+
 fn node_ids(
     step: &MatchStep,
     row: &BindingRow,

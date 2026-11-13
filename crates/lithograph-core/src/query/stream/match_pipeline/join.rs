@@ -28,27 +28,24 @@ impl MatchReadBindings {
         self.hashes = Vec::new();
         self.memory = None;
         self.identity = None;
+        let replaced = plan.multiway.as_ref().map_or(0, |plan| plan.edges.len());
         let hashes = if plan
             .stages
             .iter()
+            .skip(replaced)
             .any(|stage| matches!(stage.access, StageAccess::Hash { .. }))
         {
             plan.stages.len()
         } else {
             0
         };
-        let bytes = crate::query::resources::checked_add(
-            crate::query::resources::allocation_bytes::<Option<BoundStandardIndexRead>>(
-                plan.templates.len(),
-            )?,
-            crate::query::resources::allocation_bytes::<Option<hash::HashBuildState>>(hashes)?,
-        )?;
+        let bytes = Self::slot_memory_bytes(plan, hashes)?;
         let memory = control.reserve(bytes)?;
         self.indexes = Vec::with_capacity(plan.templates.len());
         self.indexes.resize_with(plan.templates.len(), || None);
         self.hashes = Vec::with_capacity(hashes);
         self.hashes.resize_with(hashes, || None);
-        for (index, stage) in plan.stages.iter().enumerate().take(hashes) {
+        for (index, stage) in plan.stages.iter().enumerate().take(hashes).skip(replaced) {
             if matches!(stage.access, StageAccess::Hash { .. }) {
                 self.hashes[index] = Some(hash::HashBuildState::new());
             }
@@ -56,6 +53,26 @@ impl MatchReadBindings {
         self.memory = Some(memory);
         self.identity = Some(snapshot.cache_identity());
         Ok(())
+    }
+
+    fn slot_memory_bytes(plan: &JoinPlan, hashes: usize) -> QueryResult<u64> {
+        crate::query::resources::checked_add(
+            crate::query::resources::allocation_bytes::<Option<BoundStandardIndexRead>>(
+                plan.templates.len(),
+            )?,
+            crate::query::resources::allocation_bytes::<Option<hash::HashBuildState>>(hashes)?,
+        )
+    }
+
+    /// A newly priced tail may choose Hash even when the completed binary
+    /// alternative did not. Keep every original slot addressable in its bound.
+    pub(crate) fn planning_memory_bytes(plan: &JoinPlan) -> QueryResult<u64> {
+        let hashes = if plan.hashes.is_empty() {
+            0
+        } else {
+            plan.stages.len()
+        };
+        Self::slot_memory_bytes(plan, hashes)
     }
 
     pub(in crate::query) fn finish(
@@ -181,10 +198,11 @@ impl StepCursor {
             };
         };
         for predicate in &plan.stages[depth].predicates_after {
-            // This selected key equality already succeeded inside the Hash
-            // boundary. Keep the complete WHERE; only avoid its duplicate
-            // scheduled early evaluation after that same boundary.
-            if let StageAccess::Hash { equality, .. } = plan.stages[depth].access
+            // Only a real Hash frame has already checked this equality. A
+            // multiway prefix may replace a planned binary Hash boundary and
+            // must still evaluate its scheduled equality before the tail.
+            if matches!(self.stack.get(depth), Some(MatchFrame::Hash(_)))
+                && let StageAccess::Hash { equality, .. } = plan.stages[depth].access
                 && *predicate == plan.hashes[equality].predicate
             {
                 continue;
@@ -215,6 +233,9 @@ impl StepCursor {
         metrics: &mut QueryMetrics,
         control: &ExecutionControl<'_>,
     ) -> QueryResult<bool> {
+        if matches!(self.stack.last(), Some(MatchFrame::Multiway(_))) {
+            return self.accept_multiway_prefix(row, scope, params, metrics, control);
+        }
         let (snapshot, view) = scope;
         let slots = self
             .stack

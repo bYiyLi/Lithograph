@@ -6,6 +6,7 @@ use crate::query::stream::{hash_layout, hash_table_peak_bytes};
 
 pub(super) fn compare(
     step: &MatchStep,
+    join: &crate::query::plan::join::JoinPlan,
     plan: &FactorizedPlan,
     a: Member,
     b: Member,
@@ -39,9 +40,6 @@ pub(super) fn compare(
     if total == 0 || keys.upper == 0 {
         return Ok(None);
     }
-    let Some(join) = step.join.as_ref() else {
-        return Ok(None);
-    };
     let Some((equality, side)) = join.hashes.iter().find_map(|equality| {
         if equality.family != HashFamily::NodeIdentity {
             return None;

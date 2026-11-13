@@ -11,9 +11,8 @@ pub(super) fn claim(
     let bytes = 16 * 1024;
     // Optional advice leaves enough of the shared ledger for a complete Greedy.
     // Refusing a sample does not exhaust the search or execution budget.
-    if work.saturating_add(headroom)
-        > crate::query::plan::budget::MAX_STATES.saturating_sub(budget.states)
-        || bytes > crate::query::plan::budget::MAX_BYTES.saturating_sub(budget.bytes)
+    if work.saturating_add(headroom) > budget.remaining_states()
+        || bytes > budget.remaining_advice_bytes()
     {
         return Ok(None);
     }

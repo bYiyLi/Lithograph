@@ -5,6 +5,7 @@ pub(crate) enum ProfileRole {
     NodeAccess,
     RelationshipAccess,
     Join,
+    MultiwayIntersect,
     EarlyFilter,
     FactorizedAccumulate,
     ASPJoin,
