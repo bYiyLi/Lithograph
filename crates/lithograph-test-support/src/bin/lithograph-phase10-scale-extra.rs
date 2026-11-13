@@ -55,17 +55,31 @@ fn run_large_merge_and_gc(
     conflict_count: u64,
     page_size: usize,
 ) -> Result<ExtraScaleReport, Box<dyn Error>> {
+    let seed_started = Instant::now();
+    record_progress("seed-start", 0, 0);
     seed_merge_conflicts(connection, conflict_count)?;
+    record_progress("seed-complete", seed_started.elapsed().as_millis(), 0);
     let (session, revision, merge_start_millis) =
         start_conflicted_merge(connection, conflict_count)?;
+    record_progress("merge-start-complete", merge_start_millis, 0);
     let (conflict_pages_seen, conflict_scan_millis) =
         verify_conflict_pagination(connection, &session, page_size, conflict_count)?;
+    record_progress("conflict-scan-complete", conflict_scan_millis, 0);
     let (revision, resolution_rounds, resolution_millis) =
         resolve_all_conflicts(connection, &session, revision, page_size)?;
+    record_progress("resolution-complete", resolution_millis, resolution_rounds);
     let candidate_inspection_millis = inspect_candidate(connection, &session, revision)?;
+    record_progress(
+        "candidate-inspection-complete",
+        candidate_inspection_millis,
+        resolution_rounds,
+    );
     let (finalized_commit, finalize_millis, finalize_counters) =
         finalize_merge(connection, &session, revision)?;
+    record_progress("finalize-complete", finalize_millis, resolution_rounds);
     let (gc_root_millis, gc_root_preserved) = verify_tag_gc_root(connection)?;
+
+    record_progress("gc-complete", gc_root_millis, resolution_rounds);
 
     Ok(ExtraScaleReport {
         database: database.display().to_string(),
@@ -85,6 +99,14 @@ fn run_large_merge_and_gc(
         gc_root_millis,
         gc_root_preserved,
     })
+}
+
+fn record_progress(phase: &str, elapsed_millis: u128, completed_rounds: u64) {
+    eprintln!(
+        "merge-progress {}",
+        serde_json::json!({"phase": phase, "elapsed_millis": elapsed_millis,
+            "completed_rounds": completed_rounds})
+    );
 }
 
 fn seed_merge_conflicts(
@@ -185,6 +207,11 @@ fn resolve_all_conflicts(
             "resolved revision",
         )?;
         resolution_rounds += 1;
+        record_progress(
+            "resolution-round",
+            started.elapsed().as_millis(),
+            resolution_rounds,
+        );
     }
     let resolution_millis = started.elapsed().as_millis();
     if resolution_rounds < 2 {
