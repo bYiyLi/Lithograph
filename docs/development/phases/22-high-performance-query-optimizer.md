@@ -2,7 +2,7 @@
 
 **状态：`in_progress`（S22.1–S22.7 已完成局部验收；S22.8 实施中）。** 本项目只有**一个 Phase 22、八个内部 Stage**。所有 Stage 和全部算法均为必交付；只完成部分 Stage、已有若干基础、计划通过 Review，都不能标记 Phase `done`。当前实现与实测证据续记于第 21–26 节，S22.5 最终记录见[第 24.9 节](#stage-s22-5-acceptance)，S22.6最终记录见[第25.7节](#stage-s22-6-acceptance)，S22.7最终记录见[第25.11节](#stage-s22-7-acceptance)；第 15–20 节保留先前规划审核、实施和修复的历史记录。
 
-**仓库复核（2026-11-10）**：本地 `main` HEAD 为 `3f1f31e`，本地 `v0.3.5` Tag 指向该 Commit；Phase 21 实现已进入此源码基线。复核开始时工作区干净，随后本次文档校正产生三份未提交文档修改。旧的 `e245555` + 未提交 Phase 21 是合并计划时的历史状态，不再代表当前源码。Tag 存在不等于远端 Release 制品已经完成验证；实施时仍须重新核对 HEAD/dirty tree、依赖、源码/SQLite runtime 和 Tag/资产状态。**主工作区保留任务修改；S7实现身份为`34da2d0bf3792d8667b3f939ed73cd45d4580b11`，验收文档快照`6c5401f`的CI与六平台Matrix全部通过。S8本轮实现与后续修复已实际提交并推送至独立`codex/phase22-query-optimizer-ci`分支，最新`60045bb735088321d10764363d751f3436d7c918`的CI及六平台Matrix全部通过（第26.15节）；旧SHA的失败与修复记录保留。S7四档、完整输出、最终版本受影响性能/512KiB资源及独立Review已闭环，见第25.11节；S8实现、原生32项及普通扩展双SQL验证见第26节，完整压力与验收尚待完成。未合并、发布或部署。第21–26节记录各自源码epoch及验收，旧审核章节仅为历史证据。**
+**仓库复核（2026-11-10）**：本地 `main` HEAD 为 `3f1f31e`，本地 `v0.3.5` Tag 指向该 Commit；Phase 21 实现已进入此源码基线。复核开始时工作区干净，随后本次文档校正产生三份未提交文档修改。旧的 `e245555` + 未提交 Phase 21 是合并计划时的历史状态，不再代表当前源码。Tag 存在不等于远端 Release 制品已经完成验证；实施时仍须重新核对 HEAD/dirty tree、依赖、源码/SQLite runtime 和 Tag/资产状态。**主工作区保留任务修改；S7实现身份为`34da2d0bf3792d8667b3f939ed73cd45d4580b11`，验收文档快照`6c5401f`的CI与六平台Matrix全部通过。S8本轮实现与后续修复已实际提交并推送至独立`codex/phase22-query-optimizer-ci`分支，生产实现`60045bb735088321d10764363d751f3436d7c918`的CI及六平台Matrix全部通过（第26.15节）；测试增量`809998c`已推送，CI/Matrix待终态（第26.21节）。旧SHA的失败与修复记录保留。S7四档、完整输出、最终版本受影响性能/512KiB资源及独立Review已闭环，见第25.11节；S8实现、原生32项及普通扩展双SQL验证见第26节，完整压力与验收尚待完成。未合并、发布或部署。第21–26节记录各自源码epoch及验收，旧审核章节仅为历史证据。**
 
 ## 1. 最终目标、权威设计和边界
 
@@ -88,7 +88,7 @@ Fixture 保存 seed、真实 cardinality、目标 Commit、Index/Checkpoint、Gr
 ### 3.5 资源测试层级与平台隔离
 
 - **运行时小内存场景**：在 Linux **x86_64** 可加载扩展中执行 1 GiB/no-swap cgroup，至少覆盖 100k 与适用 1M fixture、无法装入内存的 Hash/Bitmap/Factorized/Join 和资源失败清理，真实读取 `memory.max`、`memory.swap.max`、`memory.peak`、`memory.events`。若通过 QEMU 仿真须记录宿主架构与仿真模式，不与原生平台 wall-time 直接比较，也不得把编译期 OOM 当查询运行期 OOM。
-- **Release 规模场景**：10M Node / 100M Relationship 与 [Runtime Fixed Targets](../../design/runtime.md#performance-targets) 的 Apple M2/Release/同一 SQLite 配置作为独立规模与非回退门槛；不能因为 1 GiB 容器无法同时容纳构建/fixture，就跳过或改写任一测试层级。
+- **Release 规模场景**：按 [Runtime Fixed Targets](../../design/runtime.md#performance-targets) 的10M Node / 100M Relationship、Release、同一SQLite配置及换机规则执行独立规模与非回退门槛。Apple M2是既有参考设备；换用原生机器须重建同机Before/After、保留原数值阈值及实际硬件，不将新机结果写成M2复测。不能因为1GiB限制或换机跳过规模、降低数据/阈值或混比旧机wall-time。
 - **并发与稳定性**：沿用 [Runtime Stress](../../design/runtime.md#stress-workloads) 的 1/4/8 readers + 1 writer、共同运行时长按Runtime当前合同、10K-conflict Merge、WAL/Lock、GC/derived rebuild、不同 Graph View 与 Provider-owned Cache 分离的计量；把每个配置的失败、writer-hold、P95、峰值内存和 reopen/quick_check 保留为可回放证据。
 
 ## 4. 各 Stage 的完整 Features 与局部 Acceptance
@@ -472,7 +472,7 @@ Fixture 保存 seed、真实 cardinality、目标 Commit、Index/Checkpoint、Gr
 ### A22-G03：性能/规模与非回退
 
 - 对第 3 节全部九组 Fixture 建立固定 seed、真实 cardinality、State/Schema、同机相同 SQLite/build、warm/new-connection 的 Before/After；每种新算法必须有**至少一个真实执行且物理工作改善**的正例与**至少一个正确拒绝/回退**的反例。
-- 1k→10k→100k→1M 和 10 倍无关图数据增长的访问/中间候选、SQLite VM_STEP/FULLSCAN_STEP、P50/P95（样本量支持时）、CPU、RSS/TEMP 正反证据完整；结构性门槛沿用 Runtime，**真实没有 Index 的属性 Scan 不承诺常数复杂度**。分离 Linux amd64 1 GiB/no-swap 的资源强压与 Apple M2/Release 的既有 10M/100M 性能 SLA；如使用 QEMU 标注仿真，不能用其 wall-time 对照原生 SLA。
+- 1k→10k→100k→1M 和 10 倍无关图数据增长的访问/中间候选、SQLite VM_STEP/FULLSCAN_STEP、P50/P95（样本量支持时）、CPU、RSS/TEMP 正反证据完整；结构性门槛沿用 Runtime，**真实没有 Index 的属性 Scan 不承诺常数复杂度**。区分Linux amd64 1GiB/no-swap资源强压与Runtime的10M/100M Release固定性能门槛；换用原生机器按Runtime重建同机Before/After并保持原数值阈值，记录当前硬件，不冒称Apple M2复测。如使用QEMU须标注仿真，其wall-time不能对照原生SLA。
 - 适用的 10M Node / 100M Relationship release-tier 和写入/History/Diff/explicit transaction/Merge 固定非回退标准继续满足；不能通过关闭 durability、安全/Graph View/Provider、减少数据/输出、隐瞒 checkpoint build 或删除慢样本伪造通过。
 - Stage 内减少物理工作但导致其它常用 workload 严重回退，应先修正 Cost Model、限定合法适用场景并重新测量，不直接降低门槛或宣布算法不需要。
 
@@ -1319,6 +1319,8 @@ ASP 1k rows warm完整消费median从85.069ms到8.356ms、P95从89.188ms到8.958
 S22.7局部验收通过后启动S22.8：复用既有版本化typed directed邻接覆盖索引，先补neighbor下界seek，再实现成本选择和pull多路交集；不新增持久索引或公开hint。S8仍须完成自身全部验收，10M/100M、全算法混合、最终Search tiers、90分钟reader/writer及A22-G01–G06仍未关闭，Phase22保持`in_progress`。没有合并、发布或部署。
 
 
+<a id="stage-s22-8-progress"></a>
+
 ## 26. S22.8 实施记录（局部验收未完成）
 
 ### 26.1 有序邻接、真实多路交集与首轮原生回归（2026-11-13）
@@ -1533,3 +1535,17 @@ Before/After Core各10case、SQL scalar/rows各20case现均完整通过，共60�
 用户已明确选择“1对全量对照，回退再复测”。验收方法以[Runtime固定目标](../../design/runtime.md#performance-targets)当前正文为准；仅调整重复策略，不改10K conflicts、40轮、100k同fixture、13项指标、1GiB/no-swap、durability或原1.20倍/10ms阈值。`tests/phase22_nonregression_work.py`已实现先完整一对、全部通过即结束、任一超标保留首对并追加两对；输出明确`paired_rounds/statistic/sample_count`，单对不命名为三轮中位数。20%和10ms临界值、超标检测及三样本统计标签已做纯函数验证，没有在Mac执行DB/query/编译。
 
 原Native三对controller启动在此前；其1800s限时实际保留完整Before SQL/10K Merge及After SQL，随后After Merge中断，原exit124与清理记录保留。Before Merge实际40页/40轮，resolution1564.563s；四项SQL的After实际值均低于Before。为完成当前已批准的一对，仅在新独立小副本补After Merge，复用已完成Before及SQL，不重新seed、重做慢基线或把旧parent改称成功。最终13项是否通过仍以补完后的实际结果判定，当前不预写PASS。
+
+### 26.21 大 Search 准入、Merge 进度与 CI 真实状态（2026-11-13）
+
+独立Search工具复用原100K×1536、1M×128及1M全文corpus、十个query和完整FLOAT32/score/cutoff-tie Oracle；connection内共享真实TEMP cache，避免按query重复建索引。正式协议保留5 connections×20 ready/target、三条普通首次full-build和两条独立build诊断，首次build不能称为ready毫秒延迟；不机械重复100次百万build。100K×1536 After一连接准入实际195.28s（子进程186.93s）完成三个target各20条ordinary和首尾诊断，66次完整Oracle的recall均1.0；首条build-inclusive诊断184.103474s，三个target普通ready中位36.403/42.5285/41.0175ms。这只是准入，不是正式五连接对照或P95。实际进程RSS685690880B，cgroup峰达到1GiB、max事件16448、OOM/oom_kill均0，全部fixture/source/artifact guard、TEMP及unit/cgroup/PID清理通过；小型Merge进度smoke曾重叠约0.6秒，因此该准入不用于独占延迟SLA。两坐标非零的合成FLOAT32数据仍如实标注，不外推高熵embedding。
+
+NR13原Before的10K/40轮完整结果及两端SQL四指标均保留。旧900秒After补测在revision29/7168项resolution处超时，无完整报告，仍记失败；不拼接部分计时。测试工具仅增加有界stderr阶段/逐轮进度，原请求、操作顺序、全部13指标、stdout结果及writer-hold时钟保持；每轮进度成本包含在resolution总时钟中。native release实际链接及16冲突/4轮协议smoke通过后，使用全新小库开始一次完整10K/40轮After补测，复用已完成Before/SQL。单对采样遵守第26.20节，未完成不记PASS。
+
+最新采样策略快照`b8fa57046211620c3ac5ac9c603aaef3c2ea6ae5`的[CI](https://github.com/bYiyLi/Lithograph/actions/runs/43446776138)全部成功；[Matrix](https://github.com/bYiyLi/Lithograph/actions/runs/43446776086)五平台成功，macOS ARM64在执行前被GitHub取消，runner_id为0、steps为空。GitHub原始annotation为“The job was not acquired by Runner of type hosted even after multiple attempts”，并说明macOS ARM64容量不足；不冒称六平台成功或代码测试失败。逐轮进度工具已实际提交并推送`809998c9b480f1c3e9c40a049bda57915a3280fc`至授权分支，其[CI](https://github.com/bYiyLi/Lithograph/actions/runs/43454333980)与[Matrix](https://github.com/bYiyLi/Lithograph/actions/runs/43454333987)待终态，未合并、发布或部署。Search正式对照在Merge完成与清理后串行启动；两者及最终全局Review仍未验收，Phase22保持`in_progress`。
+
+### 26.22 固定设备口径与 macOS ARM64 执行机调整（2026-11-13）
+
+Runtime的固定性能目标本来就要求更换机器时重建同机Before/After；本Phase的3.5及G03引用现按该真源澄清。当前native Linux结果仍保持原10M/100M数据、全部数值阈值、SQLite/build、长流三次与短查询5×20/100fresh；并非Apple M2重新测量，也没有混比Mac旧样本或放宽性能目标。第26.19节的实际硬件限制继续保留。
+
+`b8fa570`的macOS ARM64 Matrix在取得runner前因容量失败；`809998c`同一`macos-15`job又持续排队、runner_id未分配、steps为空，而其`macos-latest`常规canonical job已经获得runner并执行真实测试。依据[GitHub官方runner镜像表](https://github.com/actions/runner-images#available-images)中GA的macOS 26 ARM64，Matrix仅将该架构的`os: macos-15`改为固定`macos-26`；原六架构、Rust/SQLite、release build、Provider、load/ABI、storage interop及版本/访问控制检查全部保留。实际成功与否仍须等新提交的精确CI，不把runner标签调整写成平台验收通过。
