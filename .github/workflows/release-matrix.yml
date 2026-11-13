@@ -66,7 +66,7 @@ jobs:
             provider_built: target/release/liblithograph_openai_compatible.dylib
             provider_artifact: target/release/lithograph-openai-compatible.dylib
           - name: macos-arm64
-            os: macos-26
+            os: macos-latest
             built: target/release/liblithograph.dylib
             artifact: target/release/lithograph.dylib
             provider_built: target/release/liblithograph_openai_compatible.dylib
@@ -74,6 +74,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Verify native macOS ARM64 runner
+        if: matrix.name == 'macos-arm64'
+        run: test "$(uname -m)" = arm64
       - name: Install host SQLite on Linux
         if: startsWith(matrix.os, 'ubuntu-')
         run: sudo apt-get update && sudo apt-get install -y sqlite3 libsqlite3-dev

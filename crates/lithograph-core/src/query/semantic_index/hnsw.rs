@@ -9,6 +9,7 @@ use crate::query::check_interrupted;
 use crate::query::resources::{ExecutionControl, checked_add, checked_mul};
 
 mod cache;
+mod navigation;
 mod search_memory;
 pub(super) use cache::hnsw_workspace_bytes;
 use cache::{
@@ -1127,7 +1128,7 @@ fn build_hnsw_graph_with_parameters(
         completed.push(entry);
     }
     *entries = completed;
-    Ok(())
+    navigation::retain_base_cycle(entries, maximum.saturating_mul(2), is_interrupted)
 }
 
 fn initialize_hnsw_entries(

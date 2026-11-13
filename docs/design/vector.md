@@ -16,7 +16,7 @@ Lithograph 同时保留两套互不替代的向量能力：
 
 Raw Vector 仍是需要 caller-owned embedding、Vector 本身进入历史、Cypher 25 `SEARCH` filter/composition 或非文本向量数据时的完整路径。Managed Semantic 只解决“文本由数据库托管 Embedding”的当前需求，不包装或废弃 Raw Vector。
 
-Raw Vector property 保留 dimension 与 coordinate type。Vector index 使用 HNSW ANN architecture，并支持 Cypher 25 vector index metadata、similarity、additional filtering properties 与 `SEARCH` subclause。现有 HNSW physical graph 继续是 connection-local TEMP derived cache，可按 `(index definition, commit)` 重建；cache 缺失不能改变语义，没有 cache 时可以使用 exact scan correctness fallback。Managed Semantic 不把 Raw Vector HNSW 改造成第二套 persistent truth。
+Raw Vector property 保留 dimension 与 coordinate type。Vector index 使用 HNSW ANN architecture，并支持 Cypher 25 vector index metadata、similarity、additional filtering properties 与 `SEARCH` subclause。现有 HNSW physical graph 继续是 connection-local TEMP derived cache，可按 `(index definition, commit)` 重建。构建必须在重复向量、相同score与neighbor pruning后仍保持base layer可导航；以受既有neighbor数量上限约束的有向环保留连通性，避免合法cache因可达候选不足反复失效、全量扫描及重建。HNSW M/ef、score/tie、Graph View与recall合同保持；cache缺失或损坏时仍可使用exact scan correctness fallback。Managed Semantic 不把 Raw Vector HNSW 改造成第二套 persistent truth。
 
 <a id="semantic-index-definition"></a>
 

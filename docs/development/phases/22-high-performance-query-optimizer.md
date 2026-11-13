@@ -72,7 +72,7 @@ Fixture 保存 seed、真实 cardinality、目标 Commit、Index/Checkpoint、Gr
 
 ### 3.3 共用性能/资源/语义门槛
 
-- 分开计时 parse/plan、Snapshot resolve、Index/Checkpoint cache build/lookup、first-row、full-drain、SQL adapter、writer-hold。Core/SQL rows 和热态/新连接/真正 OS cold 分开；热态≥5 connections×20 次、新连接首条≥100 次、长流≥3 次逐轮记录。
+- 分开计时 parse/plan、Snapshot resolve、Index/Checkpoint cache build/lookup、first-row、full-drain、SQL adapter、writer-hold。Core/SQL rows 和热态/新连接/真正 OS cold 分开；固定短查询热态≥5 connections×20次、新连接首条≥100次，长流≥3次逐轮记录；大Search按[Runtime独立采样合同](../../design/runtime.md#stress-workloads)执行每端1connection/query100次ready与单次首次构建，不把单连接稳态写成跨连接分布。
 - 记录真实 Physical Plan 与 estimated/actual rows、SQLite VM_STEP/FULLSCAN_STEP/SORT、Index/Adjacency Seek、Join 中间候选、Hash spill、SIP skip、Factorized bytes、WCOJ intersection。`EXPLAIN` 的名称或逻辑 dbHits 不能代替实际工作证明。
 - 固定结果与相关 Delta，10×无关图增长保持 Runtime 的可寻址路径门槛 `work(10×) ≤ 2×work(base)+1000 VM steps`；无 Index 的 Scan 允许候选域线性开销，不得额外产生平方中间行。
 - 所有高内存/Spill 阶段在**真实 Linux amd64、1 GiB/no-swap** 限制下测 `memory.max`、`memory.swap.max`、`memory.peak`、`oom_kill`、RSS、TEMP/WAL、cancel/early-close/rollback/reopen/quick_check。
@@ -1549,3 +1549,29 @@ NR13原Before的10K/40轮完整结果及两端SQL四指标均保留。旧900秒A
 Runtime的固定性能目标本来就要求更换机器时重建同机Before/After；本Phase的3.5及G03引用现按该真源澄清。当前native Linux结果仍保持原10M/100M数据、全部数值阈值、SQLite/build、长流三次与短查询5×20/100fresh；并非Apple M2重新测量，也没有混比Mac旧样本或放宽性能目标。第26.19节的实际硬件限制继续保留。
 
 `b8fa570`的macOS ARM64 Matrix在取得runner前因容量失败；`809998c`同一`macos-15`job又持续排队、runner_id未分配、steps为空，而其`macos-latest`常规canonical job已经获得runner并执行真实测试。依据[GitHub官方runner镜像表](https://github.com/actions/runner-images#available-images)中GA的macOS 26 ARM64，Matrix仅将该架构的`os: macos-15`改为固定`macos-26`；原六架构、Rust/SQLite、release build、Provider、load/ABI、storage interop及版本/访问控制检查全部保留。实际成功与否仍须等新提交的精确CI，不把runner标签调整写成平台验收通过。
+
+### 26.23 NR13 全部通过与百万 Search 的真实阻断（2026-11-14）
+
+用户批准的一对100k/10K-conflict/40轮对照现已完整完成，原13项全部PASS，无需再测两对。After总controller1634.04s、resolution1556.768s（Before1564.563s），writer hold3507µs（Before3452µs）、writer wait616µs、prepare2112890µs、total finalize2466ms；每项仍按`max(1.20×Before,Before+10000µs)`。单对不报三轮median/P95。完整report SHA-256为`a51ac6870a04d04028fda8061cd4a20de5df866dc1558100ffde6d0196fc1b72`，owner峰655704064B、RSS294359040B、OOM0、TEMP及unit/cgroup/PID清理通过，旧超时parent原样保留。
+
+1M×128正式After首ordinary完整query446.877180s、Oracle通过；后续一次ordinary仍485.925954s且再次出现全量属性扫描。Root随后对拥有的只读worker做短暂指令/栈采样；采样后的所有wall不用于正式分布。为避免继续重复慢扫描，准确SIGTERM该child并保留未通过parent，剩余Core/SQL队列未启动；source/fixture/artifact guards、noOOM和完整清理通过。该组不是Search验收PASS。
+
+独立最小public-SQL复现64/128/512个相同FLOAT32向量、M8/ef64/expansion4，两端普通扩展均只从entry可达18个base节点；第二条请求40候选时执行DELETE及全量INSERT，明确反复invalidate/rebuild，而非缓存首次成本。128节点第二次共129个cache INSERT。首两次复现工具因带版本文件名的默认load入口推断错误失败，未进入query；显式使用实际`sqlite3_lithograph_init`后r3完整12条成功，所有失败仍保留。这是原有HNSW剪枝的结构问题，不由单条QueryOptimizer新增逻辑引入，但阻断本Phase的独立Search门禁。
+
+按Vector设计作最小修订：构建结束在原base-layer `2*M`上限内保留有向导航环，避免相同score剪枝使cache图断开；上层、公开参数、canonical history、score/tie、Graph View及recall要求保持。新增连通性、真实cached候选宽度/预算释放与取消回归，正在native验证；当前修复尚未提交或推送。全Phase继续`in_progress`，当前Search修复与正式三域对照、精确CI和最终Review仍待闭环。
+
+### 26.24 用户确认大 Search 减时与修复定向回归（2026-11-14）
+
+用户明确选择大Search每端1个connection、每query100条ready、回退再复测；三域规模、十query、完整score/recall/visibility Oracle、独立PROFILE和1GiB/no-swap不变。Runtime的Search拥有该例外，Phase通用短查询及原10M/100M门槛不变。旧版已证实不具备ready态的百万低维case保留首次full query/后续完整慢query及失败诊断，不重复100次全量重建，也不为其构造ready P95；优化后全部查询仍需100条真实ready。
+
+修复source27全量1097文件full SHA为`b675950a18eb08b74ac4d7116a65533550044537bb84ce2ae4e4b4112b8bbc6e`、597 compiled inputs为`74bc744f19a30a3dcb934ada903c62685459b1bff81262231c66da1de81297e8`。Native Core新增3项及既有Semantic/HNSW共30项全部通过，47.61s编译、2.77s实际test，1GiB/no-swap与清理通过；Core all-target/all-feature Clippy通过。静态duplicate仍0.99%、原1%门槛通过；`hnsw.rs`1383行保留1400硬上限。修复尚须实际普通扩展及大Search验证，不能由单元green推导PASS。
+
+首次release wrapper选错Cargo target名并发现Cargo `fresh=true`、实际SO仍是旧8e5f；该轮未准入任何新制品。冻结tar的零mtime允许旧feature指纹被复用，现保留原artifact/失败记录，对冻结源码只重置mtime（内容hash不变），新release必须证明Core实际重新编译、普通SO变化、分开standalone feature build及真实public SQL缓存复现修复。旧source25 Core archive已按原SHA另存，供同epoch修复前后Search比较；不冒称source25是pre-Phase22 main。
+
+### 26.25 新普通制品通过真实缓存回归与执行机证据（2026-11-14）
+
+重新编译后的普通default-feature扩展SHA-256为`10a32ae2a82f1bba03a7c04e4e104ae1eb0e42889e16ca459962415baace11aa`；单独standalone Core为`ef279fc3b204836b9c3cb69d389da2d55e7d02f122402c98f3df9f9d658c7db9`，features为`default,test-support`。普通Core实际fresh=false，两次独立release共315.01s、3GiB/no-swap峰1834205184B、OOM0，普通SO在standalone后未变；guards与清理通过。
+
+该普通SO已经真实`.load`并运行64/128/512相同向量public SQL，base可达数分别64/128/512；第二次查询全都没有cache INSERT/DELETE，原512节点34.03ms重建调用变为4.19ms（小复现单样本，不是正式性能P95）。完整6次结果、score/Identity及1GiB/no-swap/清理通过；原有pre-Phase22与source25的18节点失效负例继续保留。百万正例尚待新工具实际运行，不能从小复现代替规模验收。
+
+`9f0c346`的[CI](https://github.com/bYiyLi/Lithograph/actions/runs/43457185678)已全部成功；其[Matrix](https://github.com/bYiyLi/Lithograph/actions/runs/43457185977)仍因macOS ARM64未取得runner失败，五个其它平台成功。成功canonical Mac日志明确为`macos-26-arm64/20261102.0473`及`1.98.1-aarch64-apple-darwin`，说明`macos-latest`已实际获得同架构执行机；Matrix现改用该已验证别名，并在build前强制`uname -m = arm64`。六架构及全部release/load/ABI/互操作检查不变，不以x64结果替代ARM。新修复的commit/push/精确CI按实际执行另记，Phase22继续`in_progress`。
