@@ -161,13 +161,8 @@ impl StepCursor {
         control: &ExecutionControl<'_>,
     ) -> QueryResult<()> {
         let depth = self.stack.len();
-        let plan = self.hash_plan()?;
-        bindings.prepare(plan, scope.0, control)?;
-        let slot = hash::hash_slot(metrics, plan, depth);
-        let frame_memory = control.reserve(std::mem::size_of::<HashFrame>() as u64)?;
-        let mut state = bindings.hashes[depth]
-            .take()
-            .ok_or_else(|| QueryError::internal("Hash owner was borrowed recursively"))?;
+        let (frame_memory, mut state, slot) =
+            self.prepare_hash_frame(depth, scope.0, metrics, bindings, control)?;
         let key = state.probe_key(&self.step, depth, &input.0, scope, metrics, control)?;
         let probe = if let Some(key) = key {
             state.ensure_build(&self.step, depth, scope.0, scope.1, metrics, control)?;
@@ -186,6 +181,24 @@ impl StepCursor {
             HashProbe::empty()
         };
         self.finish_hash_frame(frame_memory, state, probe, (depth, slot), metrics, bindings)
+    }
+
+    fn prepare_hash_frame(
+        &self,
+        depth: usize,
+        snapshot: &Snapshot<'_>,
+        metrics: &QueryMetrics,
+        bindings: &mut MatchReadBindings,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<(MemoryReservation, hash::HashBuildState, Option<usize>)> {
+        let plan = self.hash_plan()?;
+        bindings.prepare(plan, snapshot, control)?;
+        let slot = hash::hash_slot(metrics, plan, depth);
+        let frame_memory = control.reserve(std::mem::size_of::<HashFrame>() as u64)?;
+        let state = bindings.hashes[depth]
+            .take()
+            .ok_or_else(|| QueryError::internal("Hash owner was borrowed recursively"))?;
+        Ok((frame_memory, state, slot))
     }
 
     fn finish_hash_frame(

@@ -24,6 +24,7 @@ impl PlanningBudget {
     }
 
     pub(crate) fn end_clause(&mut self) {
+        self.had_fallback |= self.exhausted();
         self.clause = None;
     }
 

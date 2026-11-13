@@ -1,6 +1,72 @@
 use super::*;
 
 #[test]
+fn local_fallback_history_survives_exit_without_stopping_later_clauses() {
+    let mut budget = PlanningBudget::default();
+    budget.begin_clause(2);
+    assert!(budget.work(MAX_STATES / 2, 0));
+    assert!(!budget.work(1, 0));
+    assert!(!budget.had_fallback);
+    budget.end_clause();
+    assert!(budget.had_fallback);
+    assert!(!budget.exhausted());
+    budget.begin_clause(2);
+    assert!(budget.work(1, 1));
+    budget.end_clause();
+    assert!(budget.had_fallback);
+    assert!(!budget.exhausted());
+    assert_eq!((budget.states, budget.bytes), (MAX_STATES / 2 + 1, 1));
+}
+
+#[test]
+fn fully_used_allowances_without_a_refusal_do_not_report_fallback() {
+    let mut budget = PlanningBudget::default();
+    for _ in 0..2 {
+        budget.begin_clause(2);
+        assert!(budget.work(MAX_STATES / 2, MAX_BYTES / 2));
+        assert_eq!(
+            (budget.remaining_states(), budget.remaining_bytes()),
+            (0, 0)
+        );
+        budget.end_clause();
+        assert!(!budget.had_fallback);
+        assert!(!budget.exhausted());
+    }
+    assert_eq!((budget.states, budget.bytes), (MAX_STATES, MAX_BYTES));
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn dropping_local_fallbacks_reports_once_with_or_without_clause_exit() {
+    crate::performance::set_enabled(true);
+    for exit_clause in [false, true] {
+        crate::performance::reset();
+        {
+            let mut budget = PlanningBudget::default();
+            for _ in 0..2 {
+                budget.begin_clause(3);
+                assert!(budget.work(MAX_STATES / 3, 0));
+                assert!(!budget.work(1, 0));
+                if exit_clause {
+                    budget.end_clause();
+                } else {
+                    break;
+                }
+            }
+        }
+        let counters = crate::performance::snapshot();
+        assert_eq!(counters.planner_fallbacks, 1);
+        assert_eq!(counters.planner_candidates, 0);
+        assert_eq!(counters.planner_bytes, 0);
+        assert_eq!(
+            counters.planner_states,
+            (MAX_STATES / 3 * if exit_clause { 2 } else { 1 }) as u64
+        );
+    }
+    crate::performance::set_enabled(false);
+}
+
+#[test]
 fn already_soft_stopped_requests_cannot_poison_the_other_resource() {
     let cases = [
         ((MAX_STATES - 1, 0), (0, MAX_BYTES / 2 + 1), (2, 0)),

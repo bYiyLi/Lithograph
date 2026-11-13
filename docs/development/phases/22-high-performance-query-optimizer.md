@@ -1435,3 +1435,16 @@ fb8的CI已结束失败：Linux、macOS与quality均在Clippy停止，原因相�
 因此尚未admitted的统一库hash_grace/hash_skew成功配方采用明确4MiB query budget；原Hash1MiB soft cap、进程1GiB限制、完整Oracle及真实spill要求不变。原512失败raw保留，并作为每档必须实际触发的RESOURCE_ERROR/SQLITE_TOOBIG18及同连接4MiB完整恢复反例。小catalog的真实512KiB spill、cancel/interrupt与恢复证据仍独立保留；没有缩Schema安全费用或改产品预算语义，也不将原512改称成功。
 
 为避免把多秒旧binary查询机械乘205，剩余普通计时回到既有recipe的admission后full/long选择：Triangle/shared cycles四组已完成的full205+3继续有效；Clique旧binary实测约3.39s，按既定长流3次ordinary+1次独立diagnostic对Before/After双surface同协议计量，逐轮、中位/最大值及完整bag保留，不报P95。原113 partial不拼接为完整full。FourCycle先以真实完整smoke耗时确定协议，不因After结果改变分类；大输出与增长仍按既定long协议。该调度修订依据用户要求缩短不必要测试与原长流合同，不减少结果或隐藏失败。15分钟mixed、27case最终制品准入和其它全局门禁仍待实际完成。
+
+
+### 26.12 旧回退计数与复杂度修复闭环（2026-11-13）
+
+8b9的CI在Clippy已通过后继续发现两个真实问题：旧`phase22_access::planner_reports_actual_bounded_search_and_fallback`中600个MATCH已发生局部预算拒绝，但`end_clause`清除局部stop后，query末尾漏记`planner_fallbacks`；quality的完整production Lizard报告`push_hash` CC16超过原15。没有修改旧断言、预算或门槛。修复仅为四个文件：保留曾实际发生的局部stop历史，Drop按原一次prepare最多记一次回退，不参与admission或hard/soft控制；初始化Hash frame的原五步按原序提为helper，probe/build/DF/park/spill/partition/finish不变。
+
+`native23`以native22不可变archive加四份精确代码增量冻结；1095文件full source `462f138768a5e9d8997b107e8cf01a1a7717c806c4a63f0519ef8472361e86f9`，595文件compiled input `6c4380af16420322263adab3fd6b72fcdb1472b49ec44dd8532b26ced41875fc`。原完整四源码目录production Lizard实际退出0（2.05s），workspace/all-target/all-feature原Clippy退出0（35.77s）。package-specific standalone编译87.57s，25项实际通过（16.27s）：原600 MATCH、allowance18、access2、跨MATCH两个顺序1、递归/取消1及公开Grace2。600例为states3600/bytes159000/fallbacks1，原失败0已修复，执行结果及计费不变；恰好用满但未发生拒绝不会虚报回退，局部恢复与active/ended Drop控制均过。
+
+runtime为1GiB/no-swap，cgroup峰235384832B、RSS236290048B、OOM0；编译虽触及3GiB回收上限但无OOM，保留memory.events.max实际值，不当作运行失败或隐藏。全部1095源码、三个ELF与工具pins终检通过，三个phase的unit/cgroup/PID/TEMP清理完成。`evidence/s8-fusion-native23/verified-runtime-summary.json` SHA-256为`78c1da194212e97c65645eaab4bd027729f3286047e30af5cec40b11f0e930af`，最终检查SHA-256为`574b43cab9f158441ca2c27d76acf51fa64545e770dfc5b6a605105009a65a5d`。后续仅追加进度doc，不改变已验证编译输入。
+
+最新Source22 ordinary03已实际独立构建（SO `0991b0020796c91825dee3adfea46450bd280913f665d3c526c1633f2a3b866a`，CP `d7a501f2a13a3c788e1bc9360b0a7b8a868461d2ff36b5b33edc43af98f4a24b`），新普通制品双SQL再次9组双surface全通过；`s8-sql-runtime02/verified-sql-summary.json` SHA-256为`056313d57c08d956e28fd02791c66ae639d4ac115e2b0518e3185e86be08b5c3`。该制品继续明确属于Source22，不改名Source23。
+
+统一catalog最新制品04验证已完成27类current/historical完整bag、writer隔离、恢复writer/final checkpoint及integrity，原512拒绝→4MiB完整恢复已实际触发；138.2s、1GiB/no-swap、cgroup峰111079424B、OOM0且完整清理。但物理算法准入尚未通过：两项旧工具误将AdjacencySeek/LegacySort的rows0当未执行，已依据既有合同离线纠正并保留原raw，其余ASP/shared cycles及五类mixed仍真实缺少所需前置算子。当前normal-CBO为20/27，不能把完整bag通过改称全准入。正在同固定库、query/pin下做一次prepare-only预算/成本诊断，不force算法或修改fixture掩盖问题。15分钟混合压力、S8剩余压力、全局规模/非回退和最终CI仍待完成。

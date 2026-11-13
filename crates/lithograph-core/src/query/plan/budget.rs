@@ -23,6 +23,9 @@ pub(crate) struct PlanningBudget {
     pub(super) bytes: usize,
     pub(super) depth: usize,
     pub(super) exhausted: bool,
+    // Report a fallback once per prepare even after its local allowance ends.
+    // This history never stops a later clause from using its own allowance.
+    had_fallback: bool,
     clause: Option<allowance::ClauseAllowance>,
     // This budget belongs to one prepare with fixed Graph View / PropertyRules.
     // Never reuse its sampled advice across queries or access-policy scopes.
@@ -257,7 +260,7 @@ impl Drop for PlanningBudget {
             self.candidates,
             self.bytes,
             self.depth,
-            self.exhausted,
+            self.had_fallback || self.exhausted(),
         );
     }
 }
