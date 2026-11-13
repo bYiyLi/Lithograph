@@ -1,8 +1,8 @@
 # Phase 22：高性能查询优化器与可预算执行引擎
 
-**状态：`in_progress`（S22.1–S22.6 已完成局部验收；S22.7 实施中；S22.8 未实施）。** 本项目只有**一个 Phase 22、八个内部 Stage**。所有 Stage 和全部算法均为必交付；只完成部分 Stage、已有若干基础、计划通过 Review，都不能标记 Phase `done`。当前实现与实测证据续记于第 21–25 节，S22.5 最终记录见[第 24.9 节](#stage-s22-5-acceptance)，S22.6最终记录见[第25.7节](#stage-s22-6-acceptance)；第 15–20 节保留先前规划审核、实施和修复的历史记录。
+**状态：`in_progress`（S22.1–S22.7 已完成局部验收；S22.8 实施中）。** 本项目只有**一个 Phase 22、八个内部 Stage**。所有 Stage 和全部算法均为必交付；只完成部分 Stage、已有若干基础、计划通过 Review，都不能标记 Phase `done`。当前实现与实测证据续记于第 21–25 节，S22.5 最终记录见[第 24.9 节](#stage-s22-5-acceptance)，S22.6最终记录见[第25.7节](#stage-s22-6-acceptance)，S22.7最终记录见[第25.11节](#stage-s22-7-acceptance)；第 15–20 节保留先前规划审核、实施和修复的历史记录。
 
-**仓库复核（2026-11-10）**：本地 `main` HEAD 为 `3f1f31e`，本地 `v0.3.5` Tag 指向该 Commit；Phase 21 实现已进入此源码基线。复核开始时工作区干净，随后本次文档校正产生三份未提交文档修改。旧的 `e245555` + 未提交 Phase 21 是合并计划时的历史状态，不再代表当前源码。Tag 存在不等于远端 Release 制品已经完成验证；实施时仍须重新核对 HEAD/dirty tree、依赖、源码/SQLite runtime 和 Tag/资产状态。**主工作区保留任务修改；独立`codex/phase22-query-optimizer-ci`分支已实际提交并推送至`6d122ca5f98fda15afd3b2fba9d8fea5ebdb9316`。该精确提交的CI四项与六平台Matrix全部通过，S6定向、四档性能、百万节点回退资源及独立Review已闭环；原`05caab6`、`2df1ee7`的失败继续保留。S7现已启动实现，S8未实施；未合并、发布或部署。第21–25节记录各自源码epoch及验收，旧审核章节仅为历史证据。**
+**仓库复核（2026-11-10）**：本地 `main` HEAD 为 `3f1f31e`，本地 `v0.3.5` Tag 指向该 Commit；Phase 21 实现已进入此源码基线。复核开始时工作区干净，随后本次文档校正产生三份未提交文档修改。旧的 `e245555` + 未提交 Phase 21 是合并计划时的历史状态，不再代表当前源码。Tag 存在不等于远端 Release 制品已经完成验证；实施时仍须重新核对 HEAD/dirty tree、依赖、源码/SQLite runtime 和 Tag/资产状态。**主工作区保留任务修改；独立`codex/phase22-query-optimizer-ci`分支已实际提交并推送至`34da2d0bf3792d8667b3f939ed73cd45d4580b11`。该精确提交的CI四项与六平台Matrix全部通过；S7四档、完整输出、最终版本受影响性能/512KiB资源及独立Review已闭环，见第25.11节。S8现已启动实现；未合并、发布或部署。第21–25节记录各自源码epoch及验收，旧审核章节仅为历史证据。**
 
 ## 1. 最终目标、权威设计和边界
 
@@ -41,8 +41,8 @@
 | **S22.4** | DPhyp/Greedy Join Order + Index Nested Loop Join | S22.3 | 本地局部验收通过；R2 同源门禁、四档压力与 Review 已闭环（第 23.9–23.12 节） |
 | **S22.5** | Typed Grace Hash Join + TEMP Spill | S22.4 | 局部验收通过；R5 同源完整门禁、性能/非回退、远端原生资源/恢复及独立 Review 闭环（第 24.9 节） |
 | **S22.6** | Semi-mask/SIP + Join Dynamic Filter + TopK Pushdown | S22.5 | 局部验收通过；三算法四档、真实物理收益、语义/预算/错误回退、1M hard512资源及6d完整CI/Matrix与Review闭环（第25.7节） |
-| **S22.7** | Factorized Execution + ASP-Join + 精确 Flatten | S22.6 | 实施中；真实Flat/Group、FT、group-aware消费者及ASP三阶段按依赖开发，尚未局部验收 |
-| **S22.8** | WCOJ / Multiway Intersection + 全算法集成 | S22.7 | 未开发 |
+| **S22.7** | Factorized Execution + ASP-Join + 精确 Flatten | S22.6 | 局部验收通过；四档/复制/ASP三阶段、最终普通release完整输出及512KiB资源、34da完整CI/Matrix与Review闭环（第25.11节） |
+| **S22.8** | WCOJ / Multiway Intersection + 全算法集成 | S22.7 | 实施中；先补typed/directed有序邻接seek，再接成本选择与pull多路交集，尚未局部验收 |
 
 各 Stage 可独立完成**局部测试**后推进，但只有最终所有 Stage 的 Acceptance 加上统一全局门禁同时通过，Phase 22 才能标为 `done`；不会再创建 Phase 23–29 的实现状态。
 
@@ -1297,3 +1297,23 @@ ASP 1k rows warm完整消费median从85.069ms到8.356ms、P95从89.188ms到8.958
 实现候选为1049输入`c1d193513ac3b1d21eaee0dfeeee663d4b5b7ae18c3e920e66ccdfc5935607e3`：Core原600项通过，新增聚合测试因复用已有3节点fixture却错误期望空图而失败。随后只更正该测试为实际count=3并加入独立Missing-label空输入，冻结为`ca8137ef03a2eeed608b934825f5d13177354d2f2c09ffe116119061b96363bc`，生产编译代码无变更；该新增测试实际复验通过，不抹去旧red。110项关联/Extension测试通过，其中ASP5、Factor22、SIP11、fallback11、Join Order4、TopK14、Join Semantics16、Extension27。完整workspace Clippy和本机format/production complexity/duplication/doc链路/diff通过。
 
 普通release扩展`7ff6bf1ded6becfa6a0d13a3d50f3efdbfe2f143abbc3bb105fdd992f8b066ec`及同源checkpoint工具`f445707c4e29b6f06bfb18c67b1a668a116a77f7e7cd59dd74e0890595c224a6`通过扩展SQL gate，包括上述新部分消费正反例、原32768/256完整bag、PROFILE、权限、取消、staged/abort/history和integrity，RSS86470656B、OOM0、TEMP为空。该普通release与最终测试修正候选仅cfg(test)数据预期不同。当前尚需最终完整CI/coverage、新源码受影响性能复验及S7收口；S7/Phase22仍为`in_progress`，S8及G01–G06未完成，未发布或部署。
+
+
+<a id="stage-s22-7-acceptance"></a>
+### 25.11 S22.7 最终局部验收与 S22.8 启动（2026-11-13）
+
+最终实现已实际提交、推送到独立开发分支`codex/phase22-query-optimizer-ci`，Commit为`34da2d0bf3792d8667b3f939ed73cd45d4580b11`。主工作区与该提交全部1049个tracked文件逐字节相同；后续S8修改另计，不覆盖这一验收源码身份。[CI 43351052373](https://github.com/bYiyLi/Lithograph/actions/runs/43351052373)的quality、Linux、macOS、Windows四项全部成功；[Release Matrix 43351052466](https://github.com/bYiyLi/Lithograph/actions/runs/43351052466)的storage fixture与六平台构建/load/ABI门禁全部成功，publish-release跳过。quality的regions/functions/lines为86.24%/87.66%/89.45%，原每文件门槛保持不变；TCK为3897 total、3777 applicable/pass、0 failed、120既有不适用分类，没有修改Profile分母。
+
+最终普通release `7ff6bf1ded6becfa6a0d13a3d50f3efdbfe2f143abbc3bb105fdd992f8b066ec`的受影响性能复验位于远端`work/nexum-s7-pressure-03/`。1M无关节点上的Star/三跳/四跳scalar及rows分别完成3次普通完整消费与独立PROFILE/VM，dbHits分别为2049/2433/3969；ASP两surface各205次普通完整消费及3次独立诊断，dbHits672。所有typed bag、pins、guard及清理通过。大输出rows完整1048576行，三轮普通消费中位31.586s，相同现场S6中位81.304s；dbHits11265对5250048。该轮query预算是512MiB，不将它改称512KiB资源验收，也不把三样本当P95。
+
+为绑定最终生产代码，仅补两组512KiB资源验证，未重复既有四档/205次时序。远端`work/nexum-s7-pressure-04/verified-runtime-summary.json`（SHA-256 `8cefbcd9ccbd5be5a7214b7aa3c0f8b7446a293d98657c7484e4d6a26d14653f`）记录普通及PROFILE完整消费、同handle恢复、独立PROFILE/VM、全部冻结输入与清理。ASP百万无关图完整256行、dbHits672，RSS峰值42213376B；大输出完整1048576行、dbHits11265，RSS峰值41811968B。两组实际1GiB/no-swap、controller及worker exit0、reset0、退出前OOM事件全0、TEMP为空、unit/cgroup/所属PID均清理。ASP的cgroup峰值达到1GiB并有cache reclaim，不能与进程RSS混同；大输出cgroup峰值33325056B。receipt记录full source `c1d19351…`、compiled input `8051a7e2…`和与34da生产代码相同、只含cfg(test)预期及文档差异的来源链。
+
+| 局部Acceptance | 实际结果 |
+| --- | --- |
+| A22-S7-01 | PASS：第25.10节的四档Star/2–4hop完整identity bag、复制/footprint及受影响谓词计数改善；明确保留小Star总ledger峰值增加、ASP首行成本和旧失败。最终普通release的受影响性能复验通过。 |
+| A22-S7-02 | PASS：真实Accumulate→可寻址semijoin Build→Hash Probe减少工作且保全部parallel bag；不安全/成本不合算与部分消费回退。生产accumulator八行后、Hash Build读取64个Node后且probe0、私有ID insert/page的取消测试通过；静态review核实同步owner错误展开及顶层cancel/clear释放，无后台完成路径。公共SQL lifecycle只证明首行后close/interrupt，不冒称公共pre-probe集成实测。 |
+| A22-S7-03 | PASS：Factor22、ASP5与Join/Hash/SIP/TopK、聚合及写入/事务相关语义测试；完整multiplicity、类型/NULL、权限、历史/staged及失败边界保持。 |
+| A22-S7-04 | PASS：原四档和17组资源报告，加最终普通release两组512KiB完整输出/恢复；1GiB/no-swap、OOM0、TEMP及owner清理，不用count替代完整结果。 |
+| A22-S7-05 | PASS：两SQLsurface/PROFILE、close/interrupt、历史/staged、Graph View/Access、Provider与事务完整门禁；精确34da quality/CI/TCK及六平台Matrix、独立Phase范围review和最终diff通过。 |
+
+S22.7局部验收通过后启动S22.8：复用既有版本化typed directed邻接覆盖索引，先补neighbor下界seek，再实现成本选择和pull多路交集；不新增持久索引或公开hint。S8仍须完成自身全部验收，10M/100M、全算法混合、最终Search tiers、90分钟reader/writer及A22-G01–G06仍未关闭，Phase22保持`in_progress`。没有合并、发布或部署。
