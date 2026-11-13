@@ -41,6 +41,8 @@ pub(super) struct BindingSpillIo {
     pub(super) memory_peak_bytes: u64,
 }
 
+pub(super) type MeasuredBindingBatch = (Vec<(i64, BindingRow)>, MemoryReservation, BindingSpillIo);
+
 pub(super) fn open_spill_connection() -> QueryResult<Connection> {
     let connection = Connection::open_in_memory()?;
     connection.execute_batch("PRAGMA temp_store = FILE")?;
@@ -325,7 +327,7 @@ impl BindingSpill {
         after: i64,
         limit: usize,
         control: &ExecutionControl<'_>,
-    ) -> QueryResult<(Vec<(i64, BindingRow)>, MemoryReservation, BindingSpillIo)> {
+    ) -> QueryResult<MeasuredBindingBatch> {
         let limit = i64::try_from(limit)
             .map_err(|_| QueryError::internal("binding spill batch size exceeds INTEGER64"))?;
         let sql = format!(
@@ -338,11 +340,8 @@ impl BindingSpill {
         let mut output = Vec::new();
         let mut io = BindingSpillIo::default();
         while let Some(row) = rows.next()? {
-            control.work(1)?;
-            let seq = row.get::<_, i64>(0)?;
-            io.encoded_bytes = checked_add(io.encoded_bytes, sqlite_text(row, 1)?.len() as u64)?;
-            let (decoded, decoded_memory, decoding_peak) =
-                decode_binding_record_measured(row, 1, &self.resources, control)?;
+            let (seq, decoded, decoded_memory, decoding_peak) =
+                read_binding_spill_record(row, &self.resources, control, &mut io)?;
             io.memory_peak_bytes = io
                 .memory_peak_bytes
                 .max(checked_add(memory.bytes(), decoding_peak)?);
@@ -827,6 +826,19 @@ fn decode_binding_record(
 ) -> QueryResult<(BindingRow, MemoryReservation)> {
     decode_binding_record_measured(row, index, resources, control)
         .map(|(row, memory, _)| (row, memory))
+}
+
+fn read_binding_spill_record(
+    row: &rusqlite::Row<'_>,
+    resources: &QueryResources,
+    control: &ExecutionControl<'_>,
+    io: &mut BindingSpillIo,
+) -> QueryResult<(i64, BindingRow, MemoryReservation, u64)> {
+    control.work(1)?;
+    let sequence = row.get::<_, i64>(0)?;
+    io.encoded_bytes = checked_add(io.encoded_bytes, sqlite_text(row, 1)?.len() as u64)?;
+    let (decoded, memory, peak) = decode_binding_record_measured(row, 1, resources, control)?;
+    Ok((sequence, decoded, memory, peak))
 }
 
 fn decode_binding_record_measured(

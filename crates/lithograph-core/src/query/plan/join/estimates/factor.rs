@@ -200,6 +200,73 @@ mod tests {
         }
     }
 
+    fn typed_relationship(direction: Direction) -> crate::query::plan::RelationshipSpec {
+        crate::query::plan::RelationshipSpec {
+            variable: Some("r".into()),
+            type_id: Some(7),
+            type_name: Some("R".into()),
+            direction,
+            index_seek: None,
+            id_seek: None,
+            impossible: false,
+        }
+    }
+
+    #[test]
+    fn typed_endpoint_domain_is_stable_when_unrelated_nodes_grow() {
+        let relationship = typed_relationship(Direction::Outgoing);
+        for nodes in [1_000, 10_000, 100_000, 1_000_000] {
+            let statistics = PlannerStatistics {
+                node_count: nodes,
+                type_counts: BTreeMap::from([(7, 64)]),
+                ..Default::default()
+            };
+            let labelled = endpoint_domain(Some(64), Some(&relationship), &statistics).unwrap();
+            let unlabelled =
+                endpoint_domain(Some(nodes), Some(&relationship), &statistics).unwrap();
+            // Preserve the existing any-provider max rule, with each occurrence
+            // first bounded by the same typed relationship scope.
+            assert_eq!(labelled.max(unlabelled), 64);
+        }
+    }
+
+    #[test]
+    fn endpoint_bound_keeps_unknown_and_checked_undirected_union() {
+        let mut relationship = typed_relationship(Direction::Undirected);
+        let mut statistics = PlannerStatistics {
+            type_counts: BTreeMap::from([(7, 64)]),
+            ..Default::default()
+        };
+        assert_eq!(
+            endpoint_domain(Some(1_000_000), Some(&relationship), &statistics),
+            Some(128)
+        );
+        assert_eq!(
+            endpoint_domain(Some(2), Some(&relationship), &statistics),
+            Some(2)
+        );
+        assert_eq!(
+            endpoint_domain(None, Some(&relationship), &statistics),
+            None
+        );
+        statistics.type_counts.clear();
+        assert_eq!(
+            endpoint_domain(Some(1_000_000), Some(&relationship), &statistics),
+            Some(1_000_000)
+        );
+        statistics.type_counts.insert(7, u64::MAX);
+        assert_eq!(
+            endpoint_domain(Some(1_000_000), Some(&relationship), &statistics),
+            Some(1_000_000)
+        );
+        relationship.direction = Direction::Incoming;
+        statistics.type_counts.insert(7, 64);
+        assert_eq!(
+            endpoint_domain(Some(1_000_000), Some(&relationship), &statistics),
+            Some(64)
+        );
+    }
+
     #[test]
     fn both_arms_use_the_same_conditional_prefix_cardinality_as_the_original_order() {
         let estimates = JoinEstimates {

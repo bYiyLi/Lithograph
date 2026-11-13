@@ -910,6 +910,8 @@ pub(crate) fn value_to_string(value: &Value) -> QueryResult<String> {
 }
 
 pub(crate) fn predicate(value: Value) -> QueryResult<bool> {
+    #[cfg(feature = "test-support")]
+    crate::performance::record_predicate_conversion();
     match value {
         Value::Boolean(value) => Ok(value),
         Value::Null => Ok(false),

@@ -130,7 +130,7 @@ fn hash_json_metadata_is_reserved_before_building_many_operator_objects() {
         })
         .unwrap();
     let preflight =
-        query::resources::checked_add(preflight, hash_memory_metadata_bytes().unwrap()).unwrap();
+        query::resources::checked_add(preflight, profile_memory_metadata_bytes().unwrap()).unwrap();
     assert!(preflight >= query::resources::json_bytes(&expected).unwrap());
     let resources = query::QueryResources::new(Some(preflight - 1));
     let constructed = std::cell::Cell::new(false);
@@ -141,4 +141,63 @@ fn hash_json_metadata_is_reserved_before_building_many_operator_objects() {
     assert!(result.is_err());
     assert!(!constructed.get());
     assert_eq!(resources.peak(), 0);
+}
+
+#[test]
+fn factorized_profile_fields_are_reserved_and_absent_for_flat_fallback() {
+    let mut operator = hash_operator();
+    operator.operator = "ASPJoin".into();
+    operator.hash = None;
+    let flat = operator_profile_metadata_bytes(&operator).unwrap();
+    operator.factorized = Some(query::FactorizedRuntimeMetrics {
+        prefixes: 1,
+        accumulate_rows: 2,
+        build_rows: 3,
+        hash_entries: 4,
+        probe_rows: 5,
+        group_members: 6,
+        flattened_rows: 7,
+        semijoin_keys: 8,
+        semijoin_seeks: 9,
+        memory_peak_bytes: u64::MAX,
+        spill_encoded_bytes: u64::MAX,
+        spill_batches: 12,
+        spill_vm_steps: 13,
+        temp_allocated_bytes: u64::MAX,
+        accumulate_micros: 15,
+        build_micros: 16,
+        probe_micros: 17,
+        predicate_evaluations: 18,
+        expression_evaluations: 19,
+    });
+    let value = operator_profile_json(&operator);
+    assert_eq!(
+        value["factorized"],
+        json!({
+            "prefixes":1,"accumulateRows":2,"buildRows":3,"hashEntries":4,
+            "probeRows":5,"groupMembers":6,"flattenedRows":7,
+            "semijoinKeys":8,"semijoinSeeks":9,"memoryPeakBytes":u64::MAX,
+            "spillEncodedBytes":u64::MAX,"spillBatches":12,"spillVmSteps":13,
+            "tempAllocatedBytes":u64::MAX,"accumulateMicros":15,
+            "buildMicros":16,"probeMicros":17,"predicateEvaluations":18,
+            "expressionEvaluations":19,
+        })
+    );
+    let estimate = operator_profile_metadata_bytes(&operator).unwrap();
+    assert!(estimate >= query::resources::json_bytes(&value).unwrap());
+    assert!(estimate >= flat + query::resources::map_entry_bytes::<Value>().unwrap() * 20);
+    let resources = query::QueryResources::new(Some(estimate - 1));
+    let constructed = std::cell::Cell::new(false);
+    assert!(
+        budget::json_owned(&resources, estimate, || {
+            constructed.set(true);
+            value
+        })
+        .is_err()
+    );
+    assert!(!constructed.get());
+    assert_eq!(resources.peak(), 0);
+    operator.factorized = None;
+    assert!(operator_profile_json(&operator).get("factorized").is_none());
+    assert_eq!(operator_profile_metadata_bytes(&operator).unwrap(), flat);
 }

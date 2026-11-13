@@ -76,5 +76,13 @@ pub(crate) fn clone_binding_row_unreserved_controlled(
         copied.used_relationships.insert(*id);
     }
     copied.load_csv_context = clone_load_csv_context_controlled(&row.load_csv_context, control)?;
+    #[cfg(feature = "test-support")]
+    if crate::performance::is_enabled() {
+        let bytes = super::binding_row_bytes_controlled(&copied, None).unwrap_or(u64::MAX);
+        crate::performance::record_binding_row_clone(bytes);
+    }
     Ok(copied)
 }
+
+#[cfg(all(test, feature = "test-support"))]
+mod tests;

@@ -2,7 +2,7 @@ use super::*;
 use crate::query::resources::MemoryReservation;
 use crate::query::schema::{IndexDistribution, StandardIndexSeek};
 
-fn claim(
+pub(super) fn claim(
     work: usize,
     budget: &mut PlanningBudget,
     headroom: usize,

@@ -19,17 +19,31 @@ pub(crate) fn install(
     let Some(original) = step.join.as_ref() else {
         return Ok(());
     };
-    let Some(description) = eligibility::describe(step, scope, context, budget)? else {
+    let Some(mut description) = eligibility::describe(step, scope, context, budget)? else {
         return Ok(());
     };
-    let units = estimates.factor_advice_work(original);
+    // Flat join order is not an ordering proof for the factor tables: an arm
+    // is visited once here instead of once per outer row. Compare both already
+    // proved orientations without cloning names, expressions or either table.
+    let units = estimates
+        .factor_advice_work(original)
+        .saturating_mul(2)
+        .saturating_add(description.bindings.len().saturating_mul(2))
+        .saturating_add(step.parts.len().saturating_mul(2));
     context.control.work(units as u64)?;
     if !budget.work(units, 0) {
         return Ok(());
     }
     let work = estimates.factor_candidate_work(original, &description);
-    if !cost::beneficial(step, &description, statistics, work, context.control)? {
+    let first = cost::savings(step, &description, statistics, work, context.control)?;
+    description.swap_arms();
+    let work = estimates.factor_candidate_work(original, &description);
+    let second = cost::savings(step, &description, statistics, work, context.control)?;
+    if first.unwrap_or(0).max(second.unwrap_or(0)) == 0 {
         return Ok(());
+    }
+    if second.unwrap_or(0) <= first.unwrap_or(0) {
+        description.swap_arms();
     }
     if let Some(plan) = step.join.as_mut().and_then(std::sync::Arc::get_mut) {
         if description.asp.is_some() && !asp::install(plan, &description) {
@@ -94,6 +108,28 @@ pub(crate) struct FactorAsp {
     pub(crate) probe_group: FactorGroup,
 }
 
+impl FactorizedPlan {
+    fn swap_arms(&mut self) {
+        std::mem::swap(&mut self.accumulate, &mut self.build);
+        topology::reverse(&mut self.accumulate);
+        topology::reverse(&mut self.build);
+        for binding in &mut self.bindings {
+            binding.group = opposite(binding.group);
+        }
+        if let Some(asp) = &mut self.asp {
+            asp.probe_group = opposite(asp.probe_group);
+        }
+    }
+}
+
+fn opposite(group: FactorGroup) -> FactorGroup {
+    match group {
+        FactorGroup::Shared => FactorGroup::Shared,
+        FactorGroup::Accumulate => FactorGroup::Build,
+        FactorGroup::Build => FactorGroup::Accumulate,
+    }
+}
+
 /// Expected work of the actual old order and the normalized independent arms.
 /// All values come from this query's already collected access advice.
 #[derive(Debug, Clone, Copy)]
@@ -104,3 +140,6 @@ pub(crate) struct FactorWork {
     pub(crate) arms: [[u64; 3]; 2],
     pub(crate) point_work: Option<u64>,
 }
+
+#[cfg(test)]
+mod tests;

@@ -525,6 +525,36 @@ fn existing(
     access
 }
 
+/// A typed relationship occurrence cannot bind more distinct values at one
+/// endpoint than its relationship count. This is an upper bound on this
+/// occurrence's key domain, not an observed NDV or a new cardinality sample.
+fn endpoint_domain(
+    domain: Option<u64>,
+    relationship: Option<&crate::query::plan::RelationshipSpec>,
+    statistics: &PlannerStatistics,
+) -> Option<u64> {
+    let domain = domain?;
+    let Some(relationship) = relationship else {
+        return Some(domain);
+    };
+    let Some(total) = relationship
+        .type_id
+        .and_then(|id| statistics.type_counts.get(&id))
+        .copied()
+    else {
+        return Some(domain);
+    };
+    let bound = if relationship.direction == Direction::Undirected {
+        let Some(union) = total.checked_mul(2) else {
+            return Some(domain);
+        };
+        union
+    } else {
+        total
+    };
+    Some(domain.min(bound))
+}
+
 fn collect_variables(
     step: &MatchStep,
     context: &JoinPlanningContext<'_, '_, '_>,
@@ -536,7 +566,11 @@ fn collect_variables(
     for (id, part) in step.parts.iter().enumerate() {
         for node in std::iter::once(&part.start).chain(part.end.iter()) {
             if let Some(name) = &node.variable {
-                let count = node_domain(node, context, statistics);
+                let count = endpoint_domain(
+                    node_domain(node, context, statistics),
+                    part.relationship.as_ref(),
+                    statistics,
+                );
                 let entry = variables.entry(name).or_insert(VariableDomain {
                     providers: 0,
                     count,
@@ -606,7 +640,8 @@ fn collect_probes(
             ProbeAccess::Adjacency { .. } => {
                 let domain = degree_samples.source_cohort(id);
                 degree_samples
-                    .probe(part, template.target, domain)
+                    .source_probe(step, template)
+                    .or_else(|| degree_samples.probe(part, template.target, domain))
                     .or_else(|| degree(part, domain.map(|(_, count)| count), statistics))
             }
             ProbeAccess::IndexEquality {

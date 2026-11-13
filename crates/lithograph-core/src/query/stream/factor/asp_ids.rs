@@ -7,7 +7,9 @@ use std::ops::Bound::{Excluded, Unbounded};
 use rusqlite::{Connection, Statement, StatementStatus, params};
 
 use super::table::{FACTOR_PRIVATE_RUST_BYTES, FACTOR_RESIDENT_BYTES};
-use crate::query::resources::{allocation_bytes, checked_add, map_entry_bytes, memory_error};
+use crate::query::resources::{
+    allocation_bytes, checked_add, checked_mul, map_entry_bytes, memory_error,
+};
 use crate::query::spill::{open_spill_connection, private_temp_error};
 use crate::query::{ExecutionControl, MemoryReservation, QueryError, QueryResult};
 
@@ -34,6 +36,8 @@ pub(super) struct AspNodeIds {
     finished: bool,
     failed: bool,
     sqlite_vm_steps: u64,
+    memory_peak_bytes: u64,
+    temp_allocated_bytes: u64,
 }
 
 impl AspNodeIds {
@@ -52,6 +56,8 @@ impl AspNodeIds {
             finished: false,
             failed: false,
             sqlite_vm_steps: 0,
+            memory_peak_bytes: size_of::<Self>() as u64,
+            temp_allocated_bytes: 0,
         })
     }
 
@@ -66,6 +72,27 @@ impl AspNodeIds {
 
     pub(super) fn sqlite_vm_steps(&self) -> u64 {
         self.sqlite_vm_steps
+    }
+
+    pub(super) fn memory_peak_bytes(&self) -> u64 {
+        self.memory_peak_bytes
+    }
+
+    /// Logical TEMP pager allocation observed when the complete keyset freezes.
+    /// It is not the OS-allocated file size and never encodes Binding payloads.
+    pub(super) fn temp_allocated_bytes(&self) -> u64 {
+        self.temp_allocated_bytes
+    }
+
+    fn observe_memory(&mut self, extra: u64) -> QueryResult<()> {
+        let private = self
+            .private_memory
+            .as_ref()
+            .map_or(0, MemoryReservation::bytes);
+        let resident = checked_add(self.resident_memory.bytes(), private)?;
+        let owned = checked_add(self.metadata_memory.bytes(), resident)?;
+        self.memory_peak_bytes = self.memory_peak_bytes.max(checked_add(owned, extra)?);
+        Ok(())
     }
 
     /// The first page freezes insertion; only a complete accumulated set is read.
@@ -100,11 +127,7 @@ impl AspNodeIds {
             if self.must_spill(bytes, control)? {
                 self.spill(control)?;
             } else {
-                let len = checked_add(self.len, 1)?;
-                self.resident_memory.grow(bytes)?;
-                self.resident.insert(id);
-                self.len = len;
-                return Ok(());
+                return self.insert_resident(id, bytes);
             }
         }
         let connection = self.connection.as_ref().ok_or_else(closed_private)?;
@@ -116,6 +139,15 @@ impl AspNodeIds {
             control,
         )?;
         self.len = checked_add(self.len, inserted as u64)?;
+        Ok(())
+    }
+
+    fn insert_resident(&mut self, id: i64, bytes: u64) -> QueryResult<()> {
+        let len = checked_add(self.len, 1)?;
+        self.resident_memory.grow(bytes)?;
+        self.observe_memory(0)?;
+        self.resident.insert(id);
+        self.len = len;
         Ok(())
     }
 
@@ -134,6 +166,8 @@ impl AspNodeIds {
 
     fn spill(&mut self, control: &ExecutionControl<'_>) -> QueryResult<()> {
         let memory = control.reserve(FACTOR_PRIVATE_RUST_BYTES)?;
+        // The old BTreeSet remains live until every key has reached TEMP.
+        self.observe_memory(memory.bytes())?;
         let connection = open_spill_connection().map_err(private_temp_error)?;
         execute_private(
             &connection,
@@ -171,30 +205,72 @@ impl AspNodeIds {
         control: &ExecutionControl<'_>,
     ) -> QueryResult<Option<(Vec<i64>, MemoryReservation)>> {
         self.check_owner(control)?;
-        self.reading = true;
+        self.freeze(control)?;
         if self.finished || self.len == 0 {
             self.finished = true;
             return Ok(None);
         }
-        // Declare the claim before its data, including on allocation/read errors.
         let capacity = page_capacity(control)?;
-        let mut memory = control.reserve(page_bytes(capacity)?)?;
-        let mut ids = Vec::new();
-        ids.try_reserve_exact(capacity)
-            .map_err(|_| memory_error("unable to allocate ASP NodeID page"))?;
-        memory.resize(page_bytes(ids.capacity())?)?;
-        self.fill_page(&mut ids, capacity, control)?;
+        let mut page = self.allocate_page(capacity, control)?;
+        self.fill_page(&mut page.0, capacity, control)?;
         control.check()?;
-        let emitted = checked_add(self.emitted, ids.len() as u64)?;
-        if ids.is_empty() || emitted > self.len {
+        let emitted = checked_add(self.emitted, page.0.len() as u64)?;
+        if page.0.is_empty() || emitted > self.len {
             return Err(QueryError::internal(
                 "ASP NodeID page differs from its complete set",
             ));
         }
         self.emitted = emitted;
         self.finished = emitted == self.len;
-        self.after = ids.last().copied();
-        Ok(Some((ids, memory)))
+        self.after = page.0.last().copied();
+        Ok(Some(page))
+    }
+
+    fn freeze(&mut self, control: &ExecutionControl<'_>) -> QueryResult<()> {
+        if !self.reading {
+            self.sample_allocation(control)?;
+            self.reading = true;
+        }
+        Ok(())
+    }
+
+    fn allocate_page(
+        &mut self,
+        capacity: usize,
+        control: &ExecutionControl<'_>,
+    ) -> QueryResult<(Vec<i64>, MemoryReservation)> {
+        // Declare the claim before its data, including on allocation/read errors.
+        let mut memory = control.reserve(page_bytes(capacity)?)?;
+        // The resident set/private owner and the new page coexist until handoff.
+        self.observe_memory(memory.bytes())?;
+        let mut ids = Vec::new();
+        ids.try_reserve_exact(capacity)
+            .map_err(|_| memory_error("unable to allocate ASP NodeID page"))?;
+        memory.resize(page_bytes(ids.capacity())?)?;
+        self.observe_memory(memory.bytes())?;
+        Ok((ids, memory))
+    }
+
+    fn sample_allocation(&mut self, control: &ExecutionControl<'_>) -> QueryResult<()> {
+        let Some(connection) = &self.connection else {
+            return Ok(());
+        };
+        let pages = private_size(
+            connection,
+            "PRAGMA temp.page_count",
+            &mut self.sqlite_vm_steps,
+            control,
+        )?;
+        let page_size = private_size(
+            connection,
+            "PRAGMA temp.page_size",
+            &mut self.sqlite_vm_steps,
+            control,
+        )?;
+        self.temp_allocated_bytes = self
+            .temp_allocated_bytes
+            .max(checked_mul(pages, page_size)?);
+        Ok(())
     }
 
     fn fill_page(
@@ -278,6 +354,23 @@ fn execute_private(
     let changed = result.map_err(|error| private_temp_error(error.into()))?;
     control.check()?;
     Ok(changed)
+}
+
+fn private_size(
+    connection: &Connection,
+    sql: &str,
+    vm_steps: &mut u64,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<u64> {
+    control.check()?;
+    let mut statement = connection
+        .prepare(sql)
+        .map_err(|error| private_temp_error(error.into()))?;
+    let result = statement.query_row([], |row| row.get::<_, i64>(0));
+    record_vm(&statement, vm_steps)?;
+    let value = result.map_err(|error| private_temp_error(error.into()))?;
+    control.check()?;
+    u64::try_from(value).map_err(|_| memory_error("negative ASP NodeID TEMP size"))
 }
 
 fn read_private_page(

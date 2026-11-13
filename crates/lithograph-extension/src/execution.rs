@@ -509,24 +509,23 @@ fn operator_profile_metadata_bytes(
     if let Some(hash) = operator.hash {
         // Nine fixed counter keys and their containing `hash` key, each at
         // most 32 key bytes. Prepay map nodes before constructing any JSON.
-        let entries =
-            query::resources::checked_mul(query::resources::map_entry_bytes::<Value>()?, 10)?;
-        bytes = query::resources::checked_add(bytes, query::resources::checked_add(entries, 512)?)?;
+        bytes = query::resources::checked_add(bytes, profile_counter_metadata_bytes(10, 512)?)?;
         bytes = query::resources::checked_add(bytes, dynamic_filter_metadata_bytes(&hash)?)?;
     }
     if operator.semi_mask.is_some() {
-        let entries =
-            query::resources::checked_mul(query::resources::map_entry_bytes::<Value>()?, 3)?;
-        bytes = query::resources::checked_add(bytes, query::resources::checked_add(entries, 96)?)?;
+        bytes = query::resources::checked_add(bytes, profile_counter_metadata_bytes(3, 96)?)?;
     }
     if operator.factorized.is_some() {
         // Nineteen fixed counters plus their containing factorized map key.
-        let entries =
-            query::resources::checked_mul(query::resources::map_entry_bytes::<Value>()?, 20)?;
-        bytes =
-            query::resources::checked_add(bytes, query::resources::checked_add(entries, 1024)?)?;
+        bytes = query::resources::checked_add(bytes, profile_counter_metadata_bytes(20, 1024)?)?;
     }
     Ok(bytes)
+}
+
+fn profile_counter_metadata_bytes(entries: u64, payload_bytes: u64) -> query::QueryResult<u64> {
+    let entries =
+        query::resources::checked_mul(query::resources::map_entry_bytes::<Value>()?, entries)?;
+    query::resources::checked_add(entries, payload_bytes)
 }
 
 fn profile_memory_metadata_bytes() -> query::QueryResult<u64> {

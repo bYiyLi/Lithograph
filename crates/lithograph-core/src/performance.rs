@@ -1,12 +1,12 @@
 //! Test-support-only internal performance instrumentation.
 //!
 //! These counters are intentionally excluded from normal release builds. They
-//! exist so Phase 11 can prove physical-work invariants without changing the
+//! exist so physical-work diagnostics can run without changing the
 //! public SQL/C ABI or query result contract.
 
 use std::cell::Cell;
 
-/// Internal counters collected by the Phase 11 performance harness.
+/// Internal counters collected only while this thread's instrumentation is enabled.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PerformanceCounters {
     pub planner_states: u64,
@@ -35,6 +35,17 @@ pub struct PerformanceCounters {
     pub merge_finalize_prepare_micros: u64,
     pub merge_finalize_writer_wait_micros: u64,
     pub merge_finalize_writer_hold_micros: u64,
+    /// Successful copies through the controlled whole-BindingRow copy helper.
+    /// Other direct Clone implementations are not observed by this counter.
+    pub binding_row_clones: u64,
+    /// Sum of the successful copies' existing checked reservation-footprint
+    /// estimates, including headers, capacity and conservative B-tree charges.
+    /// This is neither malloc traffic nor hardware memcpy bytes. Overflow, or
+    /// an overflowing footprint estimate, saturates at u64::MAX.
+    pub binding_row_clone_accounted_bytes: u64,
+    /// Attempts to convert a Boolean/null predicate value, including Type errors.
+    /// This does not count every expression or individual AND/OR operand.
+    pub predicate_conversions: u64,
 }
 
 thread_local! {
@@ -66,6 +77,9 @@ thread_local! {
         merge_finalize_prepare_micros: 0,
         merge_finalize_writer_wait_micros: 0,
         merge_finalize_writer_hold_micros: 0,
+        binding_row_clones: 0,
+        binding_row_clone_accounted_bytes: 0,
+        predicate_conversions: 0,
     }) };
 }
 
@@ -82,6 +96,31 @@ pub fn reset() {
 /// Returns a point-in-time snapshot of all counters.
 pub fn snapshot() -> PerformanceCounters {
     COUNTERS.get()
+}
+
+/// Lets the successful-copy hook avoid its read-only footprint walk entirely
+/// when collection is disabled. No execution control callback is involved.
+pub(crate) fn is_enabled() -> bool {
+    ENABLED.get()
+}
+
+pub(crate) fn record_binding_row_clone(accounted_bytes: u64) {
+    if ENABLED.get() {
+        let mut counters = COUNTERS.get();
+        counters.binding_row_clones = counters.binding_row_clones.saturating_add(1);
+        counters.binding_row_clone_accounted_bytes = counters
+            .binding_row_clone_accounted_bytes
+            .saturating_add(accounted_bytes);
+        COUNTERS.set(counters);
+    }
+}
+
+pub(crate) fn record_predicate_conversion() {
+    if ENABLED.get() {
+        let mut counters = COUNTERS.get();
+        counters.predicate_conversions = counters.predicate_conversions.saturating_add(1);
+        COUNTERS.set(counters);
+    }
 }
 
 pub(crate) fn record_planning(
@@ -234,3 +273,6 @@ fn record_micros(micros: u128, update: impl FnOnce(&mut PerformanceCounters, u64
         COUNTERS.set(counters);
     }
 }
+
+#[cfg(test)]
+mod tests;

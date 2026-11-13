@@ -184,7 +184,7 @@ fn first_part(step: &MatchStep) -> Option<usize> {
     (part < step.parts.len()).then_some(part)
 }
 
-fn reverse(arm: &mut FactorArm) {
+pub(super) fn reverse(arm: &mut FactorArm) {
     arm.hops.reverse();
     for hop in &mut arm.hops {
         hop.orientation = match hop.orientation {

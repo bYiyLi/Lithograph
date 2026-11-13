@@ -458,6 +458,26 @@ indexesRemoved
 
 实际应用已完成有限 NodeId 集合的访问 boundary 可额外包含 `semiMask:{keys,seeks}`。`keys` 是该 execution 在此 boundary 每个成功发布的完整集合去重后候选数之和；`seeks` 是实际发起的逐 ID 点验次数，包含最终被 Snapshot、Label 或 Graph View 拒绝的候选。空完整集合可以为 `0/0`；只走原 matcher 的 fallback 省略 `semiMask`。原 `operator` 类别保留，因为同一 boundary 的不同 incoming row 可以分别应用 advice 或 fallback；不能仅据类别名断言全部读取为 seek。此注记不包含 ID 或属性值，不替代原 `rows`、`dbHits` 及其求和合同，也不作为跳过页数的估计。普通 execution 和 `EXPLAIN` 仍省略 `summary.profile`。
 
+选择了 Factorized 计划时，`FactorizedAccumulate`、`ASPJoin` 和条件 `Flatten` 的 PROFILE operator 包含 `factorized` object。没有选中这些算子的旧计划省略该字段；已选择但没有发生的事件记录为 `0`，不能把静态预计乘积当作实际工作。字段不包含 Node/Relationship ID、参数、属性值或原始 query：
+
+| 字段 | 含义 |
+| --- | --- |
+| `prefixes` | 本算子实际构建的FT共享prefix数；已构建prefix不保证最终有输出 |
+| `accumulateRows` | `FactorizedAccumulate`实际接纳的首臂成员数；`ASPJoin`实际消费的probe臂原始成员数，不是两个独立臂的扁平乘积 |
+| `buildRows` | `FactorizedAccumulate`接纳的另一臂成员数；`ASPJoin`有限Build实际接纳的Hash输入行数 |
+| `hashEntries` / `probeRows` | ASP真实建立的Hash entries和实际消费的Hash probe记录数；未使用Hash的Group算子为0 |
+| `groupMembers` | 该slot写入自己创建的FT的typed成员事件数，包含真实复制；原始表与refined表分别计，不跨slot去重成唯一成员数 |
+| `flattenedRows` | 本边界实际展开并交付的tuple数；直接Group fold为0，保持完整multiplicity |
+| `semijoinKeys` / `semijoinSeeks` | 完整发布的去重Node ID集合大小及实际Build点验次数；点验后被Label/View拒绝的ID仍计入seeks |
+| `memoryPeakBytes` | 本slot拥有的FT、Mask、Hash/Grace组件各自实测reservation峰值的最大值，包含各组件内old/new扩容、codec及移交前page工作区；不相加冒充同时存活的全ASP峰值，不包含SQLite pager |
+| `spillEncodedBytes` | 本slot实际写入FT或Hash spill的typed payload编码字节，不包含SQLite page/B-tree开销；INTEGER mask不经此payload codec，不伪造编码字节 |
+| `spillBatches` / `spillVmSteps` | 本slot实际执行的spill读写/处理批次及私有SQLite statement VM steps，包含实际Mask SQL；不混入host SQL adapter VM或重复归属其它slot已记录的事件 |
+| `tempAllocatedBytes` | 本slot所属FT/Mask/Hash store各自逻辑已分配页字节峰值的最大值，不是多个store的同时总量，也不是文件系统allocated blocks或设备写入量 |
+| `accumulateMicros` / `buildMicros` / `probeMicros` | 本slot对应阶段实际执行的wall microseconds；与最终输出及caller backpressure分列，不用阶段名推算耗时 |
+| `predicateEvaluations` / `expressionEvaluations` | 实际执行的分组谓词或聚合参数求值次数；COUNT(*)与空Group不伪造表达式求值 |
+
+旧FT的写入归构建它的slot；后继ASP/Flatten只记录其实际后续读取增量。相邻Group聚合可绕过条件Flatten，该节点保留`rows=0`、`flattenedRows=0`；全局聚合成功生成的那一行归实际Aggregate边界，不计为展开。整个execution的同时存活内存峰值使用下文`executionMemoryPeakBytes`；进程RSS、各TEMP文件与磁盘分配继续由独立runtime观测，不能用上述组件最大值替代。
+
 实际选择 `HashJoin` 的 PROFILE operator 额外包含 `hash` object；没有进入 Hash 计划的其它 operator 和 fallback 省略该字段。选中 Hash 但 outer 为零行时仍有 `hash` object，其所有未发生计数为 `0`。该 object 的基础计量如下，不包含 Join key、属性值、参数或原始 query：
 
 | 字段 | 含义 |

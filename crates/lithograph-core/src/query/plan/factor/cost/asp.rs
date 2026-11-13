@@ -12,7 +12,7 @@ pub(super) fn compare(
     work: FactorWork,
     statistics: &PlannerStatistics,
     available: Option<u64>,
-) -> QueryResult<Option<bool>> {
+) -> QueryResult<Option<u64>> {
     let Some(asp) = &plan.asp else {
         return Ok(None);
     };
@@ -68,8 +68,7 @@ pub(super) fn compare(
     }
     Ok(score(
         plan,
-        a,
-        b,
+        [a, b],
         work,
         keys,
         hash_peak,
@@ -109,18 +108,17 @@ fn key_upper(
 
 fn score(
     plan: &FactorizedPlan,
-    a: Member,
-    b: Member,
+    [a, b]: [Member; 2],
     work: FactorWork,
     keys: CardinalityEstimate,
     hash_peak: u64,
     hash_headroom: u64,
     available: Option<u64>,
-) -> Option<bool> {
+) -> Option<u64> {
     let (spilled, table_peak) = table_work(plan, a, b)?;
     let peak = resident_peak(table_peak, keys.upper, hash_peak, hash_headroom)?;
     if available.is_some_and(|available| peak > available) {
-        return Some(false);
+        return Some(0);
     }
     let probe = match plan.asp.as_ref()?.probe_group {
         FactorGroup::Accumulate => a,
@@ -133,7 +131,11 @@ fn score(
         a
     };
     let candidate = candidate_work(a.rows, probe, other, work, keys.expected, spilled)?;
-    Some(candidate < work.old.checked_add(work.output.checked_mul(2)?)?)
+    Some(
+        work.old
+            .checked_add(work.output.checked_mul(2)?)?
+            .saturating_sub(candidate),
+    )
 }
 
 fn resident_peak(table_peak: u64, keys: u64, hash_peak: u64, hash_headroom: u64) -> Option<u64> {

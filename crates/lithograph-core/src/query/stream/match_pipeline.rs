@@ -380,7 +380,7 @@ impl StepCursor {
             }
             self.flatten
                 .as_mut()
-                .expect("installed factor continuation")
+                .ok_or_else(|| QueryError::internal("factor continuation was not installed"))?
                 .install(packet, control)?;
         }
     }

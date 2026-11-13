@@ -36,20 +36,20 @@ struct BaseWork {
     access: u64,
 }
 
-pub(super) fn beneficial(
+pub(super) fn savings(
     step: &MatchStep,
     plan: &FactorizedPlan,
     statistics: &PlannerStatistics,
     flat_work: Option<FactorWork>,
     control: &ExecutionControl<'_>,
-) -> QueryResult<bool> {
+) -> QueryResult<Option<u64>> {
     control.check()?;
     let Some(work) = flat_work else {
-        return Ok(false);
+        return Ok(None);
     };
     let [[a_rows, _, _], [b_rows, _, _]] = work.arms;
     if !plan.single_shared {
-        return Ok(false);
+        return Ok(None);
     }
     let Some(a) = member(
         step,
@@ -61,7 +61,7 @@ pub(super) fn beneficial(
         control,
     )?
     else {
-        return Ok(false);
+        return Ok(None);
     };
     let Some(b) = member(
         step,
@@ -73,7 +73,7 @@ pub(super) fn beneficial(
         control,
     )?
     else {
-        return Ok(false);
+        return Ok(None);
     };
     let available = control
         .resources()
@@ -85,7 +85,7 @@ pub(super) fn beneficial(
         compare(plan, a, b, work, available)
     };
     control.check()?;
-    Ok(result.unwrap_or(false))
+    Ok(result)
 }
 
 fn member(
@@ -202,11 +202,11 @@ fn compare(
     b: Member,
     work: FactorWork,
     available: Option<u64>,
-) -> Option<bool> {
+) -> Option<u64> {
     let base = base_work(a, b, work)?;
     let (spilled, peak) = table_work(plan, a, b)?;
     if available.is_some_and(|available| peak > available) {
-        return Some(false);
+        return Some(0);
     }
     let startup = a
         .rows
@@ -224,7 +224,7 @@ fn compare(
         .checked_add(base.final_work)?
         .checked_add(startup)?
         .checked_add(extra)?;
-    Some(factor < base.old)
+    Some(base.old.saturating_sub(factor))
 }
 
 fn base_work(a: Member, b: Member, work: FactorWork) -> Option<BaseWork> {

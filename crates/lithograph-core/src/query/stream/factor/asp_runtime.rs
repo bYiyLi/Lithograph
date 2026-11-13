@@ -108,6 +108,8 @@ impl<'a> AspRun<'a> {
         self.stats.semijoin_seeks = keys.len();
         self.stats.accumulate_rows = table.arm_len(self.probe_arm);
         self.stats.spill_vm_steps = keys.sqlite_vm_steps();
+        self.stats.memory_peak_bytes = keys.memory_peak_bytes();
+        self.stats.temp_allocated_bytes = keys.temp_allocated_bytes();
         self.stats.build_micros = elapsed(started);
         drop(keys);
         let started = Instant::now();
@@ -268,7 +270,11 @@ impl<'a> AspRun<'a> {
         // These are separate actual component peaks. Their maximum is not a
         // simultaneous all-ASP working-set peak; the query execution peak is
         // reported by its existing shared resources ledger.
-        self.stats.memory_peak_bytes = hash.memory_peak_bytes.max(output.memory_peak_bytes);
+        self.stats.memory_peak_bytes = self
+            .stats
+            .memory_peak_bytes
+            .max(hash.memory_peak_bytes)
+            .max(output.memory_peak_bytes);
         self.stats.spill_encoded_bytes = hash
             .spill_encoded_bytes
             .saturating_add(output.spill_encoded_bytes);
@@ -282,8 +288,11 @@ impl<'a> AspRun<'a> {
             .spill_vm_steps
             .saturating_add(hash.spill_vm_steps)
             .saturating_add(output.spill_vm_steps);
-        self.stats.temp_allocated_bytes =
-            hash.temp_allocated_bytes.max(output.temp_allocated_bytes);
+        self.stats.temp_allocated_bytes = self
+            .stats
+            .temp_allocated_bytes
+            .max(hash.temp_allocated_bytes)
+            .max(output.temp_allocated_bytes);
         metrics.set_factorized_profile(slot, self.stats);
         metrics.record_profile_rows(slot, self.output_rows);
     }

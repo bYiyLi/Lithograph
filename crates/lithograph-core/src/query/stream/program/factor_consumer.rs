@@ -165,13 +165,13 @@ fn project_group(
     if packet.is_empty() {
         return Ok(None);
     }
-    if source.skip == 0 && source.limit.is_none() {
-        if let Some((projections, _memory)) =
+    if source.skip == 0
+        && source.limit.is_none()
+        && let Some((projections, _memory)) =
             factor::consume::compile_projection(&packet, &source.projections, runtime.control)?
-        {
-            packet.set_projections(&projections, runtime.control)?;
-            return Ok(Some(BindingPacket::Group(packet)));
-        }
+    {
+        packet.set_projections(&projections, runtime.control)?;
+        return Ok(Some(BindingPacket::Group(packet)));
     }
     install(
         &mut source.factor_flatten,

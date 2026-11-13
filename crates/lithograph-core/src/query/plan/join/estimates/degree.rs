@@ -4,6 +4,8 @@
 use super::*;
 use crate::storage::{LabelId, RelationshipTypeId};
 
+mod endpoints;
+
 type Cohort = (Option<LabelId>, u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -18,11 +20,23 @@ struct DegreeKey {
 pub(super) struct DegreeSamples {
     values: BTreeMap<DegreeKey, Option<CardinalityEstimate>>,
     source_cohorts: BTreeMap<usize, Cohort>,
+    endpoint_values: BTreeMap<endpoints::EndpointKey, Option<CardinalityEstimate>>,
 }
 
 impl DegreeSamples {
     pub(super) fn source_cohort(&self, template: usize) -> Option<Cohort> {
         self.source_cohorts.get(&template).copied()
+    }
+
+    pub(super) fn source_probe(
+        &self,
+        step: &MatchStep,
+        template: &ParameterTemplate,
+    ) -> Option<CardinalityEstimate> {
+        self.endpoint_values
+            .get(&endpoints::key(step, template)?)
+            .copied()
+            .flatten()
     }
 
     pub(super) fn existing(
@@ -92,6 +106,27 @@ pub(super) fn collect_degree_samples(
             }
         }
     }
+    collect_template_samples(
+        step,
+        analysis,
+        context,
+        statistics,
+        budget,
+        headroom,
+        &mut samples,
+    )?;
+    Ok(samples)
+}
+
+fn collect_template_samples(
+    step: &MatchStep,
+    analysis: &JoinAnalysis,
+    context: &JoinPlanningContext<'_, '_, '_>,
+    statistics: &PlannerStatistics,
+    budget: &mut PlanningBudget,
+    headroom: usize,
+    samples: &mut DegreeSamples,
+) -> QueryResult<()> {
     for (id, template) in analysis.templates.iter().enumerate() {
         let Some(part) = step.parts.get(template.part) else {
             continue;
@@ -104,9 +139,20 @@ pub(super) fn collect_degree_samples(
         {
             samples.source_cohorts.insert(id, cohort);
             samples.request(part, template.target, cohort, context, budget, headroom)?;
+            if cohort.1 > 32 {
+                endpoints::collect(
+                    step,
+                    template,
+                    context,
+                    statistics,
+                    budget,
+                    headroom,
+                    &mut samples.endpoint_values,
+                )?;
+            }
         }
     }
-    Ok(samples)
+    Ok(())
 }
 
 fn degree_key(part: &PatternPart, target: ProbeTarget, cohort: Cohort) -> Option<DegreeKey> {

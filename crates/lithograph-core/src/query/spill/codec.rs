@@ -108,14 +108,7 @@ pub(super) fn encode_binding_row_measured(
         binding_scalar_json_bytes(row, control)?,
         super::super::expression::binding_row_bytes_controlled(row, Some(control))?,
     )?)?;
-    let mut values = Map::new();
-    for (name, value) in &row.values {
-        control.work(1)?;
-        values.insert(
-            text(name, Some(control))?,
-            encode_binding_value(value, control)?,
-        );
-    }
+    let values = encode_binding_values(row, control)?;
     let mut used = Vec::with_capacity(row.used_relationships.len());
     for id in &row.used_relationships {
         control.work(1)?;
@@ -136,6 +129,21 @@ pub(super) fn encode_binding_row_measured(
     );
     let (text, finite_scratch) = stringify_measured(JsonValue::Object(object), Some(control))?;
     Ok((text, checked_add(_dom.bytes(), finite_scratch)?))
+}
+
+fn encode_binding_values(
+    row: &BindingRow,
+    control: &ExecutionControl<'_>,
+) -> QueryResult<Map<String, JsonValue>> {
+    let mut values = Map::new();
+    for (name, value) in &row.values {
+        control.work(1)?;
+        values.insert(
+            text(name, Some(control))?,
+            encode_binding_value(value, control)?,
+        );
+    }
+    Ok(values)
 }
 
 fn binding_scalar_json_bytes(row: &BindingRow, control: &ExecutionControl<'_>) -> QueryResult<u64> {
