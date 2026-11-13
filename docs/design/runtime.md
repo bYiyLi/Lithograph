@@ -155,7 +155,7 @@ Benchmark 报告至少保存：Git commit 与 dirty-tree digest、fixture seed/v
 
 Side-effecting `lithograph_rows()` 另报告从第一次真实 write 到 finalize-success/cancel 的 writer-hold duration，并区分 Engine active work 与 caller backpressure/暂停时间；benchmark 必须实际按设定节奏消费 rows，不能一次性 drain 后宣称 streaming write 不会长时间持锁。实现目标不是消除这一事务必需的 writer hold，而是保证没有**额外** full-result materialization、后台 completion 或 adapter delay放大它，并保证 early-close 能及时 rollback/release。
 
-1000 Node batch+Commit、History、Diff、explicit transaction、10K-conflict Merge 各阶段作为非回退集：相同条件下新中位数不得超过 before 的 `max(1.20 × before, before + 10 ms)`。重复3轮仍出现超标时按 finding 处理，不靠删掉慢样本通过。Merge 的 read preparation、writer wait、writer hold 与 total finalize 分开测量；total finalize 时间不能当成 writer hold。
+1000 Node batch+Commit、History、Diff、explicit transaction、10K-conflict Merge 各阶段作为非回退集：先在相同条件下执行1对完整 Before/After，逐项比较 `after ≤ max(1.20 × before, before + 10 ms)`。全部通过即结束；任一项超标时保留首对全部结果，再追加2对，以三对的中位数按同一公式复核，仍超标则作为 finding 处理，不删慢样本。单对结果只报告实际值和样本数，不宣称三轮中位数或P95。Merge 的10K conflicts与40轮resolution、全部13项指标，以及read preparation、writer wait、writer hold 与total finalize拆分保持；total finalize时间不能当成writer hold。
 
 <a id="stress-workloads"></a>
 

@@ -2,7 +2,7 @@
 
 **状态：`in_progress`（S22.1–S22.7 已完成局部验收；S22.8 实施中）。** 本项目只有**一个 Phase 22、八个内部 Stage**。所有 Stage 和全部算法均为必交付；只完成部分 Stage、已有若干基础、计划通过 Review，都不能标记 Phase `done`。当前实现与实测证据续记于第 21–26 节，S22.5 最终记录见[第 24.9 节](#stage-s22-5-acceptance)，S22.6最终记录见[第25.7节](#stage-s22-6-acceptance)，S22.7最终记录见[第25.11节](#stage-s22-7-acceptance)；第 15–20 节保留先前规划审核、实施和修复的历史记录。
 
-**仓库复核（2026-11-10）**：本地 `main` HEAD 为 `3f1f31e`，本地 `v0.3.5` Tag 指向该 Commit；Phase 21 实现已进入此源码基线。复核开始时工作区干净，随后本次文档校正产生三份未提交文档修改。旧的 `e245555` + 未提交 Phase 21 是合并计划时的历史状态，不再代表当前源码。Tag 存在不等于远端 Release 制品已经完成验证；实施时仍须重新核对 HEAD/dirty tree、依赖、源码/SQLite runtime 和 Tag/资产状态。**主工作区保留任务修改；S7实现身份为`34da2d0bf3792d8667b3f939ed73cd45d4580b11`，验收文档快照`6c5401f`的CI与六平台Matrix全部通过。S8本轮实现已实际提交并推送至独立`codex/phase22-query-optimizer-ci`分支的`fb8ec5a2468954c25de82fb6a404e07f9981f205`，对应首轮CI因四项Clippy失败，Matrix有五平台通过、macOS x64因下载SQLite时DNS失败；修复与复验继续推进。S7四档、完整输出、最终版本受影响性能/512KiB资源及独立Review已闭环，见第25.11节；S8实现、原生32项及普通扩展双SQL验证见第26节，完整压力与验收尚待完成。未合并、发布或部署。第21–26节记录各自源码epoch及验收，旧审核章节仅为历史证据。**
+**仓库复核（2026-11-10）**：本地 `main` HEAD 为 `3f1f31e`，本地 `v0.3.5` Tag 指向该 Commit；Phase 21 实现已进入此源码基线。复核开始时工作区干净，随后本次文档校正产生三份未提交文档修改。旧的 `e245555` + 未提交 Phase 21 是合并计划时的历史状态，不再代表当前源码。Tag 存在不等于远端 Release 制品已经完成验证；实施时仍须重新核对 HEAD/dirty tree、依赖、源码/SQLite runtime 和 Tag/资产状态。**主工作区保留任务修改；S7实现身份为`34da2d0bf3792d8667b3f939ed73cd45d4580b11`，验收文档快照`6c5401f`的CI与六平台Matrix全部通过。S8本轮实现与后续修复已实际提交并推送至独立`codex/phase22-query-optimizer-ci`分支，最新`60045bb735088321d10764363d751f3436d7c918`的CI及六平台Matrix全部通过（第26.15节）；旧SHA的失败与修复记录保留。S7四档、完整输出、最终版本受影响性能/512KiB资源及独立Review已闭环，见第25.11节；S8实现、原生32项及普通扩展双SQL验证见第26节，完整压力与验收尚待完成。未合并、发布或部署。第21–26节记录各自源码epoch及验收，旧审核章节仅为历史证据。**
 
 ## 1. 最终目标、权威设计和边界
 
@@ -42,7 +42,7 @@
 | **S22.5** | Typed Grace Hash Join + TEMP Spill | S22.4 | 局部验收通过；R5 同源完整门禁、性能/非回退、远端原生资源/恢复及独立 Review 闭环（第 24.9 节） |
 | **S22.6** | Semi-mask/SIP + Join Dynamic Filter + TopK Pushdown | S22.5 | 局部验收通过；三算法四档、真实物理收益、语义/预算/错误回退、1M hard512资源及6d完整CI/Matrix与Review闭环（第25.7节） |
 | **S22.7** | Factorized Execution + ASP-Join + 精确 Flatten | S22.6 | 局部验收通过；四档/复制/ASP三阶段、最终普通release完整输出及512KiB资源、34da完整CI/Matrix与Review闭环（第25.11节） |
-| **S22.8** | WCOJ / Multiway Intersection + 全算法集成 | S22.7 | 实施中；有序seek、四类循环、同MATCH组件及跨算法互操作已实现并部分实测；512KiB Hash/Grace、SQL、压力及完整门禁尚待闭环（第26节） |
+| **S22.8** | WCOJ / Multiway Intersection + 全算法集成 | S22.7 | 实施中；有序seek、循环组件、512KiB Hash/Grace、双SQL及统一库27类准入已通过；压力、规模及完整门禁尚待闭环（第26节） |
 
 各 Stage 可独立完成**局部测试**后推进，但只有最终所有 Stage 的 Acceptance 加上统一全局门禁同时通过，Phase 22 才能标为 `done`；不会再创建 Phase 23–29 的实现状态。
 
@@ -1460,3 +1460,76 @@ runtime为1GiB/no-swap，cgroup峰235384832B、RSS236290048B、OOM0；编译虽�
 为取得Windows根因证据，本次另含两个fixture文件的有界事务trace，不改Provider生产代码、500ms retry policy、并发成功断言或timeout。真实Linux C11/Wextra/Werror编译及10轮双worker通过，3.911s、1GiB/no-swap、峰27910144B、OOM0，完整清理；实际SQLite CLI为3.53.4，不能冒称Windows3.45或系统library3.46.1验证。trace记录自然1–3次BEGIN尝试及COMMIT，失败BEGIN没有留下事务，但原Windows失败仍open。该fixture的独立输入/制品/原始trace见`target/phase22-current/provider-publish-race26/`，与optimizer普通制品分别绑定。
 
 新的Source25普通release正在独立构建；27类normal-CBO、15分钟mixed、S8剩余Before/After、全局规模/Search/非回退及最终Review仍待完成，Phase22保持`in_progress`。
+
+### 26.14 新普通制品、27类准入与并发压力的真实缺口（2026-11-13）
+
+Source25 ordinary04的默认feature扩展已实际构建，SHA-256为`8e5fb2cf27f3d095e791739e4af90e9dbf933b8e16b0f25213dc9e427ab12f35`；独立checkpoint工具为`73a32f59a0719806bfb0a6b22e4082c25a20500fb86b146064fa5f9a44447b1c`。两个Cargo调用分别153.996s/156.432s，Core features分别`[default]`/`[default,test-support]`，后者没有改变已冻结普通扩展。source/artifact/SQLite身份及清理通过，build无OOM；`s8-normal-release04/verified-build-summary.json` SHA-256为`f446a20372f647fa5ceffe3c99fe55409c0cd0de0d720e1e13ef2d1ca4b7f2ff`。
+
+统一库05使用该普通扩展，69.44s内完成8580 Nodes/2964 Relationships、27类current/historical完整Oracle、writer隔离、原512KiB失败→4MiB恢复、final CP/Standard generation/Search ready及integrity；正常CBO PROFILE现27/27通过。`verified-setup-summary.json` SHA-256为`6c5fe68ef30728a4ba762d07cead3053096ca4e4ed7b19927e91222e1deba61f`。其中原shared-cycle在同一catalog的已完成binary103984小于W候选118698，依据S22.8.1的成本选择合同保留binary负例；未改变数据、query或Oracle，也未改写旧失败记录。独立shared-cycle正例仍由其SQL/Stage验收持有，不能将此工具预期修正代替正例。
+
+普通1k Before八组已全部完成，汇总`all-before-summary.json` SHA-256为`b42b62dfb733ae9b8fd69501d3e177a0a423a3532c4669f37282a6eb3dbe00d7`。After的Triangle两surface各205 ordinary/3 diagnostic完整352行通过：scalar warm P50/P95为40.971/44.922ms（Before230.850/243.774ms），rows为48.379/52.136ms（Before239.805/253.659ms），实际dbHits由49056降为6926。后续multicycle在计时前未选择WCOJ，整轮controller真实失败，Triangle已完成结果单独保留；尚待其精确成本/预算诊断，不能把整轮称PASS或直接修改正例断言。
+
+首次mixed在1GiB/no-swap/CPU200下，1-reader与4-reader档分别完成301.26s/343.45s主循环和排空，完整27类Oracle、必需事件、新进程恢复及清理通过，cgroup峰250486784B/252006400B。8-reader线程档未完成各case至少两轮current/historical覆盖而失败；OOM0、无残留unit/cgroup/PID/TEMP，失败小库与raw保留。系统态CPU占比随1/4/8-reader约为9%/40%/58%，只支持验证器线程争用的诊断假设，尚不证明产品瓶颈。针对失败8-reader改用同一1GiB总额内的独立进程，保持300秒、query、pin、完整Oracle、writer与恢复合同；首次进程工具在主循环前因Unix socket路径过长失败，已改短socket并继续实测，不延长压力或重复通过档。混合全门禁仍未通过。
+
+上述生产修复及fixture trace已提交/推送`2c56348723885abdda58b6f2eac05072523b3a36`；其quality发现C probe复杂度21超过原20，已仅提取原序trace初始化helper，完整C complexity及真实native C11/Wextra/Werror、一次双worker回归通过，后续提交/推送`60045bb735088321d10764363d751f3436d7c918`。后者[CI 43422543701](https://github.com/bYiyLi/Lithograph/actions/runs/43422543701)与[Matrix 43422543713](https://github.com/bYiyLi/Lithograph/actions/runs/43422543713)仍待终态，不将旧SHA绿灯称为当前通过。Provider生产策略未改，原Windows偶发BUSY根因继续保留。S8其它压力、10M/100M、Search、NR13、全局故障矩阵和最终Review未完成，Phase22保持`in_progress`。
+
+### 26.15 当前 SHA 全部 CI 通过与有限混合压力闭环（2026-11-13）
+
+`60045bb735088321d10764363d751f3436d7c918`的[CI 43422543701](https://github.com/bYiyLi/Lithograph/actions/runs/43422543701)现已全部`success`：quality以及Linux/macOS/Windows主门禁；[Matrix 43422543713](https://github.com/bYiyLi/Lithograph/actions/runs/43422543713)六平台全部成功，`publish-release`按开发分支边界跳过。原Windows偶发BUSY失败与原因未知继续保留，未以这次成功宣称因果修复，也没有改500ms policy或并发成功断言。没有合并、发布或部署。
+
+Source25的1/4/8-reader有限混合压力现有完整成功证据：1/4-reader使用原线程工具；失败的8-reader改为同一1GiB/cpu200/no-swap总额中的独立进程，保持同一27条query/参数/pin/完整Oracle、writer及300秒共同主循环。其8个reader均完成6轮，338次writer写入，GC4次、rebuild2次（含midpoint）、三次各类写入原子性检查、新进程恢复及全部清理通过；实际排空后319.71s、cgroup峰477478912B、OOM0，系统态CPU约0.37%。旧8线程覆盖失败以及进程工具的socket/代理迭代启动失败均保留，不改称成功。三档成功数据的共同主循环合计900秒，实际排空与前后验证另计，不构成长时稳定性证明。
+
+`evidence/final-mixed-composite25/verified-summary.json` SHA-256为`b474f9e50d39e80d16da544e8b517e5fba688cc70e3bd3cb786d7c34ec0ce411`，逐档绑定工具、输入、owner、原始结果与恢复，明确是组合验收，不声称原失败controller成功。4-reader线程档中另有0.2s C编译与0.45s Provider回归，其延迟只作混合负载观察，不作为隔离SLA样本。独立TEMP/checkpoint/access故障矩阵等尚未补齐，因此`full_g02_pass=false`。
+
+1k压力库的multicycle诊断也已闭环：四个W root实际定价118698/170106/170106/170106，均高于已完成Greedy103984，随后optional exact才耗尽4096 states。它是合法成本拒绝，不是W候选没有完成定价。先前未准入工具错误要求所有形状无条件选择WCOJ，现仅将该物理预期明确为成本回退负例，原失败、query、参数、pin、fixture和完整identity Oracle不变；独立SQL shared-cycle正例仍保留。`verified-cost-summary-v2.json` SHA-256为`793d9913f44a54abc81ee76f9b1461e07823a6f272c92af3342c23254bf0cf28`。隔离诊断初次Cargo错误复用了旧ELF，真实namespace列表为0测试，已在运行query前拒绝；后续实际重编46.70s、唯一namespace收集1项并运行通过，未把旧制品或0测试记作该证据。
+
+After Core short/long、Merge与Before/After Search原生工具已真实链接，standalone Core与host SQLite ABI、source/rlib/artifact、owner和清理通过；这些是测量工具就绪，不是规模、Search或NR13性能PASS。S8其余Before/After、增长/大输出/skew、全局故障矩阵、10M/100M、Search、NR13和最终Review继续执行，Phase22保持`in_progress`。
+
+### 26.16 普通1k八组对照与原生故障回归（2026-11-13）
+
+普通1k固定fixture的Before/After八组现已全部完成，组合报告`normal-composite-summary.json` SHA-256为`31be51f4522b77d2a66b4f13104c32cca08294d13000435af40d2d3c6c06f6ae`。Triangle双surface各205 ordinary/3 diagnostic结果见26.14；独立main-connection VM由scalar828895降为173793、rows829388降为174286，未把无独立归属的private SQLite工作写为0。
+
+FourCycle与Clique均按已冻结long3+1、双surface、完整5056/1920行identity bag通过，不报P95。FourCycle scalar中位1.845256s→0.617624s、rows2.038118s→0.748727s，dbHits393120→115336；Clique scalar3.428673s→0.351816s、rows3.508860s→0.404844s，dbHits723744→74674。multicycle按26.15已证明的成本回退负例完成双surface各205+3、完整16行；scalar warm P50/P95为316.729/326.191ms（Before324.633/339.159ms），rows为316.390/325.757ms（Before327.086/340.474ms），dbHits保持69888。旧失败parent及其已完成Triangle子结果分别保留，不伪称原parent成功。
+
+原生1GiB/no-swap下另完成43项必要故障/控制回归：Checkpoint18、Index cache6、Bound access16、Snapshot resource3，全部实际收集并通过、0 ignored；涵盖派生metadata损坏/版本不兼容、保守fallback、取消与publication rollback、generation替换、staged delta、access error优先级、database identity与pin生命周期。使用实际重编的隔离Core test ELF `1fb7f0984460484f9c3a4eac760df72a8b1309b2d85a5f261169828dc933561a`，与清洁Source25仅差两份测试观察，不改产品路径。
+
+同一Source25 ordinary04还通过3个真实SQL故障场景：readonly TEMP FULL、readonly TEMP不可写、active explicit TEMP FULL。宿主VFS实际命中TEMP_DB的xOpen，FULL返回SQLite13/reset13并分类RESOURCE_ERROR；不可写SQLite8按既有private Grace不可用合同分类RESOURCE_ERROR/SQLite18。active explicit中先成功stage写入，再由FULL触发fail-closed；随后零参commit精确返回NoActive/MISUSE21，未发布marker，原head/history/main文件哈希保持，same-handle恢复、readonly reopen和canonical/SQLite integrity通过。三例不是物理磁盘ENOSPC或root chmod测试，不混同API故障与实际磁盘容量结论。
+
+上述43+3的owner、cgroup、PID与TEMP全部清理，最大cgroup峰79925248B、OOM0；`final-fault25/verified-summary.json` SHA-256为`da60fa5ec2d6a29309077bd0089b1e26b8228eb4df355a0702c5de1b03811e7a`。这只关闭所列故障子项，不据此声称全部G02或Phase完成。增长档保持同一related graph/Oracle配方，10k unrelated已实际setup，100k/1M继续准备；增长对照、大输出/skew、10M/100M、Search、NR13、最终Review及全部验收仍须继续。
+
+
+### 26.17 S8 四档结构增长门槛（2026-11-13）
+
+原1k相关图不变，只增加10k/100k/1M无关Node及Relationship；每档Before/After双surface各3次普通完整消费、1次独立PROFILE/VM，352行完整identity bag和全部输入/sidecar guards通过。原1k的205+3结果继续保留，没有重跑或把三样本报成P95。After在四档的scalar/rows main VM分别恒为173793/174286，dbHits恒为6926；Before分别恒为828895/829388、dbHits49056。三个相邻10×全部满足原结构门槛，相关CREATE topology/copies/query/参数/列及完整Oracle逐档核对；private SQLite工作仍明确unavailable，不填0。
+
+10k/100k/1M的rows普通中位分别由245.298/258.549/252.550ms降为50.764/48.940/51.158ms。六个owner均实际1GiB/no-swap、OOM0、完整unit/cgroup/PID/TEMP清理，最大cgroup峰26427392B。`growth-measure25/verified-growth-summary.json` SHA-256为`238ae757e97d5871cbc0f8c49012bf1f68047372b5f76f66d96939ed9db1e143`；含原1k关系核对的`verified-growth-four-tiers.json`为`9976e6c532fd6db271cd3490ad96fbe7c235b11aefc433a267229e437189723f`。三个setup分别8.680/51.686/494.093s，完整canonical integrity单列，不混进读性能。
+
+百万输出与skew保持原独立配方，公开CREATE捕获Oracle实际1048576/8128行，setup5.14s通过；After已实际选择WCOJ并完成百万行三次普通消费，独立诊断和完整owner终检尚未完成，因此不提前标整轮PASS。相应Before/After资源/生命周期、10M/100M、Search、NR13和最终Review继续执行，Phase22保持`in_progress`。
+
+
+### 26.18 S8 小预算、百万输出与生命周期收口（2026-11-13）
+
+Source25 ordinary04在同一1GiB/no-swap限制下完成5个成功owner：百万行/8128行skew普通长流、1M无关图的hard512KiB与close/interrupt、百万行/skew的hard512KiB及close/interrupt。small-budget普通及PROFILE完整消费、同handle完整恢复、真实reset9中断和reset0早关、canonical/sidecar/source/artifact/工具guards均通过；无OOM、TEMP为空、unit/cgroup/owned PID全清。最大cgroup峰26951680B，`verified-large-resource25.json` SHA-256为`3cf222f0677966cd3ab0840e17de55b7029f4b83a2783eaa59141210e11d23bf`。Engine512KiB预算与进程1GiB上限分开记录，输出逐条核完整RID/Node bag，没有以COUNT代替。
+
+Skew双版本均完成原3 ordinary+1独立诊断、完整8128行：普通rows中位2.957223s→0.711910s、dbHits642976→101630；`verified-skew25.json`为`7273d386995e29a0c643d35331619272798a1d231402aab0e354d1a7030d2a0e`。百万行After三轮普通66.382/66.764/67.795s，另有独立PROFILE/VM；旧binary首轮完整383.605s，已证实原3+1无法在600s限时内完成。按用户缩短无意义长测试要求，在下一重复轮受控TERM，保留已完成的单个完整结果、失败parent及全部cleanup证据，不延长或重放，不报Before中位/P95或“完整benchmark PASS”。S8净收益对照由已完整验收的1k四形状、增长四档和skew持有；百万输出这里验证当前制品的完整性、bounded memory与生命周期。
+
+当前60045的Windows x64/ARM64两种SQLite版本路径另复核8个真实并发Provider worker，全部status0；失败BEGIN不留事务，成功COMMIT后autocommit1/txn0，首次BEGIN到COMMIT最长53442us。`windows-60045-trace-review.json` SHA-256为`2c4ef23cfa158e16bd5910ffd9bfef3ad8d2c72189959aaaa433236f31137ac7`。没有改生产cache/500ms预算；旧271偶发BUSY的原因仍未知，不将当前成功称为根因修复。
+
+10M/100M现复用唯一native大库，由公开Branch及1000-property SET准备一次delta；Search测量工具只链接，保留原十个query/Oracle，按连接内复用TEMP cache的方式准备pilot/full5×20及三条普通first-build长样本。规模、Search、NR13、完整全局矩阵与最终Review仍待实际执行，不以工具或setup宣称通过；Phase22继续`in_progress`。
+
+
+### 26.19 Native 10M/100M 查询与长流验收（2026-11-13）
+
+唯一`incoming/scale.sqlite`已用真正pre-Phase22扩展通过一次public Branch/SET完成1000-owner delta，NEW_DELTA为`39d4e77d07ecdee229616e145262f746b86aa9ca896bf873d9a6233ed2f53a1f`；main仍BASE、Schema与原10M generation/CP不变，恰加一Commit/Layer，完整1000个canonical INTEGER properties、无Node/Label/Rel变化。setup392.28s单列，3GiB/no-swap峰值达到回收上限，主要是file cache；wait4 RSS40034304B、OOM0和全部清理通过，不把页缓存峰值称为进程RSS或OOM。
+
+Before/After Core各10case、SQL scalar/rows各20case现均完整通过，共60个engine/surface/case组。每组仍为5×20 warm、100 fresh、独立probe和完整Oracle；全部原数值目标通过，最慢warm/fresh P95为55.200/97.162ms。`verified-short-summary.json` SHA-256为`2e761d0fea52d2c69835ae3ee315027f2fdc73250243a7c95ad270e1fca1c573`。首次Before Core子程序及全部结果实际成功，外wrapper仅因零字节WAL的mtime变化误拒绝；已按“absent与empty同逻辑内容、非空仍拒绝”离线核验main/完整fixture/inputs/owner，保留原失败、不重跑，`offline-verified-summary.json`为`7a9e27118dd1b648ba181ca4d04705cc848eb36b100377a1a00436ef08b6ea56`。后续wrapper保留raw sidecar metadata，同时使用正确的逻辑比较。
+
+44个长流owner全部实际成功：双方Core/SQL各label1M、label10M、hub1M三轮完整消费，以及Core独立counter probes/SQL生命周期。10M Label中位Core6.793→6.439s、SQL9.788→10.359s；1M hub为Core15.234→15.703s、SQL15.429→16.960s。小幅变慢的原值亦保留，所有原60/90s与30/45s数值目标通过。After普通长流最大wait4 RSS19746816B，1M→10M RSS增量均未增长，满足1GiB/128MiB目标；resolve1/build0只来自独立probe，不把普通禁用计数的0冒充实测。全部1GiB/no-swap、OOM0、输入/fixture/owner/TEMP/PID清理通过；`verified-long-summary.json`为`0e7b253732b618e5603192d32231b6d85fdc2560006225c5c283e07c34bba45e`。这是Linux同机原生证据，不宣称重新实测Apple M2绝对SLA。
+
+普通制品与60045精确CI的596个保守编译输入逐项比对，595个相同；唯一差异是Provider测试fixture的两个trace SELECT，不是Kernel/Extension/Provider/ABI生产实现。`engine-source25-ci60045-lineage.json`为`873459112ff6e2efe3b644f8543814b62a9e8810b8138ca537dad1e414986ece`，不伪称full source digest相同。Search与NR13、完整全局Review仍在继续。
+
+### 26.20 用户确认的 NR13 条件复测策略（2026-11-13）
+
+用户已明确选择“1对全量对照，回退再复测”。验收方法以[Runtime固定目标](../../design/runtime.md#performance-targets)当前正文为准；仅调整重复策略，不改10K conflicts、40轮、100k同fixture、13项指标、1GiB/no-swap、durability或原1.20倍/10ms阈值。`tests/phase22_nonregression_work.py`已实现先完整一对、全部通过即结束、任一超标保留首对并追加两对；输出明确`paired_rounds/statistic/sample_count`，单对不命名为三轮中位数。20%和10ms临界值、超标检测及三样本统计标签已做纯函数验证，没有在Mac执行DB/query/编译。
+
+原Native三对controller启动在此前；其1800s限时实际保留完整Before SQL/10K Merge及After SQL，随后After Merge中断，原exit124与清理记录保留。Before Merge实际40页/40轮，resolution1564.563s；四项SQL的After实际值均低于Before。为完成当前已批准的一对，仅在新独立小副本补After Merge，复用已完成Before及SQL，不重新seed、重做慢基线或把旧parent改称成功。最终13项是否通过仍以补完后的实际结果判定，当前不预写PASS。

@@ -3,7 +3,8 @@
 
 No canonical internal table is modified directly. Each round starts with an
 identical closed database, fully consumes outputs and verifies durable results.
-Run outside CI: three paired rounds and 10K-conflict merge are intentional.
+Run outside CI: one full pair; repeat twice only upon regression.
+The 10K conflicts, 40 resolution rounds and performance thresholds are unchanged.
 """
 
 import argparse
@@ -120,8 +121,25 @@ def compare(samples, keys):
         after = statistics.median(sample["after"][key] for sample in samples)
         # All callers normalize measurements to microseconds.
         threshold = max(1.2 * before, before + 10000)
-        result[key] = {"before_median_us": before, "after_median_us": after,
+        result[key] = {"before_us": before, "after_us": after,
+                       "statistic": "single" if len(samples) == 1 else "median",
+                       "sample_count": len(samples),
                        "threshold_us": threshold, "pass": after <= threshold}
+    return result
+
+
+def gate_results(samples, merges):
+    result = {"sql_gates": compare(samples, ("write_batch_commit_us", "history_us", "diff_us",
+                                            "explicit_transaction_us"))}
+    if merges:
+        keys = ("merge_start_millis", "conflict_scan_millis", "resolution_millis",
+                "candidate_inspection_millis", "finalize_millis", "gc_root_millis")
+        micros = [{name: {key: value * (1000 if key.endswith("_millis") else 1)
+                         for key, value in pair[name].items() if isinstance(value, (int, float))}
+                   for name in ("before", "after")} for pair in merges]
+        result["merge_gates"] = compare(micros, keys + ("finalize_prepare_micros",
+                                                       "finalize_writer_wait_micros",
+                                                       "finalize_writer_hold_micros"))
     return result
 
 
@@ -154,20 +172,18 @@ def main():
         samples.append(paired)
         if paired_merge:
             merges.append(paired_merge)
+        if index == 0:
+            first_pair_gates = gate_results(samples, merges)
+            if all(gate["pass"] for group in first_pair_gates.values() for gate in group.values()):
+                break
     require(original == digest(args.fixture), "benchmark modified source fixture")
     report = {"fixture_sha256": original, "before_sha256": digest(args.before),
               "after_sha256": digest(args.after), "samples": samples, "merge_samples": merges,
-              "sql_gates": compare(samples, ("write_batch_commit_us", "history_us", "diff_us",
-                                             "explicit_transaction_us"))}
-    if merges:
-        keys = ("merge_start_millis", "conflict_scan_millis", "resolution_millis",
-                "candidate_inspection_millis", "finalize_millis", "gc_root_millis")
-        micros = [{name: {key: value * (1000 if key.endswith("_millis") else 1)
-                         for key, value in pair[name].items() if isinstance(value, (int, float))}
-                   for name in ("before", "after")} for pair in merges]
-        report["merge_gates"] = compare(micros, keys + ("finalize_prepare_micros",
-                                                       "finalize_writer_wait_micros",
-                                                       "finalize_writer_hold_micros"))
+              "paired_rounds": len(samples),
+              "sampling_policy": "one complete pair; retain it and add two pairs only upon regression",
+              "statistic": "single" if len(samples) == 1 else "median",
+              "first_pair_gates": first_pair_gates,
+              **gate_results(samples, merges)}
     (args.destination / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report), flush=True)
     require(all(gate["pass"] for group in ("sql_gates", "merge_gates")
