@@ -380,6 +380,30 @@ static int valid_vector_args(int argc, sqlite3_value **argv) {
                        sqlite3_value_type(argv[5]) == SQLITE_INTEGER));
 }
 
+static int begin_vector_trace(int argc, sqlite3_value **argv, initialization_barrier *barrier,
+                              cache_transaction_trace *trace, int trace_transactions) {
+    if (trace_transactions) {
+        trace->origin_ns = monotonic_ns(&trace->clock_failed);
+        active_transaction_trace = trace;
+    }
+    if (argc == 6) {
+        barrier->ready_path = (const char *)sqlite3_value_text(argv[3]);
+        barrier->release_path = (const char *)sqlite3_value_text(argv[4]);
+        barrier->cancel_on_retry = sqlite3_value_int(argv[5]) != 0;
+        active_barrier = barrier;
+    }
+    if (argc != 6 && !trace_transactions) {
+        return SQLITE_OK;
+    }
+    int rc = sqlite3_auto_extension((void (*)(void))trace_cache_connection);
+    if (rc != SQLITE_OK) {
+        sqlite3_cancel_auto_extension((void (*)(void))trace_cache_connection);
+        active_barrier = NULL;
+        active_transaction_trace = NULL;
+    }
+    return rc;
+}
+
 static void probe_vector(sqlite3_context *context, int argc, sqlite3_value **argv) {
     if (!valid_vector_args(argc, argv)) {
         sqlite3_result_error(context, "vector probe expects config, text, dimensions [, ready, release, cancel_on_retry]", -1);
@@ -398,25 +422,10 @@ static void probe_vector(sqlite3_context *context, int argc, sqlite3_value **arg
     cache_transaction_trace trace = {0};
     int trace_transactions = sqlite3_user_data(context) == &transaction_trace_marker;
     int trace_connection = argc == 6 || trace_transactions;
-    if (trace_transactions) {
-        trace.origin_ns = monotonic_ns(&trace.clock_failed);
-        active_transaction_trace = &trace;
-    }
-    if (argc == 6) {
-        barrier.ready_path = (const char *)sqlite3_value_text(argv[3]);
-        barrier.release_path = (const char *)sqlite3_value_text(argv[4]);
-        barrier.cancel_on_retry = sqlite3_value_int(argv[5]) != 0;
-        active_barrier = &barrier;
-    }
-    if (trace_connection) {
-        int rc = sqlite3_auto_extension((void (*)(void))trace_cache_connection);
-        if (rc != SQLITE_OK) {
-            sqlite3_cancel_auto_extension((void (*)(void))trace_cache_connection);
-            active_barrier = NULL;
-            active_transaction_trace = NULL;
-            sqlite3_result_error_code(context, rc);
-            return;
-        }
+    int rc = begin_vector_trace(argc, argv, &barrier, &trace, trace_transactions);
+    if (rc != SQLITE_OK) {
+        sqlite3_result_error_code(context, rc);
+        return;
     }
     lithograph_embedding_text_v1 input = {
         .data = sqlite3_value_text(argv[1]),
