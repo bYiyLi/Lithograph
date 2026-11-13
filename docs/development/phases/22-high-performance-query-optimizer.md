@@ -1245,3 +1245,26 @@ S7 已在原 pull pipeline 接入 Flat/Group、紧凑 FactorTable、分组过滤
 新1k pressure fixture的公开CREATE Oracle、checkpoint、完整integrity及Before scalar/rows各普通1次与PROFILE/VM1次均通过，四次完整消费32768行。新库另含路径辅助域，不继承旧fixture时延、VM或pin；这些少量功能样本不构成P95或quiet性能验收。四档、巨大输出、小预算与取消的原生测量工具已具备，After release候选和剩余选择问题继续验证。
 
 本增量用于独立`codex/phase22-query-optimizer-ci`分支的开发CI；`6d122ca`仍是上节S6验收的精确提交。新commit/push和CI以实际Git/Actions记录为准，不由本检查点预先声明成功。S7尚需关闭四跳/ASP实际选择与净收益、完整资源/两SQLsurface/quality/CI；S8、全算法综合、10M/100M、Search tiers、90分钟reader/writer及A22-G01–06仍未验收。
+
+<a id="stage-s22-7-selection-fix"></a>
+
+### 25.9 S22.7 选择修复、原生回归与 SQL 持续集成（2026-11-13）
+
+第25.8节的source11失败保留为历史。本次固定源码为1044个输入、SHA-256 `e80913a5121a0465a0d899209e4f9bab80aef03a115f545fb06246b17635fe19`；编译输入已逐文件核对到实际提交并推送的`eb841fe23f7ae150ca4acc4d333ce5199441c2ec`，不把随后新增的Python验收/文档当作已包含在该提交。Mac只做编辑、格式和差异检查，构建及运行通过Nexum连接既有`openclaw`原生Linux执行，没有启动虚拟机或Codex任务。
+
+本轮修复与Review：Factor planner在同一有限PlanningBudget内比较两个已证明安全的arm方向，修正四跳方向成本；小型typed producer的端点加权degree采样有工作/内存上限，部分样本保持unknown upper，不以采样估计过滤结果；ASP complete-ID set对迁移重叠、read page和private TEMP采样记录真实资源。新增诊断只在`test-support`中统计成功BindingRow复制、accounted footprint和predicate转换，不增加正常构建的检查/预留，也不把accounted bytes解释为allocator实测字节。原始失败、修复及源码输入记录保留在`target/phase22-current/nexum-s7-01/`和远端同名evidence下。
+
+| 当前固定源码检查 | 实际结果 |
+| --- | --- |
+| Core lib | 599/599 PASS |
+| Factorized / ASP | 22/22、2/2 PASS，包含四跳和真实ASP选择正例 |
+| Index Nested Loop / Join Order / Join Semantics / Unknown | 19/19、4/4、16/16、2/2 PASS |
+| Hash / SIP / Dynamic Filter / TopK | 23/23、11/11、9/9、14/14 PASS |
+| Statistics / Relationship / 独立Extension invocation | 4/4、12/12、27/27 PASS |
+| 工作区Clippy / Mac rustfmt / staged diff | 全workspace/all-targets/all-features Clippy、`cargo fmt --check`及`git diff --check`通过 |
+
+以上共764项原生回归运行于`MemoryMax=1073741824`、`MemorySwapMax=0`，所有进程exit0，无ignored测试、超时或OOM；最大子进程RSS236593152B，cgroup峰值1016688640B（含该组收费的cache等，不与RSS混用），TEMP最终为空，源码及可执行文件前后SHA guard一致。证据为远端`evidence/nexum-s7-fix08-runtime/{runs,result,executables}.json`。正常release扩展SHA-256为`3c576f308a7722f41d84436f8bde2366805061202aecc46f9c7a1660116e85c4`，同源checkpoint工具为`b44fef62766f81ff3a48127ecfd1579438da489c9071b63a937cb73ec2835ca0`；各自独立Cargo invocation及receipt保留于`evidence/nexum-s7-fix08-release/`。
+
+新增`tests/phase22_factorized_sql.py`并接入`scripts/ci.sh`：公开CREATE结果生成独立Node/Relationship bag oracle，再由checkpoint helper构建派生索引；真实stock SQLite 3.46.1上，scalar/rows分别完整消费Star32768行和ASP256行，校验实际Group/Flatten/ASP物理计数、重复关系、NULL重绑、聚合不提前展开、权限/Graph View、提前关闭/Interrupt后的同连接恢复、staged可见性/abort和历史pin。1GiB/no-swap实际执行exit0、OOM0、TEMP清空，结果与工具pin见`evidence/nexum-s7-sql-02/result.json`。首轮`sql-01`把写连接内部未提交chain当作durable Branch而失败；已使用S6与当前扩展复核这是测试观察面错误，修正为第二只读连接的head/history/完整bag不变及public `summary.commit=null`，并保留abort后内部history完全恢复断言，不删除事务隔离验收。
+
+`eb841fe`的[CI 43338418369](https://github.com/bYiyLi/Lithograph/actions/runs/43338418369)及[Release Matrix 43338418269](https://github.com/bYiyLi/Lithograph/actions/runs/43338418269)已触发，记录时仍在运行，不能标PASS。此处未完成四档/大输出/净收益、小预算及完整quality/CI的S7收口，S22.7和Phase22继续`in_progress`；S8及G01–G06未关闭，未合并、发布或部署。

@@ -91,7 +91,7 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 
 S5 的独立 CI 分支快照已提交并推送为 [`2854fcc`](https://github.com/bYiyLi/Lithograph/commit/2854fcc901cd0b895c681d53c56a5221cbbf3f2e)，该精确提交的 [CI](https://github.com/bYiyLi/Lithograph/actions/runs/43185249151) 与 [Release Matrix](https://github.com/bYiyLi/Lithograph/actions/runs/43185249033) 均通过，未合并或发布。S6已实际提交并推送至[`6d122ca`](https://github.com/bYiyLi/Lithograph/commit/6d122ca5f98fda15afd3b2fba9d8fea5ebdb9316)，精确[CI](https://github.com/bYiyLi/Lithograph/actions/runs/43221810009)四项及[六平台Matrix](https://github.com/bYiyLi/Lithograph/actions/runs/43221809736)全部成功；三算法四档、语义与真实1M hard512回退资源、Review已闭环，详见[S22.6最终局部验收](phases/22-high-performance-query-optimizer.md#stage-s22-6-acceptance)。原失败与性能边界保持历史，S7已开始实现，尚未局部验收。
 
-S7已有真实紧凑Group、三跳、聚合、历史/权限/写barrier的原生验证；四跳/ASP选择及规模、资源和完整CI仍待通过。详见[开发检查点](phases/22-high-performance-query-optimizer.md#stage-s22-7-checkpoint)，不将局部通过标为Stage或Phase完成。
+S7已在`eb841fe`修复四跳/ASP候选选择，并完成同源原生764项关联回归；新增真实scalar/rows的完整bag、PROFILE、取消恢复、staged/历史隔离SQL验收已通过。四档/大输出/净收益、小预算与完整quality/CI仍待收口，详见[当前修复与证据](phases/22-high-performance-query-optimizer.md#stage-s22-7-selection-fix)。S7和Phase22仍为`in_progress`，不将这些定向通过标为Stage或Phase完成。
 
 ## 4. 路线总览
 

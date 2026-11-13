@@ -137,6 +137,8 @@ assert large["fullscan_steps"] <= 2 * small["fullscan_steps"] + 1000, (
 )
 print("Phase 21 checkpointed SQLite VM scaling: passed", small, large)
 PY
+  python3 -B tests/phase22_factorized_sql.py "$extension" \
+    "$target_dir/debug/lithograph-phase21-checkpoint"
   phase22_history_dir=$(mktemp -d "$target_dir/phase22-history.XXXXXX")
   python3 -B tests/phase22_history_work.py "$extension" "$phase22_history_dir" \
     --checkpoint-tool "$target_dir/debug/lithograph-phase21-checkpoint" \
