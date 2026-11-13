@@ -1,8 +1,8 @@
 # Phase 22：高性能查询优化器与可预算执行引擎
 
-**状态：`in_progress`（S22.1–S22.7 已完成局部验收；S22.8 实施中）。** 本项目只有**一个 Phase 22、八个内部 Stage**。所有 Stage 和全部算法均为必交付；只完成部分 Stage、已有若干基础、计划通过 Review，都不能标记 Phase `done`。当前实现与实测证据续记于第 21–26 节，S22.5 最终记录见[第 24.9 节](#stage-s22-5-acceptance)，S22.6最终记录见[第25.7节](#stage-s22-6-acceptance)，S22.7最终记录见[第25.11节](#stage-s22-7-acceptance)；第 15–20 节保留先前规划审核、实施和修复的历史记录。
+**状态：`done`（2026-11-14，S22.1–S22.8及A22-G01–G06全部验收通过）。** 本项目只有**一个 Phase 22、八个内部 Stage**，全部算法及46项局部、6项全局Acceptance均已闭环，最终状态见[全Phase验收](#phase22-final-acceptance)。各轮真实证据及原失败保留于第21–26节，S22.5最终记录见[第24.9节](#stage-s22-5-acceptance)，S22.6见[第25.7节](#stage-s22-6-acceptance)，S22.7见[第25.11节](#stage-s22-7-acceptance)，S22.8见[第26.28节](#stage-s22-8-acceptance)。历史章节的“待测/未完成”描述各自当时状态，不覆盖最终验收；完成不表示合并、Release或部署。
 
-**仓库复核（2026-11-10）**：本地 `main` HEAD 为 `3f1f31e`，本地 `v0.3.5` Tag 指向该 Commit；Phase 21 实现已进入此源码基线。复核开始时工作区干净，随后本次文档校正产生三份未提交文档修改。旧的 `e245555` + 未提交 Phase 21 是合并计划时的历史状态，不再代表当前源码。Tag 存在不等于远端 Release 制品已经完成验证；实施时仍须重新核对 HEAD/dirty tree、依赖、源码/SQLite runtime 和 Tag/资产状态。**主工作区保留任务修改；S7实现身份为`34da2d0bf3792d8667b3f939ed73cd45d4580b11`，验收文档快照`6c5401f`的CI与六平台Matrix全部通过。S8本轮实现与后续修复已实际提交并推送至独立`codex/phase22-query-optimizer-ci`分支，生产实现`60045bb735088321d10764363d751f3436d7c918`的CI及六平台Matrix全部通过（第26.15节）；测试增量`809998c`已推送，CI/Matrix待终态（第26.21节）。旧SHA的失败与修复记录保留。S7四档、完整输出、最终版本受影响性能/512KiB资源及独立Review已闭环，见第25.11节；S8实现、原生32项及普通扩展双SQL验证见第26节，完整压力与验收尚待完成。未合并、发布或部署。第21–26节记录各自源码epoch及验收，旧审核章节仅为历史证据。**
+**源码与交付身份**：pre-Phase22基线为`main`/`v0.3.5`的`3f1f31e48668b8b3836f944f1f7466db5804ce96`，Phase21已包含其中。主工作区保留任务修改；完整实现及修复已实际commit/push至独立`codex/phase22-query-optimizer-ci`分支，最终生产实现为`798a9bb347e84f709fa1efdaaadfb1b2dd22021d`，该精确SHA的CI四项及六平台Matrix全部成功（第26.26节）。最终普通native制品与该提交597个保守编译输入逐项相同；后续仅验收文档状态收口，不把旧CI冒称文档新SHA的执行结果。第21–26节保留各epoch、原失败、受控停止、采样决定及修复证据。当前交付为开发分支和验收；尚未合并main、打新Tag、发布或部署。
 
 ## 1. 最终目标、权威设计和边界
 
@@ -1575,3 +1575,82 @@ Runtime的固定性能目标本来就要求更换机器时重建同机Before/Aft
 该普通SO已经真实`.load`并运行64/128/512相同向量public SQL，base可达数分别64/128/512；第二次查询全都没有cache INSERT/DELETE，原512节点34.03ms重建调用变为4.19ms（小复现单样本，不是正式性能P95）。完整6次结果、score/Identity及1GiB/no-swap/清理通过；原有pre-Phase22与source25的18节点失效负例继续保留。百万正例尚待新工具实际运行，不能从小复现代替规模验收。
 
 `9f0c346`的[CI](https://github.com/bYiyLi/Lithograph/actions/runs/43457185678)已全部成功；其[Matrix](https://github.com/bYiyLi/Lithograph/actions/runs/43457185977)仍因macOS ARM64未取得runner失败，五个其它平台成功。成功canonical Mac日志明确为`macos-26-arm64/20261102.0473`及`1.98.1-aarch64-apple-darwin`，说明`macos-latest`已实际获得同架构执行机；Matrix现改用该已验证别名，并在build前强制`uname -m = arm64`。六架构及全部release/load/ABI/互操作检查不变，不以x64结果替代ARM。新修复的commit/push/精确CI按实际执行另记，Phase22继续`in_progress`。
+
+### 26.26 三域 Search、普通扩展双 SQL 与当前代码 CI（2026-11-14）
+
+导航修复已实际提交并推送为`798a9bb347e84f709fa1efdaaadfb1b2dd22021d`。[CI 43468307833](https://github.com/bYiyLi/Lithograph/actions/runs/43468307833)四项及[Release Matrix 43468307838](https://github.com/bYiyLi/Lithograph/actions/runs/43468307838)六平台全部成功；macOS ARM64实际执行架构准入、release/load/ABI/runtime/跨平台存储互操作。publish job按开发分支条件未执行，不把CI资产上传称为Release。quality实际exit0，region/function/line coverage为86.40%/87.80%/89.61%，duplication为1433/145136行（0.99%），原门槛保持。`engine-source27-ci798-lineage.json`证明597个保守编译输入逐项匹配native27，不宣称完整文档快照一致。
+
+三域共用原3,506,757,632B只读main文件、同一immutable pin与定义，按第26.24节用户采样决定串行完成：每域一个Core connection，以及另一个普通扩展SQL connection；每query分别100条ordinary Core、100条rows、100条scalar，共3000条当前版ready，另保留每case首条和前后独立PROFILE。十个query全部通过完整typed identity、FLOAT32 score/cutoff-tie/recall与FTS BM25 Oracle；所有向量query逐次recall@10均为1.0。SQL的前后ready诊断同时验证cache INSERT/DELETE/UPDATE为0；向量Core诊断的实际entry-load/search>0、build=0，query资源释放后used=0。诊断不混入普通分位数。
+
+| 独立域 | 首次普通完整build+query：Core / SQL（秒，各1条） | 各query的Core P95范围（ms） | rows P95范围（ms） | scalar P95范围（ms） |
+| --- | --- | --- | --- | --- |
+| 1M×128 FLOAT32 | 433.853 / 451.523 | 7.210–24.412 | 7.383–21.569 | 7.234–21.655 |
+| 100K×1536 FLOAT32 | 166.745 / 171.057 | 46.783–50.324 | 40.953–48.640 | 41.682–53.958 |
+| 1M全文文档 | 88.125 / 84.730 | 1.146–1.848 | 1.352–1.831 | 1.706–2.047 |
+
+每个P95来自该query、该surface、同一个connection的100条样本；表中范围是不同query各自P95的最小/最大值，不是合并分布或跨connection分位数。首条包含exact fallback、完整connection-local TEMP构建和query，不是ready延迟，也不称三轮中位数或OS cold。HNSW独立PROFILE分别保留build/entry-load/search计时；search包含lazy load，不能相加或用减法伪造纯query。FTS没有独立内部build/load计时，保留包含完整构建的首条wall与独立ready wall，不伪报纯build耗时。
+
+全部query owner为Linux原生x86_64、1GiB/no-swap/CPU200/Tasks128；Core/SQL的最大wait4 RSS分别982458368/1001463808B，cgroup peak触达1073741824B，max事件及全部慢样本保留，oom/oom_kill均0。采样可见的TEMP logical peak低维773074944B、高维877531136B、FTS130722816B，最多9FD；这是采样下界，不声称精确峰值。close、TEMP/FD、unit/cgroup/owned PID清理以及source/artifact/fixture/pin前后guard全部通过。
+
+`work/search-corpus27/full27/verified-search27-final.json`摘要为`2bd777e4f3638a4a6c8a97a7e2166fe75335eb50f869a1730a8a0a5a40919b42`，覆盖修复前source25到source27的Core及普通SQL对照；`verified-temp27.json`为`bad39d17d08335d928901bcd8c8e7f71deb3ed3937e7ea36e0211476015345b9`。source25不是pre-Phase22，不能借该Before名称冒称与main旧版的全Phase对照；真正旧版的普通SQL补证单独记录。百万低维的原cache失效与受控停止保持失败，不补造100次失效ready分布。
+
+向量维度与数量真实，但原fixture只有两个非零坐标；这证明本轮确定输入的容量、预算和语义，不扩大为高熵embedding或任意ANN数据集的延迟承诺。大corpus固定immutable pin；历史/staged/Graph View/Access、derived丢失/重建及Provider合同由最终CI、综合corpus和故障矩阵分别验证。当前代码门禁已绿，真正旧版补证、最终全Phase文档/Review与环境清理仍待收口。
+
+### 26.27 真正旧版 Search 基线与条件复测（2026-11-14）
+
+补证使用真正pre-Phase22 `3f1f31e`的普通扩展`5f3b6d7b3a76629f464cf17ed5562f7bbae5e8f2a9ee690a5bdaa7af4ef9c595`，与当前`10a32ae2…`在同机、相同SQLite/PRAGMA/fixture/pin下分别比较rows和scalar，不混比Core与SQL时钟。旧版高维及全文各query、各surface的100条ready、完整独立Oracle、单次普通首次构建及前后PROFILE已全部完成；两端向量recall均1.0。`work/search-baseline28-sql-r2/verified-trueold-final.json`为`c8d71ef4388dc70f84f7f04653b6885275fe162754664089677d91bf11915989`。这是旧版普通扩展对照；修复前source25的Core对照继续单独保留，不冒称重新链接了旧Core。
+
+两个准入失败均完整保留：`search-baseline28/link`因旧Core archive此前已清理而在rustc/DB之前拒绝，已证明无OOM及残留；随后`search-baseline28-sql/before-high`首条普通170.015s和完整Oracle成功，旧版PROFILE却将实际10行重复计为20行，被工具拒绝。在64-node公开fixture独立复现相同行计数错误；当前版的全量PROFILE断言及3000条ready已经通过。补证工具仅对SHA固定的旧版PROFILE保留原错误计数、以真实返回typed rows检查语义；旧版ordinary及当前版所有rows计数断言不变，不把旧错误当Cypher Oracle，不归一化或丢弃旧报告。
+
+百万低维的旧版64/128/512公开重建反例与source25百万失败均保留；真正旧版与source25的`hnsw.rs`/`hnsw/cache.rs`逐字相同。依用户批准的失效基线类别停止规则，不再把已知每条重建的状态重复100次或制造其ready分位数；当前百万档仍完整通过。大维度维持真实1536 FLOAT32与100K owners，未缩减数据来跑旧版。
+
+旧版对照的微小变慢也全部保留：高维各query rows/scalar中位增量0.616–4.453ms，最大P95增量是high-middle scalar的9.3484ms（44.6099→53.9583ms，约20.96%）；全文中位增量0.051–0.174ms，最大P95增量0.3082ms。十二组均在现有20%或10ms筛查数值内，但该筛查不被改写为新的Search SLA，也不宣称全部latency改善。按用户“出现回退再复测”，正仅对high-middle追加一对真实旧/新普通扩展复测，各保持同一100K×1536域、独立connection、两SQLsurface各100条ordinary及单次完整首build/前后PROFILE；首轮与复测分开，不删除慢值或合并制造分位数。其终态与最终Review、环境清理继续另记，Phase保持`in_progress`。
+
+<a id="stage-s22-8-acceptance"></a>
+
+### 26.28 条件复测、S22.8最终局部验收与Review闭环（2026-11-14）
+
+high-middle定向复测已完成：两端各一个connection，rows/scalar各100条ordinary、完整first build及独立前后PROFILE。rows中位41.0995→42.9472ms、P95 44.7534→47.1881ms；scalar中位43.1168→42.3725ms、P95 46.6044→45.7657ms，首轮约21%的尾延迟增幅未持续出现。首轮53.9583ms P95及93.5961ms最大值仍保留，不替换、拼接或删除；复测另外保留全部原值与单连接分位数，不构造三轮中位数。两端Oracle、recall=1.0、ready cache write=0、1GiB/no-swap、OOM0及全部owner清理通过；当前版203个普通/诊断record的summary rows独立逐项等于真实行数。报告`work/search-regression29/verified-regression29.json`为`b18dbe36805325b7a78ef7be8096de375f943955c8f7e2bd9bec725a62b2c3bc`。当前版累计3200条ordinary ready（主corpus3000＋此query追加200）；停止追加测量。
+
+| S22.8 Acceptance | 最终结论与直接证据 |
+| --- | --- |
+| A22-S8-01 | PASS：32项原生定向与真实普通扩展双SQL；Triangle/4-cycle/Clique/shared cycles实际MultiwayIntersect，普通1k完整对照的Triangle rows中位239.805→48.379ms、P95 253.659→52.136ms，dbHits49056→6926、VM829388→174286；成本不合算的复杂多环正确拒绝，不强制WCOJ。见第26.6、26.16节。 |
+| A22-S8-02 | PASS：directed/typed/parallel/self-loop、Node alias与per-MATCH RID uniqueness、错误/NULL、OPTIONAL/Path拒绝、Access/View、historical/staged及原子写入，经公开集成、双SQL、综合27类Oracle与最终CI验证。见第26.6–26.7、26.15节。 |
+| A22-S8-03 | PASS：真实typed ordered adjacency/neighbor seek、base/overlay/tombstone与revision guard；固定240相关Nodes/2432Relationships，1k/10k/100k/1M无关数据增长下352行完整bag、After VM173793/174286保持常量，Before828895/829388，10×门槛全部通过。见第26.17节。 |
+| A22-S8-04 | PASS：1048576完整输出三轮普通、skew8128完整bag、512KiB完整输出及budget/early-close/interrupt/recovery，WCOJ与Hash/Factorized共存资源生命周期；真实1GiB/no-swap、OOM0、TEMP/FD/owner回收。百万输出旧版仅一个完成样本，不伪报其完整benchmark PASS。见第26.18节。 |
+| A22-S8-05 | PASS：同一综合corpus27/27 normal-CBO及完整current/historical Oracle，SQL两surface、1/4/8-reader mixed、10M/100M原数值门槛、NR13完整单对照，以及独立Search三域与真旧版/条件复测全部完成。见第26.15–26.28节。 |
+| A22-S8-06 | PASS：798精确quality/canonical/适用TCK/SQL/Provider与六平台Matrix，受影响定向、资源、普通制品及最终源码/证据Review闭环；文档、链接、完整task diff和新增文件卫生按本节最终收口。 |
+
+跨Stage多轮Review已关闭本轮影响验收的finding：候选复制/预算耗尽导致高价值plan未准入，按已完成Greedy候选先定价及MATCH软份额修复；混合Hash/Factorized/SIP/WCOJ的slot、query-scoped账目和Grace workspace保留问题，经永久红绿、完整bag及故障/小预算恢复验证；HNSW同分剪枝断图以原`2*M`度数内导航环修复，30项语义单测、普通SO小例和三域大corpus验证。Cargo epoch-mtime复用了旧SO的制品错误保持失败，后续真实recompile、compiler-artifact、不同SO摘要、普通SQL行为及597-input CI lineage已经独立闭环。未放宽覆盖率、文件/复杂度、OOM、输出或recall门槛。
+
+`final-review26/s8-root-review.json`和`navigation-root-review27.json`保留各自有限Review边界；最终`final-review28/reconciled-evidence.json`逐项重新核对1097个Git tree记录、597个编译输入、精确CI及各压力/故障/非回退/Search报告，开发文档三份是后续唯一允许差异。无本Phase验收范围内未解决blocking finding。旧Windows Provider publish曾有一次BEGIN BUSY，根因仍未知；生产500ms/10ms策略未改，真实Windows trace、后续当前精确CI/Matrix均通过，保留历史风险，不把后续绿灯称为因果修复。macOS ARM64旧任务未取得runner的容量失败同样保留，798已实际六平台全通过。
+
+<a id="phase22-final-acceptance"></a>
+
+### 26.29 全Phase最终验收、证据继承与交付状态（2026-11-14）
+
+| 局部Stage | 必交付算法与能力 | Acceptance及最终证据 |
+| --- | --- | --- |
+| S22.1 | 多候选Planner、query级规划上限、统一可预算Executor | A22-S1-01–06全PASS；第21.2节，最终CI及全算法corpus承接。 |
+| S22.2 | Tiered Checkpoint、兼容祖先增量、Snapshot pin/维护原子性 | A22-S2-01–06全PASS；第21.2节，当前NR13、mixed及checkpoint故障矩阵承接。 |
+| S22.3 | Versioned Statistics、Relationship ID Seek、Predicate/Scan | A22-S3-01–05全PASS；第22.7节，最终四档访问、无Index回退及权限/历史/类型全集承接。 |
+| S22.4 | DPhyp/Greedy Join Order、Index Nested Loop、规划预算 | A22-S4-01–06全PASS；第23.12节，当前normal-CBO27/27及混合算法、规模与成本拒绝承接。 |
+| S22.5 | Typed Hash Join、Grace分区/Spill、有界热点处理 | A22-S5-01–06全PASS；第24.9节，当前Hash/Grace混合故障、原子性及512KiB资源承接。 |
+| S22.6 | Semi-mask/SIP、Join Dynamic Filter、TopK | A22-S6-01–06全PASS；第25.7节，最终完整结果、physical skip、取消/预算及Search/View/Access承接。 |
+| S22.7 | Factorized intermediate、Accumulate–Semijoin–Probe、Flat输出 | A22-S7-01–05全PASS；第25.11节，当前跨算法完整bag、错误时序和资源生命周期承接。 |
+| S22.8 | WCOJ、多路有序邻接交集、循环子组件混合Join | A22-S8-01–06全PASS；第26.28节及当前全部全局门禁。 |
+
+| 全局Acceptance | 最终结论与证据 |
+| --- | --- |
+| A22-G01 | PASS：冻结Cypher25 Profile保持，最终quality/canonical/TCK与双SQL全集；同一corpus27类真实normal-CBO完整typed bag/current/historical、所有要求混合算法，错误/NULL/非确定性、权限/View/staged/写事务边界及Search score/recall完整通过。新优化不增加语言或Profile分母。 |
+| A22-G02 | PASS：三个mixed配置各300秒，总15分钟；Hash/Grace、SIP、Factorized、WCOJ、Planner和Snapshot故障/资源，43项Core＋3项普通SO VFS/explicit回滚恢复、百万输出/512KiB及Search首次构建均在真实Linux1GiB/no-swap下通过，OOM0、TEMP/FD/owned unit/cgroup/PID回收。VFS FULL不是物理磁盘ENOSPC；durable inner batch不被错误要求回滚。第26.15–26.18、26.26–26.28节及相应原始owner证据共同闭合，旧局部报告的whole-phase=false不回填为true。 |
+| A22-G03 | PASS：九组Fixture及每算法物理收益/正确拒绝、四档与10×增长、ordinary/diagnostic分离；原生10M Nodes/100M Relationships的60组短查询和44条长流、完整typed rows/checksum与原数值阈值全部通过。NR13的10K冲突/40轮及13指标单对照全部通过，报告摘要`a51ac6870a04d04028fda8061cd4a20de5df866dc1558100ffde6d0196fc1b72`；无需追加。大Search主corpus、真正旧版及出现尾延迟增幅后的定向复测完成。原生Linux同机对照不是Apple M2复测；所有慢值、失败与不适用优化保留。 |
+| A22-G04 | PASS：798精确`cargo make quality`与`scripts/ci.sh`真实exit0，stock SQLite3.45.0+、Core/SQL/Version/Storage/Search/Provider/ABI及六平台load/runtime/互操作全部通过；coverage86.40/87.80/89.61、duplication0.99%，冻结inventory和原质量阈值保持。 |
+| A22-G05 | PASS：各Stage多轮Review与永久红绿、当前源码/制品/压力lineage及scope内finding闭环；task-owned staged/unstaged/untracked、许可证/NOTICE/依赖、secret/generated检查和最终文档链接/whitespace/diff检查完成，未覆盖用户无关工作。保留本节明确的采样、数据分布及历史失败限制，不声称可证明绝对零bug。 |
+| A22-G06 | PASS：八Stage共46项局部及全部6项全局证据已逐项核对并回读，本文件唯一持有Phase状态，Phase22标记`done`。代码、验证、提交/推送与发布/部署分别记录；没有把未完成算法移入新Phase。 |
+
+证据继承以受影响代码为边界：source25到最终source27的Core/Extension/Provider生产差异仅HNSW两文件，测量helper的逐轮进度和Provider trace独立绑定；不机械重跑已通过且输入/行为未变的15分钟mixed、10M/100M或NR13。HNSW增量则真实重跑定向、普通制品及完整三域/SQL和条件复测；最终全部597个编译输入由798精确全集CI承接。只修改验收状态的后续development文档执行链接/whitespace/diff检查，不冒称它拥有另一次生产编译。
+
+环境清理已执行：Mac无Colima/Lima/QEMU安装及相关VM进程，个人AGENTS保留禁止本地VM规则；本项目Mac target内没有rlib/rmeta/动态库/测试DB/core。19个未压缩源码归档在逐项验证gzip副本与原字节摘要一致后删除，释放255191040B。原生远端7个不再使用的Rust target目录已清除，文件系统可用空间增加13558145024B（约12.63GiB）；必要旧/新普通制品hash、frozen source、失败raw、recipe及唯一大fixture保留，两个main DB的inode/大小/mtime与普通制品hash前后不变，零活动Lithograph测量unit。清理报告`work/final-cleanup29/complete.json`及本地`final-review28/local-archive-cleanup.json`保留。
+
+交付为已修改、已验证、已实际提交并推送的`codex/phase22-query-optimizer-ci`开发分支；生产实现与全绿CI身份为798。主工作区仍保留main上的任务变更，不执行reset/clean/stash或覆盖其它工作。此次仅验收文档的最终提交状态以Git实际记录为准；未合并main、创建新Tag、Release、部署或执行KG OS集成。
