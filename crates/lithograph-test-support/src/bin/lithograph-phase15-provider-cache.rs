@@ -358,12 +358,12 @@ fn check_concurrent_publish(provider_load: &str, probe_load: &str) -> Result<(),
     let second_path = second_fixture.path().to_path_buf();
     let first_script = format!(
         "{provider_load}\n{probe_load}\n\
-         SELECT provider_cache_probe_vector({config}, 'concurrent-a', 2);",
+         SELECT provider_cache_probe_vector_trace({config}, 'concurrent-a', 2);",
         config = sql_literal(&config),
     );
     let second_script = format!(
         "{provider_load}\n{probe_load}\n\
-         SELECT provider_cache_probe_vector({config}, 'concurrent-b', 2);",
+         SELECT provider_cache_probe_vector_trace({config}, 'concurrent-b', 2);",
         config = sql_literal(&config),
     );
     let first = thread::spawn(move || {

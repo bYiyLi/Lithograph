@@ -1448,3 +1448,15 @@ runtime为1GiB/no-swap，cgroup峰235384832B、RSS236290048B、OOM0；编译虽�
 最新Source22 ordinary03已实际独立构建（SO `0991b0020796c91825dee3adfea46450bd280913f665d3c526c1633f2a3b866a`，CP `d7a501f2a13a3c788e1bc9360b0a7b8a868461d2ff36b5b33edc43af98f4a24b`），新普通制品双SQL再次9组双surface全通过；`s8-sql-runtime02/verified-sql-summary.json` SHA-256为`056313d57c08d956e28fd02791c66ae639d4ac115e2b0518e3185e86be08b5c3`。该制品继续明确属于Source22，不改名Source23。
 
 统一catalog最新制品04验证已完成27类current/historical完整bag、writer隔离、恢复writer/final checkpoint及integrity，原512拒绝→4MiB完整恢复已实际触发；138.2s、1GiB/no-swap、cgroup峰111079424B、OOM0且完整清理。但物理算法准入尚未通过：两项旧工具误将AdjacencySeek/LegacySort的rows0当未执行，已依据既有合同离线纠正并保留原raw，其余ASP/shared cycles及五类mixed仍真实缺少所需前置算子。当前normal-CBO为20/27，不能把完整bag通过改称全准入。正在同固定库、query/pin下做一次prepare-only预算/成本诊断，不force算法或修改fixture掩盖问题。15分钟混合压力、S8剩余压力、全局规模/非回退和最终CI仍待完成。
+
+### 26.13 综合库规划修复与新的原生验证（2026-11-13）
+
+已实际commit/push `2711831145784f848b506c4f7996b6817d644800`至授权开发分支。[CI 43413788633](https://github.com/bYiyLi/Lithograph/actions/runs/43413788633)现已全部成功，包括quality、Linux/macOS canonical与Windows load/ABI门禁；[Matrix 43413788442](https://github.com/bYiyLi/Lithograph/actions/runs/43413788442)为五平台成功、Windows x64失败。后者在Provider并发cache publish的`BEGIN IMMEDIATE`返回`SQLITE_BUSY`，根因尚未确认，不能用一次重跑成功关闭。没有合并、发布或部署。
+
+综合库的索引费用诊断证实，旧folding预付把所有catalog索引属性容量乘到每个MATCH，即使label/type scope不适用，也挤掉统计工作区。修复复用真实seek的scope筛选，继续支付全目录遍历、名称比较、参数容量、同scope属性预分配与原安全系数，不缩减实际workspace。ASP的单MATCH还受late候选定价影响：现在与已有多MATCH路径相同，在完成Greedy后给Factor/ASP候选定价，再以剩余预算做可选exact，最终严格比较实际完成的成本，删除重复late路径；4096 states、262144B、1024 candidates均未改变。
+
+清洁`native25`没有临时G02诊断观察或ignored测试，1096文件full source `f9b24fa78454d7d3aed295d69029236041e4e1b2b5d39931ca4803044a6f33bc`，596文件conservative compiled input `83c3a1b62778edaa7b8e7e82e9362e6625adea0be775c6b9de928e75c6f5938a`。真实workspace Clippy及完整production Lizard通过，jscpd按原1%门槛通过（1433/144998行，0.99%）。Core Factor4、原Factor22及ASP5共31/31通过，含全量消费、literal/parameter/offset/WITH LIMIT/排序/SKIP、失败及生命周期控制；编译91.13s、功能90.59s，不作为性能样本。运行1GiB/no-swap，峰239796224B、OOM0，source/artifact guards与unit/cgroup/PID/TEMP清理通过。`s8-fusion-native25/verified-runtime-summary.json` SHA-256为`1a09ca2dae74bfdee9e45a6fd15e48acbc6c33181eb7ed875c011729a3afd54c`。独立诊断source25确认统一库ASP真实选择Accumulate→ASPJoin→Flatten，states4090/bytes222477；该prepare-only诊断不替代新普通制品的完整执行。
+
+为取得Windows根因证据，本次另含两个fixture文件的有界事务trace，不改Provider生产代码、500ms retry policy、并发成功断言或timeout。真实Linux C11/Wextra/Werror编译及10轮双worker通过，3.911s、1GiB/no-swap、峰27910144B、OOM0，完整清理；实际SQLite CLI为3.53.4，不能冒称Windows3.45或系统library3.46.1验证。trace记录自然1–3次BEGIN尝试及COMMIT，失败BEGIN没有留下事务，但原Windows失败仍open。该fixture的独立输入/制品/原始trace见`target/phase22-current/provider-publish-race26/`，与optimizer普通制品分别绑定。
+
+新的Source25普通release正在独立构建；27类normal-CBO、15分钟mixed、S8剩余Before/After、全局规模/Search/非回退及最终Review仍待完成，Phase22保持`in_progress`。

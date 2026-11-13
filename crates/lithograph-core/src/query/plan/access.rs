@@ -6,6 +6,8 @@ use crate::query::resources::{ExecutionControl, MemoryReservation};
 use crate::query::schema::{StandardIndexPredicate, StandardIndexSeek};
 
 use super::budget::PlanningBudget;
+mod folding;
+use folding::folding_fits;
 mod sampling;
 
 pub(crate) fn reserve_match_seeks(
@@ -174,7 +176,6 @@ fn plan_step_access(
             &statistics,
             budget,
         )?;
-        install_legacy_factor(step, scope, context, &statistics, &estimates, budget)?;
     }
     Ok((statistics, memory))
 }
@@ -197,20 +198,6 @@ fn analyze_step_join(
         return Ok(None);
     }
     join::analyze_join(step, scope, context, budget)
-}
-
-fn install_legacy_factor(
-    step: &mut MatchStep,
-    scope: &join::JoinClauseScope<'_>,
-    context: &join::JoinPlanningContext<'_, '_, '_>,
-    statistics: &PlannerStatistics,
-    estimates: &join::estimates::JoinEstimates,
-    budget: &mut PlanningBudget,
-) -> QueryResult<()> {
-    if budget.clause_scoped() {
-        return Ok(());
-    }
-    super::factor::install(step, scope, context, statistics, estimates, budget)
 }
 
 fn step_statistics(
@@ -376,56 +363,12 @@ fn eligible_step(
         || folding_fits(
             params,
             schema,
-            step.parts.len(),
+            step,
             budget.bytes - before,
             budget.states - before_states,
             budget,
             control,
         )?)
-}
-
-fn folding_fits(
-    params: &BTreeMap<String, Value>,
-    schema: &storage::SchemaState,
-    parts: usize,
-    inspected_bytes: usize,
-    inspected_states: usize,
-    budget: &mut PlanningBudget,
-    control: &ExecutionControl<'_>,
-) -> QueryResult<bool> {
-    if schema.indexes.is_empty() {
-        return Ok(true);
-    }
-    let before_parameters = budget.states;
-    let Some(bytes) = budget.parameter_bytes(params, control)? else {
-        return Ok(false);
-    };
-    let properties = schema
-        .indexes
-        .values()
-        .map(|index| match &index.target {
-            storage::IndexTarget::NodeProperties { properties, .. }
-            | storage::IndexTarget::RelationshipProperties { properties, .. } => properties.len(),
-            _ => 1,
-        })
-        .sum::<usize>();
-    // Bound the existing eligibility/proof and temporary cloned seek workspace
-    // before invoking it. Repeated clauses pay only their own inspection;
-    // earlier sampling/search states are not folded again for every Index.
-    // The retained execution values keep their old lease.
-    Ok(budget.work(
-        properties.saturating_mul(
-            inspected_states
-                .saturating_add(budget.states - before_parameters)
-                .max(1),
-        ),
-        bytes
-            .saturating_add(inspected_bytes)
-            .saturating_add(128)
-            .saturating_mul(properties + 1)
-            .saturating_mul(4)
-            .saturating_mul(parts),
-    ))
 }
 
 fn candidate_labels(step: &MatchStep, view: &ResolvedGraphView) -> BTreeSet<LabelId> {

@@ -128,7 +128,7 @@ fn price_factor(
     budget: &mut PlanningBudget,
 ) -> QueryResult<Option<super::super::factor::PricedFactor>> {
     let paid = paid_binary_work(cost).zip(cost.rows.map(|rows| rows.expected));
-    if !budget.clause_scoped() || paid.is_none() {
+    if paid.is_none() {
         return Ok(None);
     }
     super::super::factor::price(

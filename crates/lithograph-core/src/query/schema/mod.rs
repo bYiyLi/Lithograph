@@ -21,7 +21,7 @@ pub(crate) use execute::execute_schema;
 pub(crate) use index::{
     StandardIndexCursor, StandardIndexPredicate, StandardIndexSeek, build_persistent_generation,
     estimate_index_access, scan_node_index_page, scan_relationship_index_page, seek_bytes,
-    select_standard_index_seeks,
+    select_standard_index_seeks, standard_index_part_property_slots,
 };
 pub(crate) use show::show_rows;
 pub(crate) use validate::{

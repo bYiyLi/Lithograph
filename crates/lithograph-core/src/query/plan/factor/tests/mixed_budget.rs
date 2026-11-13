@@ -76,6 +76,51 @@ fn sip(db: &Connection) -> String {
 }
 
 #[test]
+fn single_match_prices_one_factor_candidate_before_optional_exact_search() {
+    let db = star_fixture();
+    storage::create_checkpoint(&db, storage::branch_head(&db, "main").unwrap()).unwrap();
+    for suffix in ["", " LIMIT 1"] {
+        crate::query::plan::budget::trace::start();
+        let prepared = prepare(
+            &db,
+            &format!("PROFILE {STAR} RETURN elementId(h),elementId(r),elementId(s){suffix}"),
+            BTreeMap::from([("key".into(), Value::Integer(7))]),
+            ExecutionOptions::default(),
+        )
+        .unwrap();
+        let events = crate::query::plan::budget::trace::take();
+        let factors = events
+            .iter()
+            .filter(|entry| entry.stage == "factor-enter")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            factors.len(),
+            1,
+            "no repeated proof/metadata build: {events:?}"
+        );
+        let factor = events
+            .iter()
+            .position(|entry| entry.stage == "factor-enter")
+            .unwrap();
+        let exact = events
+            .iter()
+            .position(|entry| entry.stage == "exact-leave")
+            .unwrap();
+        assert!(
+            factor < exact,
+            "the exact search cannot consume the candidate's budget: {events:?}"
+        );
+        let plan = prepared.physical.explain();
+        assert_eq!(
+            plan.contains("FactorizedAccumulate"),
+            suffix.is_empty(),
+            "{plan}"
+        );
+        assert!(events.iter().all(|entry| entry.states <= budget::MAX_STATES && entry.bytes <= budget::MAX_BYTES));
+    }
+}
+
+#[test]
 fn first_factorized_match_retains_its_two_clause_planning_opportunity() {
     let mut failures = Vec::new();
     for (name, seed) in [("cycle", cycle as fn(&Connection) -> String), ("sip", sip)] {

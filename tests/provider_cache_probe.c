@@ -1,10 +1,17 @@
-
+#ifndef _WIN32
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include "sqlite3ext.h"
 SQLITE_EXTENSION_INIT1
 
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <time.h>
+#endif
 
 #include "lithograph_embedding_provider.h"
 
@@ -20,6 +27,92 @@ typedef struct initialization_barrier {
 } initialization_barrier;
 
 static initialization_barrier *active_barrier;
+
+enum { CACHE_TRACE_CAPACITY = 128 };
+
+typedef struct cache_transaction_event {
+    sqlite3_int64 offset_ns;
+    sqlite3_int64 elapsed_ns;
+    unsigned int event;
+    int operation;
+    int autocommit;
+    int transaction;
+} cache_transaction_event;
+
+typedef struct cache_transaction_trace {
+    sqlite3_int64 origin_ns;
+    int count;
+    int dropped;
+    int clock_failed;
+    cache_transaction_event events[CACHE_TRACE_CAPACITY];
+} cache_transaction_trace;
+
+static cache_transaction_trace *active_transaction_trace;
+static const int transaction_trace_marker = 1;
+
+static sqlite3_int64 monotonic_ns(int *failed) {
+#ifdef _WIN32
+    LARGE_INTEGER counter;
+    LARGE_INTEGER frequency;
+    if (!QueryPerformanceCounter(&counter) || !QueryPerformanceFrequency(&frequency) ||
+        frequency.QuadPart <= 0) {
+        *failed = 1;
+        return 0;
+    }
+    return (counter.QuadPart / frequency.QuadPart) * 1000000000 +
+        ((counter.QuadPart % frequency.QuadPart) * 1000000000) / frequency.QuadPart;
+#else
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        *failed = 1;
+        return 0;
+    }
+    return (sqlite3_int64)now.tv_sec * 1000000000 + now.tv_nsec;
+#endif
+}
+
+static void record_cache_transaction(unsigned int event, void *statement, void *elapsed) {
+    cache_transaction_trace *trace = active_transaction_trace;
+    if (trace == NULL) {
+        return;
+    }
+    const char *sql = sqlite3_sql((sqlite3_stmt *)statement);
+    int operation = sql == NULL ? 0 :
+        strcmp(sql, "BEGIN IMMEDIATE") == 0 ? 1 :
+        strcmp(sql, "COMMIT") == 0 ? 2 :
+        strcmp(sql, "ROLLBACK") == 0 ? 3 : 0;
+    if (operation == 0) {
+        return;
+    }
+    if (trace->count == CACHE_TRACE_CAPACITY) {
+        trace->dropped += 1;
+        return;
+    }
+    sqlite3 *db = sqlite3_db_handle((sqlite3_stmt *)statement);
+    cache_transaction_event *record = &trace->events[trace->count++];
+    record->offset_ns = monotonic_ns(&trace->clock_failed) - trace->origin_ns;
+    record->elapsed_ns = event == SQLITE_TRACE_PROFILE && elapsed != NULL ?
+        *(sqlite3_int64 *)elapsed : 0;
+    record->event = event;
+    record->operation = operation;
+    record->autocommit = sqlite3_get_autocommit(db);
+    record->transaction = sqlite3_txn_state(db, NULL);
+}
+
+static void append_cache_trace(sqlite3_str *output, const cache_transaction_trace *trace) {
+    static const char *const operations[] = {"unknown", "begin", "commit", "rollback"};
+    sqlite3_str_appendf(output,
+        "\ncache_trace origin_ns=%lld;events=%d;dropped=%d;clock_failed=%d",
+        trace->origin_ns, trace->count, trace->dropped, trace->clock_failed);
+    for (int i = 0; i < trace->count; ++i) {
+        const cache_transaction_event *record = &trace->events[i];
+        sqlite3_str_appendf(output,
+            "\ncache_trace seq=%d;operation=%s;event=%s;offset_ns=%lld;elapsed_ns=%lld;autocommit=%d;txn_state=%d",
+            i, operations[record->operation],
+            record->event == SQLITE_TRACE_STMT ? "stmt" : "profile",
+            record->offset_ns, record->elapsed_ns, record->autocommit, record->transaction);
+    }
+}
 
 static FILE *open_marker(const char *path, const char *mode) {
 #ifdef _WIN32
@@ -41,7 +134,7 @@ static int path_exists(const char *path) {
 
 static int cache_profile(unsigned int event, void *unused, void *statement, void *elapsed) {
     (void)unused;
-    (void)elapsed;
+    record_cache_transaction(event, statement, elapsed);
     initialization_barrier *barrier = active_barrier;
     const char *sql = sqlite3_sql((sqlite3_stmt *)statement);
     int schema_inventory = sql != NULL &&
@@ -73,7 +166,11 @@ static int cache_profile(unsigned int event, void *unused, void *statement, void
 static int trace_cache_connection(sqlite3 *db, char **error, const sqlite3_api_routines *api) {
     (void)error;
     (void)api;
-    return sqlite3_trace_v2(db, SQLITE_TRACE_PROFILE, cache_profile, NULL);
+    unsigned int events = SQLITE_TRACE_PROFILE;
+    if (active_transaction_trace != NULL) {
+        events |= SQLITE_TRACE_STMT;
+    }
+    return sqlite3_trace_v2(db, events, cache_profile, NULL);
 }
 
 static int barrier_cancel(void *user_data) {
@@ -298,15 +395,25 @@ static void probe_vector(sqlite3_context *context, int argc, sqlite3_value **arg
         return;
     }
     initialization_barrier barrier = {0};
+    cache_transaction_trace trace = {0};
+    int trace_transactions = sqlite3_user_data(context) == &transaction_trace_marker;
+    int trace_connection = argc == 6 || trace_transactions;
+    if (trace_transactions) {
+        trace.origin_ns = monotonic_ns(&trace.clock_failed);
+        active_transaction_trace = &trace;
+    }
     if (argc == 6) {
         barrier.ready_path = (const char *)sqlite3_value_text(argv[3]);
         barrier.release_path = (const char *)sqlite3_value_text(argv[4]);
         barrier.cancel_on_retry = sqlite3_value_int(argv[5]) != 0;
         active_barrier = &barrier;
+    }
+    if (trace_connection) {
         int rc = sqlite3_auto_extension((void (*)(void))trace_cache_connection);
         if (rc != SQLITE_OK) {
             sqlite3_cancel_auto_extension((void (*)(void))trace_cache_connection);
             active_barrier = NULL;
+            active_transaction_trace = NULL;
             sqlite3_result_error_code(context, rc);
             return;
         }
@@ -327,9 +434,10 @@ static void probe_vector(sqlite3_context *context, int argc, sqlite3_value **arg
         argc == 6 ? &barrier : NULL,
         &result, &error
     );
-    if (argc == 6) {
+    if (trace_connection) {
         sqlite3_cancel_auto_extension((void (*)(void))trace_cache_connection);
         active_barrier = NULL;
+        active_transaction_trace = NULL;
     }
     if (argc == 6 && (!barrier.observed || barrier.failed)) {
         free_probe_result(provider, &result, &error);
@@ -345,6 +453,9 @@ static void probe_vector(sqlite3_context *context, int argc, sqlite3_value **arg
     sqlite3_str_appendall(output, ";error=");
     if (error.message != NULL) {
         sqlite3_str_append(output, (const char *)error.message, (int)error.message_len);
+    }
+    if (trace_transactions) {
+        append_cache_trace(output, &trace);
     }
     free_probe_result(provider, &result, &error);
     sqlite3_result_text(context, sqlite3_str_finish(output), -1, sqlite3_free);
@@ -429,6 +540,12 @@ int sqlite3_providercacheprobe_init(
     }
     rc = sqlite3_create_function_v2(db, "provider_cache_probe_vector", 3,
         SQLITE_UTF8 | SQLITE_DIRECTONLY, NULL, probe_vector, NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        return rc;
+    }
+    rc = sqlite3_create_function_v2(db, "provider_cache_probe_vector_trace", 3,
+        SQLITE_UTF8 | SQLITE_DIRECTONLY, (void *)&transaction_trace_marker,
+        probe_vector, NULL, NULL, NULL);
     if (rc != SQLITE_OK) {
         return rc;
     }

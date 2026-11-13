@@ -326,6 +326,35 @@ fn scoped_index_properties<'a>(
     }
 }
 
+/// Use the exact seek scopes when bounding optional planner clone storage.
+pub(crate) fn standard_index_part_property_slots(
+    index: &IndexDefinition,
+    part: &PatternPart,
+) -> Option<usize> {
+    scoped_index_properties(index, PropertySeekScope::Node(&part.start.label_names))
+        .or_else(|| {
+            part.relationship.as_ref().and_then(|relationship| {
+                scoped_index_properties(
+                    index,
+                    PropertySeekScope::Relationship(relationship.type_name.as_deref()),
+                )
+            })
+        })
+        .map(<[String]>::len)
+        .or_else(|| match &index.target {
+            IndexTarget::NodeLookup if !part.start.label_names.is_empty() => Some(1),
+            IndexTarget::RelationshipLookup
+                if part
+                    .relationship
+                    .as_ref()
+                    .is_some_and(|rel| rel.type_name.is_some()) =>
+            {
+                Some(1)
+            }
+            _ => None,
+        })
+}
+
 fn lookup_seek(
     schema: &SchemaState,
     target_matches: impl Fn(&IndexTarget) -> bool,

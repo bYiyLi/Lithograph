@@ -262,6 +262,58 @@ fn indexed_fixture() -> rusqlite::Connection {
     connection
 }
 
+#[test]
+fn unrelated_catalog_indexes_leave_room_for_real_statistics_and_matching_indexes_pay() {
+    for matching in [false, true] {
+        let db = indexed_fixture();
+        for ordinal in 0..8 {
+            let label = if matching {
+                "Common".to_owned()
+            } else {
+                format!("Unrelated{ordinal}")
+            };
+            let text = format!("CREATE RANGE INDEX extra{ordinal} FOR(n:{label}) ON(n.v{ordinal})");
+            let prepared = crate::query::prepare(
+                &db,
+                &text,
+                BTreeMap::new(),
+                crate::query::ExecutionOptions::default(),
+            )
+            .unwrap();
+            consume(&db, prepared).unwrap();
+        }
+        let ast =
+            crate::cypher::parse("MATCH(a:Common),(b:Common) WHERE a.v=b.v RETURN elementId(a)")
+                .unwrap();
+        let single = super::super::single_query(&ast.root).unwrap();
+        let (steps, _) = super::super::lower_clauses(&db, single).unwrap();
+        let schema =
+            storage::SchemaState::load(&db, storage::branch_head(&db, "main").unwrap()).unwrap();
+        let resources = crate::query::QueryResources::default();
+        let control = ExecutionControl::new(&resources, &|| false);
+        let mut budget = PlanningBudget::default();
+        budget.begin_clause(2);
+        let eligible =
+            eligible_step(&steps[0], &schema, &BTreeMap::new(), &control, &mut budget).unwrap();
+        if matching {
+            assert!(
+                !eligible || budget.remaining_bytes() < 64 * 1024,
+                "matching index clone work is still charged: {budget:?}"
+            );
+        } else {
+            assert!(eligible);
+            assert!(
+                budget.remaining_bytes() >= 64 * 1024,
+                "unrelated scopes must leave the actual statistics workspace usable: {budget:?}"
+            );
+            assert!(budget.work(1, 64 * 1024));
+        }
+        assert_eq!(resources.used(), 0);
+        assert!(budget.states <= super::super::budget::MAX_STATES);
+        assert!(budget.bytes <= super::super::budget::MAX_BYTES);
+    }
+}
+
 fn large_list_params(value: i64) -> BTreeMap<String, Value> {
     let mut values = Vec::with_capacity(10_000);
     values.push(Value::Integer(value));

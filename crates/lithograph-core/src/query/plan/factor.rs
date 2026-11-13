@@ -50,35 +50,6 @@ pub(crate) fn headroom_bytes(step: &MatchStep, scope: &join::JoinClauseScope<'_>
         )
 }
 
-pub(crate) fn install(
-    step: &mut MatchStep,
-    scope: &join::JoinClauseScope<'_>,
-    context: &join::JoinPlanningContext<'_, '_, '_>,
-    statistics: &PlannerStatistics,
-    estimates: &join::estimates::JoinEstimates,
-    budget: &mut PlanningBudget,
-) -> QueryResult<()> {
-    let Some(original) = step.join.as_deref() else {
-        return Ok(());
-    };
-    let Some(priced) = price_inner(
-        step,
-        (original, None),
-        scope,
-        context,
-        statistics,
-        estimates,
-        budget,
-    )?
-    else {
-        return Ok(());
-    };
-    if let Some(plan) = step.join.as_mut().and_then(std::sync::Arc::get_mut) {
-        priced.install(plan);
-    }
-    Ok(())
-}
-
 /// A completed Factor candidate for exactly the source stages that priced it.
 pub(crate) struct PricedFactor {
     description: FactorizedPlan,
