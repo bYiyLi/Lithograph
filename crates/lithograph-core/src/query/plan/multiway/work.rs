@@ -13,8 +13,7 @@ pub(super) fn choose(
     step: &MatchStep,
     original: (&[join::JoinStage], Option<u64>),
     plan: MultiwayPlan,
-    statistics: &PlannerStatistics,
-    estimates: &join::estimates::JoinEstimates,
+    (statistics, estimates): (&PlannerStatistics, &join::estimates::JoinEstimates),
     context: &join::JoinPlanningContext<'_, '_, '_>,
     resident: Option<u64>,
     budget: &mut PlanningBudget,
@@ -76,7 +75,7 @@ pub(super) fn choose(
             first_root,
         )?;
     }
-    Ok(best.finish(plan).map(|(plan, work)| (plan, work, memory)))
+    Ok(best.finish(plan)?.map(|(plan, work)| (plan, work, memory)))
 }
 
 fn order(
@@ -257,22 +256,35 @@ fn node_domain(
         .or_else(|| (statistics.node_count > 0).then_some(statistics.node_count))
 }
 
-fn reorder(mut plan: MultiwayPlan, order: &[usize]) -> MultiwayPlan {
+fn reorder(mut plan: MultiwayPlan, order: &[usize]) -> QueryResult<MultiwayPlan> {
+    let invalid = || {
+        crate::query::QueryError::internal("multiway variable order is not a complete permutation")
+    };
+    if order.len() != plan.nodes.len() {
+        return Err(invalid());
+    }
     let mut positions = vec![0; order.len()];
     for (new, old) in order.iter().copied().enumerate() {
-        positions[old] = new;
+        *positions.get_mut(old).ok_or_else(invalid)? = new;
     }
     let mut nodes: Vec<_> = plan.nodes.into_iter().map(Some).collect();
     plan.nodes = order
         .iter()
-        .map(|old| nodes[*old].take().expect("unique variable order"))
-        .collect();
+        .map(|old| {
+            nodes
+                .get_mut(*old)
+                .and_then(Option::take)
+                .ok_or_else(invalid)
+        })
+        .collect::<QueryResult<_>>()?;
     for (index, edge) in plan.edges.iter_mut().enumerate() {
-        edge.source = positions[edge.source];
-        edge.target = positions[edge.target];
-        plan.nodes[edge.source.max(edge.target)]
+        edge.source = *positions.get(edge.source).ok_or_else(invalid)?;
+        edge.target = *positions.get(edge.target).ok_or_else(invalid)?;
+        plan.nodes
+            .get_mut(edge.source.max(edge.target))
+            .ok_or_else(invalid)?
             .constraints
             .push(index);
     }
-    plan
+    Ok(plan)
 }

@@ -19,8 +19,10 @@ impl BestOrder {
         }
     }
 
-    pub(super) fn finish(self, plan: MultiwayPlan) -> Option<(MultiwayPlan, u64)> {
-        self.order.map(|order| (reorder(plan, &order), self.work))
+    pub(super) fn finish(self, plan: MultiwayPlan) -> QueryResult<Option<(MultiwayPlan, u64)>> {
+        self.order
+            .map(|order| reorder(plan, &order).map(|plan| (plan, self.work)))
+            .transpose()
     }
 }
 

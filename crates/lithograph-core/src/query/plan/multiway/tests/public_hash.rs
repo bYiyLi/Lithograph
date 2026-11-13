@@ -67,8 +67,10 @@ fn complete_public_hash_tail_projection_keeps_hash_with_default_and_512k() {
         elementId(r1),elementId(r2),r2.k,elementId(tail),tail.k";
     let mut failures = Vec::new();
     for limit in [None, Some(512 * 1024)] {
-        let mut options = ExecutionOptions::default();
-        options.memory_limit_bytes = limit;
+        let options = ExecutionOptions {
+            memory_limit_bytes: limit,
+            ..ExecutionOptions::default()
+        };
         db.execute_batch("SAVEPOINT phase22_factorized_read")
             .unwrap();
         ADVICE.set(Some(Advice::default()));

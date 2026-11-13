@@ -81,7 +81,7 @@ pub(super) fn savings(
         .limit()
         .map(|limit| limit.saturating_sub(control.resources().used()));
     let result = if plan.asp.is_some() {
-        asp::compare(step, original, plan, a, b, work, statistics, available)?
+        asp::compare(step, original, plan, [a, b], work, statistics, available)?
     } else {
         compare(plan, a, b, work, available)
     };
