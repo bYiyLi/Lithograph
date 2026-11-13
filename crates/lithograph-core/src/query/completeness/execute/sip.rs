@@ -26,23 +26,9 @@ pub(super) fn lower_match(
     clause: &AstNode,
     incoming: &[String],
 ) -> QueryResult<Option<MatchStep>> {
-    if identity::identity_clause_size(clause).is_none()
-        || clause.kind != AstKind::Clause(ClauseKind::Match)
-    {
-        return Ok(None);
-    }
-    let Some(mut step) = identity::lower_pattern(connection, clause)? else {
+    let Some(step) = single_node::lower_match(connection, clause, incoming)? else {
         return Ok(None);
     };
-    let [part] = step.parts.as_slice() else {
-        return Ok(None);
-    };
-    if part.relationship.is_some() || part.path_variable.is_some() || part.end.is_some() {
-        return Ok(None);
-    }
-    if !crate::query::plan::constrain_match_scope(&mut step, incoming) {
-        return Ok(None);
-    }
     let Some(source) = list_source(&step) else {
         return Ok(None);
     };
@@ -196,31 +182,18 @@ impl ReadExecutor<'_, '_> {
         step: &MatchStep,
         input: RowSet,
     ) -> QueryResult<RowSet> {
-        let columns = self.match_columns(clause, &input.columns)?;
-        let previous = self
-            .metrics
-            .activate_match_clause_access(clause.span.start, 1);
-        let result = (|| {
-            let mut memory = self.control.reserve(0)?;
-            let mut rows = Vec::new();
-            for row in input.rows {
-                let before = rows.len();
-                if let Some((ids, ids_memory)) = node_ids(step, &row, self.control)? {
-                    self.append_sip_rows(step, row, (ids, ids_memory), &mut rows, &mut memory)?;
-                    self.metrics
-                        .record_pipeline_rows((rows.len() - before).try_into().unwrap_or(u64::MAX));
-                } else {
-                    self.append_single_node_fallback(step, row, &mut rows, &mut memory)?;
-                }
+        self.execute_node_match_rows(clause, input, |executor, row, rows, memory| {
+            let before = rows.len();
+            if let Some((ids, ids_memory)) = node_ids(step, &row, executor.control)? {
+                executor.append_sip_rows(step, row, (ids, ids_memory), rows, memory)?;
+                executor
+                    .metrics
+                    .record_pipeline_rows((rows.len() - before).try_into().unwrap_or(u64::MAX));
+                Ok(())
+            } else {
+                executor.append_single_node_fallback(step, row, rows, memory)
             }
-            Ok(RowSet {
-                columns,
-                rows,
-                memory: Some(memory),
-            })
-        })();
-        self.metrics.restore_active_operator(previous);
-        result
+        })
     }
 
     fn append_sip_rows(

@@ -25,19 +25,38 @@ pub(super) fn filter(
     source: &mut FilterSource,
     runtime: &mut ProgramRuntime<'_, '_>,
 ) -> QueryResult<Option<BindingRow>> {
+    next_output(source, |source| &mut source.factor_output, runtime)
+}
+
+// Both consumers override next_packet; pending Group rows must be drained
+// before advancing that packet source. This preserves the same pull boundary.
+fn next_output<S: BindingSource>(
+    source: &mut S,
+    output: fn(&mut S) -> &mut Option<FlattenContinuation>,
+    runtime: &mut ProgramRuntime<'_, '_>,
+) -> QueryResult<Option<BindingRow>> {
     loop {
-        if let Some(row) = next_flat(&mut source.factor_output, runtime)? {
+        if let Some(row) = next_flat(output(source), runtime)? {
             return Ok(Some(row));
         }
-        let Some(packet) = filter_packet(source, runtime)? else {
+        let Some(packet) = source.next_packet(runtime)? else {
             return Ok(None);
         };
         match packet {
             BindingPacket::Flat(row) => return Ok(Some(row)),
-            packet @ BindingPacket::Group(_) => {
-                install(&mut source.factor_output, packet, runtime.control)?
-            }
+            packet @ BindingPacket::Group(_) => install(output(source), packet, runtime.control)?,
         }
+    }
+}
+
+fn next_input(
+    upstream: &mut dyn BindingSource,
+    flatten: &mut Option<FlattenContinuation>,
+    runtime: &mut ProgramRuntime<'_, '_>,
+) -> QueryResult<Option<BindingPacket>> {
+    match next_flat(flatten, runtime)? {
+        Some(row) => Ok(Some(BindingPacket::Flat(row))),
+        None => upstream.next_packet(runtime),
     }
 }
 
@@ -48,13 +67,13 @@ pub(super) fn filter_packet(
     loop {
         let baseline = runtime.expression_memory.bytes();
         check_interrupted(runtime.is_interrupted)?;
-        let packet = if let Some(row) = next_flat(&mut source.factor_flatten, runtime)? {
-            BindingPacket::Flat(row)
-        } else {
-            let Some(packet) = source.upstream.next_packet(runtime)? else {
-                return Ok(None);
-            };
-            packet
+        let Some(packet) = next_input(
+            source.upstream.as_mut(),
+            &mut source.factor_flatten,
+            runtime,
+        )?
+        else {
+            return Ok(None);
         };
         match packet {
             BindingPacket::Flat(row) => {
@@ -88,20 +107,7 @@ pub(super) fn projection(
     source: &mut ProjectionSource,
     runtime: &mut ProgramRuntime<'_, '_>,
 ) -> QueryResult<Option<BindingRow>> {
-    loop {
-        if let Some(row) = next_flat(&mut source.factor_output, runtime)? {
-            return Ok(Some(row));
-        }
-        let Some(packet) = projection_packet(source, runtime)? else {
-            return Ok(None);
-        };
-        match packet {
-            BindingPacket::Flat(row) => return Ok(Some(row)),
-            packet @ BindingPacket::Group(_) => {
-                install(&mut source.factor_output, packet, runtime.control)?
-            }
-        }
-    }
+    next_output(source, |source| &mut source.factor_output, runtime)
 }
 
 pub(super) fn projection_packet(
@@ -114,13 +120,13 @@ pub(super) fn projection_packet(
     loop {
         let baseline = runtime.expression_memory.bytes();
         check_interrupted(runtime.is_interrupted)?;
-        let packet = if let Some(row) = next_flat(&mut source.factor_flatten, runtime)? {
-            BindingPacket::Flat(row)
-        } else {
-            let Some(packet) = source.upstream.next_packet(runtime)? else {
-                return Ok(None);
-            };
-            packet
+        let Some(packet) = next_input(
+            source.upstream.as_mut(),
+            &mut source.factor_flatten,
+            runtime,
+        )?
+        else {
+            return Ok(None);
         };
         let input = match packet {
             BindingPacket::Group(packet) => {

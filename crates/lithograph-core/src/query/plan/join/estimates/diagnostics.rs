@@ -16,11 +16,31 @@ fn run(db: &Connection, text: &str) -> (usize, crate::query::QuerySummary) {
     }
 }
 
-fn fixture() -> Connection {
+pub(super) fn empty_graph() -> (Connection, crate::storage::HashId) {
     let db = Connection::open_in_memory().unwrap();
     db.execute_batch("CREATE TABLE _lithograph_meta(id INTEGER PRIMARY KEY,magic TEXT,database_id TEXT,storage_format INTEGER)").unwrap();
     crate::storage::create_storage_schema(&db).unwrap();
-    crate::storage::initialize_root(&db).unwrap();
+    let root = crate::storage::initialize_root(&db).unwrap().root;
+    (db, root)
+}
+
+pub(super) fn prepared_context<'q, 'db, 'ctl>(
+    snapshot: &'q crate::storage::Snapshot<'db>,
+    schema: &'q crate::storage::SchemaState,
+    prepared: &'q crate::query::plan::PreparedQuery,
+    control: &'q ExecutionControl<'ctl>,
+) -> JoinPlanningContext<'q, 'db, 'ctl> {
+    JoinPlanningContext {
+        snapshot,
+        schema,
+        view: &prepared.graph_view,
+        params: &prepared.params,
+        control,
+    }
+}
+
+fn fixture() -> Connection {
+    let (db, _) = empty_graph();
     run(
         &db,
         "UNWIND range(0,63) AS i CREATE (:Item{k:i%8,seq:i}) FINISH",
@@ -41,11 +61,12 @@ fn fixture() -> Connection {
     db
 }
 
-fn inspect(db: &Connection, query: &str, expected_rows: usize) {
-    db.execute_batch("SAVEPOINT prefix_estimate_read").unwrap();
-    let prepared = prepare(db, query, BTreeMap::new(), ExecutionOptions::default()).unwrap();
+fn estimates_for_prepared(
+    db: &Connection,
+    prepared: &crate::query::plan::PreparedQuery,
+) -> (JoinEstimates, JoinAnalysis) {
     let step = &prepared.matches[0];
-    let plan = step.join.as_ref().expect("real cost-selected join");
+    let plan = step.join.as_ref().expect("actual cost-selected Join");
     let snapshot = crate::storage::Snapshot::from_resolved_state(
         db,
         prepared.resolved_state.as_ref().unwrap(),
@@ -53,13 +74,7 @@ fn inspect(db: &Connection, query: &str, expected_rows: usize) {
     let schema = snapshot.schema_state().unwrap();
     let resources = QueryResources::default();
     let control = ExecutionControl::new(&resources, &|| false);
-    let context = JoinPlanningContext {
-        snapshot: &snapshot,
-        schema: &schema,
-        view: &prepared.graph_view,
-        params: &prepared.params,
-        control: &control,
-    };
+    let context = prepared_context(&snapshot, &schema, prepared, &control);
     let analysis = JoinAnalysis {
         hashes: plan.hashes.clone(),
         predicates: plan.predicates.clone(),
@@ -82,6 +97,15 @@ fn inspect(db: &Connection, query: &str, expected_rows: usize) {
         &scope,
     )
     .unwrap();
+    (estimates, analysis)
+}
+
+fn inspect(db: &Connection, query: &str, expected_rows: usize) {
+    db.execute_batch("SAVEPOINT prefix_estimate_read").unwrap();
+    let prepared = prepare(db, query, BTreeMap::new(), ExecutionOptions::default()).unwrap();
+    let step = &prepared.matches[0];
+    let plan = step.join.as_ref().expect("real cost-selected join");
+    let (estimates, _) = estimates_for_prepared(db, &prepared);
     let mut prefix = 0;
     for stage in &plan.stages {
         prefix |= 1_u128 << stage.part;

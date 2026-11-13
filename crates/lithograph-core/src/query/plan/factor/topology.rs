@@ -196,49 +196,13 @@ pub(super) fn reverse(arm: &mut FactorArm) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::{self, step};
     use super::*;
-    use crate::query::plan::{Direction, RelationshipSpec, join};
+    use crate::query::plan::{Direction, join};
     use crate::storage::HashId;
 
-    fn node(name: &str) -> NodeSpec {
-        NodeSpec {
-            variable: Some(name.into()),
-            labels: vec![],
-            label_names: vec![],
-            scan_label: None,
-            scan_label_name: None,
-            index_seek: None,
-            id_seek: None,
-            impossible: false,
-        }
-    }
-
     fn part(start: &str, relationship: &str, end: &str, type_id: i64) -> PatternPart {
-        PatternPart {
-            path_variable: None,
-            start: node(start),
-            end: Some(node(end)),
-            relationship: Some(RelationshipSpec {
-                variable: Some(relationship.into()),
-                type_id: Some(type_id),
-                type_name: Some(format!("R{type_id}")),
-                direction: Direction::Outgoing,
-                index_seek: None,
-                id_seek: None,
-                impossible: false,
-            }),
-        }
-    }
-
-    fn step(parts: Vec<PatternPart>) -> MatchStep {
-        MatchStep {
-            clause_start: 0,
-            optional: false,
-            parts,
-            predicate: None,
-            early_predicates: vec![],
-            join: None,
-        }
+        test_support::part(start, relationship, end, type_id, &format!("R{type_id}"))
     }
 
     fn hops(arm: &FactorArm) -> Vec<(usize, PartOrientation)> {

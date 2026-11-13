@@ -56,28 +56,25 @@ pub(super) fn value_group(
     packet: &GroupPacket,
     runtime: &ProgramRuntime<'_, '_>,
 ) -> QueryResult<Option<ValueGroup>> {
-    runtime.control.work(1)?;
-    match expression {
-        Expr::Literal(Value::Integer(_) | Value::Null) => Ok(Some(ValueGroup::Prefix)),
-        Expr::Parameter(name) => Ok(matches!(
-            runtime.params.get(name),
-            Some(Value::Integer(_) | Value::Null)
-        )
-        .then_some(ValueGroup::Prefix)),
-        Expr::Property(base, property) => {
-            let Expr::Variable(variable) = base.as_ref() else {
-                return Ok(None);
-            };
-            property_group(variable, property, packet, runtime)
-        }
-        _ => Ok(None),
-    }
+    resolve_value_group(expression, runtime, |variable, property| {
+        property_group(variable, property, packet, runtime)
+    })
 }
 
 pub(super) fn plan_value_group(
     expression: &Expr,
     plan: &crate::query::plan::FactorizedPlan,
     runtime: &ProgramRuntime<'_, '_>,
+) -> QueryResult<Option<ValueGroup>> {
+    resolve_value_group(expression, runtime, |variable, property| {
+        binding_property_group(variable, property, plan, runtime)
+    })
+}
+
+fn resolve_value_group(
+    expression: &Expr,
+    runtime: &ProgramRuntime<'_, '_>,
+    property_group: impl FnOnce(&str, &str) -> QueryResult<Option<ValueGroup>>,
 ) -> QueryResult<Option<ValueGroup>> {
     runtime.control.work(1)?;
     match expression {
@@ -91,7 +88,7 @@ pub(super) fn plan_value_group(
             let Expr::Variable(variable) = base.as_ref() else {
                 return Ok(None);
             };
-            binding_property_group(variable, property, plan, runtime)
+            property_group(variable, property)
         }
         _ => Ok(None),
     }

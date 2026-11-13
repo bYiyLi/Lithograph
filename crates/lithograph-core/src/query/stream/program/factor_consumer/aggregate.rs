@@ -72,6 +72,11 @@ fn aggregate(expression: &Expr) -> Option<(AggregateKind, Option<&Expr>)> {
     }
 }
 
+fn compiled_aggregate(projection: &Projection) -> QueryResult<(AggregateKind, Option<&Expr>)> {
+    aggregate(&projection.expression)
+        .ok_or_else(|| QueryError::internal("factor aggregate lost its compiled expression"))
+}
+
 fn value_shape(expression: &Expr) -> bool {
     match expression {
         Expr::Literal(Value::Integer(_) | Value::Null) | Expr::Parameter(_) => true,
@@ -305,9 +310,7 @@ impl FactorAggregateSource {
         self.observe_context(row, runtime.control)?;
         for (projection, state) in self.plan.projections.iter().zip(&mut self.values) {
             runtime.control.work(1)?;
-            let (kind, argument) = aggregate(&projection.expression).ok_or_else(|| {
-                QueryError::internal("factor aggregate lost its compiled expression")
-            })?;
+            let (kind, argument) = compiled_aggregate(projection)?;
             if let Some(argument) = argument {
                 let baseline = runtime.expression_memory.bytes();
                 let value = runtime.evaluate(argument, row)?;
@@ -360,9 +363,7 @@ impl FactorAggregateSource {
         // evaluating or changing any aggregate. Failure flattens one packet.
         for (projection, state) in self.plan.projections.iter().zip(&self.values) {
             runtime.control.work(1)?;
-            let (kind, argument) = aggregate(&projection.expression).ok_or_else(|| {
-                QueryError::internal("factor aggregate lost its compiled expression")
-            })?;
+            let (kind, argument) = compiled_aggregate(projection)?;
             if kind == AggregateKind::Count
                 && state
                     .count
@@ -398,9 +399,7 @@ impl FactorAggregateSource {
         let mut scratch = GroupScratch::new(packet, runtime.control)?;
         for (projection, group) in self.plan.projections.iter().zip(groups) {
             runtime.control.work(1)?;
-            let (kind, argument) = aggregate(&projection.expression).ok_or_else(|| {
-                QueryError::internal("factor aggregate lost its compiled expression")
-            })?;
+            let (kind, argument) = compiled_aggregate(projection)?;
             let delta = if kind == AggregateKind::Count {
                 fold_count(packet, projection, runtime)?
             } else {
@@ -426,9 +425,7 @@ impl FactorAggregateSource {
             .zip(&mut self.values)
             .zip(deltas)
         {
-            let (kind, _) = aggregate(&projection.expression).ok_or_else(|| {
-                QueryError::internal("factor aggregate lost its compiled expression")
-            })?;
+            let (kind, _) = compiled_aggregate(projection)?;
             if kind == AggregateKind::Count {
                 state.count += delta.count;
             } else if let Some(value) = delta.extreme.as_ref()
@@ -548,8 +545,7 @@ fn output_value(
     state: &AggregateValue,
     control: &ExecutionControl<'_>,
 ) -> QueryResult<Value> {
-    let (kind, _) = aggregate(&projection.expression)
-        .ok_or_else(|| QueryError::internal("factor aggregate lost its compiled expression"))?;
+    let (kind, _) = compiled_aggregate(projection)?;
     if kind == AggregateKind::Count {
         return Ok(Value::Integer(state.count as i64));
     }

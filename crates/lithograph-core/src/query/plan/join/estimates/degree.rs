@@ -295,10 +295,7 @@ mod tests {
             &PlannerStatistics,
         ),
     ) {
-        let db = Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE _lithograph_meta(id INTEGER PRIMARY KEY,magic TEXT,database_id TEXT,storage_format INTEGER)").unwrap();
-        crate::storage::create_storage_schema(&db).unwrap();
-        crate::storage::initialize_root(&db).unwrap();
+        let (db, _) = super::super::diagnostics::empty_graph();
         run(&db, "CREATE (:Rare)-[:R]->(),(:Other)-[:S]->() FINISH");
         run(
             &db,
@@ -352,13 +349,8 @@ mod tests {
             PlannerStatistics::bounded(&snapshot, &labels, &types, true, 4096).unwrap();
         let resources = QueryResources::default();
         let control = ExecutionControl::new(&resources, &|| false);
-        let context = JoinPlanningContext {
-            snapshot: &snapshot,
-            schema: &schema,
-            view: &prepared.graph_view,
-            params: &prepared.params,
-            control: &control,
-        };
+        let context =
+            super::super::diagnostics::prepared_context(&snapshot, &schema, &prepared, &control);
         test(&step, &analysis, &context, &statistics);
         assert_eq!(resources.used(), 0, "only bounded scratch leases were used");
     }
@@ -611,10 +603,7 @@ mod tests {
 
     #[test]
     fn exhaustive_skew_uses_mean_for_expected_and_maximum_for_one_outer_bound() {
-        let db = Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE _lithograph_meta(id INTEGER PRIMARY KEY,magic TEXT,database_id TEXT,storage_format INTEGER)").unwrap();
-        crate::storage::create_storage_schema(&db).unwrap();
-        crate::storage::initialize_root(&db).unwrap();
+        let (db, _) = super::super::diagnostics::empty_graph();
         run(&db, "UNWIND range(0,3) AS i CREATE (:Cohort{k:i}) FINISH");
         run(
             &db,
@@ -664,13 +653,8 @@ mod tests {
         assert_eq!(degrees, vec![0, 0, 0, 8], "real pinned cohort degrees");
         let resources = QueryResources::default();
         let control = ExecutionControl::new(&resources, &|| false);
-        let context = JoinPlanningContext {
-            snapshot: &snapshot,
-            schema: &schema,
-            view: &prepared.graph_view,
-            params: &prepared.params,
-            control: &control,
-        };
+        let context =
+            super::super::diagnostics::prepared_context(&snapshot, &schema, &prepared, &control);
         let samples = collect_degree_samples(
             step,
             &analysis,

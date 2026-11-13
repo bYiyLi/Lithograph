@@ -69,6 +69,24 @@ impl ReadExecutor<'_, '_> {
         step: &MatchStep,
         input: RowSet,
     ) -> QueryResult<RowSet> {
+        self.execute_node_match_rows(clause, input, |executor, row, rows, memory| {
+            executor.append_single_node_fallback(step, row, rows, memory)
+        })
+    }
+
+    // Both the plain fallback and SIP own the same eager RowSet boundary and
+    // restore the previous PROFILE operator even when a row fails or cancels.
+    pub(super) fn execute_node_match_rows(
+        &mut self,
+        clause: &AstNode,
+        input: RowSet,
+        mut append: impl FnMut(
+            &mut Self,
+            BindingRow,
+            &mut Vec<BindingRow>,
+            &mut MemoryReservation,
+        ) -> QueryResult<()>,
+    ) -> QueryResult<RowSet> {
         let columns = self.match_columns(clause, &input.columns)?;
         let previous = self
             .metrics
@@ -77,7 +95,7 @@ impl ReadExecutor<'_, '_> {
             let mut memory = self.control.reserve(0)?;
             let mut rows = Vec::new();
             for row in input.rows {
-                self.append_single_node_fallback(step, row, &mut rows, &mut memory)?;
+                append(self, row, &mut rows, &mut memory)?;
             }
             Ok(RowSet {
                 columns,

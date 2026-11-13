@@ -6,10 +6,7 @@ use crate::storage::{CommitMetadata, LayerBuilder, OwnerKind, PropertyValue, Rel
 const FANOUT: i64 = 32;
 
 fn fixture() -> Connection {
-    let db = Connection::open_in_memory().unwrap();
-    db.execute_batch("CREATE TABLE _lithograph_meta(id INTEGER PRIMARY KEY,magic TEXT,database_id TEXT,storage_format INTEGER)").unwrap();
-    crate::storage::create_storage_schema(&db).unwrap();
-    let root = crate::storage::initialize_root(&db).unwrap().root;
+    let (db, root) = empty_graph();
     let rare = crate::storage::intern_label(&db, "Rare").unwrap();
     let b_label = crate::storage::intern_label(&db, "B").unwrap();
     let chosen = crate::storage::intern_label(&db, "Chosen").unwrap();
@@ -84,40 +81,7 @@ fn inspect(db: &Connection, patterns: &str, rare_part: usize) -> Evidence {
     let prepared = prepare(db, &text, BTreeMap::new(), ExecutionOptions::default()).unwrap();
     let step = &prepared.matches[0];
     let plan = step.join.as_ref().expect("actual cost-selected Join");
-    let snapshot = crate::storage::Snapshot::from_resolved_state(
-        db,
-        prepared.resolved_state.as_ref().unwrap(),
-    );
-    let schema = snapshot.schema_state().unwrap();
-    let resources = QueryResources::default();
-    let control = ExecutionControl::new(&resources, &|| false);
-    let context = JoinPlanningContext {
-        snapshot: &snapshot,
-        schema: &schema,
-        view: &prepared.graph_view,
-        params: &prepared.params,
-        control: &control,
-    };
-    let analysis = JoinAnalysis {
-        hashes: plan.hashes.clone(),
-        predicates: plan.predicates.clone(),
-        templates: plan.templates.clone(),
-        edges: Vec::new(),
-    };
-    let estimates = collect_join_estimates(
-        step,
-        &analysis,
-        &context,
-        &prepared.statistics,
-        &mut PlanningBudget::default(),
-        &JoinClauseScope {
-            clause_start: plan.clause_start,
-            snapshot_identity: plan.snapshot_identity,
-            incoming: &[],
-            declared_columns: &plan.declared_columns,
-        },
-    )
-    .unwrap();
+    let (estimates, analysis) = estimates_for_prepared(db, &prepared);
     let prefix = 1_u128 << rare_part;
     let template = analysis
         .templates

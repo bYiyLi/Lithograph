@@ -8,6 +8,9 @@ mod eligibility;
 mod path_bindings;
 mod topology;
 
+#[cfg(test)]
+mod test_support;
+
 pub(crate) fn install(
     step: &mut MatchStep,
     scope: &join::JoinClauseScope<'_>,

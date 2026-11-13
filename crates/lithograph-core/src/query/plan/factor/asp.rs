@@ -1,6 +1,7 @@
 //! A three-part Node-identity extension of a separately proved two-arm star.
 //! Reuse the existing Join equality; this module never invents a Hash family.
 
+use super::eligibility::plain_node;
 use super::{FactorAsp, FactorBinding, FactorBindingKind, FactorGroup, FactorizedPlan};
 use crate::query::expression::{BinaryOp, Expr};
 use crate::query::plan::{MatchStep, NodeSpec, PlanningBudget, join};
@@ -134,14 +135,6 @@ fn parts(step: &MatchStep) -> Option<([usize; 2], usize)> {
         }
     }
     (count == 2).then_some((star, build?))
-}
-
-fn plain_node(node: &NodeSpec) -> bool {
-    node.variable.as_ref().is_some_and(|name| !name.is_empty())
-        && node.id_seek.is_none()
-        && node.index_seek.is_none()
-        && !node.impossible
-        && node.labels.len() == node.label_names.len()
 }
 
 fn predicates<'a>(
@@ -448,10 +441,11 @@ fn reorder(plan: &mut join::JoinPlan, order: [usize; 3]) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::{self, node};
     use super::*;
     use crate::cypher::Value;
     use crate::query::QueryResources;
-    use crate::query::plan::{Direction, FactorArm, FactorHop, PatternPart, RelationshipSpec};
+    use crate::query::plan::{FactorArm, FactorHop, PatternPart};
     use crate::storage::HashId;
 
     fn identity(left: &str, right: &str) -> Expr {
@@ -534,34 +528,8 @@ mod tests {
         }
     }
 
-    fn node(name: &str) -> NodeSpec {
-        NodeSpec {
-            variable: Some(name.into()),
-            labels: vec![],
-            label_names: vec![],
-            scan_label: None,
-            scan_label_name: None,
-            index_seek: None,
-            id_seek: None,
-            impossible: false,
-        }
-    }
-
     fn star(end: &str, name: &str, type_id: i64) -> PatternPart {
-        PatternPart {
-            path_variable: None,
-            start: node("h"),
-            end: Some(node(end)),
-            relationship: Some(RelationshipSpec {
-                variable: Some(name.into()),
-                type_id: Some(type_id),
-                type_name: Some("R".into()),
-                direction: Direction::Outgoing,
-                index_seek: None,
-                id_seek: None,
-                impossible: false,
-            }),
-        }
+        test_support::part("h", name, end, type_id, "R")
     }
 
     fn extension_step(inner_side: join::HashOperandSide) -> MatchStep {
@@ -619,6 +587,27 @@ mod tests {
         base
     }
 
+    fn identity_shape<'a>(
+        shared: &'a Expr,
+        identity: &'a Expr,
+        inner_side: join::HashOperandSide,
+    ) -> AspShape<'a> {
+        AspShape {
+            shared_predicate: shared,
+            identity,
+            star_parts: [0, 1],
+            build_part: 2,
+            probe_variable: "a",
+            build_variable: "d",
+            equality: 0,
+            inner_side,
+        }
+    }
+
+    fn stage_order(plan: &join::JoinPlan) -> Vec<usize> {
+        plan.stages.iter().map(|stage| stage.part).collect()
+    }
+
     #[test]
     fn identity_accepts_commutation_but_not_self_equality_or_property_keys() {
         assert_eq!(identity_probe(&identity("a", "d"), "d"), Some("a"));
@@ -639,13 +628,7 @@ mod tests {
     fn installs_existing_hash_and_moves_identity_guard_after_all_providers() {
         let mut plan = plan();
         assert!(install(&mut plan, &description()));
-        assert_eq!(
-            plan.stages
-                .iter()
-                .map(|stage| stage.part)
-                .collect::<Vec<_>>(),
-            vec![0, 1, 2]
-        );
+        assert_eq!(stage_order(&plan), vec![0, 1, 2]);
         assert_eq!(
             plan.stages[2].access,
             join::StageAccess::Hash {
@@ -664,13 +647,7 @@ mod tests {
         let mut plan = plan();
         plan.hashes[0].right.providers = join::PartSet(2);
         assert!(!install(&mut plan, &description()));
-        assert_eq!(
-            plan.stages
-                .iter()
-                .map(|stage| stage.part)
-                .collect::<Vec<_>>(),
-            vec![0, 2, 1]
-        );
+        assert_eq!(stage_order(&plan), vec![0, 2, 1]);
         assert!(
             plan.stages
                 .iter()
@@ -684,13 +661,7 @@ mod tests {
         let mut description = description();
         description.asp.as_mut().unwrap().probe_group = FactorGroup::Shared;
         assert!(!install(&mut plan, &description));
-        assert_eq!(
-            plan.stages
-                .iter()
-                .map(|stage| stage.part)
-                .collect::<Vec<_>>(),
-            vec![0, 2, 1]
-        );
+        assert_eq!(stage_order(&plan), vec![0, 2, 1]);
     }
 
     #[test]
@@ -702,16 +673,7 @@ mod tests {
         let identity = identity("a", "d");
         for inner_side in [join::HashOperandSide::Left, join::HashOperandSide::Right] {
             let mut step = extension_step(inner_side);
-            let shape = AspShape {
-                shared_predicate: &shared,
-                identity: &identity,
-                star_parts: [0, 1],
-                build_part: 2,
-                probe_variable: "a",
-                build_variable: "d",
-                equality: 0,
-                inner_side,
-            };
+            let shape = identity_shape(&shared, &identity, inner_side);
             let extended = extend(
                 &step,
                 base_description(),
@@ -755,16 +717,7 @@ mod tests {
             .unwrap()
             .stages
             .swap(0, 2);
-        let shape = AspShape {
-            shared_predicate: &shared,
-            identity: &identity,
-            star_parts: [0, 1],
-            build_part: 2,
-            probe_variable: "a",
-            build_variable: "d",
-            equality: 0,
-            inner_side: join::HashOperandSide::Right,
-        };
+        let shape = identity_shape(&shared, &identity, join::HashOperandSide::Right);
         let mut base = base_description();
         std::mem::swap(&mut base.accumulate, &mut base.build);
         base.accumulate.hops[0].orientation = join::PartOrientation::Reversed;
@@ -793,13 +746,7 @@ mod tests {
         );
         let plan = std::sync::Arc::get_mut(step.join.as_mut().unwrap()).unwrap();
         assert!(install(plan, &extended));
-        assert_eq!(
-            plan.stages
-                .iter()
-                .map(|stage| stage.part)
-                .collect::<Vec<_>>(),
-            vec![1, 0, 2]
-        );
+        assert_eq!(stage_order(plan), vec![1, 0, 2]);
         assert_eq!(
             plan.stages[2].access,
             join::StageAccess::Hash {
