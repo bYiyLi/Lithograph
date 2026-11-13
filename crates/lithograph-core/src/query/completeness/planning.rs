@@ -172,6 +172,9 @@ impl PreparedProgram {
             return Ok(memory);
         };
         let cost_streamable = self.cost_matches_streamable()?;
+        // Do not infer a LIMIT's upstream demand through arbitrary WITH,
+        // projections or writes. Only complete-consumer costs are proved here.
+        let complete_consumer = !single.descendants().any(|node| node.kind == AstKind::Limit);
         let mut budget = super::super::plan::PlanningBudget::default();
         let mut identity_display = BTreeMap::new();
         let mut changed = false;
@@ -213,7 +216,7 @@ impl PreparedProgram {
                 params,
                 control,
                 &mut budget,
-                (node, &incoming, &columns),
+                (node, &incoming, &columns, complete_consumer),
             )?)?;
         }
         self.install_identity_permissions(identity_display, control, &mut memory)?;
@@ -282,9 +285,9 @@ impl PreparedProgram {
         params: &BTreeMap<String, Value>,
         control: &ExecutionControl<'_>,
         budget: &mut super::super::plan::PlanningBudget,
-        clause_scope: (&AstNode, &[String], &[String]),
+        clause_scope: (&AstNode, &[String], &[String], bool),
     ) -> QueryResult<MemoryReservation> {
-        let (clause, incoming, declared) = clause_scope;
+        let (clause, incoming, declared, complete_consumer) = clause_scope;
         let Some(mut step) =
             execute::identity::lower_pattern(snapshot.connection_for_query(), clause)?
         else {
@@ -301,6 +304,7 @@ impl PreparedProgram {
             control,
             budget,
             Some(&super::super::plan::join::JoinClauseScope {
+                complete_consumer,
                 clause_start: clause.span.start,
                 snapshot_identity: snapshot.cache_identity(),
                 incoming,

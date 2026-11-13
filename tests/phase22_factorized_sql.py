@@ -143,6 +143,24 @@ def complete_adapters(db, name, query, expected, pin):
     require(head(db) == pin, "read moved Branch")
 
 
+def prefix_consumers(db, query, expected):
+    oracle = bag(expected)
+    with_names = "h,r,a,s,b,d" if query == ASP else "h,r,a,s,b"
+    shapes = [query + " LIMIT $take", query + " SKIP 3 LIMIT $take",
+              query.replace(" RETURN ", " WITH " + with_names + " LIMIT $take RETURN ")]
+    for adapter in (execute, streamed):
+        for shape in shapes:
+            for take in (0, 1, 10):
+                result = adapter(db, "PROFILE " + shape, {"key": 7, "take": take})
+                require(len(result["rows"]) == take, "partial consumer row count")
+                require(not (bag(result["rows"]) - oracle), "partial consumer lost identity bag")
+                operators = result["summary"]["profile"]["operators"]
+                require(not any(op["operator"] in ("ASPJoin", "FactorizedAccumulate")
+                                for op in operators), "partial consumer paid full accumulation")
+                if take == 0:
+                    require(result["summary"]["metrics"]["dbHits"] == 0, "LIMIT 0 touched graph")
+
+
 def lifecycle(db, query, expected):
     oracle = bag(expected)
     for interrupt in (False, True):
@@ -227,6 +245,7 @@ def case(extension, checkpoint, directory, kind):
         require(maintenance["commit"] == pin, "checkpoint pin differs")
         for name, query, expected in cases:
             complete_adapters(db, name, query, expected, pin)
+            prefix_consumers(db, query, expected)
             lifecycle(db, query, expected)
         if kind == "star":
             aggregate_and_policy(db)

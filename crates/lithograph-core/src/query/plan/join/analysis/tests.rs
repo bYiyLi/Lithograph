@@ -98,6 +98,7 @@ fn analyze(
     let control = crate::query::ExecutionControl::new(&resources, interrupted);
     let view = ResolvedGraphView::default().with_query_access(options.access.read.query);
     let scope = JoinClauseScope {
+        complete_consumer: true,
         clause_start: 0,
         snapshot_identity: root,
         incoming,

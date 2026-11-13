@@ -153,3 +153,60 @@ fn order_alias_copy_checks_interrupt_inside_one_large_projected_value() {
     assert_eq!(checks.get(), 3);
     assert_eq!(resources.used(), 0, "failed alias copy releases its lease");
 }
+
+// Real parser/planner routing is essential: constructing a fake count-only
+// PreparedQuery would resurrect the retired, unreachable duplicate executor.
+#[test]
+fn aggregates_use_the_shared_program_with_count_null_and_terminal_modifiers() {
+    let db = fixture();
+    let cases = [
+        ("RETURN count(*)", vec![vec![Value::Integer(1)]]),
+        ("RETURN COUNT(null)", vec![vec![Value::Integer(0)]]),
+        ("MATCH(n) RETURN count(n)", vec![vec![Value::Integer(3)]]),
+        (
+            "MATCH(n) RETURN count(*) LIMIT 1",
+            vec![vec![Value::Integer(3)]],
+        ),
+        (
+            "MATCH(n:Missing) RETURN count(n)",
+            vec![vec![Value::Integer(0)]],
+        ),
+        (
+            "MATCH(n:Missing) RETURN count(*) LIMIT 1",
+            vec![vec![Value::Integer(0)]],
+        ),
+        ("RETURN count(*) SKIP 1", vec![]),
+        ("RETURN count(*) LIMIT 0", vec![]),
+        (
+            "UNWIND [1,1,null] AS n RETURN count(n),count(DISTINCT n),min(n),max(n)",
+            vec![vec![
+                Value::Integer(2),
+                Value::Integer(1),
+                Value::Integer(1),
+                Value::Integer(1),
+            ]],
+        ),
+        (
+            "UNWIND [2,1,2] AS n RETURN n,count(*) ORDER BY n LIMIT 1",
+            vec![vec![Value::Integer(1), Value::Integer(1)]],
+        ),
+    ];
+    for (text, expected) in cases {
+        let prepared = prepare(&db, text, BTreeMap::new(), ExecutionOptions::default()).unwrap();
+        assert!(prepared.program.is_some(), "{text}");
+        let resources = prepared.resources.clone();
+        let mut cursor = QueryCursor::new(prepared);
+        let mut actual = Vec::new();
+        loop {
+            let batch = cursor.next_batch(&db, 1).unwrap();
+            actual.extend(batch.rows);
+            if batch.done {
+                break;
+            }
+        }
+        assert_eq!(actual, expected, "{text}");
+        cursor.complete(&db).unwrap();
+        drop(cursor);
+        assert_eq!(resources.used(), 0, "{text}");
+    }
+}

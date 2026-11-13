@@ -398,6 +398,7 @@ fn plan_lowered_match(
         control,
         budget,
         Some(&super::plan::join::JoinClauseScope {
+            complete_consumer: true,
             clause_start,
             snapshot_identity: snapshot.cache_identity(),
             incoming,

@@ -122,3 +122,37 @@ fn predicate_counter_records_conversion_attempts_including_null_and_type_errors(
     assert_eq!(snapshot().predicate_conversions, 4);
     assert_eq!(snapshot().binding_row_clones, 0);
 }
+
+#[test]
+fn ordinary_clone_and_cooperative_copy_use_the_same_successful_copy_counter() {
+    let _collection = Collection::new();
+    let original = row();
+    let mut ordinary = original.clone();
+    assert_eq!(ordinary, original);
+    assert_eq!(snapshot().binding_row_clones, 0);
+    ordinary.values.clear();
+    ordinary.order.clear();
+    ordinary.used_relationships.clear();
+    ordinary.load_csv_context = None;
+    assert!(!original.values.is_empty() && !original.order.is_empty());
+    assert!(!original.used_relationships.is_empty() && original.load_csv_context.is_some());
+
+    set_enabled(true);
+    let copied = original.clone();
+    let clone_bytes = binding_row_bytes_controlled(&copied, None).unwrap();
+    assert_eq!(copied, original);
+    assert_eq!(snapshot().binding_row_clones, 1);
+    assert_eq!(snapshot().binding_row_clone_accounted_bytes, clone_bytes);
+    let controlled = clone_binding_row_unreserved_controlled(&original, None).unwrap();
+    let controlled_bytes = binding_row_bytes_controlled(&controlled, None).unwrap();
+    assert_eq!(controlled, copied);
+    assert_eq!(
+        snapshot().binding_row_clones,
+        2,
+        "no nested double-counting"
+    );
+    assert_eq!(
+        snapshot().binding_row_clone_accounted_bytes,
+        clone_bytes + controlled_bytes
+    );
+}

@@ -314,6 +314,7 @@ fn metadata() -> (MatchStep, JoinAnalysis, JoinEstimates) {
 fn optional_hash_metadata_never_spends_the_remaining_greedy_budget() {
     let (step, analysis, estimates) = metadata();
     let scope = JoinClauseScope {
+        complete_consumer: true,
         clause_start: 0,
         snapshot_identity: HashId::from_bytes([0; 32]),
         incoming: &[],

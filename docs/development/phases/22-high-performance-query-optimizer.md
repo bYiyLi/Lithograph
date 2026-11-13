@@ -1268,3 +1268,32 @@ S7 已在原 pull pipeline 接入 Flat/Group、紧凑 FactorTable、分组过滤
 新增`tests/phase22_factorized_sql.py`并接入`scripts/ci.sh`：公开CREATE结果生成独立Node/Relationship bag oracle，再由checkpoint helper构建派生索引；真实stock SQLite 3.46.1上，scalar/rows分别完整消费Star32768行和ASP256行，校验实际Group/Flatten/ASP物理计数、重复关系、NULL重绑、聚合不提前展开、权限/Graph View、提前关闭/Interrupt后的同连接恢复、staged可见性/abort和历史pin。1GiB/no-swap实际执行exit0、OOM0、TEMP清空，结果与工具pin见`evidence/nexum-s7-sql-02/result.json`。首轮`sql-01`把写连接内部未提交chain当作durable Branch而失败；已使用S6与当前扩展复核这是测试观察面错误，修正为第二只读连接的head/history/完整bag不变及public `summary.commit=null`，并保留abort后内部history完全恢复断言，不删除事务隔离验收。
 
 `eb841fe`的[CI 43338418369](https://github.com/bYiyLi/Lithograph/actions/runs/43338418369)及[Release Matrix 43338418269](https://github.com/bYiyLi/Lithograph/actions/runs/43338418269)已触发，记录时仍在运行，不能标PASS。此处未完成四档/大输出/净收益、小预算及完整quality/CI的S7收口，S22.7和Phase22继续`in_progress`；S8及G01–G06未关闭，未合并、发布或部署。
+
+
+<a id="stage-s22-7-demand-and-coverage"></a>
+
+### 25.10 S22.7 四档/资源实证、部分消费修复与统一聚合路径（2026-11-13）
+
+本节记录随后完成的开发证据，不覆盖第25.9节的源码身份和原始失败。`60092e4`已提交真实SQL生命周期门禁，`7858bdbb62dda0aa5e412dc84577e7bb1777ba14`已提交并推送去重后的共同proof/packet drain/单节点与SIP生命周期；两者均位于独立开发分支，未合并或发行。`7858bdb`的[Release Matrix 43343587278](https://github.com/bYiyLi/Lithograph/actions/runs/43343587278)六平台与storage fixture通过、publish跳过；[CI 43343587167](https://github.com/bYiyLi/Lithograph/actions/runs/43343587167)的quality失败原因是`stream/project.rs`每文件行覆盖26.89%，低于原50%门槛，并非complexity失败。该轮总regions/functions/lines为86.09%/87.56%/89.30%；不以整体通过掩盖单文件失败。
+
+#### 正常发布构建的四档与资源结果
+
+固定`7858bdb`的普通release扩展`fc9a62ec0175a3fdf4a0c00034bcb05b0428bc549226a3f4abbf49022ca690cb`，与冻结S6扩展`28de76577f69c114583b04b2cd561788a9de9b021d7eba63a8f8eaae864b0fd7`在原生Linux同机、相同SQLite/pin/完整CREATE identity oracle上比较。四档为1k/10k/100k/1M无关节点，真实总节点/关系含各case辅助域，以各manifest为准。Star/三跳/四跳各32768行，scalar/rows各3次普通完整消费及独立PROFILE/VM；这是长流median/max，不报告P95。ASP各256行，两SQLsurface每档采用5连接×(首个冷样本+20warm)及100fresh连接，PROFILE/VM独立，不混进普通分布。全部输出bag一致，四档物理工作与fixture guard通过，详细结果在远端`work/nexum-s7-pressure-01/`、`work/nexum-s7-pressure-02/`。
+
+ASP 1k rows warm完整消费median从85.069ms到8.356ms、P95从89.188ms到8.958ms；首行median却从1.813ms增加到5.019ms、P95从2.064ms增加到5.466ms。这是真实Accumulate的首行成本，不能宣称所有延迟改善。随后发现`LIMIT 1`仍支付整组累积，实际dbHits从旧路径145增加到672；该明确回退进入下面的修复，而不是把完整输出收益解释成短查询收益。
+
+在1GiB/no-swap条件下，百万无关数据上的Star/三跳/四跳与ASP通过512KiB query budget的完整rows消费和恢复；大输出fixture完整消费1048576行，也在同一512KiB预算通过，worker RSS峰值40148992B、cgroup峰值43233280B。ASP与大输出的early-close/Interrupt及恢复通过。17组测量的真实子进程exit0、source/artifact/fixture/sidecar guard不变、OOM事件为0、TEMP为空、unit/cgroup及所属PID清理完成；资源结论来自worker退出前的`cgroup_final_before_exit`及`results/postflight.json`，不是systemd移除后读取到的ENOENT。部分百万图测试的cgroup峰值达到1GiB并触发cache reclaim，不能把这一指标等同于低得多的进程RSS；没有OOM。汇总为`work/nexum-s7-pressure-02/verified-runtime-summary.json`。
+
+#### Review后的实质性修复
+
+- **部分消费成本边界**：原成本模型证明的是完整MATCH消费。增加私有clause消费证明，普通LIMIT及不确定的WITH/RETURN管线保留已有流式Join；已有真实Sort屏障仍可采用全量成本。覆盖literal/parameter LIMIT0/1/10、SKIP、WITH LIMIT、完整bag子集、零limit零访问和排序正例，不引入公开hint。原`count(*) LIMIT 1`已经走eager Program fallback，保留其结果和边界，不伪造它之前会选ASP。
+- **不可达重复聚合路径**：现有`requires_program`已将所有aggregate函数路由到Program/ProgramStream，旧read cursor的count-only分支不可达。删除这套重复实现及对应状态/标记，而非构造生产不可能创建的PreparedQuery来抬高覆盖率。分组COUNT/MIN/MAX、错误及不适用时逐行回退仍由统一Program负责，新增真实parser/planner/cursor回归覆盖空/非空输入、NULL、distinct/group/order及终端SKIP/LIMIT。
+- **完整复制计数**：首次诊断只记录cooperative copy而漏掉普通`BindingRow::clone`，不能用于宣称S6复制为0。改为仅在`test-support`中对两条成功整行复制路径采用同一hook；正常构建保留derive(Clone)。计数不增加control调用/预算预留、不吞掉执行错误，深复制独立性及不重复计数均有测试。计数bytes是reservation footprint估计，不是allocator实测内存或所有Value复制总量。
+
+`lithograph-phase22-factor-work`使用公开CREATE固定oracle、全identity tuple位图而不是首条关系ID去重，分别完整运行普通和instrumented消费，验证两者结果/计划一致及fixture不变；不把诊断耗时混入latency。S6与`7858bdb`分别添加相同的test-support-only计数hook后，Star成功整行复制33025→391、三跳33153→519、四跳98689→1031、ASP1289→206；对应受控footprint总量分别为309434224→779870B、523478000→2578654B、1985586160→7394526B、17033000→811144B。Boolean/null predicate转换尝试也减少，但不等于所有表达式求值次数。小Star的总query resource peak约190877B→303160B，保留这一开销而不声称所有峰值降低。八次完整bag、enabled/disabled结果和plan、源/可执行pin、资源释放及1GiB/no-swap运行通过，精确计数与SHA见`evidence/nexum-s7-copy02-runtime/`。
+
+#### 当前候选验证边界
+
+实现候选为1049输入`c1d193513ac3b1d21eaee0dfeeee663d4b5b7ae18c3e920e66ccdfc5935607e3`：Core原600项通过，新增聚合测试因复用已有3节点fixture却错误期望空图而失败。随后只更正该测试为实际count=3并加入独立Missing-label空输入，冻结为`ca8137ef03a2eeed608b934825f5d13177354d2f2c09ffe116119061b96363bc`，生产编译代码无变更；该新增测试实际复验通过，不抹去旧red。110项关联/Extension测试通过，其中ASP5、Factor22、SIP11、fallback11、Join Order4、TopK14、Join Semantics16、Extension27。完整workspace Clippy和本机format/production complexity/duplication/doc链路/diff通过。
+
+普通release扩展`7ff6bf1ded6becfa6a0d13a3d50f3efdbfe2f143abbc3bb105fdd992f8b066ec`及同源checkpoint工具`f445707c4e29b6f06bfb18c67b1a668a116a77f7e7cd59dd74e0890595c224a6`通过扩展SQL gate，包括上述新部分消费正反例、原32768/256完整bag、PROFILE、权限、取消、staged/abort/history和integrity，RSS86470656B、OOM0、TEMP为空。该普通release与最终测试修正候选仅cfg(test)数据预期不同。当前尚需最终完整CI/coverage、新源码受影响性能复验及S7收口；S7/Phase22仍为`in_progress`，S8及G01–G06未完成，未发布或部署。

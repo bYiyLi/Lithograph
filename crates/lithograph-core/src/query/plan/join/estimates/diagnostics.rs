@@ -83,6 +83,7 @@ fn estimates_for_prepared(
     };
     let mut budget = PlanningBudget::default();
     let scope = JoinClauseScope {
+        complete_consumer: true,
         clause_start: plan.clause_start,
         snapshot_identity: plan.snapshot_identity,
         incoming: &[],

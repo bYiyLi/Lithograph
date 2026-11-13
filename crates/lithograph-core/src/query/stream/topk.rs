@@ -114,7 +114,6 @@ fn index_proves_source(
 
 fn source(prepared: &PreparedQuery) -> Option<Source<'_>> {
     if prepared.distinct
-        || prepared.aggregate
         || prepared.candidate.is_some()
         || prepared.write.is_some()
         || prepared.schema.is_some()

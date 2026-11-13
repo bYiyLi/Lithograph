@@ -26,7 +26,8 @@ pub(crate) struct LoadCsvContext {
     pub(crate) line: Option<i64>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
+#[cfg_attr(not(feature = "test-support"), derive(Clone))]
 pub(crate) struct BindingRow {
     pub values: BTreeMap<String, BindingValue>,
     pub used_relationships: BTreeSet<i64>,

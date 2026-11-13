@@ -19,6 +19,9 @@ pub(crate) fn install(
     estimates: &join::estimates::JoinEstimates,
     budget: &mut PlanningBudget,
 ) -> QueryResult<()> {
+    if !scope.complete_consumer {
+        return Ok(());
+    }
     let Some(original) = step.join.as_ref() else {
         return Ok(());
     };

@@ -11,6 +11,9 @@ pub mod support;
 
 use support::{ArmRow, StarFixture, actual_operator, assert_bag, params, read};
 
+#[path = "phase22_asp/limits.rs"]
+mod limits;
+
 const ASP: &str = "MATCH (h:Hub)-[r:A]->(a:LeafA),(h)-[s:B]->(b:LeafB),(d:Build) \
     WHERE h.k=$key AND a=d \
     RETURN elementId(h),elementId(r),elementId(a),elementId(s),elementId(b),elementId(d)";

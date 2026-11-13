@@ -77,11 +77,34 @@ pub(crate) fn clone_binding_row_unreserved_controlled(
     }
     copied.load_csv_context = clone_load_csv_context_controlled(&row.load_csv_context, control)?;
     #[cfg(feature = "test-support")]
+    record_row_copy(&copied);
+    Ok(copied)
+}
+
+// The ordinary matcher uses BindingRow::clone, not the cooperative copy
+// helper. In diagnostic builds retain derive(Clone)'s exact field order and
+// behavior, then account only a successfully completed whole-row copy.
+// Normal builds keep derive(Clone) and have no diagnostic hook.
+#[cfg(feature = "test-support")]
+impl Clone for BindingRow {
+    fn clone(&self) -> Self {
+        let copied = Self {
+            values: self.values.clone(),
+            used_relationships: self.used_relationships.clone(),
+            order: self.order.clone(),
+            load_csv_context: self.load_csv_context.clone(),
+        };
+        record_row_copy(&copied);
+        copied
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn record_row_copy(copied: &BindingRow) {
     if crate::performance::is_enabled() {
-        let bytes = super::binding_row_bytes_controlled(&copied, None).unwrap_or(u64::MAX);
+        let bytes = super::binding_row_bytes_controlled(copied, None).unwrap_or(u64::MAX);
         crate::performance::record_binding_row_clone(bytes);
     }
-    Ok(copied)
 }
 
 #[cfg(all(test, feature = "test-support"))]

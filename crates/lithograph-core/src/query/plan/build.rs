@@ -6,7 +6,6 @@ pub(super) fn build_logical(
     skipped: bool,
     limited: bool,
     distinct: bool,
-    aggregate: bool,
 ) -> (LogicalPlan, Vec<ProfileBinding>) {
     let mut operators = Vec::new();
     let mut sites = Vec::new();
@@ -17,9 +16,6 @@ pub(super) fn build_logical(
         }
         append_pattern_operators_with_sites(step, &mut bound, &mut operators, &mut sites);
         append_match_residual(step, &mut operators, &mut sites);
-    }
-    if aggregate {
-        operators.push(LogicalOperator::Aggregate);
     }
     if distinct {
         operators.push(LogicalOperator::Distinct);

@@ -20,7 +20,6 @@ pub(super) fn prepare_read_query(
         limit,
         distinct,
     } = lower_projection(return_clause, query, &context.params)?;
-    let aggregate = validate_aggregation(&projections)?;
     let resolved_state = resolve_planning_state(connection, &context, control)?;
     let snapshot = storage::Snapshot::from_resolved_state(connection, &resolved_state);
     resolved_state.query_schema_state().ok_or_else(|| {
@@ -39,6 +38,7 @@ pub(super) fn prepare_read_query(
     for (step, clause) in matches.iter_mut().zip(clauses) {
         let declared = crate::query::completeness::infer_clause_columns(clause, &incoming, query)?;
         let scope = join::JoinClauseScope {
+            complete_consumer: limit.is_none() || !order.is_empty(),
             clause_start: clause.span.start,
             snapshot_identity: snapshot.cache_identity(),
             incoming: &incoming,
@@ -66,7 +66,6 @@ pub(super) fn prepare_read_query(
         skip > 0,
         limit.is_some(),
         distinct,
-        aggregate,
     );
     let physical = build_physical(&logical, &matches, !order.is_empty());
     let mut prepared = PreparedQuery {
@@ -86,7 +85,6 @@ pub(super) fn prepare_read_query(
         skip,
         limit,
         distinct,
-        aggregate,
         params: context.params,
         mode: context.mode,
         write: None,

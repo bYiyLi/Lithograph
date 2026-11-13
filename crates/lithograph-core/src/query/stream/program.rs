@@ -1041,4 +1041,3 @@ pub(crate) use builder::supports_read_stream;
 pub(crate) use builder::{
     build_program_prefix_stream, build_program_spilled_suffix_stream, build_program_suffix_stream,
 };
-pub(crate) use factor_consumer::group_counts;

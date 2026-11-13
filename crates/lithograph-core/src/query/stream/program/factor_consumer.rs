@@ -12,7 +12,6 @@ mod scratch;
 pub(super) use aggregate::{
     FactorAggregateSource, admit_aggregate, compile_aggregate, supports_aggregate,
 };
-pub(crate) use count::group_counts;
 
 fn evaluation_slot(packet: &GroupPacket, metrics: &QueryMetrics) -> Option<usize> {
     packet

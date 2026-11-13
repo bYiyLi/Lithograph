@@ -30,6 +30,9 @@ pub(crate) const DYNAMIC_FILTER_INITIAL_PAGE: usize = 1;
 pub(crate) struct PartSet(pub(crate) u128);
 
 pub(crate) struct JoinClauseScope<'a> {
+    // Factor costing currently compares complete clause consumption. A
+    // potentially early-stopping consumer keeps the existing streaming plan.
+    pub(crate) complete_consumer: bool,
     pub(crate) clause_start: usize,
     pub(crate) snapshot_identity: HashId,
     pub(crate) incoming: &'a [String],

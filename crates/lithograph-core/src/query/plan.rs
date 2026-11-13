@@ -9,7 +9,7 @@ use crate::cypher::{
 use crate::storage::{self, HashId, LabelId, RelationshipTypeId, StandardIndexKind};
 
 use super::completeness::PreparedProgram;
-use super::expression::{Expr, compile_expression, is_count, surface_expressions};
+use super::expression::{Expr, compile_expression, surface_expressions};
 use super::graph::{ResolvedGraphView, resolve_commit};
 use super::schema::PreparedSchema;
 use super::stats::PlannerStatistics;
@@ -393,7 +393,6 @@ pub struct PreparedQuery {
     pub(crate) skip: usize,
     pub(crate) limit: Option<usize>,
     pub(crate) distinct: bool,
-    pub(crate) aggregate: bool,
     pub(crate) params: BTreeMap<String, Value>,
     pub(crate) mode: ExecutionMode,
     pub(crate) write: Option<super::mutation::PreparedWrite>,
@@ -694,7 +693,6 @@ fn prepare_write_query(
         skip: 0,
         limit: None,
         distinct: false,
-        aggregate: false,
         params: context.params,
         mode: context.mode,
         write: Some(write),
@@ -815,7 +813,6 @@ fn empty_prepared_query(
         skip: 0,
         limit: None,
         distinct: false,
-        aggregate: false,
         params,
         mode,
         write: None,
@@ -922,22 +919,6 @@ fn lower_clause<'a>(
         }
     }
     Ok(())
-}
-
-fn validate_aggregation(projections: &[Projection]) -> QueryResult<bool> {
-    let aggregate = projections
-        .iter()
-        .any(|projection| is_count(&projection.expression));
-    if aggregate
-        && projections
-            .iter()
-            .any(|projection| !is_count(&projection.expression))
-    {
-        return Err(QueryError::semantic(
-            "Phase 04 basic aggregation supports global count projections; grouped aggregation is owned by Phase 06",
-        ));
-    }
-    Ok(aggregate)
 }
 
 fn node_needs_scan_statistics(node: &NodeSpec) -> bool {

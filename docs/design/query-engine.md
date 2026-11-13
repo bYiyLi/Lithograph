@@ -170,6 +170,10 @@ Planner 可以把 filter、projection、typed comparison 与部分 index seek �
 5. **Factorized Execution / ASP-Join**：对于多对多连接、重复共享前缀或 Star/Path 中间值，将可证明独立的分支保留为带 multiplicity 的内部 factorized group，并让相邻过滤、Join、适用聚合按组执行；只在必须输出、排序、含相关表达式、写 barrier 或要求扁平行的边界延迟展开。公开 `lithograph_rows()` 保持严格的一行一结果、重复行及 deterministic order/tie 契约；所需 buffer、乘积计数溢出、取消与 TEMP 均受预算控制。不整体重写已经可用的 flat row executor。
 6. **WCOJ / 多路交集**：对具有可用 typed/directed 邻接访问的三角形、环形和更一般的多边循环模式，在计划中选择多路有序候选交集（Generic Join / Leapfrog 风格），只在满足适用性和成本证明时替代可能爆炸的连续二元 Join；其它 Pattern 使用已经验证的二元 Join/Expand。节点重复、parallel Relationship identity、Path 与 per-MATCH relationship uniqueness、0/1/多结果、方向与类型、Graph View、历史/staged state 必须与普通 Cypher 完全一致。不声称任意 Cypher 查询都达到理论 worst-case optimal 上界。
 
+Factorized / ASP 的当前成本比较覆盖完整 MATCH 消费，不把全量收益用于只取前缀的消费者。对于会提前停止的 `LIMIT`，在尚未建立部分消费成本证明时保留原有流式 Join，不先累积整组再仅返回少量结果。在已支持成本规划的普通单一读查询中，位于 LIMIT 之前的真实 Sort 或 Aggregate 仍需要完整输入，可以使用原全量成本模型；已有 eager projection fallback 不因本规则新增成本规划或分组聚合能力。复杂 WITH/RETURN 管线若不能证明这一消费边界，则保守保留旧计划。不新增公开 hint 或阈值，也不改变 LIMIT、错误、取消与写入副作用语义。
+
+聚合查询由统一的 Program/ProgramStream 聚合消费者执行，包括分组 COUNT/MIN/MAX 与不适用时的逐行回退；不再维护普通 read cursor 的平行 count-only 聚合实现。普通非聚合投影仍由其既有流式路径处理。
+
 Factorized 计划中的 `Flatten` 表示可按实际输入执行的转换边界。相邻的安全分组过滤、投影或聚合可以直接消费 group；没有收到需要展开的 group 时，该边界没有产出，PROFILE 的实际 `rows` 与 `flattenedRows` 为 `0`。只有真正枚举并交付的 tuple 才计入展开数，不按预计乘积或未执行的分支填充计数；不能为了显示计划而提前展开或再建立一套聚合准入规则。
 
 Hash 的当前执行空间沿用上述左深计划：一次 build 只扫描与已完成 prefix 无关的单个 Pattern Part，probe 消费 prefix；交换两侧通过真实的 Part 顺序和方向表达，不为不可执行的 prefix build 计价。build 在首个可匹配 probe 到达后才开始，按 clause 与当前 Snapshot revision 持有，并在该 clause 的重复 incoming row、输出 batch 和写 barrier 的输入 batch 之间复用；零 outer 输入不初始化 build。不能借未来 Part 的类型或关联约束证明独立 build 的键安全。

@@ -161,7 +161,6 @@ pub struct QueryCursor {
     emitted: usize,
     ordered_topk_slot: Option<usize>,
     explain_emitted: bool,
-    aggregate_state: Option<Vec<u64>>,
     batch_memory: Option<MemoryReservation>,
     barrier: BarrierState,
     spill_connection: Option<Connection>,
@@ -277,7 +276,6 @@ impl QueryCursor {
             emitted: 0,
             ordered_topk_slot,
             explain_emitted: false,
-            aggregate_state: None,
             batch_memory: None,
             barrier,
             spill_connection: None,
@@ -387,7 +385,6 @@ impl QueryCursor {
         self.program_stream = None;
         self.transaction_stream = None;
         self.transaction_rows = None;
-        self.aggregate_state = None;
         self.metrics = QueryMetrics::default();
         self.batch_memory = None;
     }
@@ -429,9 +426,6 @@ impl QueryCursor {
         let resources = self.prepared.resources.clone();
         let control = ExecutionControl::new(&resources, is_interrupted);
         let snapshot = prepared_snapshot(connection, &self.prepared, &control)?;
-        if self.prepared.aggregate {
-            return self.next_aggregate(&snapshot, is_interrupted);
-        }
         match self.barrier {
             BarrierState::Direct => self.next_direct(&snapshot, max_rows, is_interrupted),
             BarrierState::Pending => {

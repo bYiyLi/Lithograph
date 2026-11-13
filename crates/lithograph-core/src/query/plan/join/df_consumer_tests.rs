@@ -520,7 +520,6 @@ fn refresh_selected_candidate(prepared: &mut PreparedQuery) {
         prepared.skip > 0,
         prepared.limit.is_some(),
         prepared.distinct,
-        prepared.aggregate,
     );
     prepared.physical = build_physical(&logical, &prepared.matches, !prepared.order.is_empty());
     prepared.logical = logical;
