@@ -2,9 +2,9 @@
 
 # Lithograph 开发者手册
 
-本手册面向将 Lithograph 嵌入自己产品的开发者，适用版本为 **v0.3.4**。从安装、图查询到版本管理、搜索与维护，公开能力的使用说明均可在本手册内查到。旧版本行为见对应 [Release Notes](../releases/) 和 tag；本版本变化见 [v0.3.4 发布说明](../releases/v0.3.4.md)。
+本手册面向将 Lithograph 嵌入自己产品的开发者，适用版本为 **v0.3.6**。从安装、图查询到版本管理、搜索与维护，公开能力的使用说明均可在本手册内查到。旧版本行为见对应 [Release Notes](../releases/) 和 tag；本版本变化见 [v0.3.6发布说明](../releases/v0.3.6.md)。
 
-v0.3.4 新增 Graph View 多 Label OR 筛选 `requireAnyLabels`，并修复 TLS 依赖安全公告。v0.3.3 起已有 `memoryLimitBytes` 和长表达式取消改进；v0.3.3 及更早发行版不支持新的 OR 字段。实际发布状态与制品验收见 [Phase 20](../development/phases/20-graph-view-label-union.md)。
+v0.3.6新增查询成本规划、有界Join/流式执行和自动checkpoint等性能改进，继承v0.3.5的安全谓词下推与Node Element ID Seek、v0.3.4的Graph View `requireAnyLabels`及既有访问控制。公开SQL、Cypher Profile、storage format 3和Provider SPI V1保持；章节中标明v0.3.4等版本的功能起点和历史兼容边界继续有效。实际发布及制品验收见[Phase 22发布记录](../development/phases/22-high-performance-query-optimizer.md#v036-release-delivery)。
 
 <a id="v030-基线"></a>
 
@@ -69,6 +69,6 @@ Lithograph 是嵌入式 SQLite extension。一个 SQLite connection 的 `main` d
 
 [Examples](examples/README.md) 包含 Python quickstart、完整版本工作流、SQL 事务、streaming 和 SQLite C host 示例，并说明验证方式与环境要求。接口细节和当前限制分别见 [Reference](../reference/README.md) 与 [Known Issues](../reference/known-issues.md)。
 
-v0.3.4 tag 的固定入口为 [产品手册](https://github.com/bYiyLi/Lithograph/blob/v0.3.4/docs/guide/README.md)、[Cypher 手册](https://github.com/bYiyLi/Lithograph/blob/v0.3.4/docs/cypher/index.md)、[接口参考](https://github.com/bYiyLi/Lithograph/blob/v0.3.4/docs/reference/README.md)。固定 tag 的正文与二进制版本对应；主分支代表当前开发内容，实际 tag/发布进度由 [Phase 20](https://github.com/bYiyLi/Lithograph/blob/main/docs/development/phases/20-graph-view-label-union.md) 维护。
+v0.3.6 tag的固定入口为 [产品手册](https://github.com/bYiyLi/Lithograph/blob/v0.3.6/docs/guide/README.md)、[Cypher 手册](https://github.com/bYiyLi/Lithograph/blob/v0.3.6/docs/cypher/index.md)、[接口参考](https://github.com/bYiyLi/Lithograph/blob/v0.3.6/docs/reference/README.md)。固定 tag 的正文与二进制版本对应；主分支代表当前开发内容，实际 tag/发布进度由 [Phase 22](https://github.com/bYiyLi/Lithograph/blob/main/docs/development/phases/22-high-performance-query-optimizer.md#v036-release-delivery) 维护。
 
 v0.3.0 起应用执行统一 SQL-only，Provider 自己维护 persistent embedding cache。v0.2.0/v0.2.1 的 Native query ABI、专用 tx_execute 和 format 4 属于历史版本；切换旧数据库前阅读 [升级边界](installation.md)。许可见 [LICENSE](../../LICENSE) 与 [Commercial License](../../COMMERCIAL-LICENSE.md)。

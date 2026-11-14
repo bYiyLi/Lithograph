@@ -4,6 +4,25 @@ Lithograph 的用户可见版本变化记录在此文件。版本遵循 Semantic
 
 ## Unreleased
 
+## 0.3.6
+
+完整变化见[发布说明](docs/releases/v0.3.6.md)，开发验收与发布证据由[Phase 22](docs/development/phases/22-high-performance-query-optimizer.md#v036-release-delivery)维护。
+
+### Improved
+
+- 交付有界Planner/Executor、Tiered Checkpoint/Snapshot、Versioned Statistics与Relationship Identity Seek，减少历史重放和无效访问。
+- 成本规划可选择DPhyp/Greedy、Index Nested Loop、Hash/Grace、SIP/Dynamic Filter/TopK、Factorized/ASP-Join与WCOJ；不适用时正确回退。
+- 修复混合算法的预算、PROFILE与资源生命周期问题，以及HNSW同分剪枝断图导致ready反复重建的问题。
+
+### Compatibility and validation
+
+- SQL接口、`CY25-2026.08`、storage format 3、既有Commit identity与Provider SPI V1保持；没有新增Cypher dialect或公开优化hint。
+- 八Stage的46项局部和6项全局开发验收通过，含原生Linux1GiB/no-swap、10M/100M、15分钟混合、NR13及三域Search。正式版本CI、六平台包和下载回验按上述发布记录单独核对。
+
+## 0.3.5
+
+已正式发布，完整变化见[发布说明](docs/releases/v0.3.5.md)。交付Phase 21的Read/Write MATCH安全谓词提前过滤与版本化Node Element ID Seek，保持原SQL接口、Cypher Profile、storage format及Provider SPI。
+
 ## 0.3.4
 
 完整变化见 [发布说明](docs/releases/v0.3.4.md)，开发和发布验收分别由 [Phase 20](docs/development/phases/20-graph-view-label-union.md) 维护。

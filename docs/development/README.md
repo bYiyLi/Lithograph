@@ -89,7 +89,7 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 
 性能优化统一由 **[Phase 22：高性能查询优化器与可预算执行引擎](phases/22-high-performance-query-optimizer.md)** 交付，状态 `done`（2026-11-14）。S22.1–S22.8全部实现，46项局部及6项统一Acceptance均已通过：Planner/Executor预算、Tiered Checkpoint/Snapshot、Versioned Statistics/Identity Seek、DPhyp/Greedy/Index Nested Loop、Hash/Grace、SIP/Dynamic Filter/TopK、Factorized/ASP-Join与WCOJ。最终普通扩展的完整结果、1GiB/no-swap、15分钟mixed、10M/100M原规模门槛、NR13、三域大Search及条件复测、跨Stage Review和文档/diff均已闭环；具体采样、原失败及限制由[唯一最终验收记录](phases/22-high-performance-query-optimizer.md#phase22-final-acceptance)持有，不创建新的Phase接收未完成算法。正式行为见[Query Engine](../design/query-engine.md#optimizer-and-budgeted-executor)、[Storage](../design/storage.md#tiered-checkpoint-policy)与[Runtime](../design/runtime.md#optimizer-join-stress)。
 
-完整实现与修复已实际提交并推送到`codex/phase22-query-optimizer-ci`，生产实现身份为[`798a9bb`](https://github.com/bYiyLi/Lithograph/commit/798a9bb347e84f709fa1efdaaadfb1b2dd22021d)，该精确提交的[CI四项](https://github.com/bYiyLi/Lithograph/actions/runs/43468307833)及[六平台Release Matrix](https://github.com/bYiyLi/Lithograph/actions/runs/43468307838)全部成功。随后验收文档提交与生产CI分开记录，597个编译输入保持一致。主工作区保留任务修改；当前`v0.3.5`仍是Phase21源码Tag，Phase22未合并main、打新Tag、发布或部署。
+完整实现与修复已实际提交并推送到`codex/phase22-query-optimizer-ci`，生产实现身份为[`798a9bb`](https://github.com/bYiyLi/Lithograph/commit/798a9bb347e84f709fa1efdaaadfb1b2dd22021d)，该精确提交的[CI四项](https://github.com/bYiyLi/Lithograph/actions/runs/43468307833)及[六平台Release Matrix](https://github.com/bYiyLi/Lithograph/actions/runs/43468307838)全部成功。随后仅验收文档的5c提交保持597个编译输入一致。用户进一步授权的main合并、v0.3.6版本元数据更新、新提交/Tag CI和正式资产回验见[发布记录](phases/22-high-performance-query-optimizer.md#v036-release-delivery)，不把开发阶段CI当作新版本的执行结果；原主工作区未提交内容保留。
 
 ## 4. 路线总览
 

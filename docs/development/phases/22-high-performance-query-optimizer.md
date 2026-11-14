@@ -2,7 +2,7 @@
 
 **状态：`done`（2026-11-14，S22.1–S22.8及A22-G01–G06全部验收通过）。** 本项目只有**一个 Phase 22、八个内部 Stage**，全部算法及46项局部、6项全局Acceptance均已闭环，最终状态见[全Phase验收](#phase22-final-acceptance)。各轮真实证据及原失败保留于第21–26节，S22.5最终记录见[第24.9节](#stage-s22-5-acceptance)，S22.6见[第25.7节](#stage-s22-6-acceptance)，S22.7见[第25.11节](#stage-s22-7-acceptance)，S22.8见[第26.28节](#stage-s22-8-acceptance)。历史章节的“待测/未完成”描述各自当时状态，不覆盖最终验收；完成不表示合并、Release或部署。
 
-**源码与交付身份**：pre-Phase22基线为`main`/`v0.3.5`的`3f1f31e48668b8b3836f944f1f7466db5804ce96`，Phase21已包含其中。主工作区保留任务修改；完整实现及修复已实际commit/push至独立`codex/phase22-query-optimizer-ci`分支，最终生产实现为`798a9bb347e84f709fa1efdaaadfb1b2dd22021d`，该精确SHA的CI四项及六平台Matrix全部成功（第26.26节）。最终普通native制品与该提交597个保守编译输入逐项相同；后续仅验收文档状态收口，不把旧CI冒称文档新SHA的执行结果。第21–26节保留各epoch、原失败、受控停止、采样决定及修复证据。当前交付为开发分支和验收；尚未合并main、打新Tag、发布或部署。
+**源码与交付身份**：pre-Phase22基线为`main`/`v0.3.5`的`3f1f31e48668b8b3836f944f1f7466db5804ce96`，Phase21已包含其中。主工作区保留任务修改；完整实现及修复已实际commit/push至独立`codex/phase22-query-optimizer-ci`分支，最终生产实现为`798a9bb347e84f709fa1efdaaadfb1b2dd22021d`，该精确SHA的CI四项及六平台Matrix全部成功（第26.26节）。最终普通native制品与该提交597个保守编译输入逐项相同；后续仅验收文档状态收口，不把旧CI冒称文档新SHA的执行结果。第21–26节保留各epoch、原失败、受控停止、采样决定及修复证据。上述为Phase开发验收身份；随后用户授权的main合并与v0.3.6发布、精确CI及正式制品回验由[第27节](#v036-release-delivery)另行记录。
 
 ## 1. 最终目标、权威设计和边界
 
@@ -1654,3 +1654,18 @@ high-middle定向复测已完成：两端各一个connection，rows/scalar各100
 环境清理已执行：Mac无Colima/Lima/QEMU安装及相关VM进程，个人AGENTS保留禁止本地VM规则；本项目Mac target内没有rlib/rmeta/动态库/测试DB/core。19个未压缩源码归档在逐项验证gzip副本与原字节摘要一致后删除，释放255191040B。原生远端7个不再使用的Rust target目录已清除，文件系统可用空间增加13558145024B（约12.63GiB）；必要旧/新普通制品hash、frozen source、失败raw、recipe及唯一大fixture保留，两个main DB的inode/大小/mtime与普通制品hash前后不变，零活动Lithograph测量unit。清理报告`work/final-cleanup29/complete.json`及本地`final-review28/local-archive-cleanup.json`保留。
 
 交付为已修改、已验证、已实际提交并推送的`codex/phase22-query-optimizer-ci`开发分支；生产实现与全绿CI身份为798。主工作区仍保留main上的任务变更，不执行reset/clean/stash或覆盖其它工作。此次仅验收文档的最终提交状态以Git实际记录为准；未合并main、创建新Tag、Release、部署或执行KG OS集成。
+
+
+<a id="v036-release-delivery"></a>
+
+## 27. v0.3.6主分支合并与正式发布（2026-11-14）
+
+用户已在Phase验收后明确要求合并main并发布新版本。远端main核对为v0.3.5/`3f1f31e`，开发分支为`5c0003b`，可快进；现有latest Release为已正式发布的v0.3.5。使用隔离`codex/release-v0.3.6` worktree准备，原主工作区的未提交内容保持，不执行reset/clean/stash。
+
+### 27.1 版本准备与发布门禁
+
+v0.3.6为兼容补丁版：更新workspace六个package版本、两个内部依赖pin及直接Core依赖pin，保持外部lock package与算法Rust源码不变；新增发布说明、Changelog，并同步README和安装/手册版本入口。`CY25-2026.08`、storage format 3、Commit identity、SQL surface与Provider SPI V1保持。Phase22的压力证据按算法源码继承；版本元数据变化后的`--locked`构建、完整CI、六平台制品与实际version输出必须由新提交重新验证，不能借798的CI称为v0.3.6已通过。
+
+发布顺序为：审阅版本diff和静态一致性 → 快进合并/推送main → 等待精确main提交的完整CI与六平台Matrix → 在同一已验提交创建v0.3.6 Tag → 等待该Tag的CI、六平台矩阵和发布job → 下载正式六包与SHA256SUMS，核对VERSION、主扩展/Provider、许可证/NOTICE，并在原生Linux回验实际发布包load/init/read/write。全程不在Mac构建或使用本地VM。
+
+此节记录的是发布准备；合并、Tag、Release及下载回验在相应动作真实成功后另记，不能以本段计划代替结果。正式外部状态以[GitHub Release](https://github.com/bYiyLi/Lithograph/releases/tag/v0.3.6)为准。
