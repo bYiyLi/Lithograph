@@ -1706,7 +1706,7 @@ Tag CI成功后，自动发布job仍停留在`Require successful CI for this exa
 
 <a id="v037-full-recovery"></a>
 
-## 28. v0.3.7容量耗尽异常恢复补丁（实施中）
+## 28. v0.3.7容量耗尽异常恢复补丁（已交付，2026-11-14）
 
 用户批准修复v0.3.6主库页数配额失败的错误覆盖与误隔离，并选择main和Tag各一轮完整CI/六平台门禁，发布后回到KG OS升级及补强断言。源码从`fc56b7f`隔离worktree开始；原main工作区未提交内容保留。
 
@@ -1716,4 +1716,29 @@ Tag CI成功后，自动发布job仍停留在`Require successful CI for this exa
 
 第一轮原生候选构建已完成，实际compiler artifact报告确认主扩展和Provider均为0.3.7。新增完整C事务smoke在SQLite 3.46.1、1GiB/no-swap下通过：DELETE/WAL × 五类边界 × 三轮，共30次FULL与30次解除配额后的同输入成功对照；无部分Node/history、无残留显式事务，integrity与重开检查通过。cgroup峰值262709248B，OOM各项0，TEMP为空，owned unit/cgroup/PID已回收。Core全部651项单元测试通过，包含新增checkpoint与version-read真实pager失败用例。
 
-首轮clippy发现新增test module位置触发`items_after_test_module`，已将其移到文件末尾，不添加allow或放宽规则；原始失败保留。重验已通过fmt、移动后的真实pager用例、workspace全target的clippy `-D warnings`及C复杂度；Rust复杂度与重复率门禁通过，重复行0.99%，未放宽阈值。原有SQL surface、memory预算、rollback、lifecycle、cancel和checkpoint并发/真实清理失败回归均通过，运行用1GiB/no-swap，编译用3GiB/no-swap。实际0.3.7制品生成172条函数签名和38项Procedure，公开文档85页及本次其余Markdown链接、anchor、空白检查通过。后续完整CI/Tag/Release尚待执行。证据目录为本地`target/v037-full-recovery-evidence/`与远端`work/v037-full-recovery/`。
+首轮clippy发现新增test module位置触发`items_after_test_module`，已将其移到文件末尾，不添加allow或放宽规则；原始失败保留。重验已通过fmt、移动后的真实pager用例、workspace全target的clippy `-D warnings`及C复杂度；Rust复杂度与重复率门禁通过，重复行0.99%，未放宽阈值。原有SQL surface、memory预算、rollback、lifecycle、cancel和checkpoint并发/真实清理失败回归均通过，运行用1GiB/no-swap，编译用3GiB/no-swap。实际0.3.7制品生成172条函数签名和38项Procedure，公开文档85页及本次其余Markdown链接、anchor、空白检查通过。此为发布前的本地验证记录，完整交付结果见下文。证据目录为本地`target/v037-full-recovery-evidence/`与远端`work/v037-full-recovery/`。
+
+### 28.1 精确源码、双轮CI与正式发布
+
+生产修复及0.3.7版本准备已实际提交并推送到main，源码Commit为`b4da549fc98555188a391358e0f000d94d2fd544`；注解Tag `v0.3.7`的object为`089cc4d503800d796f7c0821562d37fd54b90916`，peeled Commit与上述源码一致。原主工作区内容保持。
+
+| 门禁 | 实际结果 |
+| --- | --- |
+| [main CI 43572948546](https://github.com/bYiyLi/Lithograph/actions/runs/43572948546) | quality、Linux/macOS canonical与Windows load/ABI四项全部成功。 |
+| [main Matrix 43572948527](https://github.com/bYiyLi/Lithograph/actions/runs/43572948527) | fixture及Linux/macOS/Windows x64/arm64六平台全部成功，workflow成功；main发布job按规则跳过。 |
+| [Tag CI 43576117446](https://github.com/bYiyLi/Lithograph/actions/runs/43576117446) | 同一源码、同一Tag的四项全部成功。 |
+| [Tag Matrix 43576117383](https://github.com/bYiyLi/Lithograph/actions/runs/43576117383) | fixture、六平台及自动发布job共八项全部成功，整个workflow成功。 |
+
+[v0.3.7 Release](https://github.com/bYiyLi/Lithograph/releases/tag/v0.3.7)于**2026-11-14T09:00:31Z**正式发布，Release ID `445162514`，实际核对为latest、非draft、非prerelease，共六个平台包及`SHA256SUMS`七项资产。本轮自动发布正常完成，没有手动替换制品或修改发布workflow；v0.3.6等待异常的历史记录不因此改写。
+
+正式下载的七项资产与对应Tag CI制品逐字节一致，GitHub API的七项SHA256 digest及大小均匹配。六包的七个平铺文件、VERSION、主扩展/Provider架构、README与许可证/NOTICE均与Tag源码相符。发布说明使用固定Tag手册链接及维护于main的验收链接。
+
+### 28.2 正式制品回验与下游闭环
+
+正式Linux x64包在原生Linux **1GiB/no-swap**下完成主扩展/Provider双加载、ABI/SPI、Graph View/rows/explicit rollback、读写/历史pin及128同分向量ready/PROFILE复用回归。新增容量smoke在实际确认的DELETE/WAL模式下，再次完成五类边界各三轮，共30次FULL及30次同连接、同输入解除配额成功对照；`RESOURCE_ERROR`/13、无部分Node/history、无残留显式事务、integrity和重开均通过。Python/C运行时为SQLite3.46.1，独立CLI为3.53.4；扩展0.3.7、Profile和format3均正确。峰值**288161792B**，OOM各项0，TEMP为空，owned unit/cgroup/PID全部回收，制品和验证输入前后摘要保持。
+
+额外真实authorizer清理失败验证仍得到完整回滚、`INTERNAL_ERROR`与连接quarantine；tokenizer constructor注入NOMEM的scalar/rows保留SQLite primary7及canonical文本、无Schema提交且健康连接可复用。最初Python将NOMEM转换为`MemoryError`的验证器失败保留，随后C API验证直接读取原生code；没有为通过而放宽产品处理或门禁。
+
+下游KG OS工作树已将六平台SHA、Host预期、Dockerfile固定值、Cypher inventory、SDK说明及MCP手册同步到正式0.3.7。实际Host/Runtime/Runtimeprofile/测试辅助/Kernel/Daemon/kgosd七包集成通过；Phase38的Lithograph/Kernel/Observability Race三轮通过且无skip，三轮配额失败均为结构化`RESOURCE_ERROR`/SQLite13并保留native13 cause，原有无半提交与同输入恢复对照通过。正式Mac运行时SQLite3.51.0的172条函数签名、169个名称及38项Procedure与清单一致，31方法/76类型/134页文档和依赖检查在Node24.15.0/pnpm10.34.5上通过。Linux与Mac预验二进制均与正式包逐字节一致，bookworm/glibc2.36的动态依赖检查保持适用。KG OS原有并行改动保留，本轮未提交/推送KG OS、未发布或部署其镜像；Phase38本身的公开CI与其余Docker/极端故障门禁继续独立，未标记done。
+
+完整本地证据位于`target/v037-full-recovery-evidence/`，总验收`release-acceptance.json`、正式包`verified-published-packages.json`、原生`native-published-*`及下游`kgos-official-*`分别保留，未提交原始日志或归档。确认全部owned unit结束且候选二进制摘要保留后，清除本次独占Rust target目录（分配字节1181220864）；原始source、报告与必要制品保留。Mac未使用虚拟机；未重跑Phase22大规模性能语料，也没有把页数配额模拟扩大为物理介质故障验收。
