@@ -1669,3 +1669,9 @@ v0.3.6为兼容补丁版：更新workspace六个package版本、两个内部依�
 发布顺序为：审阅版本diff和静态一致性 → 快进合并/推送main → 等待精确main提交的完整CI与六平台Matrix → 在同一已验提交创建v0.3.6 Tag → 等待该Tag的CI、六平台矩阵和发布job → 下载正式六包与SHA256SUMS，核对VERSION、主扩展/Provider、许可证/NOTICE，并在原生Linux回验实际发布包load/init/read/write。全程不在Mac构建或使用本地VM。
 
 此节记录的是发布准备；合并、Tag、Release及下载回验在相应动作真实成功后另记，不能以本段计划代替结果。正式外部状态以[GitHub Release](https://github.com/bYiyLi/Lithograph/releases/tag/v0.3.6)为准。
+
+### 27.2 首轮主分支门禁与生成文档修正
+
+`ebacb34`已快进推送main。[首轮CI](https://github.com/bYiyLi/Lithograph/actions/runs/43535119400)的quality和Windows canonical通过，Linux、macOS在参考文档生成检查失败：`functions.md`和`procedure-inventory.md`的适用版本仍为v0.3.5；此前各自执行到的Rust、SQL、Provider检查没有失败。[首轮Release Matrix](https://github.com/bYiyLi/Lithograph/actions/runs/43535119469)六平台全部通过。本次失败保留，未创建Tag或发布。
+
+修正仅更新两份生成索引的版本行。下载该提交Matrix实际生成的Linux x64制品，在原生Linux的1GiB/no-swap独立cgroup运行真实`generate_reference.py`及`--check`：172条Function签名、38个Procedure均通过，生成前后35个输入文件摘要保持一致。owner通过且unit/cgroup/PID全部回收；本地84份手册的链接、锚点与coverage检查及`git diff --check`通过。证据为`target/release-v0.3.6-evidence/reference-fix-native.json`及`reference-fix-native-owner.json`。后续完整CI和Matrix必须绑定修正后的新提交，不能将本轮失败报告为通过。
