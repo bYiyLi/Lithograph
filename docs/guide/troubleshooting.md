@@ -71,6 +71,8 @@
 
 `RESOURCE_ERROR`：同时查看 SQLite code；TOOBIG 表示长度或受控资源限额，磁盘/内存不足则需恢复资源。将大结果改成必要字段投影与分页；流式查询也不能绕过单行限制。v0.3.3 / Phase 19 的 `memoryLimitBytes` 预算拒绝也返回 `RESOURCE_ERROR` / `SQLITE_TOOBIG`，应核对宿主配额和中间值开销，不自动去掉限制重试，见[内存预算](../reference/execution-options.md#memory-limit)。`SQLITE_INTERRUPT` 对应 `INTERRUPTED`，按取消清理处理。
 
+v0.3.7起，磁盘/主库页数配额耗尽保留`RESOURCE_ERROR` / `SQLITE_FULL` (13)。恢复容量后，健康连接可重新begin并继续使用；caller-owned SQLite transaction可能已整体回滚，包括先前尚未提交的业务表写入。先确认事务终态与已提交状态，再决定是否重新执行。
+
 `STORAGE_ERROR` / integrity 失败：停止写入，保存原文件与脱敏复现，在隔离副本上检查并恢复有效备份。`FORMAT_TOO_NEW`：使用相容扩展，不修改格式标记。不要删除正在使用的 WAL / SHM 或只复制热库主文件后认为已经备份。
 
 <a id="reporting"></a>

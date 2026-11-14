@@ -515,9 +515,12 @@ fn rollback_failed_write_savepoint(
     savepoint: &str,
     error: &QueryError,
 ) -> QueryResult<()> {
-    if error.kind == QueryErrorKind::Interrupted && connection.is_autocommit() {
-        // SQLite may have already aborted the transaction when its own write
-        // VM returned SQLITE_INTERRUPT, closing every nested savepoint.
+    if connection.is_autocommit()
+        && (error.kind == QueryErrorKind::Interrupted
+            || error.sqlite_code == Some(rusqlite::ffi::SQLITE_FULL))
+    {
+        // SQLite can abort the complete transaction on INTERRUPT or FULL,
+        // closing every nested savepoint before this error reaches us.
         return Ok(());
     }
     rollback_write_savepoint(connection, savepoint)

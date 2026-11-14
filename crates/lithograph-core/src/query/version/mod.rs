@@ -187,9 +187,13 @@ pub(super) fn with_read_snapshot<T>(
             Ok(value)
         }
         Err(error) => {
-            connection.execute_batch(
-                "ROLLBACK TO lithograph_version_read_snapshot; RELEASE lithograph_version_read_snapshot",
-            )?;
+            if !(error.sqlite_code == Some(rusqlite::ffi::SQLITE_FULL)
+                && connection.is_autocommit())
+            {
+                connection.execute_batch(
+                    "ROLLBACK TO lithograph_version_read_snapshot; RELEASE lithograph_version_read_snapshot",
+                )?;
+            }
             Err(error)
         }
     }
@@ -1179,4 +1183,42 @@ fn decode_log_pending(
         storage::load_commit(connection, commit).map_err(map_version_error)?;
     }
     Ok(pending_children)
+}
+
+#[cfg(test)]
+mod rollback_tests {
+    use super::*;
+    use crate::query::resources::{ExecutionControl, QueryResources};
+
+    #[test]
+    fn version_read_boundary_preserves_full_after_sqlite_auto_rollback() {
+        let sqlite = SqliteConnection::open_in_memory().unwrap();
+        sqlite
+            .execute_batch("CREATE TABLE quota(value BLOB)")
+            .unwrap();
+        let pages: i64 = sqlite
+            .query_row("PRAGMA page_count", [], |row| row.get(0))
+            .unwrap();
+        sqlite
+            .execute_batch(&format!("PRAGMA max_page_count={pages}"))
+            .unwrap();
+        let resources = QueryResources::new(None);
+        let interrupted = || false;
+        let control = ExecutionControl::new(&resources, &interrupted);
+        let connection = VersionExecution::new(&sqlite, &control);
+        let error = with_read_snapshot(&connection, |_| {
+            sqlite.execute("INSERT INTO quota VALUES(?1)", [vec![7u8; 4 * 1024 * 1024]])?;
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(error.kind, QueryErrorKind::Resource);
+        assert_eq!(error.sqlite_code, Some(rusqlite::ffi::SQLITE_FULL));
+        assert!(sqlite.is_autocommit());
+        assert_eq!(
+            sqlite
+                .query_row("SELECT count(*) FROM quota", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
 }

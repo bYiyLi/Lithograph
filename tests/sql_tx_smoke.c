@@ -1,5 +1,6 @@
 #include <sqlite3.h>
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -387,6 +388,179 @@ static void check_close_cleanup(const char *database, const char *extension, sql
     require(sqlite3_close(reopened) == SQLITE_OK, "failed to close reopened database");
 }
 
+enum full_mode { FULL_SCALAR, FULL_EXPLICIT, FULL_ROWS, FULL_OUTER, FULL_COMMIT };
+
+static char *full_payload(unsigned seed) {
+    size_t size = 4u * 1024u * 1024u;
+    char *payload = malloc(size + 1);
+    require(payload != NULL, "failed to allocate quota fixture payload");
+    uint32_t state = UINT32_C(0x967ab53d) ^ seed;
+    for (size_t i = 0; i < size; ++i) {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        payload[i] = "0123456789abcdef"[state & 15u];
+    }
+    payload[size] = '\0';
+    return payload;
+}
+
+static void full_statement(
+    sqlite3 *db, const char *sql, const char *payload, int expect_full, int rows
+) {
+    sqlite3_stmt *statement = NULL;
+    require(sqlite3_prepare_v2(db, sql, -1, &statement, NULL) == SQLITE_OK,
+            "failed to prepare quota fixture statement");
+    if (payload != NULL) {
+        require(sqlite3_bind_text(statement, 1, payload, -1, SQLITE_STATIC) == SQLITE_OK,
+                "failed to bind quota fixture payload");
+    }
+    int summaries = 0;
+    int code;
+    while ((code = sqlite3_step(statement)) == SQLITE_ROW) {
+        const unsigned char *event = rows ? sqlite3_column_text(statement, 0) : NULL;
+        if (event != NULL && strcmp((const char *)event, "summary") == 0) {
+            ++summaries;
+        }
+    }
+    if (expect_full) {
+        const char *message = sqlite3_errmsg(db);
+        if ((code & 255) != SQLITE_FULL || strstr(message, "LITHOGRAPH_RESOURCE_ERROR") == NULL) {
+            fprintf(stderr, "expected RESOURCE_ERROR/SQLITE_FULL, got %d: %s\n", code, message);
+            sqlite3_finalize(statement);
+            exit(1);
+        }
+        require(summaries == 0, "capacity failure emitted a successful summary");
+        (void)sqlite3_finalize(statement);
+    } else {
+        if (code != SQLITE_DONE) {
+            fprintf(stderr, "uncapped quota control failed (%d): %s\n", code, sqlite3_errmsg(db));
+            sqlite3_finalize(statement);
+            exit(1);
+        }
+        require(!rows || summaries == 1, "successful rows control has no terminal summary");
+        require(sqlite3_finalize(statement) == SQLITE_OK, "quota control finalize failed");
+    }
+}
+
+static void full_begin(sqlite3 *db, enum full_mode mode, const char *payload) {
+    if (mode == FULL_COMMIT) {
+        full_statement(db, "SELECT lithograph_tx_begin(json_object('message',?1))",
+                       payload, 0, 0);
+        execute(db, "SELECT lithograph('CREATE (:SqlFull {value: 1}) FINISH')");
+    } else if (mode == FULL_EXPLICIT) {
+        execute(db, "SELECT lithograph_tx_begin('{}')");
+        execute(db, "SELECT lithograph('CREATE (:SqlFullPrior) FINISH')");
+    } else if (mode == FULL_OUTER) {
+        execute(db, "BEGIN IMMEDIATE");
+        execute(db, "INSERT INTO full_host_marker VALUES(1)");
+        execute(db, "SELECT lithograph('CREATE (:SqlFullPrior) FINISH')");
+    }
+}
+
+static void full_write(sqlite3 *db, enum full_mode mode, const char *payload, int expect_full) {
+    const char *sql = mode == FULL_ROWS
+        ? "SELECT event,data FROM lithograph_rows("
+          "'CREATE (n:SqlFull {value:$payload}) RETURN count(n)',"
+          "json_object('payload',?1)) ORDER BY ordinal"
+        : "SELECT lithograph('CREATE (n:SqlFull {value:$payload}) RETURN count(n)',"
+          "json_object('payload',?1))";
+    if (mode == FULL_COMMIT) {
+        full_statement(db, "SELECT lithograph_tx_commit()", NULL, expect_full, 0);
+    } else {
+        full_statement(db, sql, payload, expect_full, mode == FULL_ROWS);
+    }
+}
+
+static void full_set_limit(sqlite3 *db, sqlite3_int64 pages) {
+    char sql[96];
+    int size = snprintf(sql, sizeof(sql), "PRAGMA max_page_count=%lld", (long long)pages);
+    require(size > 0 && (size_t)size < sizeof(sql), "page limit SQL overflow");
+    require(scalar_int(db, sql) == pages, "page quota was not applied");
+}
+
+static void full_cycle(sqlite3 *db, enum full_mode mode, unsigned round) {
+    // Reclaim free pages before each independent capacity failure. Recovery
+    // below is checked on this SAME connection before the next VACUUM.
+    execute(db, "VACUUM");
+    canonical_history_snapshot before = snapshot_canonical_history(db);
+    sqlite3_int64 nodes = label_count(db, "SqlFull");
+    sqlite3_int64 prior = label_count(db, "SqlFullPrior");
+    sqlite3_int64 markers = scalar_int(db, "SELECT count(*) FROM full_host_marker");
+    sqlite3_int64 maximum = scalar_int(db, "PRAGMA max_page_count");
+    char *payload = full_payload(round + (unsigned)mode * 17u);
+    full_begin(db, mode, payload);
+    full_set_limit(db, scalar_int(db, "PRAGMA page_count"));
+    full_write(db, mode, payload, 1);
+    // SQLite may abort either the failed statement or the whole caller-owned
+    // transaction. In the former case, earlier caller writes stay provisional.
+    if (mode == FULL_OUTER && !sqlite3_get_autocommit(db)) {
+        require(label_count(db, "SqlFull") == nodes, "failed invocation left partial nodes");
+        require(label_count(db, "SqlFullPrior") == prior + 1,
+                "invocation rollback lost earlier caller graph writes");
+        require(scalar_int(db, "SELECT count(*) FROM full_host_marker") == markers + 1,
+                "invocation rollback lost earlier caller SQL writes");
+        execute(db, "ROLLBACK");
+    }
+    require(sqlite3_get_autocommit(db) != 0, "capacity failure left an owned transaction active");
+    require(label_count(db, "SqlFull") == nodes, "capacity failure published a node");
+    require(label_count(db, "SqlFullPrior") == prior, "capacity failure left staged graph writes");
+    require(scalar_int(db, "SELECT count(*) FROM full_host_marker") == markers,
+            "capacity failure left caller SQL writes");
+    require_canonical_history_unchanged(db, &before, "capacity failure changed canonical history");
+    if (mode == FULL_EXPLICIT || mode == FULL_COMMIT) {
+        require(execute_error(db, "SELECT lithograph_tx_commit()", "LITHOGRAPH_INVALID_ARGUMENT")
+                    == SQLITE_MISUSE,
+                "capacity failure left stale explicit commit state");
+        require(execute_error(db, "SELECT lithograph_tx_abort()", "LITHOGRAPH_INVALID_ARGUMENT")
+                    == SQLITE_MISUSE,
+                "capacity failure left stale explicit abort state");
+    }
+    char integrity[32];
+    scalar_text(db, "PRAGMA integrity_check", integrity, sizeof(integrity));
+    require(strcmp(integrity, "ok") == 0, "page quota left SQLite corruption");
+
+    full_set_limit(db, maximum);
+    full_begin(db, mode, payload);
+    full_write(db, mode, payload, 0);
+    if (mode == FULL_EXPLICIT) {
+        execute(db, "SELECT lithograph_tx_commit()");
+    } else if (mode == FULL_OUTER) {
+        execute(db, "COMMIT");
+    }
+    require(sqlite3_get_autocommit(db) != 0, "uncapped control left a transaction active");
+    require(label_count(db, "SqlFull") == nodes + 1, "same-input recovery did not persist a node");
+    canonical_history_snapshot after = snapshot_canonical_history(db);
+    require(strcmp(after.main_head, before.main_head) != 0, "same-input recovery did not advance Head");
+    free(payload);
+}
+
+static void check_full_recovery(const char *database, const char *extension) {
+    for (int wal = 0; wal < 2; ++wal) {
+        for (int mode = FULL_SCALAR; mode <= FULL_COMMIT; ++mode) {
+            char *path = sqlite3_mprintf("%s.full-%d-%d", database, wal, mode);
+            require(path != NULL, "failed to allocate quota fixture path");
+            (void)remove(path);
+            sqlite3 *db = open_loaded(path, extension);
+            execute(db, wal ? "PRAGMA journal_mode=WAL" : "PRAGMA journal_mode=DELETE");
+            execute(db, "SELECT lithograph_init()");
+            execute(db, "CREATE TABLE full_host_marker(value INTEGER)");
+            for (unsigned round = 0; round < 3; ++round) {
+                full_cycle(db, (enum full_mode)mode, round);
+            }
+            canonical_history_snapshot before = snapshot_canonical_history(db);
+            require(sqlite3_close(db) == SQLITE_OK, "failed to close quota fixture");
+            db = open_loaded(path, extension);
+            require_canonical_history_unchanged(db, &before, "reopen changed recovered history");
+            require(label_count(db, "SqlFull") == 3, "reopen lost recovered graph writes");
+            require(sqlite3_close(db) == SQLITE_OK, "failed to close recovered quota fixture");
+            (void)remove(path);
+            sqlite3_free(path);
+        }
+    }
+    puts("SQLite FULL recovery: DELETE/WAL, five boundaries, three same-connection cycles: ok");
+}
+
 int main(int argc, char **argv) {
     if (argc != 3) {
         fprintf(stderr, "usage: %s <extension-path> <database-path>\n", argv[0]);
@@ -410,6 +584,7 @@ int main(int argc, char **argv) {
     check_result_limit_cleanup(writer);
     check_ordinary_outer_transaction(writer);
     check_close_cleanup(database, extension, writer);
+    check_full_recovery(database, extension);
 
     (void)remove(database);
     puts("sql explicit transaction smoke: ok");

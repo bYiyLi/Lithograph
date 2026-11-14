@@ -42,6 +42,8 @@ v0.3.2 的 `ACCESS_DENIED` 对应 `SQLITE_AUTH` (23)。query 属性不可见本�
 
 资源失败可能是 NOMEM (7)、TOOBIG (18)、FULL (13)；I/O 类还包括 READONLY 等 code。不要假定某个 category 永远只对应一个 code；使用实际返回值。
 
+**v0.3.7：** 磁盘或主库页数配额耗尽返回`RESOURCE_ERROR` + `SQLITE_FULL` (13)，消息为`database or disk is full`。SQLite可能已自动回滚整个外层事务；检查实际transaction状态，显式事务需要重新begin。资源恢复后健康连接可继续使用；真正的清理失败仍按原有保护隔离连接。不要仅凭报错自动重放写入。
+
 **v0.3.3 / Phase 19：** `memoryLimitBytes` 配置类型或范围错误返回 `INVALID_ARGUMENT`；合法预算被本次执行用尽返回 `RESOURCE_ERROR` + `SQLITE_TOOBIG` (18)，这是引擎在分配前拒绝的策略限制，不应当报告为系统实际 OOM。参数解码、中间值、semantic barrier 和结果编码/收集都可能触发预算错误。不要自动移除预算重试；宿主先检查工作量及自己的配额策略。配置合同和发布边界见 [Execution Options](execution-options.md#memory-limit)。
 
 <a id="atomicity-after-error"></a>

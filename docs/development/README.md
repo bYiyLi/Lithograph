@@ -91,6 +91,8 @@ Feature 是实现单元；Phase 是默认交付单元。不得用“Feature 已�
 
 完整实现与修复已实际提交并推送到`codex/phase22-query-optimizer-ci`，生产实现身份为[`798a9bb`](https://github.com/bYiyLi/Lithograph/commit/798a9bb347e84f709fa1efdaaadfb1b2dd22021d)，该精确提交的[CI四项](https://github.com/bYiyLi/Lithograph/actions/runs/43468307833)及[六平台Release Matrix](https://github.com/bYiyLi/Lithograph/actions/runs/43468307838)全部成功。随后仅验收文档的5c提交保持597个编译输入一致。**v0.3.6已合并远端main并正式发布为latest**，发行源码/Tag为`faaa91d`，该提交的main与Tag CI四项、两轮六平台验收，以及正式六包下载和原生Linux实际加载回验全部通过。自动发布等待job未推进后，核验同Tag制品并手动完成发布；原Tag Matrix workflow最终为cancelled，根因未确认。完整状态与证据见[发布记录](phases/22-high-performance-query-optimizer.md#v036-release-delivery)；原主工作区未提交内容保留。
 
+v0.3.7容量耗尽异常恢复补丁正在交付：真实SQLite FULL同连接恢复回归与651项Core单元测试通过，主分支/Tag完整CI、正式发布和KG OS集成按[补丁记录](phases/22-high-performance-query-optimizer.md#v037-full-recovery)逐项维护。它不重新定义Phase 22的性能验收或语言coverage。
+
 ## 4. 路线总览
 
 | Phase | 状态 | 交付结果 | 主要依赖 |

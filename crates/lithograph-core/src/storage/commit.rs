@@ -479,7 +479,10 @@ fn with_savepoint<T>(
             Ok(value)
         }
         Err(error) => {
-            rollback_savepoint(connection)?;
+            let full_rolled_back = error.is_sqlite_full() && connection.is_autocommit();
+            if !full_rolled_back {
+                rollback_savepoint(connection)?;
+            }
             Err(error)
         }
     }

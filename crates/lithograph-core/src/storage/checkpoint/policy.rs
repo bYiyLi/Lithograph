@@ -52,14 +52,14 @@ pub(crate) fn maybe_auto_checkpoint(
     }
     let candidate = match should_checkpoint(connection, commit, check) {
         Ok(candidate) => candidate,
-        Err(error) => return defer_maintenance_resource_error(error),
+        Err(error) => return defer_maintenance_resource_error(connection, error),
     };
     if candidate {
         // A derived maintenance resource limit must not veto an otherwise
         // valid canonical Commit. The checkpoint writer already rolled its
         // own savepoint back before returning an error.
         if let Err(error) = publish_automatic_checkpoint(connection, commit, observer, check) {
-            return defer_maintenance_resource_error(error);
+            return defer_maintenance_resource_error(connection, error);
         }
     }
     Ok(())
@@ -155,7 +155,15 @@ fn protected_checkpoint(
     }
 }
 
-fn defer_maintenance_resource_error(error: StorageError) -> StorageResult<()> {
+fn defer_maintenance_resource_error(
+    connection: &Connection,
+    error: StorageError,
+) -> StorageResult<()> {
+    // This maintenance runs inside the canonical writer's transaction. FULL
+    // may have rolled that entire transaction back, not just the checkpoint.
+    if error.is_sqlite_full() && connection.is_autocommit() {
+        return Err(error);
+    }
     match &error {
         StorageError::Sqlite(rusqlite::Error::SqliteFailure(sqlite, _))
             if matches!(
@@ -429,6 +437,8 @@ mod tests {
 
     #[test]
     fn automatic_derived_work_defers_only_explicit_resource_failures() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch("BEGIN").unwrap();
         for code in [
             rusqlite::ffi::SQLITE_FULL,
             rusqlite::ffi::SQLITE_NOMEM,
@@ -439,7 +449,7 @@ mod tests {
                 rusqlite::ffi::Error::new(code),
                 None,
             ));
-            assert!(defer_maintenance_resource_error(error).is_ok());
+            assert!(defer_maintenance_resource_error(&connection, error).is_ok());
         }
         for code in [
             rusqlite::ffi::SQLITE_INTERRUPT,
@@ -449,8 +459,44 @@ mod tests {
                 rusqlite::ffi::Error::new(code),
                 None,
             ));
-            assert!(defer_maintenance_resource_error(error).is_err());
+            assert!(defer_maintenance_resource_error(&connection, error).is_err());
         }
-        assert!(defer_maintenance_resource_error(StorageError::BranchHeadMoved).is_err());
+        assert!(
+            defer_maintenance_resource_error(&connection, StorageError::BranchHeadMoved).is_err()
+        );
+    }
+
+    #[test]
+    fn checkpoint_full_preserves_error_and_cannot_hide_aborted_canonical_write() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE quota(value BLOB); BEGIN IMMEDIATE; INSERT INTO quota VALUES(x'01')",
+            )
+            .unwrap();
+        let pages: i64 = connection
+            .query_row("PRAGMA page_count", [], |row| row.get(0))
+            .unwrap();
+        connection
+            .execute_batch(&format!("PRAGMA max_page_count={pages}"))
+            .unwrap();
+        let error = super::super::with_savepoint(&connection, || {
+            connection.execute("INSERT INTO quota VALUES(?1)", [vec![7u8; 4 * 1024 * 1024]])?;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(error.is_sqlite_full(), "{error}");
+        assert!(connection.is_autocommit());
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM quota", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert!(
+            defer_maintenance_resource_error(&connection, error)
+                .unwrap_err()
+                .is_sqlite_full()
+        );
     }
 }

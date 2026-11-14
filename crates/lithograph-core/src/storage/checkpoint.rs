@@ -391,12 +391,17 @@ fn with_savepoint<T>(
             Err(error) => {
                 // A failed RELEASE is not proof the savepoint was closed.
                 // Never defer its resource error until its rollback succeeds.
-                rollback_checkpoint_savepoint(connection)?;
-                Err(StorageError::from(error))
+                let error = StorageError::from(error);
+                if !(error.is_sqlite_full() && connection.is_autocommit()) {
+                    rollback_checkpoint_savepoint(connection)?;
+                }
+                Err(error)
             }
         },
         Err(error) => {
-            rollback_checkpoint_savepoint(connection)?;
+            if !(error.is_sqlite_full() && connection.is_autocommit()) {
+                rollback_checkpoint_savepoint(connection)?;
+            }
             Err(error)
         }
     }

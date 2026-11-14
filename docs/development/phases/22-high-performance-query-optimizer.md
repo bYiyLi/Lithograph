@@ -1702,3 +1702,18 @@ Tag CI成功后，自动发布job仍停留在`Require successful CI for this exa
 仅在逐项确认正式下载副本字节相同后清除重复CI包，Mac释放46733328B；远端清除已被替代的参考生成SO及压缩副本，释放33854653B，原始压缩输入仍保存在Mac，当前正式包与必要源文件/报告保持。本次Mac全程遵守无VM约束，跨平台构建在GitHub CI完成，扩展实际执行在远端原生Linux进行。原主工作区的未提交内容保持。
 
 后续同步只更新本文件及开发索引；已验发行源码与不可变Tag保持`faaa91d`，交付记录提交身份按Git另记。自动发布等待的根因保留为已知运维限制，本次Release发布、资产一致性及普通运行回验均已完成。
+
+
+<a id="v037-full-recovery"></a>
+
+## 28. v0.3.7容量耗尽异常恢复补丁（实施中）
+
+用户批准修复v0.3.6主库页数配额失败的错误覆盖与误隔离，并选择main和Tag各一轮完整CI/六平台门禁，发布后回到KG OS升级及补强断言。源码从`fc56b7f`隔离worktree开始；原main工作区未提交内容保留。
+
+已在真实官方v0.3.6普通SO上运行新增SQL事务smoke，原有事务场景通过后，新容量断言真实变红：预期`RESOURCE_ERROR/SQLITE_FULL`，实际`INTERNAL_ERROR/1`，包含不存在的invocation SAVEPOINT。独立临时库、原生Linux1GiB/no-swap，owner已回收；原始报告位于远端`work/v037-full-recovery-red/owner`。这不是物理磁盘写满或介质损坏验证。
+
+修复范围为Storage、Query、SQL adapter的原始FULL传播和事务终态清理；自动checkpoint在外层事务已经回滚时必须传播FULL。版本元数据准备为0.3.7，外部lock依赖保持。新增回归覆盖DELETE/WAL、scalar/rows/显式事务/caller-owned BEGIN/tx_commit，含三轮同连接故障与解除配额后的同输入对照；Core checkpoint与version read边界另加真实pager用例。成功、保护机制回归、完整CI、正式Tag、发布及KG OS结果须在实际执行后更新，此处均未标记通过。
+
+第一轮原生候选构建已完成，实际compiler artifact报告确认主扩展和Provider均为0.3.7。新增完整C事务smoke在SQLite 3.46.1、1GiB/no-swap下通过：DELETE/WAL × 五类边界 × 三轮，共30次FULL与30次解除配额后的同输入成功对照；无部分Node/history、无残留显式事务，integrity与重开检查通过。cgroup峰值262709248B，OOM各项0，TEMP为空，owned unit/cgroup/PID已回收。Core全部651项单元测试通过，包含新增checkpoint与version-read真实pager失败用例。
+
+首轮clippy发现新增test module位置触发`items_after_test_module`，已将其移到文件末尾，不添加allow或放宽规则；原始失败保留。重验已通过fmt、移动后的真实pager用例、workspace全target的clippy `-D warnings`及C复杂度；Rust复杂度与重复率门禁通过，重复行0.99%，未放宽阈值。原有SQL surface、memory预算、rollback、lifecycle、cancel和checkpoint并发/真实清理失败回归均通过，运行用1GiB/no-swap，编译用3GiB/no-swap。实际0.3.7制品生成172条函数签名和38项Procedure，公开文档85页及本次其余Markdown链接、anchor、空白检查通过。后续完整CI/Tag/Release尚待执行。证据目录为本地`target/v037-full-recovery-evidence/`与远端`work/v037-full-recovery/`。

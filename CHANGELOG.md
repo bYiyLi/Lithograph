@@ -4,6 +4,21 @@ Lithograph 的用户可见版本变化记录在此文件。版本遵循 Semantic
 
 ## Unreleased
 
+## 0.3.7
+
+完整变化见[发布说明](docs/releases/v0.3.7.md)，实现、主分支/Tag CI和正式制品验收由[补丁记录](docs/development/phases/22-high-performance-query-optimizer.md#v037-full-recovery)维护。
+
+### Fixed
+
+- SQLite容量耗尽已自动回滚整个事务时，保留`RESOURCE_ERROR` / `SQLITE_FULL` (13)，避免重复清理不存在的SAVEPOINT将其覆盖为`INTERNAL_ERROR`。
+- 清除失败事务的active/staged/cursor状态，健康连接恢复空间后可继续使用；真实清理失败仍执行原有回滚与隔离保护。
+- 自动checkpoint遇到已经撤销canonical write的FULL时传播失败，避免把整个写入失败误当作可延后的derived maintenance。
+
+### Compatibility and validation
+
+- 公开SQL、`CY25-2026.08`、storage format 3、Commit identity和Provider SPI V1保持；没有新增依赖。
+- 新增DELETE/WAL下五类事务边界的真实配额回归，各执行三轮同连接失败/恢复及同输入对照。CI与发布结果按上述补丁记录独立维护。
+
 ## 0.3.6
 
 完整变化见[发布说明](docs/releases/v0.3.6.md)，开发验收与发布证据由[Phase 22](docs/development/phases/22-high-performance-query-optimizer.md#v036-release-delivery)维护。

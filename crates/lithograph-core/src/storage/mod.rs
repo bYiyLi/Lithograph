@@ -246,6 +246,14 @@ pub enum StorageError {
 }
 
 impl StorageError {
+    pub(crate) fn is_sqlite_full(&self) -> bool {
+        matches!(
+            self,
+            Self::Sqlite(SqliteError::SqliteFailure(code, _))
+                if code.code == rusqlite::ErrorCode::DiskFull
+        )
+    }
+
     pub(crate) fn corrupt(message: impl Into<String>) -> Self {
         Self::Corrupt(message.into())
     }

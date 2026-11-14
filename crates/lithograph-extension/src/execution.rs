@@ -717,6 +717,7 @@ pub(super) fn counters_json(counters: &query::QueryCounters) -> Value {
 pub(super) fn map_query_error(error: query::QueryError) -> LithographError {
     let category = match error.sqlite_code {
         Some(ffi::SQLITE_BUSY | ffi::SQLITE_LOCKED) => ErrorCategory::Busy,
+        Some(ffi::SQLITE_FULL) => ErrorCategory::Resource,
         Some(ffi::SQLITE_IOERR | ffi::SQLITE_CANTOPEN | ffi::SQLITE_READONLY) => ErrorCategory::Io,
         _ => match error.kind {
             query::QueryErrorKind::Parse => ErrorCategory::Parse,
@@ -754,9 +755,10 @@ pub(super) fn map_query_error(error: query::QueryError) -> LithographError {
         query::QueryErrorKind::AccessDenied => ffi::SQLITE_AUTH,
         _ => ffi::SQLITE_ERROR,
     });
-    let message = match error.kind {
-        query::QueryErrorKind::Storage => "query storage operation failed".to_owned(),
-        query::QueryErrorKind::Busy => "query storage operation is busy".to_owned(),
+    let message = match (error.sqlite_code, error.kind) {
+        (Some(ffi::SQLITE_FULL), _) => "database or disk is full".to_owned(),
+        (_, query::QueryErrorKind::Storage) => "query storage operation failed".to_owned(),
+        (_, query::QueryErrorKind::Busy) => "query storage operation is busy".to_owned(),
         _ => error.message,
     };
     let mut mapped = LithographError::new(category, message, sqlite_code);

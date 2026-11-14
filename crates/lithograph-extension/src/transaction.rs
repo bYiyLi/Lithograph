@@ -438,6 +438,10 @@ fn fail_closed_tx_with_connection<T>(
     connection: &Connection,
     error: LithographError,
 ) -> LithographResult<T> {
+    if full_error_ended_transaction(connection, &error) {
+        clear_explicit_transaction_state(db);
+        return Err(error);
+    }
     match rollback_explicit_transaction(db, connection) {
         Ok(()) => Err(error),
         Err(cleanup) => Err(LithographError::internal(format!(

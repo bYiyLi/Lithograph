@@ -1012,12 +1012,16 @@ fn with_savepoint<T>(
             Ok(()) => Ok(value),
             Err(error) => {
                 let release_error = map_sqlite_error(error, "failed to release internal savepoint");
-                rollback_savepoint(connection, &savepoint)?;
+                if !full_error_ended_transaction(connection, &release_error) {
+                    rollback_savepoint(connection, &savepoint)?;
+                }
                 Err(release_error)
             }
         },
         Ok(Err(error)) => {
-            rollback_savepoint(connection, &savepoint)?;
+            if !full_error_ended_transaction(connection, &error) {
+                rollback_savepoint(connection, &savepoint)?;
+            }
             Err(error)
         }
         Err(_) => {
@@ -1027,6 +1031,10 @@ fn with_savepoint<T>(
             ))
         }
     }
+}
+
+fn full_error_ended_transaction(connection: &Connection, error: &LithographError) -> bool {
+    error.sqlite_code == ffi::SQLITE_FULL && connection.is_autocommit()
 }
 
 fn rollback_savepoint(connection: &Connection, savepoint: &str) -> LithographResult<()> {
@@ -1111,6 +1119,11 @@ fn map_sqlite_error(error: SqliteError, message: &str) -> LithographError {
         ffi::SQLITE_IOERR | ffi::SQLITE_CANTOPEN | ffi::SQLITE_READONLY => ErrorCategory::Io,
         ffi::SQLITE_INTERRUPT => ErrorCategory::Interrupted,
         _ => ErrorCategory::Storage,
+    };
+    let message = if primary == ffi::SQLITE_FULL {
+        "database or disk is full"
+    } else {
+        message
     };
     LithographError::new(category, message, primary)
 }

@@ -8,7 +8,7 @@ repository.workspace = true
 
 [dependencies]
 blake3.workspace = true
-lithograph-core = { path = "../lithograph-core", version = "=0.3.6", features = ["test-support"] }
+lithograph-core = { path = "../lithograph-core", version = "=0.3.7", features = ["test-support"] }
 rusqlite = { workspace = true, features = ["trace"] }
 serde.workspace = true
 serde_json.workspace = true
