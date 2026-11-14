@@ -1660,7 +1660,9 @@ high-middle定向复测已完成：两端各一个connection，rows/scalar各100
 
 ## 27. v0.3.6主分支合并与正式发布（2026-11-14）
 
-用户已在Phase验收后明确要求合并main并发布新版本。远端main核对为v0.3.5/`3f1f31e`，开发分支为`5c0003b`，可快进；现有latest Release为已正式发布的v0.3.5。使用隔离`codex/release-v0.3.6` worktree准备，原主工作区的未提交内容保持，不执行reset/clean/stash。
+**交付状态：已合并远端main；v0.3.6已正式发布为latest，六包下载完整性及原生Linux实际加载回验通过。** 发行源码/Tag为`faaa91d`。Tag CI四项、六个平台验收全部成功；自动发布等待job未继续推进，本次经逐项核验后手动发布同Tag制品，原Matrix workflow的最终状态为`cancelled`，详情及限制见第27.3节。
+
+用户已在Phase验收后明确要求合并main并发布新版本。开始准备时，远端main核对为v0.3.5/`3f1f31e`，开发分支为`5c0003b`，可快进；当时latest Release为已正式发布的v0.3.5。使用隔离`codex/release-v0.3.6` worktree准备，原主工作区的未提交内容保持，不执行reset/clean/stash。
 
 ### 27.1 版本准备与发布门禁
 
@@ -1668,10 +1670,35 @@ v0.3.6为兼容补丁版：更新workspace六个package版本、两个内部依�
 
 发布顺序为：审阅版本diff和静态一致性 → 快进合并/推送main → 等待精确main提交的完整CI与六平台Matrix → 在同一已验提交创建v0.3.6 Tag → 等待该Tag的CI、六平台矩阵和发布job → 下载正式六包与SHA256SUMS，核对VERSION、主扩展/Provider、许可证/NOTICE，并在原生Linux回验实际发布包load/init/read/write。全程不在Mac构建或使用本地VM。
 
-此节记录的是发布准备；合并、Tag、Release及下载回验在相应动作真实成功后另记，不能以本段计划代替结果。正式外部状态以[GitHub Release](https://github.com/bYiyLi/Lithograph/releases/tag/v0.3.6)为准。
+第27.1–27.2节保留发布准备与首轮失败，正式交付及下载回验见第27.3节。正式外部状态以[GitHub Release](https://github.com/bYiyLi/Lithograph/releases/tag/v0.3.6)为准。
 
 ### 27.2 首轮主分支门禁与生成文档修正
 
 `ebacb34`已快进推送main。[首轮CI](https://github.com/bYiyLi/Lithograph/actions/runs/43535119400)的quality和Windows canonical通过，Linux、macOS在参考文档生成检查失败：`functions.md`和`procedure-inventory.md`的适用版本仍为v0.3.5；此前各自执行到的Rust、SQL、Provider检查没有失败。[首轮Release Matrix](https://github.com/bYiyLi/Lithograph/actions/runs/43535119469)六平台全部通过。本次失败保留，未创建Tag或发布。
 
 修正仅更新两份生成索引的版本行。下载该提交Matrix实际生成的Linux x64制品，在原生Linux的1GiB/no-swap独立cgroup运行真实`generate_reference.py`及`--check`：172条Function签名、38个Procedure均通过，生成前后35个输入文件摘要保持一致。owner通过且unit/cgroup/PID全部回收；本地84份手册的链接、锚点与coverage检查及`git diff --check`通过。证据为`target/release-v0.3.6-evidence/reference-fix-native.json`及`reference-fix-native-owner.json`。后续完整CI和Matrix必须绑定修正后的新提交，不能将本轮失败报告为通过。
+
+### 27.3 正式发布、下载制品与原生运行回验
+
+`faaa91d7ce617039e6cd93ab40e47e1653639f43`已实际推送main，在该提交创建并推送annotated Tag `v0.3.6`，Tag object为`7aa5480a0b6a54c93742ca525dce16b331bcc4da`。版本修正后完整门禁如下：
+
+| 验证身份 | 实际结果 |
+| --- | --- |
+| [main CI 43538974477](https://github.com/bYiyLi/Lithograph/actions/runs/43538974477) | 全部4项成功：quality、Linux/macOS canonical、Windows load/ABI；coverage Regions/Functions/Lines为86.40%/87.80%/89.61%。 |
+| [main Release Matrix 43538974407](https://github.com/bYiyLi/Lithograph/actions/runs/43538974407) | workflow成功；storage fixture及Linux/macOS/Windows x64/arm64六平台build、version、权限、实际load、ABI/runtime/interop全部成功。main不执行发布job。 |
+| [Tag CI 43542860563](https://github.com/bYiyLi/Lithograph/actions/runs/43542860563) | 精确Tag/Commit的4项全部成功。 |
+| [Tag Release Matrix 43542860398](https://github.com/bYiyLi/Lithograph/actions/runs/43542860398) | storage fixture与六个平台job全部成功，六个必需`release-*`包均已生成并上传；仅剩自动发布job卡在等待Tag CI，随后取消，整个workflow最终为`cancelled`。 |
+
+Tag CI成功后，自动发布job仍停留在`Require successful CI for this exact tag`，普通取消后未及时停止，随后强制取消。该等待的根因尚未确认；取消job的日志获取返回not found/EOF，保留job状态与成功平台日志，不把推测写成根因，也没有未经验证修改workflow。此运行不能描述为整个Tag Matrix workflow全绿。
+
+本次按手动恢复完成发布：重新读取同Tag的4项CI与6个平台成功状态，下载该Matrix的六个必需发布包，逐包检查SHA256、7个平铺文件、VERSION、两份扩展的64-bit架构以及README/许可证/NOTICE与Tag源码一致性；通过后生成`SHA256SUMS`并上传既有draft。GitHub API对7项上传资产给出的SHA256 digest及大小全部与本地实测一致，Tag object及peeled Commit保持。发布页将四处相对文档链接展开为有效的公开链接；手册固定到v0.3.6，当前交付记录指向main。
+
+[v0.3.6 Release](https://github.com/bYiyLi/Lithograph/releases/tag/v0.3.6)于**2026-11-14T02:40:02Z**正式发布，Release ID `444934477`，已核对为当前latest、`draft=false`、`prerelease=false`，共六个平台包加`SHA256SUMS`七项资产。再次从正式Release下载全部七项后，六包hash与原Tag CI制品逐一相同，全部七项与GitHub资产digest一致；包内主扩展、OpenAI-compatible Provider、VERSION、README、LICENSE、COMMERCIAL-LICENSE、THIRD_PARTY_NOTICES与架构均通过。
+
+正式下载的Linux x64包在原生Linux **1GiB/no-swap**独立owner下执行：主扩展/Provider实际双加载、ABI检查、Provider SPI回调及错误释放、Graph View/rows/explicit rollback、读写与历史pin、128个同分向量的ordinary/ready/PROFILE完整结果、10行summary和ready缓存复用全部通过。Python SQLite实际为3.46.1，独立CLI为3.53.4；`lithograph_version()`为0.3.6/`CY25-2026.08`/format 3。峰值内存**87666688B**，OOM各项0，TEMP为空，owned unit/cgroup/PID均回收，制品与输入摘要前后相同。资源证据取worker退出前快照，回收证据取外层owner终态；没有调用付费Embedding服务。
+
+最终证据位于`target/release-v0.3.6-evidence/`：`release-acceptance.json`摘要`7eedf23ad944c20bfe9a1b6bd143f1cf3bb957d7f5c501a47863c3e6ed279d00`，正式包检查`verified-published-packages.json`摘要`045d112718eb252f16fb36b89d3343ff10203b3a755de9dafffee38d5becc8d5`，原生完整回验与owner资格报告`native-published-qualified.json`摘要`eb04f3501ee6e6ab37bcb1d0f13f123c7197f59188cb5c67c3e7d4115c09bf0a`。正式`SHA256SUMS`文件本身摘要为`6f892600e4dbcb35a078523fc93ee528f4516f7c23c5ce0acb4a20e5a400afde`；原始首轮失败、等待/取消、上传前后与实际下载记录均保留。
+
+仅在逐项确认正式下载副本字节相同后清除重复CI包，Mac释放46733328B；远端清除已被替代的参考生成SO及压缩副本，释放33854653B，原始压缩输入仍保存在Mac，当前正式包与必要源文件/报告保持。本次Mac全程遵守无VM约束，跨平台构建在GitHub CI完成，扩展实际执行在远端原生Linux进行。原主工作区的未提交内容保持。
+
+后续同步只更新本文件及开发索引；已验发行源码与不可变Tag保持`faaa91d`，交付记录提交身份按Git另记。自动发布等待的根因保留为已知运维限制，本次Release发布、资产一致性及普通运行回验均已完成。
